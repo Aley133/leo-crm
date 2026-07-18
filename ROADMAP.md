@@ -5,7 +5,7 @@ This roadmap reports demonstrated project state. A phase is complete only when e
 ## Current status
 
 ```text
-Phase A — Foundation: mostly complete
+Phase A — Foundation: in verification
 Phase B — Product and supplier core: in progress
 Phase C — Monitoring reliability vertical slice: design approved, implementation gated
 ```
@@ -22,13 +22,16 @@ Completed:
 - `/health` endpoint;
 - Swagger documentation;
 - architecture v0.2 and Phase C addendum;
-- monitoring contracts.
+- canonical monitoring contract v0.2;
+- CI test workflow;
+- service-token protection for private `/api/*` endpoints;
+- explicit SQLAlchemy pool limits (`pool_size=2`, `max_overflow=1`).
 
 Still required before marking fully complete:
 
-- CI test workflow;
-- authentication implementation, not only plan;
-- explicit database pool configuration in deployed runtime.
+- configure `SERVICE_API_TOKEN` in Render and verify authenticated/unauthenticated requests;
+- verify the current GitHub Actions run is green;
+- add future Supabase JWT authentication for the web CRM when the web client starts.
 
 ## Phase B — Product and supplier core
 
@@ -39,7 +42,8 @@ Completed:
 - SupplierProduct model and create API;
 - ProductBinding model and create API;
 - binding lifecycle fields;
-- database migrations through monitoring schema foundation.
+- database migrations through monitoring schema foundation;
+- service authentication usable by Swagger and the future Telegram adapter.
 
 In progress / missing:
 
@@ -49,8 +53,7 @@ In progress / missing:
 - primary-binding uniqueness policy;
 - Telegram API client skeleton;
 - import of existing TGBAD bindings;
-- automated API and migration tests;
-- service authentication for Telegram.
+- automated API and migration tests beyond current contract tests.
 
 Phase B is not complete until the above items are verified.
 
@@ -60,12 +63,14 @@ Phase B is not complete until the above items are verified.
 
 - [x] architecture contract;
 - [x] Phase C domain model;
-- [x] monitoring JSON contract;
+- [x] monitoring contract reconciled with ORM and persisted schema;
 - [x] initial monitoring migration;
-- [ ] verify migration on production database;
-- [ ] reconcile ORM models with migration;
-- [ ] add database constraints for all invariants;
-- [ ] add test database fixture.
+- [x] production migration through `20260718_0004` deployed;
+- [x] database constraints for current invariants;
+- [x] explicit connection-pool limits;
+- [ ] add reusable test database fixture;
+- [ ] add migration upgrade/downgrade smoke test against PostgreSQL;
+- [ ] verify all C0 contract tests in green CI.
 
 ### C1 — Lease Engine
 
@@ -119,6 +124,15 @@ Phase B is not complete until the above items are verified.
 - [ ] stable `/feeds/kaspi.xml` endpoint;
 - [ ] retention and storage thresholds.
 
+### Phase C production infrastructure gate
+
+The Lease Engine and adapters may be developed and tested on the current free Render plan. Continuous production monitoring may not be enabled until:
+
+- [ ] an always-on paid Render worker or equivalent always-on host is provisioned;
+- [ ] worker heartbeat monitoring is active;
+- [ ] source and outbox backlog alerts are active;
+- [ ] the production connection budget is rechecked for API plus worker processes.
+
 ## Later phases
 
 ### Phase D — Telegram operations interface
@@ -143,3 +157,4 @@ Forecasting, supplier selection, purchasing recommendations and carefully scoped
 2. No phase is marked complete from a successful deployment alone.
 3. Every completed roadmap item requires code, migration where applicable, and automated tests.
 4. Roadmap changes are allowed when real implementation reveals a false assumption.
+5. A public deployment must fail closed when authentication configuration is missing.
