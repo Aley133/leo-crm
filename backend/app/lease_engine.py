@@ -4,7 +4,7 @@ import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import or_, select, update
+from sqlalchemy import Select, or_, select, update
 from sqlalchemy.orm import Session
 
 from .monitoring import MonitorStatus, MonitorTarget
@@ -27,6 +27,29 @@ def _new_lease_token() -> str:
     # token_urlsafe(32) is cryptographically random and currently produces a
     # 43-character token, which fits the persisted String(64) contract.
     return secrets.token_urlsafe(32)
+
+
+def due_target_statement(
+    *,
+    now: datetime,
+    limit: int,
+    shard: int | None = None,
+) -> Select[tuple[MonitorTarget]]:
+    """Build the canonical PostgreSQL claim query."""
+    statement = (
+        select(MonitorTarget)
+        .where(
+            MonitorTarget.status == MonitorStatus.ACTIVE.value,
+            MonitorTarget.next_check_at <= now,
+            or_(MonitorTarget.lease_until.is_(None), MonitorTarget.lease_until < now),
+        )
+        .order_by(MonitorTarget.next_check_at.asc(), MonitorTarget.id.asc())
+        .limit(limit)
+        .with_for_update(skip_locked=True)
+    )
+    if shard is not None:
+        statement = statement.where(MonitorTarget.shard == shard)
+    return statement
 
 
 def claim_due_targets(
@@ -55,20 +78,7 @@ def claim_due_targets(
 
     claimed_at = now or utc_now()
     lease_until = claimed_at + timedelta(seconds=lease_seconds)
-
-    statement = (
-        select(MonitorTarget)
-        .where(
-            MonitorTarget.status == MonitorStatus.ACTIVE.value,
-            MonitorTarget.next_check_at <= claimed_at,
-            or_(MonitorTarget.lease_until.is_(None), MonitorTarget.lease_until < claimed_at),
-        )
-        .order_by(MonitorTarget.next_check_at.asc(), MonitorTarget.id.asc())
-        .limit(limit)
-        .with_for_update(skip_locked=True)
-    )
-    if shard is not None:
-        statement = statement.where(MonitorTarget.shard == shard)
+    statement = due_target_statement(now=claimed_at, limit=limit, shard=shard)
 
     try:
         targets = list(session.scalars(statement).all())
