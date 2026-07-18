@@ -19,6 +19,10 @@ from .supplier_adapters.base import NormalizedOffer
 from .suppliers import ProductBinding
 
 
+class StaleLeaseError(RuntimeError):
+    """Raised when a worker no longer owns the target lease."""
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationResult:
     attempt_id: int
@@ -29,14 +33,36 @@ class ObservationResult:
     fingerprint: str
 
 
-def _supplier_product_id_for_target(session: Session, monitor_target_id: int) -> int:
+def _lock_current_target(
+    session: Session,
+    *,
+    monitor_target_id: int,
+    lease_token: str,
+) -> MonitorTarget:
+    """Lock the target row and verify that the caller still owns its lease."""
+    target = session.scalar(
+        select(MonitorTarget)
+        .where(
+            MonitorTarget.id == monitor_target_id,
+            MonitorTarget.lease_token == lease_token,
+        )
+        .with_for_update()
+    )
+    if target is None:
+        raise StaleLeaseError(
+            f"MonitorTarget {monitor_target_id} is not owned by the supplied lease token"
+        )
+    return target
+
+
+def _supplier_product_id_for_target(session: Session, target: MonitorTarget) -> int:
     supplier_product_id = session.scalar(
-        select(ProductBinding.supplier_product_id)
-        .join(MonitorTarget, MonitorTarget.product_binding_id == ProductBinding.id)
-        .where(MonitorTarget.id == monitor_target_id)
+        select(ProductBinding.supplier_product_id).where(
+            ProductBinding.id == target.product_binding_id
+        )
     )
     if supplier_product_id is None:
-        raise LookupError(f"MonitorTarget {monitor_target_id} is not linked to a supplier product")
+        raise LookupError(f"MonitorTarget {target.id} is not linked to a supplier product")
     return supplier_product_id
 
 
@@ -60,35 +86,39 @@ def record_successful_observation(
 ) -> ObservationResult:
     """Persist one successful adapter result in a short independent transaction.
 
-    The attempt is always recorded. Current state is updated on every successful
-    check, while an append-only observation is created only when normalized
-    business facts changed.
+    The target row is locked and the current lease token is verified before any
+    attempt, state, or observation row is written. A stale worker therefore
+    cannot mutate monitoring history or supplier-offer state.
     """
     if not lease_token.strip():
         raise ValueError("lease_token must not be empty")
     if finished_at < started_at:
         raise ValueError("finished_at must not precede started_at")
 
-    supplier_product_id = _supplier_product_id_for_target(session, monitor_target_id)
-    if offer.supplier_product_id != supplier_product_id:
-        raise ValueError("offer supplier_product_id does not match monitor target")
-
-    duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
-    fingerprint = offer.fingerprint
-
-    attempt = MonitorAttempt(
-        monitor_target_id=monitor_target_id,
-        lease_token=lease_token,
-        outcome=AttemptOutcome.SUCCESS.value,
-        adapter_code=adapter_code,
-        access_strategy=access_strategy,
-        started_at=started_at,
-        finished_at=finished_at,
-        duration_ms=duration_ms,
-        http_status=http_status,
-    )
-
     try:
+        target = _lock_current_target(
+            session,
+            monitor_target_id=monitor_target_id,
+            lease_token=lease_token,
+        )
+        supplier_product_id = _supplier_product_id_for_target(session, target)
+        if offer.supplier_product_id != supplier_product_id:
+            raise ValueError("offer supplier_product_id does not match monitor target")
+
+        duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
+        fingerprint = offer.fingerprint
+
+        attempt = MonitorAttempt(
+            monitor_target_id=monitor_target_id,
+            lease_token=lease_token,
+            outcome=AttemptOutcome.SUCCESS.value,
+            adapter_code=adapter_code,
+            access_strategy=access_strategy,
+            started_at=started_at,
+            finished_at=finished_at,
+            duration_ms=duration_ms,
+            http_status=http_status,
+        )
         session.add(attempt)
         session.flush()
 
@@ -202,6 +232,8 @@ def record_failed_attempt(
     error_message: str | None = None,
 ) -> int:
     """Record a failed adapter attempt without mutating offer state."""
+    if not lease_token.strip():
+        raise ValueError("lease_token must not be empty")
     if outcome is AttemptOutcome.SUCCESS:
         raise ValueError("record_failed_attempt cannot use success outcome")
     if finished_at < started_at:
@@ -222,6 +254,11 @@ def record_failed_attempt(
         error_message=error_message,
     )
     try:
+        _lock_current_target(
+            session,
+            monitor_target_id=monitor_target_id,
+            lease_token=lease_token,
+        )
         session.add(attempt)
         session.commit()
         return attempt.id
