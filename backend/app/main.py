@@ -9,7 +9,7 @@ from .suppliers import router as suppliers_router
 
 app = FastAPI(
     title="LEO CRM API",
-    version="0.4.0",
+    version="0.5.0",
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
 )
 
