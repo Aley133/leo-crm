@@ -8,6 +8,7 @@ from sqlalchemy.orm import Session
 from backend.app.lease_engine import (
     claim_due_targets,
     due_target_statement,
+    leased_target_statement,
     release_target,
     reschedule_failure,
     reschedule_success,
@@ -63,6 +64,14 @@ def test_due_target_query_uses_postgresql_skip_locked() -> None:
     assert "FOR UPDATE SKIP LOCKED" in sql
     assert "NEXT_CHECK_AT" in sql
     assert "LEASE_UNTIL" in sql
+
+
+def test_completion_query_locks_current_lease_row() -> None:
+    statement = leased_target_statement(target_id=1, lease_token="token")
+    sql = str(statement.compile(dialect=postgresql.dialect())).upper()
+
+    assert "FOR UPDATE" in sql
+    assert "LEASE_TOKEN" in sql
 
 
 def test_one_worker_claims_due_target_and_second_worker_gets_none(db_session: Session) -> None:
