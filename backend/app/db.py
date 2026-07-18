@@ -19,6 +19,9 @@ engine = create_engine(
     _database_url(),
     pool_pre_ping=True,
     pool_recycle=300,
+    pool_size=2,
+    max_overflow=1,
+    pool_timeout=10,
 )
 
 SessionLocal = sessionmaker(
