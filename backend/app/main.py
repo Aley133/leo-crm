@@ -1,24 +1,15 @@
-from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import FastAPI
 from sqlalchemy import text
 
-from .db import Base, engine
+from .db import engine
 from .products import router as products_router
-
-
-@asynccontextmanager
-async def lifespan(_: FastAPI):
-    Base.metadata.create_all(bind=engine)
-    yield
-
 
 app = FastAPI(
     title="LEO CRM API",
-    version="0.2.0",
+    version="0.3.0",
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
-    lifespan=lifespan,
 )
 
 app.include_router(products_router)
