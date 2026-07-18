@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 from backend.app.lease_engine import (
     claim_due_targets,
+    due_target_statement,
     release_target,
     reschedule_failure,
     reschedule_success,
@@ -51,6 +53,16 @@ def _seed_target(session: Session, *, next_check_at: datetime, interval_seconds:
 
 def _without_tz(value: datetime) -> datetime:
     return value.replace(tzinfo=None)
+
+
+def test_due_target_query_uses_postgresql_skip_locked() -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    statement = due_target_statement(now=now, limit=10)
+    sql = str(statement.compile(dialect=postgresql.dialect())).upper()
+
+    assert "FOR UPDATE SKIP LOCKED" in sql
+    assert "NEXT_CHECK_AT" in sql
+    assert "LEASE_UNTIL" in sql
 
 
 def test_one_worker_claims_due_target_and_second_worker_gets_none(db_session: Session) -> None:
