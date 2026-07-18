@@ -3,11 +3,12 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl
-from sqlalchemy import Boolean, DateTime, ForeignKey, Numeric, String, UniqueConstraint, func, select
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
 from .db import Base, get_db
+from .monitoring import BindingStatus
 
 
 class Supplier(Base):
@@ -44,9 +45,18 @@ class ProductBinding(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
     supplier_product_id: Mapped[int] = mapped_column(ForeignKey("supplier_products.id", ondelete="CASCADE"), index=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default=BindingStatus.CANDIDATE.value, server_default="candidate", index=True
+    )
+    decision_source: Mapped[str] = mapped_column(String(32), default="manual", server_default="manual")
     is_primary: Mapped[bool] = mapped_column(Boolean, default=False, server_default="false")
     confidence_score: Mapped[int | None] = mapped_column(nullable=True)
+    priority: Mapped[int] = mapped_column(Integer, default=100, server_default="100")
+    confirmed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_validated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    last_mismatch_reason: Mapped[str | None] = mapped_column(String(1000), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
 class SupplierCreate(BaseModel):
@@ -91,8 +101,11 @@ class SupplierProductRead(BaseModel):
 class BindingCreate(BaseModel):
     product_id: int
     supplier_product_id: int
+    status: BindingStatus = BindingStatus.CANDIDATE
+    decision_source: str = Field(default="manual", pattern=r"^(automatic|manual|imported)$")
     is_primary: bool = False
     confidence_score: int | None = Field(default=None, ge=0, le=100)
+    priority: int = Field(default=100, ge=0, le=10_000)
 
 
 class BindingRead(BaseModel):
@@ -100,9 +113,16 @@ class BindingRead(BaseModel):
     id: int
     product_id: int
     supplier_product_id: int
+    status: str
+    decision_source: str
     is_primary: bool
     confidence_score: int | None
+    priority: int
+    confirmed_at: datetime | None
+    last_validated_at: datetime | None
+    last_mismatch_reason: str | None
     created_at: datetime
+    updated_at: datetime
 
 
 router = APIRouter(prefix="/api", tags=["suppliers"])
@@ -150,7 +170,11 @@ def create_binding(payload: BindingCreate, db: Session = Depends(get_db)):
     if db.get(SupplierProduct, payload.supplier_product_id) is None:
         raise HTTPException(status_code=404, detail="Supplier product not found")
 
-    binding = ProductBinding(**payload.model_dump())
+    values = payload.model_dump(mode="json")
+    if values["status"] in {BindingStatus.CONFIRMED.value, BindingStatus.ACTIVE.value}:
+        values["confirmed_at"] = func.now()
+
+    binding = ProductBinding(**values)
     db.add(binding)
     try:
         db.commit()
