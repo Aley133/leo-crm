@@ -1,39 +1,44 @@
-# Monitoring Contract v0.1
+# Monitoring Contract v0.2
 
-Status: Draft for implementation review
+Status: Canonical implementation contract for Phase C.
 
-This contract defines the minimum data and runtime behavior required before Phase C monitoring code is accepted.
+This file must match the ORM models and Alembic schema. Future fields may be added only through an architecture change, migration, ORM update and contract update in the same work item.
 
 ## 1. MonitorTarget
 
-Purpose: current scheduling and lease state for one independently monitored supplier card.
+Purpose: current schedule and lease state for one ProductBinding.
 
-Required fields:
+Persisted fields:
 
 ```json
 {
   "id": 101,
   "product_binding_id": 55,
-  "supplier_product_id": 9001,
   "status": "active",
+  "interval_seconds": 300,
   "next_check_at": "2026-07-18T18:00:00Z",
-  "check_interval_seconds": 300,
-  "priority": 100,
-  "bucket": 1,
+  "last_checked_at": null,
+  "consecutive_failures": 0,
   "lease_owner": null,
   "lease_token": null,
   "lease_until": null,
-  "consecutive_failures": 0,
-  "last_checked_at": null,
-  "last_success_at": null,
-  "last_error_code": null,
-  "source_health_status": "healthy",
+  "shard": 0,
   "created_at": "2026-07-18T17:00:00Z",
   "updated_at": "2026-07-18T17:00:00Z"
 }
 ```
 
-Claim rule:
+Allowed statuses:
+
+```text
+active
+paused
+degraded
+manual_review
+disabled
+```
+
+Claim selection:
 
 ```sql
 SELECT id
@@ -41,124 +46,169 @@ FROM monitor_targets
 WHERE status = 'active'
   AND next_check_at <= now()
   AND (lease_until IS NULL OR lease_until < now())
-ORDER BY priority DESC, next_check_at ASC
+ORDER BY next_check_at ASC
 FOR UPDATE SKIP LOCKED
 LIMIT :limit;
 ```
 
-A claim writes a new cryptographically random `lease_token`. All later writes that reschedule or release the target must match both `id` and `lease_token`. A stale worker may record its attempt result, but it may not overwrite the current target lease or schedule.
+A claim writes a cryptographically random `lease_token`, `lease_owner` and `lease_until`. Every release or reschedule must match both target id and lease token. A stale worker may create a diagnostic attempt but may not mutate the current lease or schedule.
+
+Priority currently belongs to ProductBinding. Source-health status is read from SourceHealth and is not duplicated into MonitorTarget.
 
 ## 2. MonitorAttempt
 
-Purpose: short-lived diagnostic record for every claimed execution.
+Purpose: short-lived diagnostic record for one claimed execution.
 
-Required fields:
+Persisted fields:
 
 ```json
 {
   "id": 70001,
   "monitor_target_id": 101,
-  "lease_token": "uuid",
+  "lease_token": "opaque-random-token",
+  "outcome": "success",
   "adapter_code": "ozon_browser_v1",
   "access_strategy": "browser",
   "started_at": "2026-07-18T18:00:01Z",
   "finished_at": "2026-07-18T18:00:04Z",
   "duration_ms": 3100,
-  "outcome": "success",
-  "error_class": null,
   "http_status": 200,
-  "captcha_detected": false,
-  "rate_limited": false,
-  "request_fingerprint": "sha256:...",
-  "observation_id": 88001,
-  "retry_number": 0,
-  "diagnostic_metadata": {},
+  "error_code": null,
+  "error_message": null,
   "created_at": "2026-07-18T18:00:04Z"
 }
 ```
 
-Retention: raw attempts are retained for 14 days initially. Before deletion they are aggregated into `MonitorDailyMetric`.
+Allowed outcomes:
+
+```text
+success
+timeout
+rate_limited
+captcha
+blocked
+auth_required
+not_found
+parse_error
+network_error
+internal_error
+```
+
+Detailed conditions are represented by `outcome`, `error_code` and `error_message`. Fields such as `captcha_detected`, `request_fingerprint`, `observation_id`, `retry_number` and diagnostic JSON are not part of the current persisted contract. They may be introduced later only with a migration and contract revision.
+
+Retention: raw attempts are retained for 14 days initially. Before deletion, operational reliability is aggregated into MonitorDailyMetric when that model is introduced in C2.
 
 ## 3. SupplierOfferState
 
-Purpose: one current row containing the latest accepted normalized facts for a supplier card.
+Purpose: the single current normalized state row for one SupplierProduct.
 
-Required fields:
+Persisted fields:
 
 ```json
 {
+  "id": 5001,
   "supplier_product_id": 9001,
-  "price": 5640,
-  "old_price": 6200,
-  "currency": "KZT",
-  "availability": "in_stock",
-  "stock_quantity": null,
+  "price": "5640.00",
+  "old_price": "6200.00",
+  "available": true,
+  "stock": null,
   "delivery_days": 2,
-  "delivery_text": "22 июля",
-  "seller_name": "Example seller",
-  "business_fingerprint": "sha256:...",
-  "adapter_schema_version": 1,
+  "seller": "Example seller",
+  "fingerprint": "64-character-sha256",
+  "adapter_schema_version": "ozon-v1",
   "observed_at": "2026-07-18T18:00:04Z",
   "last_checked_at": "2026-07-18T18:00:04Z",
-  "version": 12
+  "version": 12,
+  "updated_at": "2026-07-18T18:00:04Z"
 }
 ```
 
-An unchanged check updates `last_checked_at` but does not create another business observation.
+Current Phase C assumes supplier prices are normalized into the business pricing currency before persistence. A dedicated Money/currency model is introduced with Pricing in C4. `delivery_text` is adapter diagnostic input and is not part of current normalized state.
+
+An unchanged check updates `last_checked_at` but does not create another SupplierOfferObservation.
 
 ## 4. SupplierOfferObservation
 
-Purpose: append-only record created when normalized business facts change or when policy explicitly requires a diagnostic observation.
+Purpose: append-only significant observation of normalized supplier facts.
 
-Required fields:
+Persisted fields:
 
 ```json
 {
   "id": 88001,
   "supplier_product_id": 9001,
-  "previous_state_version": 11,
-  "new_state_version": 12,
-  "business_fingerprint": "sha256:...",
-  "price": 5640,
-  "availability": "in_stock",
-  "stock_quantity": null,
+  "monitor_attempt_id": 70001,
+  "price": "5640.00",
+  "old_price": "6200.00",
+  "available": true,
+  "stock": null,
   "delivery_days": 2,
-  "seller_name": "Example seller",
-  "change_mask": ["price", "delivery_days"],
-  "source_observed_at": "2026-07-18T18:00:03Z",
-  "committed_at": "2026-07-18T18:00:04Z"
+  "seller": "Example seller",
+  "fingerprint": "64-character-sha256",
+  "adapter_schema_version": "ozon-v1",
+  "raw_metadata": null,
+  "observed_at": "2026-07-18T18:00:03Z",
+  "created_at": "2026-07-18T18:00:04Z"
 }
 ```
 
-Required uniqueness:
+Required uniqueness in the current schema:
 
 ```text
-supplier_product_id + business_fingerprint + adapter_schema_version
+supplier_product_id + fingerprint
 ```
 
-## 5. Error classification
+The fingerprint itself includes `adapter_schema_version`, therefore an adapter schema change produces a different deterministic fingerprint.
 
-Allowed top-level classes:
+## 5. Fingerprint contract
+
+Every automatic adapter must produce a deterministic SHA-256 fingerprint from normalized business facts:
 
 ```text
-not_found
+supplier_product_id
+price
+available
+stock
+delivery_days
+normalized seller
+adapter_schema_version
+```
+
+HTML formatting, whitespace and casing changes that do not change normalized business facts must not create a new fingerprint.
+
+## 6. Error classification
+
+MonitorAttempt outcomes are the persisted top-level classification. Recommended error codes provide finer detail, for example:
+
+```text
 out_of_stock
-rate_limited
 captcha_required
-auth_required
 source_blocked
-timeout
-network_error
 parser_schema_changed
 invalid_response
 database_unavailable
 pricing_failed
-internal_error
 ```
 
-`captcha_required`, `source_blocked`, `rate_limited`, `timeout` and `parser_schema_changed` must never be translated to product absence.
+`captcha`, `blocked`, `rate_limited`, `timeout`, `auth_required` and `parse_error` must never be translated to product absence. `not_found` means the adapter positively identified that the external card does not exist.
 
-## 6. SourceHealth
+## 7. SourceHealth
+
+Persisted fields:
+
+```json
+{
+  "id": 1,
+  "supplier_id": 1,
+  "status": "healthy",
+  "consecutive_failures": 0,
+  "blocked_until": null,
+  "last_success_at": null,
+  "last_failure_at": null,
+  "last_error_code": null,
+  "updated_at": "2026-07-18T18:00:04Z"
+}
+```
 
 Allowed states:
 
@@ -167,19 +217,20 @@ healthy
 degraded
 rate_limited
 captcha_required
-auth_required
 blocked
+auth_required
 disabled
 ```
 
-Repeated source-wide failures open a circuit breaker. While open, targets are rescheduled according to source policy instead of repeatedly hammering the platform.
+Repeated source-wide failures open a circuit breaker. While open, targets are rescheduled according to source policy instead of repeatedly calling the platform.
 
-## 7. Workflow transaction contract
+## 8. Workflow transaction contract
 
 ### A. Claim transaction
 
 - claim due target;
 - generate lease token;
+- write owner and expiry;
 - commit;
 - close database session.
 
@@ -187,58 +238,60 @@ Repeated source-wide failures open a circuit breaker. While open, targets are re
 
 - execute without holding a database connection;
 - apply adapter timeout and bounded retries;
-- normalize the response;
-- calculate deterministic business fingerprint.
+- normalize response;
+- calculate deterministic fingerprint.
 
 ### C. Observation transaction
 
-- insert `MonitorAttempt` result;
-- upsert `SupplierOfferState`;
-- insert `SupplierOfferObservation` only when facts changed;
-- commit regardless of later pricing success;
+- insert or complete MonitorAttempt;
+- upsert SupplierOfferState;
+- insert SupplierOfferObservation only when facts changed;
+- commit independently of later pricing success;
 - close database session.
 
 ### D. Pricing transaction
 
 - calculate from committed observation and policy version;
-- use a deterministic idempotency key;
-- insert or reuse `PriceCalculation`;
-- update `ProductPriceState` with optimistic locking;
+- use deterministic idempotency key;
+- insert or reuse PriceCalculation;
+- update ProductPriceState with optimistic locking;
 - commit;
 - close database session.
 
 ### E. Reschedule transaction
 
 - update target only when lease token still matches;
-- calculate next check time and failure counters;
+- calculate next-check time and failure counters;
 - clear lease;
 - commit.
 
-## 8. Initial concurrency contract
+## 9. Initial concurrency contract
 
 ```text
 network_semaphore = 8
 observation_write_semaphore = 2
 pricing_write_semaphore = 2
 outbox_write_semaphore = 1
+API/worker database pool_size = 2
+API/worker max_overflow = 1
 ```
 
-External requests may run concurrently up to the network limit. Database phases must use their own semaphore and must not hold a connection while waiting for a network semaphore.
+External requests may use the network semaphore. Database phases use separate bounded semaphores and must not hold a connection while waiting for network work.
 
-## 9. Adapter acceptance cases
+## 10. Adapter acceptance cases
 
 Every automatic adapter must pass deterministic mocked tests for:
 
 - valid 200 response;
 - card not found;
 - out of stock;
-- HTTP 429 / rate limit;
-- captcha page;
+- HTTP 429;
+- captcha;
 - authentication required;
 - timeout;
 - malformed response;
 - parser schema change;
 - identical business facts with changed HTML formatting;
-- meaningful price or delivery change.
+- meaningful price, availability or delivery change.
 
 An adapter that cannot classify these cases is manual-review-only and cannot drive automatic pricing.
