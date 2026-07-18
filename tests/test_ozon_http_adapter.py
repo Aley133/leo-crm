@@ -20,10 +20,10 @@ from backend.app.supplier_adapters.errors import (
 from backend.app.supplier_adapters.ozon_http import OzonHttpAdapter
 
 
-def _request() -> AdapterRequest:
+def _request(url: str = "https://www.ozon.ru/product/test-product-123/") -> AdapterRequest:
     return AdapterRequest(
         supplier_product_id=77,
-        url="https://www.ozon.ru/product/test-product-123/",
+        url=url,
         external_id="123",
     )
 
@@ -32,7 +32,7 @@ def _client(handler) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=httpx.MockTransport(handler), follow_redirects=True)
 
 
-def test_ozon_http_adapter_parses_reliable_json_ld_offer() -> None:
+def _product_html(*, currency: str = "RUB") -> str:
     payload = {
         "@context": "https://schema.org",
         "@type": "Product",
@@ -40,19 +40,21 @@ def test_ozon_http_adapter_parses_reliable_json_ld_offer() -> None:
         "offers": {
             "@type": "Offer",
             "price": "5640.00",
-            "priceCurrency": "RUB",
+            "priceCurrency": currency,
             "availability": "https://schema.org/InStock",
             "seller": {"@type": "Organization", "name": "Ozon seller"},
         },
     }
+    return (
+        "<html><head><script type=\"application/ld+json\">"
+        + json.dumps(payload)
+        + "</script></head></html>"
+    )
 
+
+def test_ozon_http_adapter_parses_reliable_json_ld_offer() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
-        html = (
-            "<html><head><script type=\"application/ld+json\">"
-            + json.dumps(payload)
-            + "</script></head></html>"
-        )
-        return httpx.Response(200, text=html, request=request)
+        return httpx.Response(200, text=_product_html(), request=request)
 
     async def scenario() -> None:
         async with _client(handler) as client:
@@ -62,6 +64,22 @@ def test_ozon_http_adapter_parses_reliable_json_ld_offer() -> None:
         assert offer.seller == "Ozon seller"
         assert offer.adapter_schema_version == "ozon-jsonld-v1"
         assert offer.raw_metadata["currency"] == "RUB"
+
+    asyncio.run(scenario())
+
+
+def test_ozon_http_adapter_accepts_ozon_kz_product_url() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.host == "ozon.kz"
+        return httpx.Response(200, text=_product_html(currency="KZT"), request=request)
+
+    async def scenario() -> None:
+        async with _client(handler) as client:
+            offer = await OzonHttpAdapter(client=client).fetch(
+                _request("https://ozon.kz/product/test-product-123/")
+            )
+        assert offer.price == Decimal("5640.00")
+        assert offer.raw_metadata["currency"] == "KZT"
 
     asyncio.run(scenario())
 
@@ -140,7 +158,7 @@ def test_ozon_http_adapter_maps_httpx_timeout_to_typed_error() -> None:
 def test_ozon_http_adapter_rejects_non_ozon_url() -> None:
     async def scenario() -> None:
         async with _client(lambda request: httpx.Response(200, request=request)) as client:
-            with pytest.raises(ValueError, match="only ozon.ru URLs"):
+            with pytest.raises(ValueError, match="ozon.ru or ozon.kz"):
                 await OzonHttpAdapter(client=client).fetch(
                     AdapterRequest(1, "https://example.com/product/1", "1")
                 )
