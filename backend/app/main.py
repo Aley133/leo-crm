@@ -1,12 +1,27 @@
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 
 from fastapi import FastAPI
+from sqlalchemy import text
+
+from .db import Base, engine
+from .products import router as products_router
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    Base.metadata.create_all(bind=engine)
+    yield
+
 
 app = FastAPI(
     title="LEO CRM API",
-    version="0.1.0",
+    version="0.2.0",
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
+    lifespan=lifespan,
 )
+
+app.include_router(products_router)
 
 
 @app.get("/")
@@ -20,7 +35,11 @@ async def root() -> dict[str, str]:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
     return {
         "status": "ok",
+        "database": "connected",
         "timestamp": datetime.now(UTC).isoformat(),
     }
