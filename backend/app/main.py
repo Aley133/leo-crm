@@ -5,14 +5,16 @@ from sqlalchemy import text
 
 from .db import engine
 from .products import router as products_router
+from .suppliers import router as suppliers_router
 
 app = FastAPI(
     title="LEO CRM API",
-    version="0.3.0",
+    version="0.4.0",
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
 )
 
 app.include_router(products_router)
+app.include_router(suppliers_router)
 
 
 @app.get("/")
