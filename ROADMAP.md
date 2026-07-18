@@ -25,7 +25,9 @@ Completed:
 - canonical monitoring contract v0.2;
 - CI test workflow;
 - service-token protection for private `/api/*` endpoints;
-- explicit SQLAlchemy pool limits (`pool_size=2`, `max_overflow=1`).
+- explicit SQLAlchemy pool limits (`pool_size=2`, `max_overflow=1`) for PostgreSQL;
+- dialect-aware SQLite test-engine configuration;
+- documented immutable migration policy.
 
 Still required before marking fully complete:
 
@@ -67,7 +69,9 @@ Phase B is not complete until the above items are verified.
 - [x] initial monitoring migration;
 - [x] production migration through `20260718_0004` deployed;
 - [x] database constraints for current invariants;
-- [x] explicit connection-pool limits;
+- [x] explicit PostgreSQL connection-pool limits;
+- [x] SQLite CI compatibility for engine creation;
+- [x] migration immutability and recovery policy documented;
 - [ ] add reusable test database fixture;
 - [ ] add migration upgrade/downgrade smoke test against PostgreSQL;
 - [ ] verify all C0 contract tests in green CI.
@@ -158,3 +162,5 @@ Forecasting, supplier selection, purchasing recommendations and carefully scoped
 3. Every completed roadmap item requires code, migration where applicable, and automated tests.
 4. Roadmap changes are allowed when real implementation reveals a false assumption.
 5. A public deployment must fail closed when authentication configuration is missing.
+6. Once an Alembic migration has been applied in a shared or production environment, it is immutable; normal fixes require a new revision.
+7. Editing an applied migration is allowed only as a documented recovery action for an interrupted, unrecorded revision and must not change the intended final schema.
