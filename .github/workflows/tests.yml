@@ -7,6 +7,9 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: "."
+      DATABASE_URL: "sqlite+pysqlite:///:memory:"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -14,6 +17,4 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: pytest -q
-        env:
-          DATABASE_URL: "sqlite+pysqlite:///:memory:"
+      - run: python -m pytest -q
