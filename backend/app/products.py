@@ -3,11 +3,16 @@ from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
+from .auth import require_service_token
 from .db import get_db
 from .models import Product
 from .schemas import ProductCreate, ProductRead
 
-router = APIRouter(prefix="/api/products", tags=["products"])
+router = APIRouter(
+    prefix="/api/products",
+    tags=["products"],
+    dependencies=[Depends(require_service_token)],
+)
 
 
 @router.get("", response_model=list[ProductRead])
