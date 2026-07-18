@@ -36,12 +36,13 @@ _BLOCK_MARKERS = (
     "temporarily blocked",
     "request blocked",
 )
+_OZON_ROOT_DOMAINS = ("ozon.ru", "ozon.kz")
 
 
 class OzonHttpAdapter:
-    """Conservative direct-HTTP Ozon adapter.
+    """Conservative direct-HTTP adapter for Ozon Russia and Kazakhstan.
 
-    This adapter does not attempt to bypass anti-bot systems. It accepts only
+    The adapter does not attempt to bypass anti-bot systems. It accepts only
     reliable structured product data and classifies blocked/captcha responses
     explicitly instead of pretending that a product is absent.
     """
@@ -96,10 +97,9 @@ class OzonHttpAdapter:
     def _validate_url(url: str) -> None:
         parsed = urlparse(url)
         host = (parsed.hostname or "").casefold()
-        if parsed.scheme not in {"http", "https"} or not (
-            host == "ozon.ru" or host.endswith(".ozon.ru")
-        ):
-            raise ValueError("Ozon adapter accepts only ozon.ru URLs")
+        supported_host = any(host == root or host.endswith(f".{root}") for root in _OZON_ROOT_DOMAINS)
+        if parsed.scheme not in {"http", "https"} or not supported_host:
+            raise ValueError("Ozon adapter accepts only ozon.ru or ozon.kz URLs")
 
     @staticmethod
     def _raise_for_response(response: httpx.Response) -> None:
