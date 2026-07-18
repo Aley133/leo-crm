@@ -52,6 +52,23 @@ def due_target_statement(
     return statement
 
 
+def leased_target_statement(*, target_id: int, lease_token: str) -> Select[tuple[MonitorTarget]]:
+    """Lock one target only when the caller still owns its current lease token.
+
+    The row lock closes the race between token validation and completion. If a
+    newer worker has reclaimed the target, this query either waits for that
+    claim transaction and then observes a token mismatch, or returns no row.
+    """
+    return (
+        select(MonitorTarget)
+        .where(
+            MonitorTarget.id == target_id,
+            MonitorTarget.lease_token == lease_token,
+        )
+        .with_for_update()
+    )
+
+
 def claim_due_targets(
     session: Session,
     *,
@@ -134,24 +151,23 @@ def reschedule_success(
 ) -> bool:
     """Complete a successful check and schedule the normal next interval."""
     completed_at = checked_at or utc_now()
-    target = session.scalar(
-        select(MonitorTarget).where(
-            MonitorTarget.id == target_id,
-            MonitorTarget.lease_token == lease_token,
-        )
-    )
-    if target is None:
-        session.rollback()
-        return False
+    try:
+        target = session.scalar(leased_target_statement(target_id=target_id, lease_token=lease_token))
+        if target is None:
+            session.rollback()
+            return False
 
-    target.last_checked_at = completed_at
-    target.consecutive_failures = 0
-    target.next_check_at = completed_at + timedelta(seconds=target.interval_seconds)
-    target.lease_owner = None
-    target.lease_token = None
-    target.lease_until = None
-    session.commit()
-    return True
+        target.last_checked_at = completed_at
+        target.consecutive_failures = 0
+        target.next_check_at = completed_at + timedelta(seconds=target.interval_seconds)
+        target.lease_owner = None
+        target.lease_token = None
+        target.lease_until = None
+        session.commit()
+        return True
+    except Exception:
+        session.rollback()
+        raise
 
 
 def reschedule_failure(
@@ -167,25 +183,24 @@ def reschedule_failure(
         raise ValueError("max_backoff_seconds must be at least 60")
 
     completed_at = checked_at or utc_now()
-    target = session.scalar(
-        select(MonitorTarget).where(
-            MonitorTarget.id == target_id,
-            MonitorTarget.lease_token == lease_token,
-        )
-    )
-    if target is None:
+    try:
+        target = session.scalar(leased_target_statement(target_id=target_id, lease_token=lease_token))
+        if target is None:
+            session.rollback()
+            return False
+
+        failures = target.consecutive_failures + 1
+        multiplier = 2 ** min(failures, 16)
+        backoff_seconds = min(target.interval_seconds * multiplier, max_backoff_seconds)
+
+        target.last_checked_at = completed_at
+        target.consecutive_failures = failures
+        target.next_check_at = completed_at + timedelta(seconds=backoff_seconds)
+        target.lease_owner = None
+        target.lease_token = None
+        target.lease_until = None
+        session.commit()
+        return True
+    except Exception:
         session.rollback()
-        return False
-
-    failures = target.consecutive_failures + 1
-    multiplier = 2 ** min(failures, 16)
-    backoff_seconds = min(target.interval_seconds * multiplier, max_backoff_seconds)
-
-    target.last_checked_at = completed_at
-    target.consecutive_failures = failures
-    target.next_check_at = completed_at + timedelta(seconds=backoff_seconds)
-    target.lease_owner = None
-    target.lease_token = None
-    target.lease_until = None
-    session.commit()
-    return True
+        raise
