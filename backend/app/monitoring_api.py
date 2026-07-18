@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import secrets
-from datetime import timedelta
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -30,11 +30,11 @@ class MonitorTargetRead(BaseModel):
     product_binding_id: int
     status: str
     interval_seconds: int
-    next_check_at: object
-    last_checked_at: object | None
+    next_check_at: datetime
+    last_checked_at: datetime | None
     consecutive_failures: int
     lease_owner: str | None
-    lease_until: object | None
+    lease_until: datetime | None
     shard: int
 
 
@@ -121,22 +121,25 @@ def _claim_selected_target(db: Session, target_id: int, *, lease_seconds: int = 
         raise HTTPException(status_code=409, detail="Manual runtime currently supports supplier code 'ozon'")
 
     token = secrets.token_urlsafe(32)
+    lease_until = now + timedelta(seconds=lease_seconds)
     target.lease_owner = "manual-api"
     target.lease_token = token
-    target.lease_until = now + timedelta(seconds=lease_seconds)
+    target.lease_until = lease_until
+    product_binding_id = target.product_binding_id
     db.commit()
     return LeaseClaim(
-        target_id=target.id,
-        product_binding_id=target.product_binding_id,
+        target_id=target_id,
+        product_binding_id=product_binding_id,
         lease_owner="manual-api",
         lease_token=token,
-        lease_until=target.lease_until,
+        lease_until=lease_until,
     )
 
 
 @router.post("/{target_id}/run-now", response_model=ManualRunRead)
 async def run_monitor_target_now(target_id: int, db: Session = Depends(get_db)):
     claim = _claim_selected_target(db, target_id)
+    db.close()
     result: ScheduledTaskResult = await process_claimed_target(
         claim,
         registry=_runtime_registry(),
