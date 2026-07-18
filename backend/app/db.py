@@ -1,7 +1,10 @@
 import os
+from typing import Any
 
 from sqlalchemy import create_engine
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import DeclarativeBase, sessionmaker
+from sqlalchemy.pool import StaticPool
 
 
 def _database_url() -> str:
@@ -15,14 +18,38 @@ def _database_url() -> str:
     return value
 
 
-engine = create_engine(
-    _database_url(),
-    pool_pre_ping=True,
-    pool_recycle=300,
-    pool_size=2,
-    max_overflow=1,
-    pool_timeout=10,
-)
+def _engine_options(database_url: str) -> dict[str, Any]:
+    """Return safe engine settings for the selected database dialect.
+
+    PostgreSQL uses a deliberately small QueuePool because Supabase has a
+    limited connection budget. SQLite test databases must not receive
+    QueuePool-only arguments such as max_overflow and pool_timeout.
+    """
+
+    url = make_url(database_url)
+    options: dict[str, Any] = {
+        "pool_pre_ping": True,
+        "pool_recycle": 300,
+    }
+
+    if url.get_backend_name() == "sqlite":
+        options["connect_args"] = {"check_same_thread": False}
+        if url.database in {None, "", ":memory:"}:
+            options["poolclass"] = StaticPool
+        return options
+
+    options.update(
+        {
+            "pool_size": 2,
+            "max_overflow": 1,
+            "pool_timeout": 10,
+        }
+    )
+    return options
+
+
+DATABASE_URL = _database_url()
+engine = create_engine(DATABASE_URL, **_engine_options(DATABASE_URL))
 
 SessionLocal = sessionmaker(
     bind=engine,
