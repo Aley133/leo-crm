@@ -1,6 +1,6 @@
-# LEO CRM Architecture v0.1
+# LEO CRM Architecture v0.2
 
-Status: Draft
+Status: Approved for Phase B; Phase C remains blocked until the monitoring contract is implemented.
 Owner: Business owner
 Technical direction: Full-stack / architecture
 
@@ -21,7 +21,7 @@ The target state is a machine that minimizes manual participation in:
 - cancellations, expenses, margin and profit analytics;
 - notifications and exception handling.
 
-Telegram is not the system core. Telegram and the web interface are clients of the same API.
+Telegram is the primary operational interface of the MVP, but it is not the system core. Telegram and the future web interface are clients of the same authenticated API.
 
 ## 2. Core architectural principles
 
@@ -29,35 +29,43 @@ Telegram is not the system core. Telegram and the web interface are clients of t
 2. XML is generated output, never the primary storage.
 3. Every Kaspi product is an independent business entity.
 4. One product may have multiple supplier cards and multiple supplier platforms.
-5. Monitoring, pricing, XML, orders and purchasing are separate modules.
-6. No module writes directly into another module's internal tables without a service boundary.
-7. All important changes are recorded as immutable business events and history records.
-8. Background work is performed by jobs and workers, not by infinite loops inside the API process.
-9. Telegram and the website communicate only through the API.
-10. Secrets exist only in deployment environment variables.
-11. Database structure changes only through Alembic migrations.
-12. The system is optimized for speed, auditability and recovery after errors.
+5. Monitoring, pricing, XML, orders and purchasing are separate modules inside one modular monolith.
+6. No module reads or writes another module's ORM models or repositories directly. Cross-module work uses a public application-service or query interface.
+7. We do not create ceremonial interfaces for every function. Boundaries are enforced where they protect business ownership or allow replacement of an external adapter.
+8. Important history is immutable. Current state and historical observations are stored separately.
+9. Background work runs outside the API request lifecycle.
+10. Telegram and the website communicate only through the API.
+11. Secrets exist only in deployment environment variables.
+12. Database structure changes only through Alembic migrations.
+13. Critical operational workflows favor explicit transaction boundaries over architectural purity.
+14. Every automatic decision must be explainable and recoverable.
+15. External-source failures are expected operating states, not exceptional surprises.
 
 ## 3. System context
 
 ```text
-Kaspi XML consumer
-        ^
-        |
-XML publication endpoint
-        ^
-        |
-LEO CRM API <---- Web CRM
-        ^
-        |
-Telegram assistant
-        |
-        v
-PostgreSQL <---- Workers / Scheduler
-        ^
-        |
-Supplier adapters: Ozon, WB, Kaspi, other connected sources
+                          Kaspi XML consumer
+                                  ^
+                                  |
+                         /feeds/kaspi.xml
+                                  ^
+                                  |
+Telegram Bot -----> Authenticated LEO CRM API <----- Web CRM
+                                  |
+                                  v
+                      Application service layer
+                                  |
+                                  v
+                             PostgreSQL
+                                  ^
+                                  |
+                     Worker runtime / adapters
+                                  ^
+                                  |
+               Ozon / WB / Kaspi / other sources
 ```
+
+Telegram and Web CRM never connect directly to PostgreSQL.
 
 ## 4. Main bounded modules
 
@@ -72,14 +80,16 @@ Main entities:
 - ProductAttribute
 - ProductExternalIdentifier
 
-Responsibilities:
+Product lifecycle:
 
-- Kaspi product identity;
-- merchant SKU;
-- product name and brand;
-- activation state;
-- product-level settings;
-- links to supplier bindings, pricing, orders and XML offers.
+```text
+draft -> active -> paused -> archived
+```
+
+- `draft`: incomplete or not approved for automation;
+- `active`: eligible for monitoring, pricing and XML;
+- `paused`: temporarily excluded from automatic operations;
+- `archived`: retired while history remains available.
 
 Catalog does not parse suppliers and does not calculate prices.
 
@@ -92,25 +102,30 @@ Main entities:
 - Supplier
 - SupplierAccount
 - SupplierProduct
-- SupplierOfferSnapshot
+- SupplierOfferState
+- SupplierOfferObservation
+- SourceHealth
 
-Supplier means a source/platform or configured supplier integration.
+`SupplierOfferState` stores the latest known state, one row per supplier product:
 
-SupplierProduct means one concrete external card, for example one Ozon URL.
-
-SupplierOfferSnapshot stores observed facts at a point in time:
-
-- price;
-- old price;
-- availability;
-- stock;
-- delivery text;
-- calculated delivery days;
+- current price and old price;
+- availability and stock;
+- delivery text and normalized delivery days;
 - seller;
-- observed timestamp;
-- parser response metadata.
+- last successful observation;
+- last checked timestamp;
+- current parser/access status;
+- state version.
 
-Historical snapshots are not overwritten.
+`SupplierOfferObservation` is append-only and is written only for meaningful changes or diagnostic evidence. A successful check with no business change updates `SupplierOfferState.last_checked_at` without creating a full duplicate snapshot.
+
+Required index:
+
+```text
+(supplier_product_id, observed_at DESC)
+```
+
+Raw payload retention is bounded. Large raw responses are stored in object storage or discarded after the diagnostic window.
 
 ### 4.3 Matching and bindings
 
@@ -122,60 +137,130 @@ Main entities:
 - MatchCandidate
 - MatchDecision
 
-Binding stores:
+Binding lifecycle:
 
-- product_id;
-- supplier_product_id;
-- status;
-- confidence score;
-- source of decision: automatic/manual/imported;
-- primary flag;
-- priority;
-- validation timestamps;
-- last mismatch reason.
+```text
+candidate -> confirmed -> active -> degraded -> disabled
+       \-> rejected
+```
 
-The matching engine only proposes candidates. It does not silently replace a confirmed binding without an explicit rule.
+The matching engine may propose candidates. It may not silently replace a confirmed binding. Promotion to `active` requires confirmation or an explicitly approved high-confidence rule.
 
-### 4.4 Monitoring
+### 4.4 Monitoring and external-source reliability
 
-Purpose: independently schedule and execute checks for every bound supplier card.
+Purpose: independently schedule and execute checks for every active supplier binding.
 
 Main entities:
 
 - MonitorTarget
 - MonitorPolicy
-- MonitorJob
-- MonitorRun
-- MonitorError
+- MonitorAttempt
+- MonitorDailyMetric
+- SourceHealth
 
-Each binding has its own monitor state:
+There is no persistent `MonitorJob` queue in the first version.
 
-- last checked at;
-- next check at;
-- check interval;
-- status;
-- consecutive failures;
-- last response time;
-- lock owner and lock expiry.
+`MonitorTarget` stores current scheduling state:
 
-Monitoring flow:
+- binding_id;
+- next_check_at;
+- last_checked_at;
+- interval_seconds;
+- priority;
+- bucket;
+- consecutive_failures;
+- lease_owner;
+- lease_until;
+- current degradation state.
 
-```text
-Scheduler selects due targets
-    -> creates jobs
-    -> worker claims job
-    -> supplier adapter checks card
-    -> snapshot saved
-    -> change detector compares state
-    -> business event emitted
-    -> next check scheduled
+Workers claim targets using a short transaction:
+
+```sql
+SELECT ...
+FROM monitor_targets
+WHERE next_check_at <= now()
+  AND (lease_until IS NULL OR lease_until < now())
+ORDER BY priority DESC, next_check_at
+FOR UPDATE SKIP LOCKED
+LIMIT :batch_size;
 ```
 
-The scheduler must support many independent cards. We do not run one giant pass over the entire catalog.
+Lease duration must cover:
+
+```text
+adapter timeout
++ configured retries
++ observation persistence budget
++ pricing workflow budget
++ safety margin
+```
+
+A lease heartbeat may extend the lease for long operations. Completion and rescheduling use a claim token so an expired worker cannot overwrite a newer worker's result.
+
+`MonitorAttempt` is a short-lived diagnostic journal, retained for 7-30 days. It records:
+
+- target and attempt identifiers;
+- adapter and access strategy;
+- start/end and duration;
+- HTTP/result classification;
+- captcha, block, timeout or parser error;
+- retry count;
+- lease owner;
+- error details with bounded payload size.
+
+Before raw attempts are deleted, a daily rollup is persisted in `MonitorDailyMetric`:
+
+- attempts;
+- successes;
+- failures;
+- captcha count;
+- blocked count;
+- timeout count;
+- average and percentile latency;
+- longest success gap.
+
+This preserves quarterly and annual reliability analytics after raw diagnostic retention expires.
+
+#### Source-health states
+
+```text
+healthy
+-> degraded
+-> rate_limited
+-> captcha_required
+-> blocked
+-> auth_required
+-> disabled
+```
+
+The adapter must distinguish at least:
+
+- product not found;
+- product out of stock;
+- source timeout;
+- HTTP 429/rate limit;
+- captcha;
+- IP or account block;
+- authentication required;
+- parser/layout break;
+- transport failure.
+
+Repeated captchas or blocks do not trigger endless fast retries. The target enters degraded/manual-review state and the source-level circuit breaker increases backoff.
+
+`AccessStrategy` is adapter-specific and may include:
+
+- official API;
+- authenticated browser session;
+- browser profile and cookies;
+- direct HTTP;
+- proxy route where legally and operationally justified;
+- manual verification fallback.
+
+Proxy infrastructure is not added before measured failure data justifies it. Terms-of-service and legal risk must be reviewed before this system is offered to third parties.
 
 ### 4.5 Pricing
 
-Purpose: calculate a safe sales price and repricing floor for each product.
+Purpose: calculate a safe sale price and dynamic floor.
 
 Main entities:
 
@@ -184,69 +269,94 @@ Main entities:
 - PriceCalculation
 - ProductPriceState
 
-Inputs may include:
-
-- supplier price;
-- supplier delivery cost;
-- marketplace commission;
-- acquiring/payment cost;
-- tax;
-- fixed operating costs;
-- desired profit;
-- minimum margin;
-- rounding rule;
-- risk buffer;
-- delivery SLA;
-- product-specific floor.
-
-The floor is dynamic. If supplier cost changes, the allowed minimum sale price changes.
-
-Every calculation must store an explanation:
+Every calculation stores a complete explanation:
 
 ```text
 supplier price
-+ delivery
-+ commission
++ supplier delivery
++ marketplace commission
++ payment cost
 + tax
 + fixed costs
++ risk buffer
 + target profit
 = safe sale price
 ```
 
-Pricing never edits XML directly. It publishes a price decision.
+`ProductPriceState` includes:
+
+- version for optimistic locking;
+- last calculation_id;
+- source observation_id;
+- updated_by;
+- update_reason;
+- manual_override type/value;
+- manual_override_until;
+- current floor and sale price.
+
+Priority order:
+
+```text
+sale prohibition
+> manual lock
+> manual fixed price/floor
+> automatic calculation
+```
+
+Automatic writes use optimistic locking. A stale calculation may not overwrite a newer manual or automatic decision.
 
 ### 4.6 XML
 
-Purpose: generate and publish Kaspi-compatible XML from database state.
+Purpose: generate and publish Kaspi-compatible XML.
 
 Main entities:
 
 - XmlFeed
+- XmlFeedVersion
 - XmlOfferState
 - XmlGenerationRun
-- XmlPublication
 
-Flow:
+XML files are immutable and versioned:
 
 ```text
-Approved product price/state
-    -> XML projection updated
-    -> XML generated
-    -> validation performed
-    -> version stored
-    -> publication endpoint serves latest valid version
+feed_000123.xml
+feed_000124.xml
+feed_000125.xml
 ```
 
-Requirements:
+Generation flow:
 
-- atomic publication: Kaspi must never read a partially written file;
-- previous valid version remains available if generation fails;
-- generation history and validation errors are stored;
-- each offer can be traced back to the price calculation that produced it.
+```text
+read an explicit pricing-state version
+-> generate a new immutable file
+-> validate structure and required offers
+-> persist file and checksum
+-> atomically update XmlFeed.active_version_id
+```
+
+Kaspi always uses one stable endpoint:
+
+```text
+GET /feeds/kaspi.xml
+```
+
+The endpoint serves the active valid version itself. It does not depend on marketplace support for HTTP redirects.
+
+The previous valid version remains active if generation or validation fails.
+
+Storage policy:
+
+- keep the active version;
+- keep a configurable number of recent valid versions;
+- keep failed-generation metadata, not unlimited failed files;
+- delete old files only after confirming they are not active;
+- alert before storage reaches configured soft and hard limits.
 
 ### 4.7 Orders
 
-Purpose: complete order lifecycle and business facts.
+Purpose: import and maintain the complete Kaspi order lifecycle.
+
+Kaspi order import is treated as another scheduled polling task. It reuses the same scheduling, lease, retry, backoff and execution infrastructure as supplier monitoring, while its business handler remains inside the Orders module.
 
 Main entities:
 
@@ -256,19 +366,11 @@ Main entities:
 - Cancellation
 - Fulfillment
 
-Responsibilities:
-
-- import orders from Kaspi;
-- normalize statuses;
-- preserve marketplace raw payload;
-- track item quantities and revenue;
-- detect cancellations;
-- connect sales to purchasing and inventory;
-- support profitability calculations.
+Imports are idempotent by Kaspi order identifier and preserve bounded raw source data for diagnosis.
 
 ### 4.8 Purchasing
 
-Purpose: turn sales and stock needs into controlled procurement.
+The first version recommends and tracks purchases. It does not automatically complete checkout on an external marketplace.
 
 Main entities:
 
@@ -279,24 +381,9 @@ Main entities:
 - Receipt
 - ReceiptItem
 
-Lifecycle:
-
-```text
-Need detected
--> recommended supplier selected
--> purchase draft
--> purchased
--> in transit
--> received
--> accepted into inventory
--> linked to sold orders / stock
-```
-
-The first version will recommend and track purchases. Fully automatic checkout on external platforms is a later phase and must not be mixed into the initial architecture.
-
 ### 4.9 Inventory
 
-Purpose: know what was purchased, received, reserved and sold.
+Inventory uses an append-only stock-movement ledger.
 
 Main entities:
 
@@ -306,11 +393,9 @@ Main entities:
 - Reservation
 - Batch
 
-Inventory uses an append-only movement ledger. Current stock is calculated or projected from movements.
+Current stock is a projection derived from movements. Corrections are new movements, never destructive edits of history.
 
 ### 4.10 Finance and analytics
-
-Purpose: calculate actual business performance.
 
 Main entities:
 
@@ -319,47 +404,26 @@ Main entities:
 - ProfitCalculation
 - ProductDailyMetric
 - SupplierMetric
+- MonitorDailyMetric
 
-Metrics include:
+Financial calculations must be reproducible from source records. Long-term monitoring reliability is calculated from daily rollups, not only from raw MonitorAttempt rows.
 
-- revenue;
-- gross profit;
-- net profit;
-- margin;
-- cancellation rate;
-- supplier price stability;
-- monitoring reliability;
-- purchase lead time;
-- stock turnover;
-- product profitability.
+### 4.11 Notifications and Telegram
 
-Financial calculations must be reproducible from source records.
+Telegram is the production-ready owner interface of the MVP. It is a client of the backend and contains no pricing, monitoring or database logic.
 
-### 4.11 Notifications and exception handling
+Initial Telegram capabilities:
 
-Purpose: surface only actions that require human attention.
+- confirm or reject binding candidates;
+- pause/resume a product;
+- request a priority recheck;
+- view monitoring degradation;
+- receive price-below-floor alerts;
+- view supplier disappearance or captcha/block alerts;
+- view XML publication failures;
+- view purchase recommendations.
 
-Channels:
-
-- Telegram;
-- web CRM;
-- later email or other channels.
-
-Examples:
-
-- supplier card unavailable;
-- price below safe floor;
-- binding confidence degraded;
-- XML generation failed;
-- purchase overdue;
-- order cannot be fulfilled;
-- repeated parser errors.
-
-Telegram is an assistant for exceptions, not the primary workflow engine.
-
-### 4.12 Audit and events
-
-Purpose: explain why the system changed something.
+### 4.12 Audit and outbox
 
 Main entities:
 
@@ -367,234 +431,371 @@ Main entities:
 - AuditLog
 - OutboxEvent
 
-Example events:
+The first version uses a transactional outbox for secondary reactions:
 
-- SupplierOfferObserved
-- SupplierPriceChanged
-- SupplierAvailabilityChanged
-- BindingConfirmed
-- BindingRejected
-- ProductPriceCalculated
-- ProductPriceChanged
-- XmlOfferChanged
-- XmlPublished
-- OrderImported
-- OrderCancelled
-- PurchaseNeedCreated
-- PurchaseReceived
+- Telegram notifications;
+- analytics projections;
+- audit integrations;
+- non-critical follow-up work.
 
-We will begin with a transactional outbox table inside PostgreSQL. We will not introduce Kafka or a complex message broker at the start.
+The critical `observation -> pricing decision` workflow does not wait for the outbox dispatcher.
+
+The Outbox Dispatcher is an explicit asynchronous loop inside the Worker runtime. It claims rows using `FOR UPDATE SKIP LOCKED` and provides at-least-once delivery.
+
+Outbox fields include:
+
+- event_id and idempotency key;
+- event type and payload version;
+- created_at;
+- attempts;
+- next_attempt_at;
+- locked_by and locked_until;
+- processed_at;
+- last_error;
+- dead-letter status.
+
+Every event handler must be idempotent.
 
 ## 5. Data ownership rules
 
 - Catalog owns Product.
-- Suppliers owns Supplier and SupplierProduct.
-- Matching owns ProductBinding.
-- Monitoring owns MonitorJob and MonitorRun.
+- Suppliers owns Supplier, SupplierProduct, SupplierOfferState and SupplierOfferObservation.
+- Matching owns ProductBinding and match decisions.
+- Monitoring owns MonitorTarget, MonitorAttempt, SourceHealth and MonitorDailyMetric.
 - Pricing owns PriceCalculation and ProductPriceState.
 - XML owns feed versions and offer projections.
 - Orders owns order lifecycle.
 - Purchasing owns procurement lifecycle.
 - Inventory owns stock movements.
-- Analytics reads source records and creates projections; it does not rewrite operational history.
+- Analytics owns derived projections and does not rewrite operational history.
+- Audit owns outbox and audit records.
 
-## 6. Event flow example: supplier price changed
+## 6. Critical workflow and transaction boundaries
+
+### 6.1 Supplier check workflow
+
+The workflow runs synchronously inside one worker task, but not inside one database transaction.
 
 ```text
-1. Monitor worker checks an Ozon card.
-2. SupplierOfferSnapshot is saved.
-3. Change detector sees a price difference.
-4. SupplierPriceChanged event is written to the outbox.
-5. Pricing handler recalculates the safe sale price.
-6. PriceCalculation and ProductPriceState are saved.
-7. ProductPriceChanged event is written.
-8. XML projection is updated.
-9. New XML version is generated and validated.
-10. Telegram receives a notification only if policy requires it.
+A. Claim target transaction
+   - claim due MonitorTarget
+   - write lease token and lease_until
+   - commit
+
+B. External access, no database connection held
+   - call Ozon/WB adapter
+   - enforce timeout and cancellation
+
+C. Observation transaction
+   - persist MonitorAttempt outcome
+   - update SupplierOfferState.last_checked_at
+   - append SupplierOfferObservation when meaningful
+   - update SourceHealth/target degradation
+   - commit unconditionally when the source result is valid evidence
+
+D. Pricing transaction
+   - load the committed observation/state
+   - validate ProductPricingPolicy
+   - calculate price
+   - optimistic-lock ProductPriceState
+   - persist PriceCalculation
+   - write secondary OutboxEvents
+   - commit
+
+E. Reschedule transaction
+   - verify claim token
+   - set next_check_at/backoff
+   - release lease
+   - commit
 ```
 
-Every step is idempotent. Reprocessing the same event must not create duplicate business actions.
+A pricing failure does not roll back or erase the observation. It records a pricing failure, leaves the previous valid price active and creates an actionable exception.
 
-## 7. Runtime architecture: initial stage
+If the database is unavailable after the external source returned successfully, the result is not acknowledged as completed. The attempt is retried after the lease expires. Adapter requests should use stable request/observation fingerprints where possible so repeated persistence is idempotent.
 
-We deliberately start as a modular monolith, not microservices.
+### 6.2 XML workflow
+
+XML generation reads an explicit pricing-state version. If newer pricing appears while generation is running, the generated version is either discarded before activation or published only when its input version still satisfies the activation rule.
+
+## 7. Runtime architecture and concurrency
+
+Initial runtime:
 
 ```text
 One repository
-One FastAPI application
+One FastAPI API process
+One Worker process
 One PostgreSQL database
-One worker service
-One scheduler service
-One web frontend
-One Telegram adapter
+One Telegram adapter process or lightweight client
+Web frontend later
 ```
 
-Why:
-
-- faster development;
-- simpler debugging;
-- lower hosting cost;
-- easier transactions;
-- enough for the expected initial scale.
-
-Modules remain separated in code so they can be extracted later if real load justifies it.
-
-## 8. Deployment topology: initial stage
-
-- GitHub: source control.
-- Render Web Service: FastAPI API.
-- Render Worker: background jobs.
-- Render Cron or scheduler worker: due job creation.
-- Supabase PostgreSQL: primary database.
-- Supabase Storage or object storage later: XML versions and exported files.
-- Web frontend deployment later.
-
-Important limitation: Render free instances sleep. Continuous near-real-time monitoring cannot rely on the free web service. Before production monitoring, we must move workers to an always-on paid instance or another always-on host.
-
-## 9. Repository target structure
+The Worker is one process but not one sequential loop. It contains independent supervised asyncio loops:
 
 ```text
-backend/
-  app/
-    api/
-    core/
-    db/
-    modules/
-      catalog/
-      suppliers/
-      matching/
-      monitoring/
-      pricing/
-      xml_feed/
-      orders/
-      purchasing/
-      inventory/
-      analytics/
-      notifications/
-      audit/
-    workers/
-    main.py
-frontend/
-bot/
-migrations/
-docs/
-tests/
-render.yaml
+scheduler_loop
+monitor_dispatch_loop
+order_poll_dispatch_loop
+outbox_dispatch_loop
+maintenance_and_retention_loop
+health_heartbeat_loop
 ```
 
-## 10. Reliability requirements
+Network-bound monitor tasks run with bounded concurrency using semaphores. A slow Ozon request may not block the outbox loop or order polling loop.
 
-- all jobs have retry policy and dead-letter state;
-- external requests have timeouts;
-- repeated failures use exponential backoff;
-- workers use database locks or claim tokens;
-- no duplicate processing for the same business key;
-- latest valid XML remains available during failures;
-- every automatic price change has a calculation trace;
-- every manual change has actor, timestamp and reason;
-- raw supplier responses may be retained for debugging with size limits;
-- health checks distinguish API, database and worker health.
+Rules:
 
-## 11. Security requirements
+- every external request has a hard timeout;
+- blocking browser or parser work runs in a separate process/thread executor when required;
+- each loop has its own exception boundary and restart policy;
+- one failing loop must not terminate the whole Worker;
+- graceful shutdown stops claims, waits for bounded in-flight work, and releases/lets leases expire safely;
+- Worker heartbeat is stored separately from API health.
 
-- no secrets in GitHub;
-- private CRM authentication before real business data is loaded;
-- role model initially: owner and system;
-- supplier credentials encrypted at rest where applicable;
-- public XML endpoint is read-only and exposes only required feed data;
-- admin API is never public without authentication;
-- audit log cannot be modified through normal application endpoints.
+## 8. Scheduled task infrastructure
 
-## 12. Decisions we explicitly reject for now
+Supplier monitoring and Kaspi order polling reuse generic scheduling primitives:
+
+- due timestamp;
+- priority;
+- lease owner/token;
+- lease expiration;
+- retry count;
+- next retry time;
+- execution diagnostics.
+
+Business modules own their target tables and handlers. There is no universal god-table containing every business payload.
+
+Bucketing/sharding fields are included for future scale, but the initial deployment may run one worker instance.
+
+## 9. Database connection policy
+
+Supabase Session Pooler is used for deployed processes.
+
+Initial maximums:
+
+```text
+API:    pool_size=2, max_overflow=1
+Worker: pool_size=2, max_overflow=1
+```
+
+Rules:
+
+- do not hold a database connection during supplier HTTP/browser requests;
+- use short transactions;
+- monitor checked-out connections and pool timeout errors;
+- Worker concurrency is bounded independently of database pool size;
+- migrations run as a controlled deploy step, not concurrently from every process.
+
+## 10. Authentication and authorization
+
+Initial model:
+
+- Telegram Bot -> API: `SERVICE_API_TOKEN` with restricted service scope;
+- Web CRM -> API: Supabase Auth JWT;
+- Owner/admin endpoints: owner JWT or explicitly permitted service scope;
+- Worker -> application services: in-process calls, no internal HTTP;
+- public XML endpoint: read-only and contains no admin capability.
+
+Planned scopes include:
+
+- products:read/write;
+- bindings:review;
+- monitoring:trigger;
+- prices:override;
+- purchases:review.
+
+## 11. Failure modes and mitigations
+
+### Database unavailable after a successful supplier response
+
+- no database connection is held during scrape;
+- persistence is retried using an observation fingerprint;
+- the monitor target is not marked completed until persistence commits;
+- lease expiry makes the task recoverable;
+- repeated persistence failures move the target to degraded state and alert the owner.
+
+### Pricing fails after observation is committed
+
+- observation remains committed;
+- previous valid ProductPriceState remains active;
+- pricing failure is recorded separately;
+- retry is scheduled after configuration/code correction;
+- the product may be paused automatically when safe-price guarantees cannot be established.
+
+### Worker dies while holding a target
+
+- leases expire automatically;
+- completion requires the original claim token;
+- a stale worker may not reschedule or overwrite a newly claimed target.
+
+### Captcha, rate limit or source block
+
+- classify separately from product absence;
+- apply source-level circuit breaker and increasing backoff;
+- do not retry every product aggressively during a source-wide incident;
+- surface manual-review status in Telegram;
+- switch AccessStrategy only through configured policy.
+
+### Outbox Dispatcher stops
+
+- critical monitoring/pricing state remains committed;
+- outbox backlog age and row count are health metrics;
+- alerts trigger at configured warning/critical thresholds;
+- dispatcher resumes with `SKIP LOCKED` and idempotent handlers;
+- poison events move to dead-letter state after bounded attempts.
+
+### XML generation fails
+
+- active version is not changed;
+- previous valid XML remains available;
+- validation error and source pricing version are recorded;
+- owner receives an exception notification.
+
+### XML/object storage fills
+
+- immutable versions have retention policy;
+- active version and a recent rollback window are protected;
+- maintenance loop deletes eligible old versions;
+- storage usage has soft and hard thresholds;
+- generation is blocked safely before storage exhaustion can corrupt publication.
+
+### PostgreSQL connection limit reached
+
+- fixed small pools;
+- pool-timeout metrics and alerts;
+- short transactions;
+- bounded task concurrency;
+- no DB connection during external network waits.
+
+### Observation/history growth
+
+- current state is separate from history;
+- history is change-based, not one full snapshot per unchanged check;
+- MonitorAttempt has short retention;
+- daily rollups are produced before deletion;
+- partitioning is introduced only when measured row volume/query latency crosses an agreed threshold.
+
+## 12. Retention and maintenance
+
+Initial policy, configurable per environment:
+
+- MonitorAttempt: 14 days;
+- bounded raw supplier payload: 3-7 days;
+- SupplierOfferObservation: long-lived meaningful changes, with later archival policy;
+- MonitorDailyMetric: indefinite or multi-year;
+- successful XML versions: active + latest 20;
+- failed XML file bodies: not retained indefinitely;
+- Outbox processed rows: 7-30 days after processing;
+- AuditLog and financial ledgers: long-lived.
+
+Retention deletion is incremental and runs in bounded batches.
+
+## 13. Reliability and operational health
+
+Health is not one `/health` boolean. It includes:
+
+- API availability;
+- database connectivity;
+- Worker heartbeat age;
+- oldest due-but-unclaimed monitor target;
+- monitor success rate;
+- source health by platform;
+- oldest unprocessed outbox event;
+- outbox backlog size;
+- XML active-version age;
+- storage usage;
+- connection-pool saturation.
+
+Initial operational targets are internal SLOs, not customer promises:
+
+- API admin operations: 99.5% monthly availability after paid always-on hosting;
+- no active XML publication from an invalid file;
+- critical notification backlog warning when oldest event exceeds 5 minutes;
+- monitoring-lag warning when a high-priority target is overdue by more than two policy intervals;
+- recovery from worker crash through lease expiry without manual database edits.
+
+## 14. Decisions explicitly rejected for now
 
 - microservices;
-- Kafka or RabbitMQ at the first stage;
-- React frontend before the operational core exists;
-- automatic purchasing on external platforms before purchase tracking is stable;
-- one giant monitoring loop;
-- storing current business state only in XML or JSON files;
-- direct Telegram access to the database;
-- hardcoded supplier/product mappings in the matching engine;
-- uncontrolled automatic rebinding of confirmed products.
+- Kafka or RabbitMQ in the first stage;
+- direct Telegram access to PostgreSQL;
+- pricing/scraping inside a user HTTP request;
+- unlimited retries against a captcha or blocked source;
+- one full historical snapshot for every unchanged check;
+- automatic rebinding of confirmed products;
+- destructive stock-history edits;
+- automatic external checkout before procurement tracking is stable;
+- unbounded XML and raw-response retention.
 
-## 13. Development phases
+## 15. Development phases
 
 ### Phase A: foundation
 
-- architecture document;
-- authentication plan;
-- modular project structure;
-- database migrations;
-- tests and CI baseline;
-- event/outbox foundation.
+- architecture and security contract;
+- migrations and CI baseline;
+- API authentication;
+- Worker runtime skeleton;
+- outbox and health foundation.
 
 ### Phase B: product and supplier core
 
-- products;
-- suppliers;
-- supplier products;
-- bindings;
-- manual CRUD and validation;
+- Product/Supplier/SupplierProduct/ProductBinding;
+- lifecycle validation;
+- manual CRUD;
+- Telegram API client skeleton;
 - import existing TGBAD bindings.
 
-### Phase C: monitoring engine
+### Phase C: monitoring reliability vertical slice
 
-- monitor policies;
-- due jobs;
-- worker claiming;
-- Ozon adapter;
-- snapshots and history;
-- retry and error states.
+Before broad monitoring, implement one real Ozon-bound product end to end:
+
+- MonitorTarget and lease claiming;
+- bounded async worker loops;
+- Ozon adapter result classification;
+- SupplierOfferState/Observation;
+- MonitorAttempt and daily rollup;
+- SourceHealth and degradation policy;
+- transaction boundaries defined in section 6;
+- operational metrics and Telegram exception output.
 
 ### Phase D: pricing and XML
 
-- pricing policies;
-- product-level floors;
-- price calculations;
-- XML projection;
-- validation and publication endpoint.
+- pricing policies and optimistic locking;
+- manual override hierarchy;
+- explainable PriceCalculation;
+- versioned immutable XML;
+- stable publication endpoint;
+- storage retention.
 
 ### Phase E: web operations console
 
 - dashboard;
-- product card;
-- binding review;
-- monitor status;
-- price history;
-- system errors.
+- product and binding review;
+- monitor/source health;
+- price history and overrides;
+- operational failures.
 
 ### Phase F: orders, purchasing and inventory
 
-- Kaspi order import;
-- purchase needs;
-- procurement statuses;
-- receipts;
-- stock movements;
-- cancellation and profitability analytics.
+- Kaspi polling through shared scheduling primitives;
+- purchase needs and status tracking;
+- receipts and append-only stock movements;
+- cancellations and profitability.
 
-### Phase G: automation expansion
+## 16. Phase C approval gate
 
-- automatic supplier selection;
-- intelligent exception handling;
-- purchasing recommendations;
-- selective automatic purchase actions;
-- forecasting and optimization.
+Phase C coding may begin only when tests cover:
 
-## 14. Next architecture decisions to finalize
+1. Two workers cannot complete the same lease claim.
+2. A stale claim token cannot overwrite a newer claim.
+3. Pricing failure does not roll back SupplierOfferObservation.
+4. Outbox loop continues while a monitor request is slow.
+5. Captcha is not classified as product absence.
+6. Retention creates MonitorDailyMetric before deleting MonitorAttempt.
+7. Database pool remains bounded during concurrent monitor requests.
+8. XML active version never points to an invalid or incomplete file.
 
-Before further production code, we must approve:
+## 17. Immediate next step
 
-1. Product lifecycle and statuses.
-2. Binding lifecycle and automatic/manual decision rules.
-3. Monitoring frequency, priority and failure policy.
-4. Exact pricing formula and product-level overrides.
-5. XML publication contract for Kaspi.
-6. Order and purchase lifecycle.
-7. Authentication and access model.
-8. Event naming and idempotency rules.
-9. Data retention for snapshots and logs.
-10. Production hosting requirements for continuous monitoring.
-
-## 15. Immediate next step
-
-The next work item is not another parser. We will design the lifecycle of a Product and ProductBinding, because these two state machines determine how monitoring, pricing and human review behave.
+Design and implement the ProductBinding and MonitorTarget state contracts for one controlled Ozon test product. Do not import the old parser wholesale. The first vertical slice must prove leases, transaction boundaries, source-error classification and diagnostics before scale is increased.
