@@ -6,13 +6,14 @@ from datetime import datetime
 from typing import Callable, Mapping
 
 from sqlalchemy import select
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import Session
 
 from .db import SessionLocal
 from .lease_engine import LeaseClaim, claim_due_targets, reschedule_failure, reschedule_success, utc_now
 from .monitoring import AttemptOutcome, MonitorTarget
 from .observation_engine import StaleLeaseError, record_failed_attempt, record_successful_observation
 from .supplier_adapters.base import AdapterRequest, SupplierAdapter
+from .supplier_adapters.errors import AdapterError
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
@@ -76,14 +77,16 @@ def load_task_context(session: Session, target_id: int) -> MonitorTaskContext:
     )
 
 
-def classify_adapter_exception(exc: Exception) -> tuple[AttemptOutcome, str]:
+def classify_adapter_exception(exc: Exception) -> tuple[AttemptOutcome, str, int | None]:
+    if isinstance(exc, AdapterError):
+        return exc.outcome, exc.error_code, exc.http_status
     if isinstance(exc, TimeoutError | asyncio.TimeoutError):
-        return AttemptOutcome.TIMEOUT, "adapter_timeout"
+        return AttemptOutcome.TIMEOUT, "adapter_timeout", None
     if isinstance(exc, ConnectionError):
-        return AttemptOutcome.NETWORK_ERROR, "adapter_network_error"
+        return AttemptOutcome.NETWORK_ERROR, "adapter_network_error", None
     if isinstance(exc, ValueError):
-        return AttemptOutcome.PARSE_ERROR, "adapter_invalid_response"
-    return AttemptOutcome.INTERNAL_ERROR, "adapter_internal_error"
+        return AttemptOutcome.PARSE_ERROR, "adapter_invalid_response", None
+    return AttemptOutcome.INTERNAL_ERROR, "adapter_internal_error", None
 
 
 async def process_claimed_target(
@@ -174,7 +177,7 @@ async def process_claimed_target(
     except asyncio.CancelledError:
         raise
     except Exception as exc:
-        outcome, error_code = classify_adapter_exception(exc)
+        outcome, error_code, http_status = classify_adapter_exception(exc)
         finished_at = now_factory()
         try:
             with session_factory() as session:
@@ -187,6 +190,7 @@ async def process_claimed_target(
                     started_at=started_at,
                     finished_at=finished_at,
                     outcome=outcome,
+                    http_status=http_status,
                     error_code=error_code,
                     error_message=str(exc),
                 )
