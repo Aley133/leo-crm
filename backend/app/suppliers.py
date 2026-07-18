@@ -7,6 +7,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, 
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Mapped, Session, mapped_column
 
+from .auth import require_service_token
 from .db import Base, get_db
 from .monitoring import BindingStatus
 
@@ -125,7 +126,11 @@ class BindingRead(BaseModel):
     updated_at: datetime
 
 
-router = APIRouter(prefix="/api", tags=["suppliers"])
+router = APIRouter(
+    prefix="/api",
+    tags=["suppliers"],
+    dependencies=[Depends(require_service_token)],
+)
 
 
 @router.get("/suppliers", response_model=list[SupplierRead])
