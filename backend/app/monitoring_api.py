@@ -5,13 +5,19 @@ from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .db import get_db
 from .lease_engine import LeaseClaim, utc_now
-from .monitoring import MonitorStatus, MonitorTarget
+from .monitoring import (
+    MonitorAttempt,
+    MonitorStatus,
+    MonitorTarget,
+    SupplierOfferObservation,
+    SupplierOfferState,
+)
 from .scheduler_engine import AdapterRegistry, ScheduledTaskResult, process_claimed_target
 from .supplier_adapters.ozon_http import OzonHttpAdapter
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -151,3 +157,72 @@ async def run_monitor_target_now(target_id: int, db: Session = Depends(get_db)):
         changed=result.changed,
         error=result.error,
     )
+
+
+@router.get("/{target_id}/snapshot")
+def get_monitor_target_snapshot(target_id: int, db: Session = Depends(get_db)):
+    target = db.get(MonitorTarget, target_id)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Monitor target not found")
+
+    supplier_product_id = db.scalar(
+        select(ProductBinding.supplier_product_id).where(
+            ProductBinding.id == target.product_binding_id
+        )
+    )
+    last_attempt = db.scalar(
+        select(MonitorAttempt)
+        .where(MonitorAttempt.monitor_target_id == target_id)
+        .order_by(MonitorAttempt.id.desc())
+        .limit(1)
+    )
+    state = None
+    observation_count = 0
+    if supplier_product_id is not None:
+        state = db.scalar(
+            select(SupplierOfferState).where(
+                SupplierOfferState.supplier_product_id == supplier_product_id
+            )
+        )
+        observation_count = db.scalar(
+            select(func.count())
+            .select_from(SupplierOfferObservation)
+            .where(SupplierOfferObservation.supplier_product_id == supplier_product_id)
+        ) or 0
+
+    return {
+        "target": {
+            "id": target.id,
+            "status": target.status,
+            "last_checked_at": target.last_checked_at,
+            "next_check_at": target.next_check_at,
+            "consecutive_failures": target.consecutive_failures,
+            "lease_owner": target.lease_owner,
+            "lease_until": target.lease_until,
+        },
+        "last_attempt": None if last_attempt is None else {
+            "id": last_attempt.id,
+            "outcome": last_attempt.outcome,
+            "adapter_code": last_attempt.adapter_code,
+            "access_strategy": last_attempt.access_strategy,
+            "http_status": last_attempt.http_status,
+            "error_code": last_attempt.error_code,
+            "error_message": last_attempt.error_message,
+            "started_at": last_attempt.started_at,
+            "finished_at": last_attempt.finished_at,
+            "duration_ms": last_attempt.duration_ms,
+        },
+        "offer_state": None if state is None else {
+            "price": state.price,
+            "old_price": state.old_price,
+            "available": state.available,
+            "stock": state.stock,
+            "delivery_days": state.delivery_days,
+            "seller": state.seller,
+            "version": state.version,
+            "observed_at": state.observed_at,
+            "last_checked_at": state.last_checked_at,
+            "adapter_schema_version": state.adapter_schema_version,
+        },
+        "observation_count": observation_count,
+    }
