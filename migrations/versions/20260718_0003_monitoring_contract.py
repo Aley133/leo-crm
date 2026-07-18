@@ -64,7 +64,7 @@ def upgrade() -> None:
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
     )
-    op.create_index("ix_monitor_attempts_target_started", "monitor_attempts", ["monitor_target_id", sa.text("started_at DESC")])
+    op.create_index("ix_monitor_attempts_target_started", "monitor_attempts", ["monitor_target_id", "started_at"])
     op.create_index("ix_monitor_attempts_outcome", "monitor_attempts", ["outcome"])
     op.create_index("ix_monitor_attempts_lease_token", "monitor_attempts", ["lease_token"])
 
@@ -107,7 +107,7 @@ def upgrade() -> None:
         sa.Column("created_at", sa.DateTime(timezone=True), nullable=False, server_default=sa.func.now()),
         sa.UniqueConstraint("supplier_product_id", "fingerprint", name="uq_supplier_observation_fingerprint"),
     )
-    op.create_index("ix_supplier_observations_product_observed", "supplier_offer_observations", ["supplier_product_id", sa.text("observed_at DESC")])
+    op.create_index("ix_supplier_observations_product_observed", "supplier_offer_observations", ["supplier_product_id", "observed_at"])
     op.create_index("ix_supplier_observations_attempt_id", "supplier_offer_observations", ["monitor_attempt_id"])
 
     op.create_table(
