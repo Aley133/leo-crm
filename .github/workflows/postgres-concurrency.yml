@@ -36,4 +36,14 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: pytest -q tests/test_postgres_lease_concurrency.py
+      - name: Run PostgreSQL concurrency test
+        id: postgres_test
+        continue-on-error: true
+        run: pytest -q tests/test_postgres_lease_concurrency.py > postgres-test.log 2>&1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: postgres-test-log
+          path: postgres-test.log
+      - name: Fail when PostgreSQL test failed
+        if: steps.postgres_test.outcome == 'failure'
+        run: exit 1
