@@ -7,6 +7,7 @@ from .db import engine
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
+from .product_identity_api import router as product_identity_router
 from .products import router as products_router
 from .purchase_api import router as purchase_router
 from .supplier_products_api import router as supplier_products_router
@@ -14,7 +15,7 @@ from .suppliers import router as suppliers_router
 
 app = FastAPI(
     title="LEO CRM API",
-    version="0.9.0",
+    version="0.10.0",
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
 )
 
@@ -24,6 +25,7 @@ app.include_router(supplier_products_router)
 app.include_router(monitoring_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
+app.include_router(product_identity_router)
 app.include_router(purchase_router)
 
 
