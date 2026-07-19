@@ -24,8 +24,6 @@ def utc_now() -> datetime:
 
 
 def _new_lease_token() -> str:
-    # token_urlsafe(32) is cryptographically random and currently produces a
-    # 43-character token, which fits the persisted String(64) contract.
     return secrets.token_urlsafe(32)
 
 
@@ -35,7 +33,6 @@ def due_target_statement(
     limit: int,
     shard: int | None = None,
 ) -> Select[tuple[MonitorTarget]]:
-    """Build the canonical PostgreSQL claim query."""
     statement = (
         select(MonitorTarget)
         .where(
@@ -53,12 +50,6 @@ def due_target_statement(
 
 
 def leased_target_statement(*, target_id: int, lease_token: str) -> Select[tuple[MonitorTarget]]:
-    """Lock one target only when the caller still owns its current lease token.
-
-    The row lock closes the race between token validation and completion. If a
-    newer worker has reclaimed the target, this query either waits for that
-    claim transaction and then observes a token mismatch, or returns no row.
-    """
     return (
         select(MonitorTarget)
         .where(
@@ -78,12 +69,7 @@ def claim_due_targets(
     now: datetime | None = None,
     shard: int | None = None,
 ) -> list[LeaseClaim]:
-    """Atomically claim due monitor targets.
-
-    PostgreSQL executes the selection with ``FOR UPDATE SKIP LOCKED`` so
-    concurrent workers cannot claim the same row. The function owns the short
-    claim transaction and commits before returning.
-    """
+    """Atomically claim due targets and commit the short claim transaction."""
     if not lease_owner.strip():
         raise ValueError("lease_owner must not be empty")
     if limit < 1:
@@ -127,7 +113,6 @@ def release_target(
     target_id: int,
     lease_token: str,
 ) -> bool:
-    """Release a lease only when the caller still owns the current token."""
     statement = (
         update(MonitorTarget)
         .where(MonitorTarget.id == target_id, MonitorTarget.lease_token == lease_token)
@@ -142,6 +127,29 @@ def release_target(
         raise
 
 
+def apply_success_reschedule(
+    session: Session,
+    *,
+    target_id: int,
+    lease_token: str,
+    checked_at: datetime | None = None,
+) -> bool:
+    """Apply success scheduling without owning the transaction."""
+    completed_at = checked_at or utc_now()
+    target = session.scalar(leased_target_statement(target_id=target_id, lease_token=lease_token))
+    if target is None:
+        return False
+
+    target.last_checked_at = completed_at
+    target.consecutive_failures = 0
+    target.next_check_at = completed_at + timedelta(seconds=target.interval_seconds)
+    target.lease_owner = None
+    target.lease_token = None
+    target.lease_until = None
+    session.flush()
+    return True
+
+
 def reschedule_success(
     session: Session,
     *,
@@ -149,25 +157,53 @@ def reschedule_success(
     lease_token: str,
     checked_at: datetime | None = None,
 ) -> bool:
-    """Complete a successful check and schedule the normal next interval."""
-    completed_at = checked_at or utc_now()
+    """Backward-compatible transaction-owning success wrapper."""
     try:
-        target = session.scalar(leased_target_statement(target_id=target_id, lease_token=lease_token))
-        if target is None:
+        completed = apply_success_reschedule(
+            session,
+            target_id=target_id,
+            lease_token=lease_token,
+            checked_at=checked_at,
+        )
+        if completed:
+            session.commit()
+        else:
             session.rollback()
-            return False
-
-        target.last_checked_at = completed_at
-        target.consecutive_failures = 0
-        target.next_check_at = completed_at + timedelta(seconds=target.interval_seconds)
-        target.lease_owner = None
-        target.lease_token = None
-        target.lease_until = None
-        session.commit()
-        return True
+        return completed
     except Exception:
         session.rollback()
         raise
+
+
+def apply_failure_reschedule(
+    session: Session,
+    *,
+    target_id: int,
+    lease_token: str,
+    checked_at: datetime | None = None,
+    max_backoff_seconds: int = 86_400,
+) -> bool:
+    """Apply bounded failure backoff without owning the transaction."""
+    if max_backoff_seconds < 60:
+        raise ValueError("max_backoff_seconds must be at least 60")
+
+    completed_at = checked_at or utc_now()
+    target = session.scalar(leased_target_statement(target_id=target_id, lease_token=lease_token))
+    if target is None:
+        return False
+
+    failures = target.consecutive_failures + 1
+    multiplier = 2 ** min(failures, 16)
+    backoff_seconds = min(target.interval_seconds * multiplier, max_backoff_seconds)
+
+    target.last_checked_at = completed_at
+    target.consecutive_failures = failures
+    target.next_check_at = completed_at + timedelta(seconds=backoff_seconds)
+    target.lease_owner = None
+    target.lease_token = None
+    target.lease_until = None
+    session.flush()
+    return True
 
 
 def reschedule_failure(
@@ -178,29 +214,20 @@ def reschedule_failure(
     checked_at: datetime | None = None,
     max_backoff_seconds: int = 86_400,
 ) -> bool:
-    """Complete a failed check using bounded exponential backoff."""
-    if max_backoff_seconds < 60:
-        raise ValueError("max_backoff_seconds must be at least 60")
-
-    completed_at = checked_at or utc_now()
+    """Backward-compatible transaction-owning failure wrapper."""
     try:
-        target = session.scalar(leased_target_statement(target_id=target_id, lease_token=lease_token))
-        if target is None:
+        completed = apply_failure_reschedule(
+            session,
+            target_id=target_id,
+            lease_token=lease_token,
+            checked_at=checked_at,
+            max_backoff_seconds=max_backoff_seconds,
+        )
+        if completed:
+            session.commit()
+        else:
             session.rollback()
-            return False
-
-        failures = target.consecutive_failures + 1
-        multiplier = 2 ** min(failures, 16)
-        backoff_seconds = min(target.interval_seconds * multiplier, max_backoff_seconds)
-
-        target.last_checked_at = completed_at
-        target.consecutive_failures = failures
-        target.next_check_at = completed_at + timedelta(seconds=backoff_seconds)
-        target.lease_owner = None
-        target.lease_token = None
-        target.lease_until = None
-        session.commit()
-        return True
+        return completed
     except Exception:
         session.rollback()
         raise
