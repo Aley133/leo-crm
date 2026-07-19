@@ -16,7 +16,7 @@ from .monitoring import (
     SupplierOfferState,
 )
 from .supplier_adapters.base import NormalizedOffer
-from .suppliers import ProductBinding
+from .suppliers import ProductBinding, SupplierProduct
 
 
 class StaleLeaseError(RuntimeError):
@@ -66,13 +66,30 @@ def _supplier_product_id_for_target(session: Session, target: MonitorTarget) -> 
     return supplier_product_id
 
 
+def _lock_supplier_product(session: Session, supplier_product_id: int) -> SupplierProduct:
+    """Lock the aggregate root so first-state creation is serialized.
+
+    A SELECT FOR UPDATE on SupplierOfferState cannot protect the first insert,
+    because there is no child row to lock yet. SupplierProduct always exists and
+    therefore provides a stable lock for both first creation and later updates.
+    """
+    supplier_product = session.scalar(
+        select(SupplierProduct)
+        .where(SupplierProduct.id == supplier_product_id)
+        .with_for_update()
+    )
+    if supplier_product is None:
+        raise LookupError(f"SupplierProduct {supplier_product_id} not found")
+    return supplier_product
+
+
 def _normalized_metadata(offer: NormalizedOffer) -> str | None:
     if not offer.raw_metadata:
         return None
     return json.dumps(offer.raw_metadata, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
 
 
-def record_successful_observation(
+def persist_successful_observation(
     session: Session,
     *,
     monitor_target_id: int,
@@ -84,56 +101,101 @@ def record_successful_observation(
     offer: NormalizedOffer,
     http_status: int | None = 200,
 ) -> ObservationResult:
-    """Persist one successful adapter result in a short independent transaction.
+    """Persist a successful result without committing or rolling back.
 
-    The target row is locked and the current lease token is verified before any
-    attempt, state, or observation row is written. A stale worker therefore
-    cannot mutate monitoring history or supplier-offer state.
+    Transaction ownership belongs to the application orchestrator. The caller
+    may atomically combine this step with target rescheduling and lease release.
     """
     if not lease_token.strip():
         raise ValueError("lease_token must not be empty")
     if finished_at < started_at:
         raise ValueError("finished_at must not precede started_at")
 
-    try:
-        target = _lock_current_target(
-            session,
-            monitor_target_id=monitor_target_id,
-            lease_token=lease_token,
-        )
-        supplier_product_id = _supplier_product_id_for_target(session, target)
-        if offer.supplier_product_id != supplier_product_id:
-            raise ValueError("offer supplier_product_id does not match monitor target")
+    target = _lock_current_target(
+        session,
+        monitor_target_id=monitor_target_id,
+        lease_token=lease_token,
+    )
+    supplier_product_id = _supplier_product_id_for_target(session, target)
+    if offer.supplier_product_id != supplier_product_id:
+        raise ValueError("offer supplier_product_id does not match monitor target")
 
-        duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
-        fingerprint = offer.fingerprint
+    # Serializes the state-is-None path as well as normal state transitions.
+    _lock_supplier_product(session, supplier_product_id)
 
-        attempt = MonitorAttempt(
-            monitor_target_id=monitor_target_id,
-            lease_token=lease_token,
-            outcome=AttemptOutcome.SUCCESS.value,
-            adapter_code=adapter_code,
-            access_strategy=access_strategy,
-            started_at=started_at,
-            finished_at=finished_at,
-            duration_ms=duration_ms,
-            http_status=http_status,
+    duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
+    fingerprint = offer.fingerprint
+
+    attempt = MonitorAttempt(
+        monitor_target_id=monitor_target_id,
+        lease_token=lease_token,
+        outcome=AttemptOutcome.SUCCESS.value,
+        adapter_code=adapter_code,
+        access_strategy=access_strategy,
+        started_at=started_at,
+        finished_at=finished_at,
+        duration_ms=duration_ms,
+        http_status=http_status,
+    )
+    session.add(attempt)
+    session.flush()
+
+    state = session.scalar(
+        select(SupplierOfferState)
+        .where(SupplierOfferState.supplier_product_id == supplier_product_id)
+        .with_for_update()
+    )
+
+    changed = state is None or state.fingerprint != fingerprint
+    observation_id: int | None = None
+
+    if state is None:
+        state = SupplierOfferState(
+            supplier_product_id=supplier_product_id,
+            price=offer.price,
+            old_price=offer.old_price,
+            available=offer.available,
+            stock=offer.stock,
+            delivery_days=offer.delivery_days,
+            seller=offer.seller,
+            fingerprint=fingerprint,
+            adapter_schema_version=offer.adapter_schema_version,
+            observed_at=offer.observed_at,
+            last_checked_at=finished_at,
+            version=1,
         )
-        session.add(attempt)
+        session.add(state)
+        session.flush()
+    elif changed:
+        state.price = offer.price
+        state.old_price = offer.old_price
+        state.available = offer.available
+        state.stock = offer.stock
+        state.delivery_days = offer.delivery_days
+        state.seller = offer.seller
+        state.fingerprint = fingerprint
+        state.adapter_schema_version = offer.adapter_schema_version
+        state.observed_at = offer.observed_at
+        state.last_checked_at = finished_at
+        state.version += 1
+        session.flush()
+    else:
+        state.last_checked_at = finished_at
         session.flush()
 
-        state = session.scalar(
-            select(SupplierOfferState)
-            .where(SupplierOfferState.supplier_product_id == supplier_product_id)
-            .with_for_update()
+    if changed:
+        # Historical fingerprint uniqueness remains temporarily for compatibility
+        # and will be replaced by attempt-level idempotency in a new migration.
+        existing = session.scalar(
+            select(SupplierOfferObservation).where(
+                SupplierOfferObservation.supplier_product_id == supplier_product_id,
+                SupplierOfferObservation.fingerprint == fingerprint,
+            )
         )
-
-        changed = state is None or state.fingerprint != fingerprint
-        observation_id: int | None = None
-
-        if state is None:
-            state = SupplierOfferState(
+        if existing is None:
+            observation = SupplierOfferObservation(
                 supplier_product_id=supplier_product_id,
+                monitor_attempt_id=attempt.id,
                 price=offer.price,
                 old_price=offer.old_price,
                 available=offer.available,
@@ -142,82 +204,53 @@ def record_successful_observation(
                 seller=offer.seller,
                 fingerprint=fingerprint,
                 adapter_schema_version=offer.adapter_schema_version,
+                raw_metadata=_normalized_metadata(offer),
                 observed_at=offer.observed_at,
-                last_checked_at=finished_at,
-                version=1,
             )
-            session.add(state)
-            session.flush()
-        elif changed:
-            state.price = offer.price
-            state.old_price = offer.old_price
-            state.available = offer.available
-            state.stock = offer.stock
-            state.delivery_days = offer.delivery_days
-            state.seller = offer.seller
-            state.fingerprint = fingerprint
-            state.adapter_schema_version = offer.adapter_schema_version
-            state.observed_at = offer.observed_at
-            state.last_checked_at = finished_at
-            state.version += 1
-            session.flush()
-        else:
-            state.last_checked_at = finished_at
-            session.flush()
-
-        if changed:
-            existing = session.scalar(
-                select(SupplierOfferObservation).where(
-                    SupplierOfferObservation.supplier_product_id == supplier_product_id,
-                    SupplierOfferObservation.fingerprint == fingerprint,
-                )
-            )
-            if existing is None:
-                observation = SupplierOfferObservation(
-                    supplier_product_id=supplier_product_id,
-                    monitor_attempt_id=attempt.id,
-                    price=offer.price,
-                    old_price=offer.old_price,
-                    available=offer.available,
-                    stock=offer.stock,
-                    delivery_days=offer.delivery_days,
-                    seller=offer.seller,
-                    fingerprint=fingerprint,
-                    adapter_schema_version=offer.adapter_schema_version,
-                    raw_metadata=_normalized_metadata(offer),
-                    observed_at=offer.observed_at,
-                )
-                try:
-                    with session.begin_nested():
-                        session.add(observation)
-                        session.flush()
-                    observation_id = observation.id
-                except IntegrityError:
-                    existing = session.scalar(
-                        select(SupplierOfferObservation).where(
-                            SupplierOfferObservation.supplier_product_id == supplier_product_id,
-                            SupplierOfferObservation.fingerprint == fingerprint,
-                        )
+            try:
+                with session.begin_nested():
+                    session.add(observation)
+                    session.flush()
+                observation_id = observation.id
+            except IntegrityError:
+                existing = session.scalar(
+                    select(SupplierOfferObservation).where(
+                        SupplierOfferObservation.supplier_product_id == supplier_product_id,
+                        SupplierOfferObservation.fingerprint == fingerprint,
                     )
-                    observation_id = existing.id if existing is not None else None
-            else:
-                observation_id = existing.id
+                )
+                observation_id = existing.id if existing is not None else None
+        else:
+            observation_id = existing.id
 
+    return ObservationResult(
+        attempt_id=attempt.id,
+        supplier_product_id=supplier_product_id,
+        state_version=state.version,
+        observation_id=observation_id,
+        changed=changed,
+        fingerprint=fingerprint,
+    )
+
+
+def record_successful_observation(
+    session: Session,
+    **kwargs: object,
+) -> ObservationResult:
+    """Backward-compatible transaction-owning wrapper.
+
+    New orchestrated workflows must call persist_successful_observation().
+    """
+    try:
+        result = persist_successful_observation(session, **kwargs)
         session.commit()
-        return ObservationResult(
-            attempt_id=attempt.id,
-            supplier_product_id=supplier_product_id,
-            state_version=state.version,
-            observation_id=observation_id,
-            changed=changed,
-            fingerprint=fingerprint,
-        )
+        return result
     except Exception:
         session.rollback()
         raise
 
 
-def record_failed_attempt(
+def persist_failed_attempt(
     session: Session,
     *,
     monitor_target_id: int,
@@ -231,14 +264,19 @@ def record_failed_attempt(
     error_code: str | None = None,
     error_message: str | None = None,
 ) -> int:
-    """Record a failed adapter attempt without mutating offer state."""
+    """Persist a failed attempt without committing or rolling back."""
     if not lease_token.strip():
         raise ValueError("lease_token must not be empty")
     if outcome is AttemptOutcome.SUCCESS:
-        raise ValueError("record_failed_attempt cannot use success outcome")
+        raise ValueError("persist_failed_attempt cannot use success outcome")
     if finished_at < started_at:
         raise ValueError("finished_at must not precede started_at")
 
+    _lock_current_target(
+        session,
+        monitor_target_id=monitor_target_id,
+        lease_token=lease_token,
+    )
     duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
     attempt = MonitorAttempt(
         monitor_target_id=monitor_target_id,
@@ -253,15 +291,17 @@ def record_failed_attempt(
         error_code=error_code,
         error_message=error_message,
     )
+    session.add(attempt)
+    session.flush()
+    return attempt.id
+
+
+def record_failed_attempt(session: Session, **kwargs: object) -> int:
+    """Backward-compatible transaction-owning wrapper."""
     try:
-        _lock_current_target(
-            session,
-            monitor_target_id=monitor_target_id,
-            lease_token=lease_token,
-        )
-        session.add(attempt)
+        attempt_id = persist_failed_attempt(session, **kwargs)
         session.commit()
-        return attempt.id
+        return attempt_id
     except Exception:
         session.rollback()
         raise
