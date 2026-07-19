@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .monitoring import (
@@ -67,12 +66,7 @@ def _supplier_product_id_for_target(session: Session, target: MonitorTarget) -> 
 
 
 def _lock_supplier_product(session: Session, supplier_product_id: int) -> SupplierProduct:
-    """Lock the aggregate root so first-state creation is serialized.
-
-    A SELECT FOR UPDATE on SupplierOfferState cannot protect the first insert,
-    because there is no child row to lock yet. SupplierProduct always exists and
-    therefore provides a stable lock for both first creation and later updates.
-    """
+    """Lock the aggregate root so first-state creation is serialized."""
     supplier_product = session.scalar(
         select(SupplierProduct)
         .where(SupplierProduct.id == supplier_product_id)
@@ -101,11 +95,7 @@ def persist_successful_observation(
     offer: NormalizedOffer,
     http_status: int | None = 200,
 ) -> ObservationResult:
-    """Persist a successful result without committing or rolling back.
-
-    Transaction ownership belongs to the application orchestrator. The caller
-    may atomically combine this step with target rescheduling and lease release.
-    """
+    """Persist a successful result without committing or rolling back."""
     if not lease_token.strip():
         raise ValueError("lease_token must not be empty")
     if finished_at < started_at:
@@ -120,7 +110,6 @@ def persist_successful_observation(
     if offer.supplier_product_id != supplier_product_id:
         raise ValueError("offer supplier_product_id does not match monitor target")
 
-    # Serializes the state-is-None path as well as normal state transitions.
     _lock_supplier_product(session, supplier_product_id)
 
     duration_ms = max(0, int((finished_at - started_at).total_seconds() * 1000))
@@ -184,44 +173,23 @@ def persist_successful_observation(
         session.flush()
 
     if changed:
-        # Historical fingerprint uniqueness remains temporarily for compatibility
-        # and will be replaced by attempt-level idempotency in a new migration.
-        existing = session.scalar(
-            select(SupplierOfferObservation).where(
-                SupplierOfferObservation.supplier_product_id == supplier_product_id,
-                SupplierOfferObservation.fingerprint == fingerprint,
-            )
+        observation = SupplierOfferObservation(
+            supplier_product_id=supplier_product_id,
+            monitor_attempt_id=attempt.id,
+            price=offer.price,
+            old_price=offer.old_price,
+            available=offer.available,
+            stock=offer.stock,
+            delivery_days=offer.delivery_days,
+            seller=offer.seller,
+            fingerprint=fingerprint,
+            adapter_schema_version=offer.adapter_schema_version,
+            raw_metadata=_normalized_metadata(offer),
+            observed_at=offer.observed_at,
         )
-        if existing is None:
-            observation = SupplierOfferObservation(
-                supplier_product_id=supplier_product_id,
-                monitor_attempt_id=attempt.id,
-                price=offer.price,
-                old_price=offer.old_price,
-                available=offer.available,
-                stock=offer.stock,
-                delivery_days=offer.delivery_days,
-                seller=offer.seller,
-                fingerprint=fingerprint,
-                adapter_schema_version=offer.adapter_schema_version,
-                raw_metadata=_normalized_metadata(offer),
-                observed_at=offer.observed_at,
-            )
-            try:
-                with session.begin_nested():
-                    session.add(observation)
-                    session.flush()
-                observation_id = observation.id
-            except IntegrityError:
-                existing = session.scalar(
-                    select(SupplierOfferObservation).where(
-                        SupplierOfferObservation.supplier_product_id == supplier_product_id,
-                        SupplierOfferObservation.fingerprint == fingerprint,
-                    )
-                )
-                observation_id = existing.id if existing is not None else None
-        else:
-            observation_id = existing.id
+        session.add(observation)
+        session.flush()
+        observation_id = observation.id
 
     return ObservationResult(
         attempt_id=attempt.id,
@@ -237,10 +205,7 @@ def record_successful_observation(
     session: Session,
     **kwargs: object,
 ) -> ObservationResult:
-    """Backward-compatible transaction-owning wrapper.
-
-    New orchestrated workflows must call persist_successful_observation().
-    """
+    """Backward-compatible transaction-owning wrapper."""
     try:
         result = persist_successful_observation(session, **kwargs)
         session.commit()
