@@ -1,7 +1,6 @@
 from __future__ import annotations
 
-import secrets
-from datetime import datetime, timedelta
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, ConfigDict, Field
@@ -10,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .db import get_db
-from .lease_engine import LeaseClaim, utc_now
+from .lease_engine import ClaimFailure, LeaseClaim, claim_target, utc_now
 from .monitoring import (
     MonitorAttempt,
     MonitorStatus,
@@ -98,48 +97,38 @@ def list_monitor_targets(db: Session = Depends(get_db)):
     return list(db.scalars(select(MonitorTarget).order_by(MonitorTarget.id)).all())
 
 
-def _claim_selected_target(db: Session, target_id: int, *, lease_seconds: int = 120) -> LeaseClaim:
-    now = utc_now()
-    target = db.scalar(
-        select(MonitorTarget).where(MonitorTarget.id == target_id).with_for_update()
-    )
-    if target is None:
-        db.rollback()
-        raise HTTPException(status_code=404, detail="Monitor target not found")
-    if target.status != MonitorStatus.ACTIVE.value:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=f"Monitor target is {target.status}")
-    if target.lease_until is not None and target.lease_until >= now:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Monitor target is already leased")
-
+def _validate_manual_runtime_context(db: Session, target_id: int) -> None:
     context = db.execute(
         select(Supplier.code, SupplierProduct.url)
         .join(SupplierProduct, SupplierProduct.supplier_id == Supplier.id)
         .join(ProductBinding, ProductBinding.supplier_product_id == SupplierProduct.id)
-        .where(ProductBinding.id == target.product_binding_id)
+        .join(MonitorTarget, MonitorTarget.product_binding_id == ProductBinding.id)
+        .where(MonitorTarget.id == target_id)
     ).one_or_none()
     if context is None:
-        db.rollback()
-        raise HTTPException(status_code=409, detail="Monitor target supplier context is missing")
+        raise HTTPException(status_code=404, detail="Monitor target or supplier context not found")
     if context[0].strip().lower() != "ozon":
-        db.rollback()
         raise HTTPException(status_code=409, detail="Manual runtime currently supports supplier code 'ozon'")
 
-    token = secrets.token_urlsafe(32)
-    lease_until = now + timedelta(seconds=lease_seconds)
-    target.lease_owner = "manual-api"
-    target.lease_token = token
-    target.lease_until = lease_until
-    product_binding_id = target.product_binding_id
-    db.commit()
-    return LeaseClaim(
+
+def _claim_selected_target(db: Session, target_id: int, *, lease_seconds: int = 120) -> LeaseClaim:
+    _validate_manual_runtime_context(db, target_id)
+    result = claim_target(
+        db,
         target_id=target_id,
-        product_binding_id=product_binding_id,
         lease_owner="manual-api",
-        lease_token=token,
-        lease_until=lease_until,
+        lease_seconds=lease_seconds,
+        require_due=False,
     )
+    if result.claim is not None:
+        return result.claim
+    if result.failure is ClaimFailure.NOT_FOUND:
+        raise HTTPException(status_code=404, detail="Monitor target not found")
+    if result.failure is ClaimFailure.NOT_ACTIVE:
+        raise HTTPException(status_code=409, detail=f"Monitor target is {result.target_status}")
+    if result.failure is ClaimFailure.ALREADY_LEASED:
+        raise HTTPException(status_code=409, detail="Monitor target is already leased")
+    raise HTTPException(status_code=409, detail=f"Monitor target cannot be claimed: {result.failure}")
 
 
 @router.post("/{target_id}/run-now", response_model=ManualRunRead)
