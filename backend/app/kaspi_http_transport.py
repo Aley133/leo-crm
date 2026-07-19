@@ -11,6 +11,10 @@ import httpx
 from .marketplace_transport import MarketplaceOrderPage
 
 
+DEFAULT_KASPI_API_BASE_URL = "https://kaspi.kz/shop/api/v2"
+DEFAULT_KASPI_API_TIMEOUT_SECONDS = 20.0
+
+
 class KaspiConfigurationError(RuntimeError):
     """Raised before any network call when Kaspi credentials are missing."""
 
@@ -34,16 +38,23 @@ class KaspiTemporaryError(KaspiTransportError):
 @dataclass(frozen=True, slots=True)
 class KaspiHttpSettings:
     api_token: str
-    base_url: str = "https://kaspi.kz/shop/api/v2"
-    timeout_seconds: float = 20.0
+    base_url: str = DEFAULT_KASPI_API_BASE_URL
+    timeout_seconds: float = DEFAULT_KASPI_API_TIMEOUT_SECONDS
 
     @classmethod
     def from_environment(cls) -> "KaspiHttpSettings":
         token = os.getenv("KASPI_API_TOKEN", "").strip()
         if not token:
             raise KaspiConfigurationError("KASPI_API_TOKEN is not configured")
-        base_url = os.getenv("KASPI_API_BASE_URL", cls.base_url).strip().rstrip("/")
-        timeout_raw = os.getenv("KASPI_API_TIMEOUT_SECONDS", "20").strip()
+
+        base_url = os.getenv("KASPI_API_BASE_URL", DEFAULT_KASPI_API_BASE_URL).strip().rstrip("/")
+        if not base_url:
+            raise KaspiConfigurationError("KASPI_API_BASE_URL must not be empty")
+
+        timeout_raw = os.getenv(
+            "KASPI_API_TIMEOUT_SECONDS",
+            str(DEFAULT_KASPI_API_TIMEOUT_SECONDS),
+        ).strip()
         try:
             timeout = float(timeout_raw)
         except ValueError as exc:
