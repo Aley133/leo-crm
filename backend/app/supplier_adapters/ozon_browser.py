@@ -17,6 +17,7 @@ from .errors import (
     AdapterTimeoutError,
 )
 from .playwright_pool import (
+    BrowserPageResult,
     PlaywrightBrowserPool,
     PlaywrightNavigationTimeout,
     PlaywrightPoolError,
@@ -38,24 +39,39 @@ _META_CURRENCY_RE = re.compile(
     r'<meta[^>]+(?:itemprop|property)=["\'](?:priceCurrency|product:price:currency)["\'][^>]+content=["\']([^"\']+)',
     re.IGNORECASE,
 )
+_CANONICAL_RE = re.compile(
+    r'<link[^>]+rel=["\']canonical["\'][^>]+href=["\']([^"\']+)',
+    re.IGNORECASE,
+)
+_SCRIPT_RE = re.compile(r"<script\b", re.IGNORECASE)
+_META_RE = re.compile(r"<meta\b", re.IGNORECASE)
 _OZON_ROOT_DOMAINS = ("ozon.ru", "ozon.kz")
 _CAPTCHA_MARKERS = (
     "captcha",
     "подтвердите, что вы не робот",
     "проверка безопасности",
+    "verify you are human",
 )
 _BLOCK_MARKERS = (
     "access denied",
     "доступ ограничен",
     "request blocked",
     "temporarily blocked",
+    "forbidden",
+)
+_CHALLENGE_MARKERS = (
+    "challenge",
+    "antibot",
+    "cloudflare",
+    "robot check",
+    "проверяем ваш браузер",
 )
 _PRICE_KEYS = ("price", "finalPrice", "salePrice", "currentPrice", "cardPrice")
 _OLD_PRICE_KEYS = ("oldPrice", "originalPrice", "basePrice")
 
 
 class OzonBrowserAdapter:
-    code = "ozon-browser-v3"
+    code = "ozon-browser-v4"
     access_strategy = AccessStrategy.BROWSER
 
     def __init__(
@@ -84,13 +100,12 @@ class OzonBrowserAdapter:
         except PlaywrightPoolError as exc:
             raise AdapterNetworkError(str(exc)) from exc
 
-        self._classify_page(response.content)
+        self._classify_page(response)
         extracted = self._extract_structured_offer(response.content)
         if extracted is None:
-            diagnostic = self._diagnostic_summary(response.content, response.final_url)
             raise AdapterParseError(
                 "Ozon browser page did not contain reliable structured offer data; "
-                + diagnostic
+                + self._diagnostic_summary(response)
             )
         offer, source = extracted
 
@@ -102,7 +117,7 @@ class OzonBrowserAdapter:
             stock=None,
             delivery_days=None,
             seller=offer["seller"],
-            adapter_schema_version="ozon-browser-structured-v3",
+            adapter_schema_version="ozon-browser-structured-v4",
             observed_at=datetime.now(UTC),
             raw_metadata={
                 "source": source,
@@ -122,12 +137,20 @@ class OzonBrowserAdapter:
             raise ValueError("Ozon browser adapter accepts only ozon.ru or ozon.kz URLs")
 
     @staticmethod
-    def _classify_page(content: str) -> None:
-        body = content.casefold()[:250_000]
+    def _page_text(response: BrowserPageResult) -> str:
+        return f"{response.title}\n{response.body_text}\n{response.content[:250_000]}".casefold()
+
+    @classmethod
+    def _classify_page(cls, response: BrowserPageResult) -> None:
+        body = cls._page_text(response)
         if any(marker in body for marker in _CAPTCHA_MARKERS):
-            raise AdapterCaptchaError("Ozon returned a captcha page")
+            raise AdapterCaptchaError(
+                "Ozon returned a captcha page; " + cls._diagnostic_summary(response)
+            )
         if any(marker in body for marker in _BLOCK_MARKERS):
-            raise AdapterBlockedError("Ozon blocked browser access")
+            raise AdapterBlockedError(
+                "Ozon blocked browser access; " + cls._diagnostic_summary(response)
+            )
 
     @classmethod
     def _extract_structured_offer(
@@ -240,7 +263,6 @@ class OzonBrowserAdapter:
         if price is None:
             return None
 
-        # Avoid accepting unrelated analytics/config numbers as a product offer.
         keys = {str(key).casefold() for key in node}
         commercial_context = any(
             marker in keys
@@ -312,10 +334,28 @@ class OzonBrowserAdapter:
         return None
 
     @staticmethod
-    def _diagnostic_summary(content: str, final_url: str) -> str:
+    def _clean_diagnostic_text(value: str, *, limit: int) -> str:
+        compact = " ".join(value.split())
+        compact = re.sub(r"[\x00-\x1f\x7f]", "", compact)
+        return compact[:limit] or "-"
+
+    @classmethod
+    def _diagnostic_summary(cls, response: BrowserPageResult) -> str:
+        content = response.content
         digest = hashlib.sha256(content.encode("utf-8", errors="replace")).hexdigest()[:12]
+        canonical = _CANONICAL_RE.search(content)
+        lowered = cls._page_text(response)
+        challenge_markers = sorted(
+            marker
+            for marker in (*_CAPTCHA_MARKERS, *_BLOCK_MARKERS, *_CHALLENGE_MARKERS)
+            if marker in lowered
+        )
         return (
-            f"final_url={final_url}; html_bytes={len(content.encode('utf-8'))}; "
-            f"json_ld_scripts={len(_JSON_LD_RE.findall(content))}; "
-            f"json_scripts={len(_JSON_SCRIPT_RE.findall(content))}; sha256={digest}"
+            f"final_url={response.final_url}; title={cls._clean_diagnostic_text(response.title, limit=160)}; "
+            f"body={cls._clean_diagnostic_text(response.body_text, limit=320)}; "
+            f"html_bytes={len(content.encode('utf-8'))}; scripts={len(_SCRIPT_RE.findall(content))}; "
+            f"meta={len(_META_RE.findall(content))}; json_ld_scripts={len(_JSON_LD_RE.findall(content))}; "
+            f"json_scripts={len(_JSON_SCRIPT_RE.findall(content))}; "
+            f"canonical={cls._clean_diagnostic_text(canonical.group(1) if canonical else '', limit=200)}; "
+            f"challenge={','.join(challenge_markers) or '-'}; sha256={digest}"
         )
