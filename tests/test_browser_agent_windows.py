@@ -10,7 +10,8 @@ def test_windows_launcher_keeps_cdp_local_and_uses_dedicated_profile() -> None:
     script = (ROOT / "tools" / "windows" / "start_browser_agent.ps1").read_text(encoding="utf-8")
     assert "--remote-debugging-address=127.0.0.1" in script
     assert "--remote-debugging-port=9222" in script
-    assert ".browser-agent\\chrome-profile" in script
+    assert 'Join-Path $env:LOCALAPPDATA "LEO-CRM\\browser-agent"' in script
+    assert '$ChromeProfile = Join-Path $RuntimeRoot "chrome-profile"' in script
     assert "0.0.0.0" not in script
 
 
