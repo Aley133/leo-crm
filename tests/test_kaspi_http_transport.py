@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
@@ -8,6 +8,7 @@ import pytest
 from backend.app.kaspi_http_transport import (
     DEFAULT_KASPI_API_BASE_URL,
     DEFAULT_KASPI_API_TIMEOUT_SECONDS,
+    DEFAULT_KASPI_INITIAL_LOOKBACK_DAYS,
     KaspiAuthenticationError,
     KaspiConfigurationError,
     KaspiHttpSettings,
@@ -32,16 +33,19 @@ def test_environment_configuration_uses_stable_defaults(monkeypatch) -> None:
     monkeypatch.setenv("KASPI_API_TOKEN", "secret")
     monkeypatch.delenv("KASPI_API_BASE_URL", raising=False)
     monkeypatch.delenv("KASPI_API_TIMEOUT_SECONDS", raising=False)
+    monkeypatch.delenv("KASPI_INITIAL_LOOKBACK_DAYS", raising=False)
 
     settings = KaspiHttpSettings.from_environment()
 
     assert settings.api_token == "secret"
     assert settings.base_url == DEFAULT_KASPI_API_BASE_URL
     assert settings.timeout_seconds == DEFAULT_KASPI_API_TIMEOUT_SECONDS
+    assert settings.initial_lookback_days == DEFAULT_KASPI_INITIAL_LOOKBACK_DAYS
 
 
-def test_fetch_orders_builds_official_json_api_request_and_parses_page() -> None:
+def test_fetch_orders_builds_bounded_official_json_api_request_and_parses_page() -> None:
     seen: dict = {}
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 
     def handler(request: httpx.Request) -> httpx.Response:
         seen["request"] = request
@@ -68,6 +72,7 @@ def test_fetch_orders_builds_official_json_api_request_and_parses_page() -> None
     transport = KaspiHttpTransport(
         KaspiHttpSettings(api_token="secret"),
         client=_client(handler),
+        clock=lambda: now,
     )
     page = transport.fetch_orders(
         cursor="2",
@@ -81,9 +86,36 @@ def test_fetch_orders_builds_official_json_api_request_and_parses_page() -> None
     assert request.url.params["page[number]"] == "2"
     assert request.url.params["page[size]"] == "1"
     assert request.url.params["filter[orders][creationDate][$ge]"] == "1784368800000"
+    assert request.url.params["filter[orders][creationDate][$le]"] == str(
+        int(now.timestamp() * 1000)
+    )
     assert page.items[0]["id"] == "order-1"
     assert page.next_cursor == "3"
     assert page.watermark_at == datetime(2026, 7, 19, 10, 5, tzinfo=UTC)
+
+
+def test_initial_request_uses_configured_lookback_window() -> None:
+    seen: dict = {}
+    now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["request"] = request
+        return httpx.Response(200, json={"data": [], "links": {"next": None}})
+
+    settings = KaspiHttpSettings(api_token="secret", initial_lookback_days=3)
+    transport = KaspiHttpTransport(
+        settings,
+        client=_client(handler),
+        clock=lambda: now,
+    )
+
+    transport.fetch_orders(cursor=None, updated_after=None, limit=10)
+
+    params = seen["request"].url.params
+    assert params["filter[orders][creationDate][$ge]"] == str(
+        int((now - timedelta(days=3)).timestamp() * 1000)
+    )
+    assert params["filter[orders][creationDate][$le]"] == str(int(now.timestamp() * 1000))
 
 
 @pytest.mark.parametrize(
