@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from enum import StrEnum
 
-from sqlalchemy import DateTime, Integer, String, Text, func
+from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -20,6 +20,11 @@ class BrowserAgentJob(Base):
     __tablename__ = "browser_agent_jobs"
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    monitor_target_id: Mapped[int | None] = mapped_column(
+        ForeignKey("monitor_targets.id", ondelete="CASCADE"),
+        nullable=True,
+        index=True,
+    )
     supplier_product_id: Mapped[int] = mapped_column(Integer, index=True)
     url: Mapped[str] = mapped_column(Text)
     status: Mapped[str] = mapped_column(
