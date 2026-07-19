@@ -9,9 +9,19 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .lease_engine import LeaseClaim, claim_due_targets, reschedule_failure, reschedule_success, utc_now
+from .lease_engine import (
+    LeaseClaim,
+    apply_failure_reschedule,
+    apply_success_reschedule,
+    claim_due_targets,
+    utc_now,
+)
 from .monitoring import AttemptOutcome, MonitorTarget
-from .observation_engine import StaleLeaseError, record_failed_attempt, record_successful_observation
+from .observation_engine import (
+    StaleLeaseError,
+    persist_failed_attempt,
+    persist_successful_observation,
+)
 from .supplier_adapters.base import AdapterRequest, SupplierAdapter
 from .supplier_adapters.errors import AdapterError
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -89,6 +99,42 @@ def classify_adapter_exception(exc: Exception) -> tuple[AttemptOutcome, str, int
     return AttemptOutcome.INTERNAL_ERROR, "adapter_internal_error", None
 
 
+def _persist_failure_and_reschedule(
+    session: Session,
+    *,
+    claim: LeaseClaim,
+    adapter_code: str,
+    access_strategy: str,
+    started_at: datetime,
+    finished_at: datetime,
+    outcome: AttemptOutcome,
+    error_code: str,
+    error_message: str,
+    http_status: int | None = None,
+) -> None:
+    persist_failed_attempt(
+        session,
+        monitor_target_id=claim.target_id,
+        lease_token=claim.lease_token,
+        adapter_code=adapter_code,
+        access_strategy=access_strategy,
+        started_at=started_at,
+        finished_at=finished_at,
+        outcome=outcome,
+        http_status=http_status,
+        error_code=error_code,
+        error_message=error_message,
+    )
+    completed = apply_failure_reschedule(
+        session,
+        target_id=claim.target_id,
+        lease_token=claim.lease_token,
+        checked_at=finished_at,
+    )
+    if not completed:
+        raise StaleLeaseError(f"MonitorTarget {claim.target_id} lease changed before failure completion")
+
+
 async def process_claimed_target(
     claim: LeaseClaim,
     *,
@@ -114,27 +160,25 @@ async def process_claimed_target(
         outcome = AttemptOutcome.INTERNAL_ERROR
         error_code = "adapter_not_registered"
         error_message = f"No adapter registered for supplier {context.supplier_code}"
+        finished_at = now_factory()
         try:
             with session_factory() as session:
-                record_failed_attempt(
-                    session,
-                    monitor_target_id=claim.target_id,
-                    lease_token=claim.lease_token,
-                    adapter_code=context.supplier_code,
-                    access_strategy="registry",
-                    started_at=started_at,
-                    finished_at=now_factory(),
-                    outcome=outcome,
-                    error_code=error_code,
-                    error_message=error_message,
-                )
-            with session_factory() as session:
-                reschedule_failure(
-                    session,
-                    target_id=claim.target_id,
-                    lease_token=claim.lease_token,
-                    checked_at=now_factory(),
-                )
+                try:
+                    _persist_failure_and_reschedule(
+                        session,
+                        claim=claim,
+                        adapter_code=context.supplier_code,
+                        access_strategy="registry",
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        outcome=outcome,
+                        error_code=error_code,
+                        error_message=error_message,
+                    )
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
         except StaleLeaseError:
             return ScheduledTaskResult(claim.target_id, "stale", outcome, error=error_message)
         return ScheduledTaskResult(claim.target_id, "failed", outcome, error=error_message)
@@ -149,26 +193,34 @@ async def process_claimed_target(
         offer = await adapter.fetch(request)
         finished_at = now_factory()
         with session_factory() as session:
-            observation = record_successful_observation(
-                session,
-                monitor_target_id=claim.target_id,
-                lease_token=claim.lease_token,
-                adapter_code=adapter.code,
-                access_strategy=adapter.access_strategy,
-                started_at=started_at,
-                finished_at=finished_at,
-                offer=offer,
-            )
-        with session_factory() as session:
-            completed = reschedule_success(
-                session,
-                target_id=claim.target_id,
-                lease_token=claim.lease_token,
-                checked_at=finished_at,
-            )
+            try:
+                observation = persist_successful_observation(
+                    session,
+                    monitor_target_id=claim.target_id,
+                    lease_token=claim.lease_token,
+                    adapter_code=adapter.code,
+                    access_strategy=adapter.access_strategy,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    offer=offer,
+                )
+                completed = apply_success_reschedule(
+                    session,
+                    target_id=claim.target_id,
+                    lease_token=claim.lease_token,
+                    checked_at=finished_at,
+                )
+                if not completed:
+                    raise StaleLeaseError(
+                        f"MonitorTarget {claim.target_id} lease changed before success completion"
+                    )
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
         return ScheduledTaskResult(
             target_id=claim.target_id,
-            status="succeeded" if completed else "stale",
+            status="succeeded",
             outcome=AttemptOutcome.SUCCESS,
             changed=observation.changed,
         )
@@ -181,29 +233,26 @@ async def process_claimed_target(
         finished_at = now_factory()
         try:
             with session_factory() as session:
-                record_failed_attempt(
-                    session,
-                    monitor_target_id=claim.target_id,
-                    lease_token=claim.lease_token,
-                    adapter_code=adapter.code,
-                    access_strategy=adapter.access_strategy,
-                    started_at=started_at,
-                    finished_at=finished_at,
-                    outcome=outcome,
-                    http_status=http_status,
-                    error_code=error_code,
-                    error_message=str(exc),
-                )
-            with session_factory() as session:
-                completed = reschedule_failure(
-                    session,
-                    target_id=claim.target_id,
-                    lease_token=claim.lease_token,
-                    checked_at=finished_at,
-                )
+                try:
+                    _persist_failure_and_reschedule(
+                        session,
+                        claim=claim,
+                        adapter_code=adapter.code,
+                        access_strategy=adapter.access_strategy,
+                        started_at=started_at,
+                        finished_at=finished_at,
+                        outcome=outcome,
+                        error_code=error_code,
+                        error_message=str(exc),
+                        http_status=http_status,
+                    )
+                    session.commit()
+                except Exception:
+                    session.rollback()
+                    raise
             return ScheduledTaskResult(
                 target_id=claim.target_id,
-                status="failed" if completed else "stale",
+                status="failed",
                 outcome=outcome,
                 error=str(exc),
             )
