@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .browser_agent_dispatch import dispatch_due_browser_targets
+from .browser_agent_failure import persist_browser_agent_failure
 from .browser_agent_ingestion import BrowserAgentResultError, persist_browser_agent_success
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import get_db
@@ -149,6 +150,14 @@ def complete_browser_agent_job(
                 db,
                 job=job,
                 payload=payload.payload or {},
+                finished_at=now,
+            )
+        elif not succeeded:
+            attempt_id = persist_browser_agent_failure(
+                db,
+                job=job,
+                error_code=payload.error_code,
+                error_message=payload.error_message,
                 finished_at=now,
             )
 
