@@ -92,8 +92,8 @@ Implemented, final verification pending:
 - [x] expired lease recovery;
 - [x] scheduler orchestration;
 - [x] intentional `/run-now` path;
-- [ ] shared `claim_target()` primitive for scheduler and `/run-now`;
-- [ ] real PostgreSQL lease-claim concurrency test.
+- [x] shared `claim_target()` primitive for scheduler and `/run-now`;
+- [x] real PostgreSQL lease-claim concurrency test.
 
 ### C2 — Observation and current-state engine
 
@@ -107,12 +107,12 @@ Implemented, stabilization pending:
 - [x] unchanged-result deduplication against current state;
 - [x] row lock for an existing SupplierOfferState;
 - [x] source error classification foundation;
-- [ ] protect first-state creation through a locked SupplierProduct aggregate root;
-- [ ] accepted observation and success reschedule committed in one orchestrator-owned transaction;
+- [x] protect first-state creation through a locked SupplierProduct aggregate root;
+- [x] accepted observation and success reschedule committed in one orchestrator-owned transaction;
 - [ ] stale worker diagnostic attempt with `result_accepted=false`;
 - [ ] stable attempt idempotency key;
-- [ ] replace global historical fingerprint uniqueness with attempt-level idempotency;
-- [ ] verify `A -> B -> A` creates a new historical observation;
+- [x] replace global historical fingerprint uniqueness with attempt-level idempotency;
+- [x] verify `A -> B -> A` creates a new historical observation;
 - [ ] MonitorDailyMetric rollup and retention.
 
 ### C3 — Adapter contract and manual vertical proof
@@ -125,7 +125,7 @@ Implemented, reliability classification pending:
 - [x] scheduler-to-adapter vertical path;
 - [x] manual run-now proof path;
 - [ ] richer adapter failure evidence;
-- [ ] scope hints for route, strategy, account/profile and source;
+- [ ] scope hints for route, account/profile and source;
 - [ ] explicit confidence and evidence codes;
 - [ ] verify that HTTP `403` is not treated as a source-wide block from status code alone.
 
@@ -135,44 +135,46 @@ C4 must be complete before Browser Runtime starts.
 
 Transaction and concurrency:
 
-- [ ] scheduler/application orchestrator owns the accepted-result transaction;
-- [ ] persistence functions never commit internally;
-- [ ] lock and validate MonitorTarget lease before accepted writes;
-- [ ] lock SupplierProduct before first SupplierOfferState creation;
-- [ ] lock/read SupplierOfferState before fingerprint comparison;
-- [ ] persist attempt, state transition, observation, reschedule and lease release atomically;
+- [x] scheduler/application orchestrator owns the accepted-result transaction;
+- [x] persistence functions never commit internally;
+- [x] lock and validate MonitorTarget lease before accepted writes;
+- [x] lock SupplierProduct before first SupplierOfferState creation;
+- [x] lock/read SupplierOfferState before fingerprint comparison;
+- [x] persist attempt, state transition, observation, reschedule and lease release atomically;
 - [ ] stale results use a separate audit-only transaction and never mutate business state;
-- [ ] PostgreSQL first-observation race test;
-- [ ] PostgreSQL existing-state race test;
+- [x] PostgreSQL first-observation race test;
+- [x] PostgreSQL existing-state serialization test;
 - [ ] PostgreSQL `A -> B -> A` history test.
 
 Schema:
 
-- [ ] new immutable Alembic migration removes global observation fingerprint uniqueness;
-- [ ] automatic observation has attempt-level uniqueness;
+- [x] new immutable Alembic migration removes global observation fingerprint uniqueness;
+- [x] automatic observation has attempt-level uniqueness;
 - [ ] manual/import observation origins have an explicit future-safe identity model;
-- [ ] no applied migration is edited.
+- [x] no applied migration is edited.
 
 Access strategy and source health:
 
-- [ ] `AccessStrategy` is a database/application enum;
-- [ ] initial values: `official_api`, `direct_http`, `browser`, `remote_browser`, `manual`;
-- [ ] SourceHealth scope includes supplier and access strategy;
+- [x] `AccessStrategy` is an application enum with persisted string values;
+- [x] current values are explicitly declared in the adapter contract;
+- [x] SourceHealth scope includes supplier and access strategy;
 - [ ] account/profile/route dimensions are included when present;
-- [ ] adapter classifies one response and returns evidence; it never opens a breaker itself;
-- [ ] breaker policy owns aggregation and state transitions;
-- [ ] explicit hard signals may open the appropriate scoped breaker immediately;
+- [x] adapter classifies one response and returns evidence; it never opens a breaker itself;
+- [x] breaker policy owns current hard-signal state transitions;
+- [x] explicit hard signals may open the appropriate strategy-scoped breaker immediately;
+- [x] open breaker is enforced before `adapter.fetch()` and defers the target until `blocked_until`;
 - [ ] parser-schema breaker requires a 15-minute window, at least 20 attempts, at least 10 distinct previously healthy targets and at least 40% classified failures;
-- [ ] breaker supports `closed`, `open` and `half_open` states;
-- [ ] per-target timeout/parse/not-found backoff remains separate from source-health state.
+- [ ] breaker supports explicit `closed`, `open` and `half_open` states;
+- [x] per-target timeout/parse/not-found backoff remains separate from source-health state.
 
 C4 acceptance:
 
-- [ ] all monitoring unit tests green;
-- [ ] all PostgreSQL concurrency tests green;
-- [ ] migrations verified against PostgreSQL;
-- [ ] CI green;
-- [ ] architecture, monitoring contract, ORM and roadmap describe the same invariants.
+- [ ] all monitoring unit tests green for the latest commit;
+- [ ] all PostgreSQL concurrency tests green for the latest commit;
+- [ ] migrations verified against PostgreSQL, including `20260719_0006`;
+- [ ] CI green for the latest commit;
+- [x] architecture, ORM and roadmap describe the implemented transaction and source-health scope invariants;
+- [ ] monitoring contract updated for enforced breaker and strategy scope.
 
 ## Phase D — Browser access runtime
 
@@ -241,9 +243,10 @@ Forecasting, supplier selection, purchasing recommendations and carefully scoped
 2. The Domain Model gate applies to new high-risk modules, not routine Phase B stabilization.
 3. No phase is marked complete from a successful deployment alone.
 4. Every completed roadmap item requires code, migration where applicable, and automated verification.
-5. Roadmap changes are allowed when implementation proves an assumption false.
-6. A public deployment must fail closed when authentication configuration is missing.
-7. Once an Alembic migration has been applied in a shared or production environment, it is immutable.
-8. Critical state transitions use explicit transaction ownership at the application-orchestrator level.
-9. Adapters classify external evidence; policy layers make platform-wide decisions.
-10. Browser automation cannot begin until the monitoring stabilization gate is green.
+5. Roadmap changes are part of the definition of done for the commit that changes an invariant.
+6. Roadmap changes are allowed when implementation proves an assumption false.
+7. A public deployment must fail closed when authentication configuration is missing.
+8. Once an Alembic migration has been applied in a shared or production environment, it is immutable.
+9. Critical state transitions use explicit transaction ownership at the application-orchestrator level.
+10. Adapters classify external evidence; policy layers make platform-wide decisions.
+11. Browser automation cannot begin until the monitoring stabilization gate is green.
