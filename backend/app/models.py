@@ -158,10 +158,10 @@ class MarketplaceOrder(Base):
     source_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="KZT")
     total_amount: Mapped[float] = mapped_column(Numeric(18, 2))
-    ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
-    planned_delivery_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
-    source_updated_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    ordered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    planned_delivery_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
@@ -224,7 +224,7 @@ class MarketplaceOrderEvent(Base):
     event_type: Mapped[str] = mapped_column(String(64), index=True)
     previous_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     current_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    occurred_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), index=True)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
     metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
