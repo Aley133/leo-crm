@@ -148,13 +148,19 @@ def reschedule_success(
     target_id: int,
     lease_token: str,
     checked_at: datetime | None = None,
+    commit: bool = True,
 ) -> bool:
-    """Complete a successful check and schedule the normal next interval."""
+    """Complete a successful check and schedule the normal next interval.
+
+    ``commit=False`` lets the scheduler persist the observation, state update,
+    lease release, and next schedule in one caller-owned transaction.
+    """
     completed_at = checked_at or utc_now()
     try:
         target = session.scalar(leased_target_statement(target_id=target_id, lease_token=lease_token))
         if target is None:
-            session.rollback()
+            if commit:
+                session.rollback()
             return False
 
         target.last_checked_at = completed_at
@@ -163,10 +169,13 @@ def reschedule_success(
         target.lease_owner = None
         target.lease_token = None
         target.lease_until = None
-        session.commit()
+        session.flush()
+        if commit:
+            session.commit()
         return True
     except Exception:
-        session.rollback()
+        if commit:
+            session.rollback()
         raise
 
 
@@ -177,8 +186,13 @@ def reschedule_failure(
     lease_token: str,
     checked_at: datetime | None = None,
     max_backoff_seconds: int = 86_400,
+    commit: bool = True,
 ) -> bool:
-    """Complete a failed check using bounded exponential backoff."""
+    """Complete a failed check using bounded exponential backoff.
+
+    ``commit=False`` lets the scheduler write the failed attempt and lease
+    completion atomically in one caller-owned transaction.
+    """
     if max_backoff_seconds < 60:
         raise ValueError("max_backoff_seconds must be at least 60")
 
@@ -186,7 +200,8 @@ def reschedule_failure(
     try:
         target = session.scalar(leased_target_statement(target_id=target_id, lease_token=lease_token))
         if target is None:
-            session.rollback()
+            if commit:
+                session.rollback()
             return False
 
         failures = target.consecutive_failures + 1
@@ -199,8 +214,11 @@ def reschedule_failure(
         target.lease_owner = None
         target.lease_token = None
         target.lease_until = None
-        session.commit()
+        session.flush()
+        if commit:
+            session.commit()
         return True
     except Exception:
-        session.rollback()
+        if commit:
+            session.rollback()
         raise
