@@ -16,8 +16,8 @@ from .purchase_api import router as purchase_router
 from .supplier_products_api import router as supplier_products_router
 from .suppliers import router as suppliers_router
 
-APP_VERSION = "0.12.1"
-DEPLOYMENT_MARKER = "event-driven-repricing-v1"
+APP_VERSION = "0.12.2"
+DEPLOYMENT_MARKER = "local-browser-verification-v1"
 
 app = FastAPI(
     title="LEO CRM API",
