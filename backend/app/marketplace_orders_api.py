@@ -53,9 +53,38 @@ def _order_payload(order: MarketplaceOrder, *, include_lines: bool) -> dict[str,
         "version": order.version,
         "line_count": len(order.lines),
         "total_quantity": sum(line.quantity for line in order.lines),
+        "hydrated": bool(order.lines),
     }
     if include_lines:
         payload["lines"] = [_line_payload(line) for line in order.lines]
+    return payload
+
+
+def _load_order_by_id(order_id: int) -> MarketplaceOrder | None:
+    with SessionLocal() as session:
+        return session.scalar(
+            select(MarketplaceOrder)
+            .where(MarketplaceOrder.id == order_id)
+            .options(
+                selectinload(MarketplaceOrder.lines),
+                selectinload(MarketplaceOrder.events),
+            )
+        )
+
+
+def _detail_payload(order: MarketplaceOrder) -> dict[str, object]:
+    payload = _order_payload(order, include_lines=True)
+    payload["events"] = [
+        {
+            "id": event.id,
+            "event_type": event.event_type,
+            "previous_status": event.previous_status,
+            "current_status": event.current_status,
+            "occurred_at": event.occurred_at,
+            "metadata": event.metadata_json,
+        }
+        for event in sorted(order.events, key=lambda item: item.occurred_at)
+    ]
     return payload
 
 
@@ -65,6 +94,7 @@ def list_marketplace_orders(
     offset: int = Query(default=0, ge=0),
     order_status: str | None = Query(default=None, alias="status"),
     query: str | None = Query(default=None, min_length=1, max_length=200),
+    include_lines: bool = Query(default=False),
 ) -> dict[str, object]:
     filters = []
     if order_status:
@@ -101,16 +131,17 @@ def list_marketplace_orders(
         "total": total,
         "limit": limit,
         "offset": offset,
-        "items": [_order_payload(order, include_lines=False) for order in orders],
+        "items": [_order_payload(order, include_lines=include_lines) for order in orders],
     }
 
 
-@router.get("/{order_id}")
-def get_marketplace_order(order_id: int) -> dict[str, object]:
+@router.get("/by-code/{external_code}")
+def get_marketplace_order_by_code(external_code: str) -> dict[str, object]:
+    """Return a fully hydrated order by its human-facing Kaspi order number."""
     with SessionLocal() as session:
         order = session.scalar(
             select(MarketplaceOrder)
-            .where(MarketplaceOrder.id == order_id)
+            .where(MarketplaceOrder.external_code == external_code.strip())
             .options(
                 selectinload(MarketplaceOrder.lines),
                 selectinload(MarketplaceOrder.events),
@@ -121,16 +152,15 @@ def get_marketplace_order(order_id: int) -> dict[str, object]:
                 status_code=status.HTTP_404_NOT_FOUND,
                 detail="Marketplace order not found",
             )
-        payload = _order_payload(order, include_lines=True)
-        payload["events"] = [
-            {
-                "id": event.id,
-                "event_type": event.event_type,
-                "previous_status": event.previous_status,
-                "current_status": event.current_status,
-                "occurred_at": event.occurred_at,
-                "metadata": event.metadata_json,
-            }
-            for event in sorted(order.events, key=lambda item: item.occurred_at)
-        ]
-        return payload
+        return _detail_payload(order)
+
+
+@router.get("/{order_id}")
+def get_marketplace_order(order_id: int) -> dict[str, object]:
+    order = _load_order_by_id(order_id)
+    if order is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Marketplace order not found",
+        )
+    return _detail_payload(order)
