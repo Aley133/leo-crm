@@ -10,3 +10,5 @@ services:
     envVars:
       - key: PLAYWRIGHT_BROWSERS_PATH
         value: /opt/render/project/src/.cache/playwright
+      - key: OZON_CDP_ENDPOINT
+        sync: false
