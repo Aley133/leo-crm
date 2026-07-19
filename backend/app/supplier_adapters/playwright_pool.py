@@ -12,6 +12,8 @@ class BrowserPageResult:
     final_url: str
     content: str
     duration_ms: int
+    title: str = ""
+    body_text: str = ""
 
 
 class PlaywrightPoolError(RuntimeError):
@@ -113,6 +115,22 @@ class PlaywrightBrowserPool:
                 await page.close()
                 await context.close()
 
+    @staticmethod
+    async def _safe_title(page: Any) -> str:
+        try:
+            return str(await page.title()).strip()[:300]
+        except Exception:
+            return ""
+
+    @staticmethod
+    async def _safe_body_text(page: Any) -> str:
+        try:
+            locator = page.locator("body")
+            text = await locator.inner_text(timeout=1000)
+            return " ".join(str(text).split())[:1200]
+        except Exception:
+            return ""
+
     async def fetch_html(self, url: str, *, timeout_seconds: float) -> BrowserPageResult:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -125,14 +143,13 @@ class PlaywrightBrowserPool:
                     wait_until="domcontentloaded",
                     timeout=timeout_ms,
                 )
-                # Ozon renders commercial data after DOMContentLoaded. A bounded
-                # settle period is intentionally concrete to this browser fetch path;
-                # it does not reuse context state between independent checks.
                 remaining_ms = max(0, timeout_ms - int((monotonic() - started) * 1000))
                 if remaining_ms:
                     await page.wait_for_timeout(min(2500, remaining_ms))
                 content = await page.content()
                 final_url = page.url
+                title = await self._safe_title(page)
+                body_text = await self._safe_body_text(page)
         except asyncio.TimeoutError as exc:
             raise PlaywrightNavigationTimeout("Browser navigation timed out") from exc
         except Exception as exc:
@@ -146,4 +163,6 @@ class PlaywrightBrowserPool:
             final_url=final_url,
             content=content,
             duration_ms=max(0, int((monotonic() - started) * 1000)),
+            title=title,
+            body_text=body_text,
         )
