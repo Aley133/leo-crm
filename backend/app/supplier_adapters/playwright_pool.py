@@ -199,16 +199,19 @@ class PlaywrightBrowserPool:
             remaining_ms = timeout_ms - int((monotonic() - started) * 1000)
             if remaining_ms <= 0:
                 break
-            try:
-                await page.wait_for_load_state(
-                    "domcontentloaded",
-                    timeout=min(3000, remaining_ms),
-                )
-            except Exception as exc:
-                if exc.__class__.__name__ == "TimeoutError":
-                    last_error = exc
-                else:
-                    raise
+
+            wait_for_load_state = getattr(page, "wait_for_load_state", None)
+            if callable(wait_for_load_state):
+                try:
+                    await wait_for_load_state(
+                        "domcontentloaded",
+                        timeout=min(3000, remaining_ms),
+                    )
+                except Exception as exc:
+                    if exc.__class__.__name__ == "TimeoutError":
+                        last_error = exc
+                    else:
+                        raise
 
             remaining_ms = timeout_ms - int((monotonic() - started) * 1000)
             if remaining_ms <= 0:
