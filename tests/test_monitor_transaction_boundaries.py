@@ -7,7 +7,14 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from backend.app.models import Product
-from backend.app.monitoring import MonitorAttempt, MonitorStatus, MonitorTarget, SupplierOfferObservation, SupplierOfferState
+from backend.app.monitoring import (
+    AttemptOutcome,
+    MonitorAttempt,
+    MonitorStatus,
+    MonitorTarget,
+    SupplierOfferObservation,
+    SupplierOfferState,
+)
 from backend.app.observation_engine import persist_failed_attempt, persist_successful_observation
 from backend.app.supplier_adapters.base import NormalizedOffer
 from backend.app.suppliers import ProductBinding, Supplier, SupplierProduct
@@ -100,7 +107,7 @@ def test_failure_persistence_does_not_commit_its_own_transaction(db_session: Ses
         access_strategy="fixture",
         started_at=started_at,
         finished_at=finished_at,
-        outcome="timeout",
+        outcome=AttemptOutcome.TIMEOUT,
         error_code="fixture_timeout",
         error_message="fixture timeout",
     )
