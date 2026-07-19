@@ -5,6 +5,7 @@ from enum import StrEnum
 from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
+from .attempt_contracts import AttemptOutcome
 from .db import Base
 from .offer_contracts import offer_fingerprint
 
@@ -24,19 +25,6 @@ class MonitorStatus(StrEnum):
     DEGRADED = "degraded"
     MANUAL_REVIEW = "manual_review"
     DISABLED = "disabled"
-
-
-class AttemptOutcome(StrEnum):
-    SUCCESS = "success"
-    TIMEOUT = "timeout"
-    RATE_LIMITED = "rate_limited"
-    CAPTCHA = "captcha"
-    BLOCKED = "blocked"
-    AUTH_REQUIRED = "auth_required"
-    NOT_FOUND = "not_found"
-    PARSE_ERROR = "parse_error"
-    NETWORK_ERROR = "network_error"
-    INTERNAL_ERROR = "internal_error"
 
 
 class SourceHealthStatus(StrEnum):
