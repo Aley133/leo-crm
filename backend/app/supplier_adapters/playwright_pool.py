@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from time import monotonic
 from typing import Any, AsyncIterator, Awaitable, Callable
+from urllib.parse import urlparse
 
 
 @dataclass(frozen=True, slots=True)
@@ -28,12 +30,13 @@ BrowserLauncher = Callable[[], Awaitable[tuple[Any, Any]]]
 
 
 class PlaywrightBrowserPool:
-    """Small concrete Playwright pool for supplier-card checks.
+    """Concrete Playwright pool for supplier-card checks.
 
-    One Chromium browser process is reused. Every check receives a fresh isolated
-    BrowserContext and Page, which are always closed before the concurrency slot
-    is returned. Cookie or local-storage state is therefore never shared between
-    independent MonitorTarget checks.
+    Local mode reuses one Chromium process while every check receives a fresh
+    isolated BrowserContext. CDP mode attaches to an already running Chrome and
+    intentionally reuses its existing default context so cookies, browser profile
+    and trusted session state survive between checks. A new Page is still created
+    and always closed for every MonitorTarget execution.
     """
 
     def __init__(
@@ -42,17 +45,30 @@ class PlaywrightBrowserPool:
         concurrency: int = 2,
         headless: bool = True,
         launcher: BrowserLauncher | None = None,
+        cdp_endpoint: str | None = None,
+        reuse_default_context: bool | None = None,
     ) -> None:
         if concurrency < 1:
             raise ValueError("concurrency must be positive")
+        configured_endpoint = (cdp_endpoint or os.getenv("OZON_CDP_ENDPOINT") or "").strip()
+        if configured_endpoint:
+            scheme = urlparse(configured_endpoint).scheme.casefold()
+            if scheme not in {"http", "https", "ws", "wss"}:
+                raise ValueError("OZON_CDP_ENDPOINT must use http, https, ws or wss")
+
         self._semaphore = asyncio.Semaphore(concurrency)
         self._headless = headless
-        self._launcher = launcher or self._launch_local_chromium
+        self._cdp_endpoint = configured_endpoint or None
+        self._launcher = launcher or self._start_configured_browser
+        self._reuse_default_context = (
+            bool(self._cdp_endpoint) if reuse_default_context is None else reuse_default_context
+        )
+        self._owns_browser = not self._reuse_default_context
         self._playwright: Any | None = None
         self._browser: Any | None = None
         self._start_lock = asyncio.Lock()
 
-    async def _launch_local_chromium(self) -> tuple[Any, Any]:
+    async def _start_configured_browser(self) -> tuple[Any, Any]:
         try:
             from playwright.async_api import async_playwright
         except ImportError as exc:
@@ -62,10 +78,13 @@ class PlaywrightBrowserPool:
 
         playwright = await async_playwright().start()
         try:
-            browser = await playwright.chromium.launch(
-                headless=self._headless,
-                args=["--disable-dev-shm-usage", "--no-sandbox"],
-            )
+            if self._cdp_endpoint:
+                browser = await playwright.chromium.connect_over_cdp(self._cdp_endpoint)
+            else:
+                browser = await playwright.chromium.launch(
+                    headless=self._headless,
+                    args=["--disable-dev-shm-usage", "--no-sandbox"],
+                )
         except Exception:
             await playwright.stop()
             raise
@@ -82,13 +101,16 @@ class PlaywrightBrowserPool:
             except PlaywrightPoolError:
                 raise
             except Exception as exc:
-                raise PlaywrightPoolError(f"Unable to start Chromium: {exc}") from exc
+                mode = "remote Chrome session" if self._cdp_endpoint else "Chromium"
+                raise PlaywrightPoolError(f"Unable to start {mode}: {exc}") from exc
 
     async def close(self) -> None:
         browser, playwright = self._browser, self._playwright
         self._browser = None
         self._playwright = None
-        if browser is not None:
+        # Never terminate an externally managed Chrome process. Stopping Playwright
+        # disconnects the CDP client while leaving the user's profile/session alive.
+        if browser is not None and self._owns_browser:
             await browser.close()
         if playwright is not None:
             await playwright.stop()
@@ -99,6 +121,21 @@ class PlaywrightBrowserPool:
         async with self._semaphore:
             if self._browser is None:
                 raise PlaywrightPoolError("Chromium is not available")
+
+            if self._reuse_default_context:
+                contexts = list(self._browser.contexts)
+                if not contexts:
+                    raise PlaywrightPoolError(
+                        "CDP Chrome has no default browser context; open Chrome with a user profile"
+                    )
+                context = contexts[0]
+                page = await context.new_page()
+                try:
+                    yield page
+                finally:
+                    await page.close()
+                return
+
             context = await self._browser.new_context(
                 locale="ru-RU",
                 timezone_id="Asia/Almaty",
