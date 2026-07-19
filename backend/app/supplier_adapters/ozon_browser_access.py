@@ -1,19 +1,22 @@
 from __future__ import annotations
 
+from dataclasses import replace
+
+from .base import AdapterRequest, NormalizedOffer
 from .errors import AdapterBlockedError
 from .ozon_browser import OzonBrowserAdapter
 from .playwright_pool import BrowserPageResult
 
 
 class OzonBrowserAccessAdapter(OzonBrowserAdapter):
-    """Ozon browser adapter with explicit anti-bot access classification.
+    """Ozon browser adapter with explicit anti-bot access classification."""
 
-    The base parser owns offer extraction. This concrete access wrapper prevents
-    Ozon challenge/offline shells from being misreported as parser failures, so
-    SourceHealth and the circuit breaker receive the correct blocked outcome.
-    """
+    code = "ozon-browser-v6"
 
-    code = "ozon-browser-v5"
+    async def fetch(self, request: AdapterRequest) -> NormalizedOffer:
+        offer = await super().fetch(request)
+        currency = str(offer.raw_metadata.get("currency") or "").strip().upper() or None
+        return replace(offer, currency=currency)
 
     @classmethod
     def _classify_page(cls, response: BrowserPageResult) -> None:
