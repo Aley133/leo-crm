@@ -1,6 +1,7 @@
 name: Debug pytest log
 
 on:
+  pull_request:
   push:
     branches:
       - agent/c4-6-stabilization
