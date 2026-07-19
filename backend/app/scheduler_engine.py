@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Callable, Mapping
 
 from sqlalchemy import select
@@ -35,6 +35,7 @@ from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
 SessionFactory = Callable[[], Session]
+RECOVERY_JITTER_MAX_SECONDS = 180
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +69,20 @@ class AdapterRegistry:
 
     def get(self, supplier_code: str) -> SupplierAdapter | None:
         return self._adapters.get(supplier_code.strip().lower())
+
+
+def recovery_jitter_seconds(target_id: int, *, window_seconds: int = RECOVERY_JITTER_MAX_SECONDS) -> int:
+    """Return a stable per-target recovery offset in the inclusive range 1..window.
+
+    The multiplicative mix distributes sequential database ids without using a
+    random-number generator, so recovery scheduling remains reproducible.
+    """
+    if target_id < 1:
+        raise ValueError("target_id must be positive")
+    if window_seconds < 1:
+        raise ValueError("window_seconds must be positive")
+    mixed = (target_id * 2_654_435_761) & 0xFFFFFFFF
+    return 1 + (mixed % window_seconds)
 
 
 def load_task_context(session: Session, target_id: int) -> MonitorTaskContext:
@@ -196,7 +211,7 @@ def _defer_blocked_target(
     *,
     claim: LeaseClaim,
     blocked_until: datetime,
-) -> None:
+) -> datetime:
     target = session.scalar(
         select(MonitorTarget)
         .where(
@@ -207,11 +222,14 @@ def _defer_blocked_target(
     )
     if target is None:
         raise StaleLeaseError(f"MonitorTarget {claim.target_id} lease changed before breaker deferral")
-    target.next_check_at = blocked_until
+
+    resume_at = blocked_until + timedelta(seconds=recovery_jitter_seconds(claim.target_id))
+    target.next_check_at = resume_at
     target.lease_owner = None
     target.lease_token = None
     target.lease_until = None
     session.flush()
+    return resume_at
 
 
 async def process_claimed_target(
@@ -269,7 +287,7 @@ async def process_claimed_target(
             )
             if source_is_blocked(health, now=started_at):
                 assert health is not None and health.blocked_until is not None
-                _defer_blocked_target(
+                resume_at = _defer_blocked_target(
                     session,
                     claim=claim,
                     blocked_until=health.blocked_until,
@@ -279,7 +297,10 @@ async def process_claimed_target(
                     target_id=claim.target_id,
                     status="source_blocked",
                     outcome=None,
-                    error=f"{context.supplier_code}/{strategy} blocked until {health.blocked_until.isoformat()}",
+                    error=(
+                        f"{context.supplier_code}/{strategy} blocked until "
+                        f"{health.blocked_until.isoformat()}; target resumes at {resume_at.isoformat()}"
+                    ),
                 )
     except StaleLeaseError:
         return ScheduledTaskResult(claim.target_id, "stale", None)
