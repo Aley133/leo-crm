@@ -7,9 +7,15 @@ This roadmap is the single source of truth for delivery order and demonstrated p
 ```text
 Phase A — Foundation: verification pending
 Phase B — Product and supplier core: in progress
-Phase C — Monitoring stabilization: core gate verified, remaining enhancements in progress
-Phase D — Browser access runtime: blocked by remaining Phase C requirements
+Phase C — Monitoring stabilization: core gate verified, remaining enhancements moved to production hardening
+Phase D — Marketplace Core (Kaspi-first): started
+Phase E — Purchase Lifecycle Core: planned
+Phase F — Browser Runtime MVP for Ozon live observations: planned
+Phase G — Pricing Engine: blocked by Phase F live-data proof
+Phase H — Supplier Recommendation: blocked by Phases F and G
 ```
+
+The approved delivery order is defined by `docs/ADR-0004-kaspi-first-delivery-order.md`.
 
 ## Phase A — Foundation
 
@@ -57,13 +63,14 @@ In progress / missing:
 - primary-binding uniqueness policy;
 - Telegram API client skeleton;
 - import of existing TGBAD bindings;
-- broader API and migration tests.
+- broader API and migration tests;
+- reviewed migration from generic-product Kaspi fields to marketplace-reference records.
 
-Phase B may continue in parallel where work does not change Phase C invariants.
+Phase B may continue in parallel where work does not change Phase C invariants or the Phase D marketplace boundary.
 
 ## Phase C — Monitoring stabilization
 
-Phase C stabilizes the monitoring core before any browser automation is introduced.
+Phase C stabilized the monitoring core before browser automation or automated pricing.
 
 ### C0 — Schema and architecture gate
 
@@ -81,8 +88,6 @@ Phase C stabilizes the monitoring core before any browser automation is introduc
 
 ### C1 — Lease and scheduler foundation
 
-Implemented, final verification pending:
-
 - [x] claim due targets with `FOR UPDATE SKIP LOCKED`;
 - [x] cryptographically random lease token;
 - [x] stale-token mutation protection;
@@ -97,8 +102,6 @@ Implemented, final verification pending:
 
 ### C2 — Observation and current-state engine
 
-Implemented, stabilization pending:
-
 - [x] MonitorAttempt lifecycle;
 - [x] normalized adapter result;
 - [x] mandatory business fingerprint;
@@ -109,15 +112,13 @@ Implemented, stabilization pending:
 - [x] source error classification foundation;
 - [x] protect first-state creation through a locked SupplierProduct aggregate root;
 - [x] accepted observation and success reschedule committed in one orchestrator-owned transaction;
-- [ ] stale worker diagnostic attempt with `result_accepted=false`;
-- [ ] stable attempt idempotency key;
 - [x] replace global historical fingerprint uniqueness with attempt-level idempotency;
 - [x] verify `A -> B -> A` creates a new historical observation;
+- [ ] stale worker diagnostic attempt with `result_accepted=false`;
+- [ ] stable attempt idempotency key;
 - [ ] MonitorDailyMetric rollup and retention.
 
 ### C3 — Adapter contract and manual vertical proof
-
-Implemented, reliability classification pending:
 
 - [x] adapter interface;
 - [x] Ozon direct-HTTP adapter foundation;
@@ -131,8 +132,6 @@ Implemented, reliability classification pending:
 
 ### C4 — Monitoring stabilization gate
 
-C4 must be complete before Browser Runtime starts.
-
 Transaction and concurrency:
 
 - [x] scheduler/application orchestrator owns the accepted-result transaction;
@@ -141,42 +140,42 @@ Transaction and concurrency:
 - [x] lock SupplierProduct before first SupplierOfferState creation;
 - [x] lock/read SupplierOfferState before fingerprint comparison;
 - [x] persist attempt, state transition, observation, reschedule and lease release atomically;
-- [ ] stale results use a separate audit-only transaction and never mutate business state;
 - [x] PostgreSQL first-observation race test;
 - [x] PostgreSQL existing-state serialization test;
+- [ ] stale results use a separate audit-only transaction and never mutate business state;
 - [ ] PostgreSQL `A -> B -> A` history test.
 
 Schema:
 
 - [x] new immutable Alembic migration removes global observation fingerprint uniqueness;
 - [x] automatic observation has attempt-level uniqueness;
-- [ ] manual/import observation origins have an explicit future-safe identity model;
-- [x] no applied migration is edited.
+- [x] no applied migration is edited;
+- [ ] manual/import observation origins have an explicit future-safe identity model.
 
 Access strategy and source health:
 
 - [x] `AccessStrategy` is an application enum with persisted string values;
 - [x] current values are explicitly declared in the adapter contract;
 - [x] SourceHealth scope includes supplier and access strategy;
-- [ ] account/profile/route dimensions are included when present;
 - [x] adapter classifies one response and returns evidence; it never opens a breaker itself;
 - [x] breaker policy owns current hard-signal state transitions;
 - [x] explicit hard signals may open the appropriate strategy-scoped breaker immediately;
 - [x] open breaker is enforced before `adapter.fetch()`;
 - [x] blocked targets resume with deterministic target-specific jitter after `blocked_until`;
-- [ ] parser-schema breaker requires a 15-minute window, at least 20 attempts, at least 10 distinct previously healthy targets and at least 40% classified failures;
-- [ ] breaker supports explicit `closed`, `open` and `half_open` states;
-- [x] per-target timeout/parse/not-found backoff remains separate from source-health state.
+- [x] per-target timeout/parse/not-found backoff remains separate from source-health state;
+- [ ] account/profile/route dimensions are included when present;
+- [ ] parser-schema breaker uses a reviewed statistical window;
+- [ ] breaker supports explicit `closed`, `open` and `half_open` states.
 
-C4 acceptance:
+C4 verified acceptance:
 
-- [ ] all monitoring unit tests green for the latest jitter implementation commit;
-- [ ] all PostgreSQL concurrency tests green for the latest jitter implementation commit;
+- [x] monitoring unit tests green for commit `329b1b6`;
+- [x] PostgreSQL concurrency tests green for commit `329b1b6`;
 - [x] migrations verified against PostgreSQL, including existing-data upgrade `20260719_0005 -> 20260719_0006`;
-- [ ] CI green for the latest jitter implementation commit;
+- [x] CI green for commit `329b1b6`;
 - [x] architecture, monitoring contract, ORM and roadmap describe the same implemented invariants.
 
-Remaining Phase C requirements before Phase D:
+Moved to production-hardening gates rather than blocking Marketplace Core:
 
 - [ ] stale-worker audit-only attempt path;
 - [ ] stable execution/attempt UUID;
@@ -184,21 +183,92 @@ Remaining Phase C requirements before Phase D:
 - [ ] statistical parser-schema breaker and half-open probes;
 - [ ] decide whether PostgreSQL `A -> B -> A` concurrency proof is required or the existing deterministic history test is sufficient.
 
-## Phase D — Browser access runtime
+These items must be completed before continuous production monitoring or the full Browser Runtime is activated, but they do not block marketplace-neutral order-domain work.
 
-Blocked until the remaining Phase C requirements are explicitly completed or formally moved to a later production gate by an architecture decision.
+## Phase D — Marketplace Core (Kaspi-first)
+
+Kaspi is the mandatory first marketplace integration. The domain remains marketplace-neutral and follows `docs/KASPI_INTEGRATION_CONTRACT.md`.
+
+### D0 — Architecture and contract gate
+
+- [x] approve Kaspi-first delivery order through ADR-0004;
+- [x] define Kaspi integration ownership and transaction boundaries;
+- [x] define raw-payload retention and import idempotency;
+- [x] separate normalized Marketplace Core from Kaspi transport DTOs;
+- [ ] approve Phase D domain model and migration plan;
+- [ ] define reconciliation and checkpoint model;
+- [ ] define tenant/account ownership for marketplace connections.
+
+### D1 — Marketplace domain foundation
+
+- [ ] `MarketplaceAccount` model;
+- [ ] marketplace-neutral `MarketplaceOrder` model;
+- [ ] `MarketplaceOrderLine` model;
+- [ ] append-only `MarketplaceOrderEvent` model;
+- [ ] raw import evidence model;
+- [ ] import execution/checkpoint model;
+- [ ] normalized status enum with original status retained;
+- [ ] immutable Alembic migration;
+- [ ] unit and PostgreSQL integration tests.
+
+### D2 — Kaspi importer vertical slice
+
+- [ ] Kaspi transport client behind an interface;
+- [ ] bounded fetch without an open business transaction;
+- [ ] deterministic normalization;
+- [ ] idempotent order and line upsert;
+- [ ] atomic raw evidence, normalized state, event and checkpoint persistence;
+- [ ] duplicate payload test;
+- [ ] changed-revision test;
+- [ ] unknown-status test;
+- [ ] persistence rollback leaves checkpoint unchanged;
+- [ ] internal outbox event after committed order changes.
+
+### D3 — Read API and reconciliation
+
+- [ ] list/read normalized orders;
+- [ ] filter by account, status and date range;
+- [ ] expose original and normalized statuses;
+- [ ] show import/reconciliation errors without leaking credentials;
+- [ ] manual re-import by external order identity;
+- [ ] reconciliation report between external and normalized state.
+
+## Phase E — Purchase Lifecycle Core
+
+This phase implements deterministic purchasing lifecycle only. Supplier recommendation is explicitly excluded.
+
+- [ ] approved purchase domain model;
+- [ ] purchase request linked to an originating order or manual demand;
+- [ ] versioned lifecycle transitions;
+- [ ] ordered, partially received, received, cancelled and closed states;
+- [ ] receipt records and audit events;
+- [ ] idempotent downstream handling of marketplace-order events;
+- [ ] no automatic supplier selection;
+- [ ] no dependency on raw Kaspi payloads;
+- [ ] transaction and concurrency tests.
+
+## Phase F — Browser Runtime MVP for Ozon live observations
+
+Browser Runtime is infrastructure and must reuse the normalized monitoring adapter result.
+
+MVP scope:
 
 - [ ] separate worker process, never the web process;
-- [ ] browser profile lifecycle;
-- [ ] authenticated session handling;
-- [ ] per-strategy concurrency limits;
-- [ ] bounded retries and timeouts;
+- [ ] one Ozon browser access strategy;
+- [ ] bounded timeout and concurrency;
+- [ ] one managed authenticated or anonymous session profile as required;
+- [ ] normalized live price, availability and delivery evidence;
 - [ ] captcha/block evidence capture;
-- [ ] normalized adapter result identical to other access strategies;
-- [ ] no pricing or XML writes from Browser Runtime;
-- [ ] operational kill switch.
+- [ ] no pricing, purchase or XML writes from Browser Runtime;
+- [ ] operational kill switch;
+- [ ] representative live-evidence contract tests;
+- [ ] continuous production use remains blocked until Phase C hardening gates are satisfied.
 
-## Phase E — Pricing integration
+The full browser pool, multi-profile lifecycle, remote browser strategies and broad anti-bot support are later runtime expansions, not MVP requirements.
+
+## Phase G — Pricing Engine
+
+Pricing may begin only after Phase F proves a live Ozon observation path.
 
 - [ ] Money value object;
 - [ ] immutable PriceCalculation;
@@ -206,9 +276,23 @@ Blocked until the remaining Phase C requirements are explicitly completed or for
 - [ ] optimistic ProductPriceState update;
 - [ ] manual override priority;
 - [ ] pricing failure does not erase an accepted observation;
-- [ ] every calculation stores an explainable breakdown.
+- [ ] every calculation stores an explainable breakdown;
+- [ ] real Ozon observations included in acceptance tests;
+- [ ] commission, delivery, tax, floor and minimum-margin policies are versioned.
 
-## Phase F — XML publication
+## Phase H — Supplier Recommendation
+
+Recommendation consumes accepted supplier observations and explainable pricing results. It is not part of Purchase Lifecycle or Browser Runtime.
+
+- [ ] recommendation policy contract;
+- [ ] compare supplier price, delivery, availability and confidence;
+- [ ] deterministic tie-breaking;
+- [ ] recommendation audit trail;
+- [ ] manual override and rejection reasons;
+- [ ] no automatic purchase in the initial release;
+- [ ] acceptance tests use live-shaped Ozon data and deterministic fixtures.
+
+## Phase I — XML publication
 
 - [ ] immutable XML versions;
 - [ ] validation before activation;
@@ -218,7 +302,7 @@ Blocked until the remaining Phase C requirements are explicitly completed or for
 - [ ] stable `/feeds/kaspi.xml` endpoint;
 - [ ] retention and storage thresholds.
 
-## Phase G — Production worker activation
+## Phase J — Production worker activation
 
 Continuous production monitoring may not be enabled until:
 
@@ -227,34 +311,34 @@ Continuous production monitoring may not be enabled until:
 - [ ] source-health and queue/backlog alerts are active;
 - [ ] production connection budget is rechecked for API plus worker processes;
 - [ ] source-specific emergency stop is available;
-- [ ] runbook for captcha, block, migration and rollback incidents is documented.
+- [ ] runbook for captcha, block, migration and rollback incidents is documented;
+- [ ] remaining Phase C production-hardening gates are complete.
 
-## Phase H — Telegram operations interface
+## Phase K — Telegram operations interface
 
-Telegram is the first operational interface, but remains an authenticated API client with no database, monitoring or pricing logic.
+Telegram is the first operational interface, but remains an authenticated API client with no database, monitoring, pricing or purchasing logic.
 
-## Phase I — Web CRM
+## Phase L — Web CRM
 
-Dashboard, product cards, binding review, monitoring status, exception handling and audit views.
+Dashboard, product cards, binding review, orders, purchasing, monitoring status, exception handling and audit views.
 
-## Phase J — Orders, purchasing and inventory
+## Phase M — Inventory, finance and analytics expansion
 
-Requires separate approved domain models. Order polling may reuse the scheduler and lease infrastructure, while business ownership remains inside the Orders module.
-
-## Phase K — Analytics and automation expansion
-
-Forecasting, supplier selection, purchasing recommendations and carefully scoped automatic actions.
+Warehouse movements, FIFO, realized margin, forecasting, automation and carefully scoped automatic actions require separate approved domain models.
 
 ## Working rules
 
 1. PostgreSQL is the source of truth. XML, Telegram and Web CRM are outputs or clients.
-2. The Domain Model gate applies to new high-risk modules, not routine Phase B stabilization.
+2. The Domain Model gate applies to new high-risk modules, not routine stabilization.
 3. No phase is marked complete from a successful deployment alone.
 4. Every completed roadmap item requires code, migration where applicable, and automated verification.
 5. Roadmap changes are part of the definition of done for the commit that changes an invariant.
-6. Roadmap changes are allowed when implementation proves an assumption false.
+6. Roadmap changes are allowed when implementation or CTO review proves an assumption false.
 7. A public deployment must fail closed when authentication configuration is missing.
 8. Once an Alembic migration has been applied in a shared or production environment, it is immutable.
 9. Critical state transitions use explicit transaction ownership at the application-orchestrator level.
 10. Adapters classify external evidence; policy layers make platform-wide decisions.
-11. Browser automation cannot begin until the monitoring stabilization gate is green.
+11. Browser Runtime never owns marketplace, monitoring, pricing, purchase or XML business state.
+12. Pricing and supplier recommendation require a proven live supplier observation path.
+13. Purchase Lifecycle and Supplier Recommendation are separate responsibilities.
+14. New Phase D code must not deepen the existing coupling between generic Product and Kaspi identifiers.
