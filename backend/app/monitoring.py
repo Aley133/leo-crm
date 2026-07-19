@@ -101,6 +101,7 @@ class SupplierOfferState(Base):
     )
     price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     old_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
     delivery_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -128,6 +129,7 @@ class SupplierOfferObservation(Base):
     )
     price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
     old_price: Mapped[Decimal | None] = mapped_column(Numeric(14, 2), nullable=True)
+    currency: Mapped[str | None] = mapped_column(String(3), nullable=True)
     available: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     stock: Mapped[int | None] = mapped_column(Integer, nullable=True)
     delivery_days: Mapped[int | None] = mapped_column(Integer, nullable=True)
@@ -168,11 +170,13 @@ def offer_fingerprint(
     delivery_days: int | None,
     seller: str | None,
     adapter_schema_version: str,
+    currency: str | None = None,
 ) -> str:
     """Return a stable SHA-256 fingerprint from normalized business facts."""
     payload = {
         "supplier_product_id": supplier_product_id,
         "price": format(price, "f") if price is not None else None,
+        "currency": currency.strip().upper() if currency else None,
         "available": available,
         "stock": stock,
         "delivery_days": delivery_days,
