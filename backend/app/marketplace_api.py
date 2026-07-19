@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import select
 
 from .auth import require_service_token
 from .db import SessionLocal
@@ -12,6 +13,7 @@ from .kaspi_integration import (
 )
 from .marketplace_full_sync import sync_kaspi_orders
 from .marketplace_sync import sync_kaspi_order_page
+from .models import MarketplaceImportCheckpoint
 
 
 router = APIRouter(
@@ -116,4 +118,42 @@ def full_sync_orders(
         "updated_count": result.updated_count,
         "next_cursor": result.next_cursor,
         "completed": result.completed,
+    }
+
+
+@router.post("/orders/checkpoint/reset")
+def reset_order_checkpoint(
+    confirm: bool = Query(default=False),
+) -> dict[str, int | bool]:
+    """Rewind only the orders checkpoint; existing orders remain idempotently stored."""
+    if not confirm:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Set confirm=true to reset the Kaspi orders checkpoint",
+        )
+
+    try:
+        _, marketplace_account_id = _bootstrap_live_import()
+    except KaspiConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    with SessionLocal() as session:
+        with session.begin():
+            checkpoint = session.scalar(
+                select(MarketplaceImportCheckpoint).where(
+                    MarketplaceImportCheckpoint.marketplace_account_id
+                    == marketplace_account_id,
+                    MarketplaceImportCheckpoint.stream_name == "orders",
+                )
+            )
+            reset = checkpoint is not None
+            if checkpoint is not None:
+                session.delete(checkpoint)
+
+    return {
+        "marketplace_account_id": marketplace_account_id,
+        "reset": reset,
     }
