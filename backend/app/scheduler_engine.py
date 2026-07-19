@@ -22,7 +22,13 @@ from .observation_engine import (
     persist_failed_attempt,
     persist_successful_observation,
 )
-from .source_health_engine import apply_source_failure, apply_source_success
+from .source_health_engine import (
+    apply_source_failure,
+    apply_source_success,
+    get_source_health,
+    source_is_blocked,
+    strategy_value,
+)
 from .supplier_adapters.base import AccessStrategy, AdapterRequest, SupplierAdapter
 from .supplier_adapters.errors import AdapterError
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -62,13 +68,6 @@ class AdapterRegistry:
 
     def get(self, supplier_code: str) -> SupplierAdapter | None:
         return self._adapters.get(supplier_code.strip().lower())
-
-
-def _strategy_value(strategy: AccessStrategy | str) -> str:
-    value = strategy.value if isinstance(strategy, AccessStrategy) else strategy
-    if not value.strip():
-        raise ValueError("access_strategy must not be empty")
-    return value
 
 
 def load_task_context(session: Session, target_id: int) -> MonitorTaskContext:
@@ -124,12 +123,13 @@ def _persist_failure_and_reschedule(
     supplier_id: int | None = None,
     http_status: int | None = None,
 ) -> None:
+    strategy = strategy_value(access_strategy)
     persist_failed_attempt(
         session,
         monitor_target_id=claim.target_id,
         lease_token=claim.lease_token,
         adapter_code=adapter_code,
-        access_strategy=_strategy_value(access_strategy),
+        access_strategy=strategy,
         started_at=started_at,
         finished_at=finished_at,
         outcome=outcome,
@@ -141,6 +141,7 @@ def _persist_failure_and_reschedule(
         apply_source_failure(
             session,
             supplier_id=supplier_id,
+            access_strategy=strategy,
             outcome=outcome,
             error_code=error_code,
             occurred_at=finished_at,
@@ -190,6 +191,29 @@ def _commit_failure_result(
             raise
 
 
+def _defer_blocked_target(
+    session: Session,
+    *,
+    claim: LeaseClaim,
+    blocked_until: datetime,
+) -> None:
+    target = session.scalar(
+        select(MonitorTarget)
+        .where(
+            MonitorTarget.id == claim.target_id,
+            MonitorTarget.lease_token == claim.lease_token,
+        )
+        .with_for_update()
+    )
+    if target is None:
+        raise StaleLeaseError(f"MonitorTarget {claim.target_id} lease changed before breaker deferral")
+    target.next_check_at = blocked_until
+    target.lease_owner = None
+    target.lease_token = None
+    target.lease_until = None
+    session.flush()
+
+
 async def process_claimed_target(
     claim: LeaseClaim,
     *,
@@ -235,6 +259,33 @@ async def process_claimed_target(
             return ScheduledTaskResult(claim.target_id, "persistence_error", outcome, error=str(exc))
         return ScheduledTaskResult(claim.target_id, "failed", outcome, error=error_message)
 
+    strategy = strategy_value(adapter.access_strategy)
+    try:
+        with session_factory() as session:
+            health = get_source_health(
+                session,
+                supplier_id=context.supplier_id,
+                access_strategy=strategy,
+            )
+            if source_is_blocked(health, now=started_at):
+                assert health is not None and health.blocked_until is not None
+                _defer_blocked_target(
+                    session,
+                    claim=claim,
+                    blocked_until=health.blocked_until,
+                )
+                session.commit()
+                return ScheduledTaskResult(
+                    target_id=claim.target_id,
+                    status="source_blocked",
+                    outcome=None,
+                    error=f"{context.supplier_code}/{strategy} blocked until {health.blocked_until.isoformat()}",
+                )
+    except StaleLeaseError:
+        return ScheduledTaskResult(claim.target_id, "stale", None)
+    except Exception as exc:
+        return ScheduledTaskResult(claim.target_id, "persistence_error", None, error=str(exc))
+
     request = AdapterRequest(
         supplier_product_id=context.supplier_product_id,
         url=context.url,
@@ -253,7 +304,7 @@ async def process_claimed_target(
                 session_factory=session_factory,
                 claim=claim,
                 adapter_code=adapter.code,
-                access_strategy=adapter.access_strategy,
+                access_strategy=strategy,
                 started_at=started_at,
                 finished_at=finished_at,
                 outcome=outcome,
@@ -282,7 +333,7 @@ async def process_claimed_target(
                     monitor_target_id=claim.target_id,
                     lease_token=claim.lease_token,
                     adapter_code=adapter.code,
-                    access_strategy=_strategy_value(adapter.access_strategy),
+                    access_strategy=strategy,
                     started_at=started_at,
                     finished_at=finished_at,
                     offer=offer,
@@ -290,6 +341,7 @@ async def process_claimed_target(
                 apply_source_success(
                     session,
                     supplier_id=context.supplier_id,
+                    access_strategy=strategy,
                     occurred_at=finished_at,
                 )
                 completed = apply_success_reschedule(
