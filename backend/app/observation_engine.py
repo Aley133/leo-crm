@@ -5,7 +5,6 @@ from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy import select
-from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from .monitoring import (
@@ -83,12 +82,14 @@ def record_successful_observation(
     finished_at: datetime,
     offer: NormalizedOffer,
     http_status: int | None = 200,
+    commit: bool = True,
 ) -> ObservationResult:
-    """Persist one successful adapter result in a short independent transaction.
+    """Persist a successful adapter result.
 
-    The target row is locked and the current lease token is verified before any
-    attempt, state, or observation row is written. A stale worker therefore
-    cannot mutate monitoring history or supplier-offer state.
+    A new append-only observation is created whenever the current state changes,
+    including a return to a previously seen fingerprint (A -> B -> A).
+    ``commit=False`` lets the scheduler own the transaction and atomically pair
+    this write with rescheduling and lease release.
     """
     if not lease_token.strip():
         raise ValueError("lease_token must not be empty")
@@ -166,44 +167,26 @@ def record_successful_observation(
             session.flush()
 
         if changed:
-            existing = session.scalar(
-                select(SupplierOfferObservation).where(
-                    SupplierOfferObservation.supplier_product_id == supplier_product_id,
-                    SupplierOfferObservation.fingerprint == fingerprint,
-                )
+            observation = SupplierOfferObservation(
+                supplier_product_id=supplier_product_id,
+                monitor_attempt_id=attempt.id,
+                price=offer.price,
+                old_price=offer.old_price,
+                available=offer.available,
+                stock=offer.stock,
+                delivery_days=offer.delivery_days,
+                seller=offer.seller,
+                fingerprint=fingerprint,
+                adapter_schema_version=offer.adapter_schema_version,
+                raw_metadata=_normalized_metadata(offer),
+                observed_at=offer.observed_at,
             )
-            if existing is None:
-                observation = SupplierOfferObservation(
-                    supplier_product_id=supplier_product_id,
-                    monitor_attempt_id=attempt.id,
-                    price=offer.price,
-                    old_price=offer.old_price,
-                    available=offer.available,
-                    stock=offer.stock,
-                    delivery_days=offer.delivery_days,
-                    seller=offer.seller,
-                    fingerprint=fingerprint,
-                    adapter_schema_version=offer.adapter_schema_version,
-                    raw_metadata=_normalized_metadata(offer),
-                    observed_at=offer.observed_at,
-                )
-                try:
-                    with session.begin_nested():
-                        session.add(observation)
-                        session.flush()
-                    observation_id = observation.id
-                except IntegrityError:
-                    existing = session.scalar(
-                        select(SupplierOfferObservation).where(
-                            SupplierOfferObservation.supplier_product_id == supplier_product_id,
-                            SupplierOfferObservation.fingerprint == fingerprint,
-                        )
-                    )
-                    observation_id = existing.id if existing is not None else None
-            else:
-                observation_id = existing.id
+            session.add(observation)
+            session.flush()
+            observation_id = observation.id
 
-        session.commit()
+        if commit:
+            session.commit()
         return ObservationResult(
             attempt_id=attempt.id,
             supplier_product_id=supplier_product_id,
@@ -213,7 +196,8 @@ def record_successful_observation(
             fingerprint=fingerprint,
         )
     except Exception:
-        session.rollback()
+        if commit:
+            session.rollback()
         raise
 
 
@@ -230,6 +214,7 @@ def record_failed_attempt(
     http_status: int | None = None,
     error_code: str | None = None,
     error_message: str | None = None,
+    commit: bool = True,
 ) -> int:
     """Record a failed adapter attempt without mutating offer state."""
     if not lease_token.strip():
@@ -260,8 +245,11 @@ def record_failed_attempt(
             lease_token=lease_token,
         )
         session.add(attempt)
-        session.commit()
+        session.flush()
+        if commit:
+            session.commit()
         return attempt.id
     except Exception:
-        session.rollback()
+        if commit:
+            session.rollback()
         raise
