@@ -3,6 +3,7 @@ from datetime import UTC, datetime
 from fastapi import FastAPI
 from sqlalchemy import text
 
+from .browser_agent_api import router as browser_agent_router
 from .db import engine
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
@@ -13,8 +14,8 @@ from .purchase_api import router as purchase_router
 from .supplier_products_api import router as supplier_products_router
 from .suppliers import router as suppliers_router
 
-APP_VERSION = "0.10.1"
-DEPLOYMENT_MARKER = "ozon-browser-v4-page-fingerprint"
+APP_VERSION = "0.11.0"
+DEPLOYMENT_MARKER = "browser-agent-queue-v1"
 
 app = FastAPI(
     title="LEO CRM API",
@@ -26,6 +27,7 @@ app.include_router(products_router)
 app.include_router(suppliers_router)
 app.include_router(supplier_products_router)
 app.include_router(monitoring_router)
+app.include_router(browser_agent_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
 app.include_router(product_identity_router)
