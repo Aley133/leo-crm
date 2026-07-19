@@ -1,13 +1,14 @@
 # LEO CRM Roadmap
 
-This roadmap reports demonstrated project state. A phase is complete only when every acceptance item is implemented and verified.
+This roadmap is the single source of truth for delivery order and demonstrated project state. A phase is complete only when every acceptance item is implemented, migrated where necessary, and verified by automated tests.
 
 ## Current status
 
 ```text
-Phase A — Foundation: in verification
+Phase A — Foundation: verification pending
 Phase B — Product and supplier core: in progress
-Phase C — Monitoring reliability vertical slice: design approved, implementation gated
+Phase C — Monitoring stabilization: in progress
+Phase D — Browser access runtime: blocked by Phase C
 ```
 
 ## Phase A — Foundation
@@ -22,7 +23,7 @@ Completed:
 - `/health` endpoint;
 - Swagger documentation;
 - architecture v0.2 and Phase C addendum;
-- canonical monitoring contract v0.2;
+- canonical monitoring contract;
 - CI test workflow;
 - service-token protection for private `/api/*` endpoints;
 - explicit SQLAlchemy pool limits (`pool_size=2`, `max_overflow=1`) for PostgreSQL;
@@ -31,9 +32,10 @@ Completed:
 
 Still required before marking fully complete:
 
-- configure `SERVICE_API_TOKEN` in Render and verify authenticated/unauthenticated requests;
+- configure and verify `SERVICE_API_TOKEN` in Render;
+- verify authenticated requests return `200` and unauthenticated requests return `401`;
 - verify the current GitHub Actions run is green;
-- add future Supabase JWT authentication for the web CRM when the web client starts.
+- add Supabase JWT authentication when the Web CRM client starts.
 
 ## Phase B — Product and supplier core
 
@@ -44,8 +46,8 @@ Completed:
 - SupplierProduct model and create API;
 - ProductBinding model and create API;
 - binding lifecycle fields;
-- database migrations through monitoring schema foundation;
-- service authentication usable by Swagger and the future Telegram adapter.
+- database migrations through the monitoring schema foundation;
+- service authentication usable by Swagger and future clients.
 
 In progress / missing:
 
@@ -55,70 +57,148 @@ In progress / missing:
 - primary-binding uniqueness policy;
 - Telegram API client skeleton;
 - import of existing TGBAD bindings;
-- automated API and migration tests beyond current contract tests.
+- broader API and migration tests.
 
-Phase B is not complete until the above items are verified.
+Phase B may continue in parallel where work does not change Phase C invariants.
 
-## Phase C — Monitoring reliability vertical slice
+## Phase C — Monitoring stabilization
 
-### C0 — Domain and schema gate
+Phase C stabilizes the monitoring core before any browser automation is introduced.
+
+### C0 — Schema and architecture gate
 
 - [x] architecture contract;
 - [x] Phase C domain model;
 - [x] monitoring contract reconciled with ORM and persisted schema;
 - [x] initial monitoring migration;
-- [x] production migration through `20260718_0004` deployed;
-- [x] database constraints for current invariants;
+- [x] production migrations through `20260718_0004` deployed;
 - [x] explicit PostgreSQL connection-pool limits;
 - [x] SQLite CI compatibility for engine creation;
 - [x] migration immutability and recovery policy documented;
-- [ ] add reusable test database fixture;
-- [ ] add migration upgrade/downgrade smoke test against PostgreSQL;
-- [ ] verify all C0 contract tests in green CI.
+- [ ] reusable test database fixture;
+- [ ] PostgreSQL migration upgrade/downgrade smoke test;
+- [ ] all C0 contract tests verified in green CI.
 
-### C1 — Lease Engine
+### C1 — Lease and scheduler foundation
 
-- [ ] claim due targets with `FOR UPDATE SKIP LOCKED`;
-- [ ] create cryptographically random LeaseToken;
-- [ ] prevent stale-token mutation;
-- [ ] release lease;
-- [ ] success reschedule;
-- [ ] failure reschedule with backoff;
-- [ ] expired lease recovery;
-- [ ] concurrency tests.
+Implemented, final verification pending:
 
-### C2 — Observation Engine
+- [x] claim due targets with `FOR UPDATE SKIP LOCKED`;
+- [x] cryptographically random lease token;
+- [x] stale-token mutation protection;
+- [x] lease release;
+- [x] success reschedule;
+- [x] failure reschedule with per-target backoff;
+- [x] expired lease recovery;
+- [x] scheduler orchestration;
+- [x] intentional `/run-now` path;
+- [ ] shared `claim_target()` primitive for scheduler and `/run-now`;
+- [ ] real PostgreSQL lease-claim concurrency test.
 
-- [ ] MonitorAttempt lifecycle;
-- [ ] normalized adapter result;
-- [ ] mandatory fingerprint;
-- [ ] current SupplierOfferState update;
-- [ ] append-only significant observations;
-- [ ] unchanged-result deduplication;
-- [ ] source error classification;
+### C2 — Observation and current-state engine
+
+Implemented, stabilization pending:
+
+- [x] MonitorAttempt lifecycle;
+- [x] normalized adapter result;
+- [x] mandatory business fingerprint;
+- [x] current SupplierOfferState update;
+- [x] append-only significant observations;
+- [x] unchanged-result deduplication against current state;
+- [x] row lock for an existing SupplierOfferState;
+- [x] source error classification foundation;
+- [ ] protect first-state creation through a locked SupplierProduct aggregate root;
+- [ ] accepted observation and success reschedule committed in one orchestrator-owned transaction;
+- [ ] stale worker diagnostic attempt with `result_accepted=false`;
+- [ ] stable attempt idempotency key;
+- [ ] replace global historical fingerprint uniqueness with attempt-level idempotency;
+- [ ] verify `A -> B -> A` creates a new historical observation;
 - [ ] MonitorDailyMetric rollup and retention.
 
-### C3 — Ozon adapter contract
+### C3 — Adapter contract and manual vertical proof
 
-- [ ] adapter interface;
-- [ ] mocked 200 response;
-- [ ] mocked 404 response;
-- [ ] mocked 429 response;
-- [ ] mocked captcha response;
-- [ ] mocked timeout;
-- [ ] SourceHealth transition tests;
-- [ ] circuit breaker.
+Implemented, reliability classification pending:
 
-### C4 — Pricing integration
+- [x] adapter interface;
+- [x] Ozon direct-HTTP adapter foundation;
+- [x] mocked success/not-found/rate-limit/captcha/timeout paths;
+- [x] scheduler-to-adapter vertical path;
+- [x] manual run-now proof path;
+- [ ] richer adapter failure evidence;
+- [ ] scope hints for route, strategy, account/profile and source;
+- [ ] explicit confidence and evidence codes;
+- [ ] verify that HTTP `403` is not treated as a source-wide block from status code alone.
+
+### C4 — Monitoring stabilization gate
+
+C4 must be complete before Browser Runtime starts.
+
+Transaction and concurrency:
+
+- [ ] scheduler/application orchestrator owns the accepted-result transaction;
+- [ ] persistence functions never commit internally;
+- [ ] lock and validate MonitorTarget lease before accepted writes;
+- [ ] lock SupplierProduct before first SupplierOfferState creation;
+- [ ] lock/read SupplierOfferState before fingerprint comparison;
+- [ ] persist attempt, state transition, observation, reschedule and lease release atomically;
+- [ ] stale results use a separate audit-only transaction and never mutate business state;
+- [ ] PostgreSQL first-observation race test;
+- [ ] PostgreSQL existing-state race test;
+- [ ] PostgreSQL `A -> B -> A` history test.
+
+Schema:
+
+- [ ] new immutable Alembic migration removes global observation fingerprint uniqueness;
+- [ ] automatic observation has attempt-level uniqueness;
+- [ ] manual/import observation origins have an explicit future-safe identity model;
+- [ ] no applied migration is edited.
+
+Access strategy and source health:
+
+- [ ] `AccessStrategy` is a database/application enum;
+- [ ] initial values: `official_api`, `direct_http`, `browser`, `remote_browser`, `manual`;
+- [ ] SourceHealth scope includes supplier and access strategy;
+- [ ] account/profile/route dimensions are included when present;
+- [ ] adapter classifies one response and returns evidence; it never opens a breaker itself;
+- [ ] breaker policy owns aggregation and state transitions;
+- [ ] explicit hard signals may open the appropriate scoped breaker immediately;
+- [ ] parser-schema breaker requires a 15-minute window, at least 20 attempts, at least 10 distinct previously healthy targets and at least 40% classified failures;
+- [ ] breaker supports `closed`, `open` and `half_open` states;
+- [ ] per-target timeout/parse/not-found backoff remains separate from source-health state.
+
+C4 acceptance:
+
+- [ ] all monitoring unit tests green;
+- [ ] all PostgreSQL concurrency tests green;
+- [ ] migrations verified against PostgreSQL;
+- [ ] CI green;
+- [ ] architecture, monitoring contract, ORM and roadmap describe the same invariants.
+
+## Phase D — Browser access runtime
+
+Blocked until C4 is complete.
+
+- [ ] separate worker process, never the web process;
+- [ ] browser profile lifecycle;
+- [ ] authenticated session handling;
+- [ ] per-strategy concurrency limits;
+- [ ] bounded retries and timeouts;
+- [ ] captcha/block evidence capture;
+- [ ] normalized adapter result identical to other access strategies;
+- [ ] no pricing or XML writes from Browser Runtime;
+- [ ] operational kill switch.
+
+## Phase E — Pricing integration
 
 - [ ] Money value object;
 - [ ] immutable PriceCalculation;
 - [ ] calculation idempotency key;
 - [ ] optimistic ProductPriceState update;
 - [ ] manual override priority;
-- [ ] pricing failure does not erase observation.
+- [ ] pricing failure does not erase an accepted observation;
+- [ ] every calculation stores an explainable breakdown.
 
-### C5 — XML publication
+## Phase F — XML publication
 
 - [ ] immutable XML versions;
 - [ ] validation before activation;
@@ -128,39 +208,42 @@ Phase B is not complete until the above items are verified.
 - [ ] stable `/feeds/kaspi.xml` endpoint;
 - [ ] retention and storage thresholds.
 
-### Phase C production infrastructure gate
+## Phase G — Production worker activation
 
-The Lease Engine and adapters may be developed and tested on the current free Render plan. Continuous production monitoring may not be enabled until:
+Continuous production monitoring may not be enabled until:
 
-- [ ] an always-on paid Render worker or equivalent always-on host is provisioned;
+- [ ] an always-on paid Render worker or equivalent host is provisioned;
 - [ ] worker heartbeat monitoring is active;
-- [ ] source and outbox backlog alerts are active;
-- [ ] the production connection budget is rechecked for API plus worker processes.
+- [ ] source-health and queue/backlog alerts are active;
+- [ ] production connection budget is rechecked for API plus worker processes;
+- [ ] source-specific emergency stop is available;
+- [ ] runbook for captcha, block, migration and rollback incidents is documented.
 
-## Later phases
+## Phase H — Telegram operations interface
 
-### Phase D — Telegram operations interface
+Telegram is the first operational interface, but remains an authenticated API client with no database, monitoring or pricing logic.
 
-Telegram is the first operational interface but remains an API client.
+## Phase I — Web CRM
 
-### Phase E — Web CRM
+Dashboard, product cards, binding review, monitoring status, exception handling and audit views.
 
-Dashboard, product cards, binding review, monitoring status and error handling.
+## Phase J — Orders, purchasing and inventory
 
-### Phase F — Orders, purchasing and inventory
+Requires separate approved domain models. Order polling may reuse the scheduler and lease infrastructure, while business ownership remains inside the Orders module.
 
-Requires a separate domain model before implementation.
-
-### Phase G — Analytics and automation expansion
+## Phase K — Analytics and automation expansion
 
 Forecasting, supplier selection, purchasing recommendations and carefully scoped automatic actions.
 
 ## Working rules
 
-1. The Domain Model gate applies to new high-risk Phase C modules, not to Phase B fixes and stabilization.
-2. No phase is marked complete from a successful deployment alone.
-3. Every completed roadmap item requires code, migration where applicable, and automated tests.
-4. Roadmap changes are allowed when real implementation reveals a false assumption.
-5. A public deployment must fail closed when authentication configuration is missing.
-6. Once an Alembic migration has been applied in a shared or production environment, it is immutable; normal fixes require a new revision.
-7. Editing an applied migration is allowed only as a documented recovery action for an interrupted, unrecorded revision and must not change the intended final schema.
+1. PostgreSQL is the source of truth. XML, Telegram and Web CRM are outputs or clients.
+2. The Domain Model gate applies to new high-risk modules, not routine Phase B stabilization.
+3. No phase is marked complete from a successful deployment alone.
+4. Every completed roadmap item requires code, migration where applicable, and automated verification.
+5. Roadmap changes are allowed when implementation proves an assumption false.
+6. A public deployment must fail closed when authentication configuration is missing.
+7. Once an Alembic migration has been applied in a shared or production environment, it is immutable.
+8. Critical state transitions use explicit transaction ownership at the application-orchestrator level.
+9. Adapters classify external evidence; policy layers make platform-wide decisions.
+10. Browser automation cannot begin until the monitoring stabilization gate is green.
