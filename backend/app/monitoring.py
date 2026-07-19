@@ -141,10 +141,13 @@ class SupplierOfferObservation(Base):
 
 class SourceHealth(Base):
     __tablename__ = "source_health"
-    __table_args__ = (UniqueConstraint("supplier_id", name="uq_source_health_supplier"),)
+    __table_args__ = (
+        UniqueConstraint("supplier_id", "access_strategy", name="uq_source_health_supplier_strategy"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     supplier_id: Mapped[int] = mapped_column(ForeignKey("suppliers.id", ondelete="CASCADE"), index=True)
+    access_strategy: Mapped[str] = mapped_column(String(64), index=True)
     status: Mapped[str] = mapped_column(String(32), default=SourceHealthStatus.HEALTHY.value, server_default="healthy", index=True)
     consecutive_failures: Mapped[int] = mapped_column(Integer, default=0, server_default="0")
     blocked_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
