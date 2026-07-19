@@ -10,3 +10,5 @@ venv/
 .idea/
 .vscode/
 .DS_Store
+.browser-agent/
+tools/windows/browser_agent.env.ps1
