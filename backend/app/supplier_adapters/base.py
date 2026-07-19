@@ -3,9 +3,19 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 from typing import Any, Protocol
 
 from backend.app.monitoring import offer_fingerprint
+
+
+class AccessStrategy(StrEnum):
+    DIRECT_HTTP = "direct_http"
+    PUBLIC_API = "public_api"
+    BROWSER = "browser"
+    CACHED = "cached"
+    FIXTURE = "fixture"
+    REGISTRY = "registry"
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,7 +77,7 @@ class NormalizedOffer:
 
 class SupplierAdapter(Protocol):
     code: str
-    access_strategy: str
+    access_strategy: AccessStrategy | str
 
     async def fetch(self, request: AdapterRequest) -> NormalizedOffer:
         """Fetch one supplier card and return normalized business facts."""
