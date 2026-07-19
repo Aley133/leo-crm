@@ -38,6 +38,12 @@ class StubPool:
         self.closed = True
 
 
+class FakeBodyLocator:
+    async def inner_text(self, *, timeout: int) -> str:
+        assert timeout == 1000
+        return "  Проверка страницы   Ozon  "
+
+
 class FakePage:
     def __init__(self) -> None:
         self.url = "https://www.ozon.ru/product/final-1/"
@@ -53,6 +59,13 @@ class FakePage:
 
     async def content(self) -> str:
         return "<html>ok</html>"
+
+    async def title(self) -> str:
+        return "Ozon Test"
+
+    def locator(self, selector: str) -> FakeBodyLocator:
+        assert selector == "body"
+        return FakeBodyLocator()
 
     async def close(self) -> None:
         self.closed = True
@@ -108,10 +121,12 @@ async def _exercise_pool() -> tuple[object, object, object]:
     return first, second, browser
 
 
-def test_playwright_pool_uses_fresh_context_waits_and_always_closes_it() -> None:
+def test_playwright_pool_uses_fresh_context_waits_and_captures_diagnostics() -> None:
     first, second, browser = asyncio.run(_exercise_pool())
 
     assert first.content == "<html>ok</html>"
+    assert first.title == "Ozon Test"
+    assert first.body_text == "Проверка страницы Ozon"
     assert second.final_url.endswith("final-1/")
     assert len(browser.contexts) == 2
     assert browser.contexts[0] is not browser.contexts[1]
@@ -158,7 +173,7 @@ def test_ozon_browser_adapter_implements_existing_supplier_contract() -> None:
     )
 
     assert adapter.access_strategy == AccessStrategy.BROWSER
-    assert adapter.code == "ozon-browser-v3"
+    assert adapter.code == "ozon-browser-v4"
     assert offer.supplier_product_id == 17
     assert offer.price == Decimal("3734")
     assert offer.available is True
@@ -215,24 +230,31 @@ def test_ozon_browser_adapter_extracts_meta_price_fallback() -> None:
     assert offer.raw_metadata["source"] == "browser_meta"
 
 
-def test_ozon_browser_adapter_parse_error_contains_safe_diagnostics() -> None:
+def test_ozon_browser_adapter_parse_error_contains_bounded_page_fingerprint() -> None:
     request = AdapterRequest(
         supplier_product_id=20,
         url="https://www.ozon.ru/product/example-20/",
         external_id="example-20",
     )
+    response = BrowserPageResult(
+        request.url,
+        '<html><head><link rel="canonical" href="https://www.ozon.ru/product/example-20/">'
+        '<meta name="robots" content="noindex"><script></script></head><body>empty</body></html>',
+        5,
+        title="Проверка браузера",
+        body_text="Пожалуйста, подождите — проверяем ваш браузер",
+    )
     with pytest.raises(AdapterParseError) as exc_info:
-        asyncio.run(
-            OzonBrowserAdapter(
-                StubPool(BrowserPageResult(request.url, "<html>empty</html>", 5))
-            ).fetch(request)
-        )
+        asyncio.run(OzonBrowserAdapter(StubPool(response)).fetch(request))
 
     message = str(exc_info.value)
     assert "final_url=https://www.ozon.ru/product/example-20/" in message
-    assert "html_bytes=" in message
-    assert "json_ld_scripts=0" in message
-    assert "json_scripts=0" in message
+    assert "title=Проверка браузера" in message
+    assert "body=Пожалуйста, подождите" in message
+    assert "scripts=1" in message
+    assert "meta=1" in message
+    assert "canonical=https://www.ozon.ru/product/example-20/" in message
+    assert "challenge=проверяем ваш браузер" in message
     assert "sha256=" in message
     assert "<html>" not in message
 
@@ -264,8 +286,10 @@ def test_ozon_browser_adapter_classifies_runtime_and_page_failures() -> None:
                 StubPool(
                     BrowserPageResult(
                         final_url=request.url,
-                        content="<html>Подтвердите, что вы не робот</html>",
+                        content="<html></html>",
                         duration_ms=10,
+                        title="Проверка",
+                        body_text="Подтвердите, что вы не робот",
                     )
                 )
             ).fetch(request)
