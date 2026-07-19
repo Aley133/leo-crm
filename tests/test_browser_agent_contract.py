@@ -14,6 +14,7 @@ class FakeAdapter:
     async def fetch(self, request):
         assert request.supplier_product_id == 17
         assert request.url == "https://www.ozon.ru/product/example-17/"
+        assert request.external_id == "browser-agent-17"
         return NormalizedOffer(
             supplier_product_id=17,
             price=Decimal("3734"),
@@ -34,6 +35,7 @@ def test_browser_agent_routes_are_registered() -> None:
     assert "/api/browser-agent/claim" in paths
     assert "/api/browser-agent/jobs/{job_id}/complete" in paths
     assert "/api/browser-agent/jobs/{job_id}" in paths
+    assert "/api/monitor-targets/{target_id}/queue-browser-agent" in paths
 
 
 def test_local_agent_serializes_normalized_offer() -> None:
