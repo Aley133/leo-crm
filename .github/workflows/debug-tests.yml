@@ -1,0 +1,31 @@
+name: Debug pytest log
+
+on:
+  push:
+    branches:
+      - agent/c4-6-stabilization
+
+jobs:
+  pytest-debug:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONPATH: .
+      DATABASE_URL: sqlite+pysqlite:///:memory:
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements.txt
+      - name: Run tests and capture log
+        id: tests
+        continue-on-error: true
+        run: python -m pytest -q > pytest.log 2>&1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: pytest.log
+      - name: Fail when pytest failed
+        if: steps.tests.outcome == 'failure'
+        run: exit 1
