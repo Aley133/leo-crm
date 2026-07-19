@@ -16,6 +16,7 @@ from sqlalchemy import (
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
+from .db_types import UTCDateTime
 
 
 class ProductStatus(StrEnum):
@@ -128,7 +129,7 @@ class MarketplaceImportCheckpoint(Base):
     )
     stream_name: Mapped[str] = mapped_column(String(64))
     cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
-    watermark_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    watermark_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
