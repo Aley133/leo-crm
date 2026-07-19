@@ -8,6 +8,14 @@ from sqlalchemy.orm import Session
 from .monitoring import AttemptOutcome, SourceHealth, SourceHealthStatus
 
 
+def _same_timezone(value: datetime | None, reference: datetime) -> datetime | None:
+    if value is None:
+        return None
+    if value.tzinfo is None and reference.tzinfo is not None:
+        return value.replace(tzinfo=reference.tzinfo)
+    return value
+
+
 def _locked_health(session: Session, supplier_id: int) -> SourceHealth:
     health = session.scalar(
         select(SourceHealth)
@@ -30,9 +38,12 @@ def source_blocked_until(
     health = session.scalar(
         select(SourceHealth).where(SourceHealth.supplier_id == supplier_id)
     )
-    if health is None or health.blocked_until is None or health.blocked_until <= now:
+    if health is None:
         return None
-    return health.blocked_until
+    blocked_until = _same_timezone(health.blocked_until, now)
+    if blocked_until is None or blocked_until <= now:
+        return None
+    return blocked_until
 
 
 def record_source_success(
@@ -65,6 +76,7 @@ def record_source_failure(
     health.last_failure_at = finished_at
     health.last_error_code = error_code
 
+    delay: timedelta | None
     if outcome is AttemptOutcome.RATE_LIMITED:
         health.status = SourceHealthStatus.RATE_LIMITED.value
         delay = timedelta(minutes=min(15 * (2 ** min(failures - 1, 3)), 120))
@@ -79,10 +91,16 @@ def record_source_failure(
         delay = timedelta(hours=24)
     else:
         health.status = SourceHealthStatus.DEGRADED.value
-        delay = timedelta(minutes=min(5 * (2 ** min(failures - 1, 4)), 60))
+        # One timeout or parser failure is target-local noise. Global source
+        # suppression starts only after three consecutive transient failures.
+        delay = None if failures < 3 else timedelta(
+            minutes=min(5 * (2 ** min(failures - 3, 4)), 60)
+        )
 
-    candidate = finished_at + delay
-    if health.blocked_until is None or candidate > health.blocked_until:
-        health.blocked_until = candidate
+    if delay is not None:
+        candidate = finished_at + delay
+        current = _same_timezone(health.blocked_until, finished_at)
+        if current is None or candidate > current:
+            health.blocked_until = candidate
     session.flush()
     return health
