@@ -40,11 +40,12 @@ def _post_json(url: str, token: str, payload: dict) -> dict:
 
 
 async def _run_job(job: dict, adapter: OzonBrowserAccessAdapter) -> dict:
+    supplier_product_id = int(job["supplier_product_id"])
     offer = await adapter.fetch(
         AdapterRequest(
-            supplier_product_id=int(job["supplier_product_id"]),
+            supplier_product_id=supplier_product_id,
             url=str(job["url"]),
-            external_id=None,
+            external_id=f"browser-agent-{supplier_product_id}",
         )
     )
     return {
