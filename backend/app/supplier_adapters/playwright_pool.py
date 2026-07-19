@@ -117,13 +117,20 @@ class PlaywrightBrowserPool:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         started = monotonic()
+        timeout_ms = int(timeout_seconds * 1000)
         try:
             async with self.isolated_page() as page:
                 await page.goto(
                     url,
                     wait_until="domcontentloaded",
-                    timeout=int(timeout_seconds * 1000),
+                    timeout=timeout_ms,
                 )
+                # Ozon renders commercial data after DOMContentLoaded. A bounded
+                # settle period is intentionally concrete to this browser fetch path;
+                # it does not reuse context state between independent checks.
+                remaining_ms = max(0, timeout_ms - int((monotonic() - started) * 1000))
+                if remaining_ms:
+                    await page.wait_for_timeout(min(2500, remaining_ms))
                 content = await page.content()
                 final_url = page.url
         except asyncio.TimeoutError as exc:
