@@ -10,6 +10,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
+from .browser_agent_dispatch import dispatch_due_browser_targets
 from .browser_agent_ingestion import BrowserAgentResultError, persist_browser_agent_success
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import get_db
@@ -27,6 +28,11 @@ class BrowserAgentClaim(BaseModel):
     lease_seconds: int = Field(default=120, ge=30, le=600)
 
 
+class BrowserAgentDispatch(BaseModel):
+    limit: int = Field(default=100, ge=1, le=1000)
+    supplier_code: str = Field(default="ozon", min_length=1, max_length=64)
+
+
 class BrowserAgentResult(BaseModel):
     lease_token: str = Field(min_length=16, max_length=128)
     status: str
@@ -40,6 +46,24 @@ router = APIRouter(
     tags=["browser-agent"],
     dependencies=[Depends(require_service_token)],
 )
+
+
+@router.post("/dispatch-due")
+def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_db)):
+    try:
+        result = dispatch_due_browser_targets(
+            db,
+            limit=payload.limit,
+            supplier_code=payload.supplier_code,
+        )
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    return {
+        "queued_count": result.queued_count,
+        "job_ids": list(result.queued_job_ids),
+    }
 
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
