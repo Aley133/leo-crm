@@ -89,6 +89,52 @@ def classify_adapter_exception(exc: Exception) -> tuple[AttemptOutcome, str, int
     return AttemptOutcome.INTERNAL_ERROR, "adapter_internal_error", None
 
 
+def _commit_failure(
+    session: Session,
+    *,
+    claim: LeaseClaim,
+    adapter_code: str,
+    access_strategy: str,
+    started_at: datetime,
+    finished_at: datetime,
+    outcome: AttemptOutcome,
+    error_code: str,
+    error_message: str,
+    http_status: int | None = None,
+) -> bool:
+    """Persist failure and reschedule in one transaction."""
+    try:
+        record_failed_attempt(
+            session,
+            monitor_target_id=claim.target_id,
+            lease_token=claim.lease_token,
+            adapter_code=adapter_code,
+            access_strategy=access_strategy,
+            started_at=started_at,
+            finished_at=finished_at,
+            outcome=outcome,
+            http_status=http_status,
+            error_code=error_code,
+            error_message=error_message,
+            commit=False,
+        )
+        completed = reschedule_failure(
+            session,
+            target_id=claim.target_id,
+            lease_token=claim.lease_token,
+            checked_at=finished_at,
+            commit=False,
+        )
+        if not completed:
+            session.rollback()
+            return False
+        session.commit()
+        return True
+    except Exception:
+        session.rollback()
+        raise
+
+
 async def process_claimed_target(
     claim: LeaseClaim,
     *,
@@ -116,10 +162,9 @@ async def process_claimed_target(
         error_message = f"No adapter registered for supplier {context.supplier_code}"
         try:
             with session_factory() as session:
-                record_failed_attempt(
+                completed = _commit_failure(
                     session,
-                    monitor_target_id=claim.target_id,
-                    lease_token=claim.lease_token,
+                    claim=claim,
                     adapter_code=context.supplier_code,
                     access_strategy="registry",
                     started_at=started_at,
@@ -128,16 +173,14 @@ async def process_claimed_target(
                     error_code=error_code,
                     error_message=error_message,
                 )
-            with session_factory() as session:
-                reschedule_failure(
-                    session,
-                    target_id=claim.target_id,
-                    lease_token=claim.lease_token,
-                    checked_at=now_factory(),
-                )
         except StaleLeaseError:
             return ScheduledTaskResult(claim.target_id, "stale", outcome, error=error_message)
-        return ScheduledTaskResult(claim.target_id, "failed", outcome, error=error_message)
+        return ScheduledTaskResult(
+            claim.target_id,
+            "failed" if completed else "stale",
+            outcome,
+            error=error_message,
+        )
 
     request = AdapterRequest(
         supplier_product_id=context.supplier_product_id,
@@ -149,26 +192,35 @@ async def process_claimed_target(
         offer = await adapter.fetch(request)
         finished_at = now_factory()
         with session_factory() as session:
-            observation = record_successful_observation(
-                session,
-                monitor_target_id=claim.target_id,
-                lease_token=claim.lease_token,
-                adapter_code=adapter.code,
-                access_strategy=adapter.access_strategy,
-                started_at=started_at,
-                finished_at=finished_at,
-                offer=offer,
-            )
-        with session_factory() as session:
-            completed = reschedule_success(
-                session,
-                target_id=claim.target_id,
-                lease_token=claim.lease_token,
-                checked_at=finished_at,
-            )
+            try:
+                observation = record_successful_observation(
+                    session,
+                    monitor_target_id=claim.target_id,
+                    lease_token=claim.lease_token,
+                    adapter_code=adapter.code,
+                    access_strategy=adapter.access_strategy,
+                    started_at=started_at,
+                    finished_at=finished_at,
+                    offer=offer,
+                    commit=False,
+                )
+                completed = reschedule_success(
+                    session,
+                    target_id=claim.target_id,
+                    lease_token=claim.lease_token,
+                    checked_at=finished_at,
+                    commit=False,
+                )
+                if not completed:
+                    session.rollback()
+                    return ScheduledTaskResult(claim.target_id, "stale", AttemptOutcome.SUCCESS)
+                session.commit()
+            except Exception:
+                session.rollback()
+                raise
         return ScheduledTaskResult(
             target_id=claim.target_id,
-            status="succeeded" if completed else "stale",
+            status="succeeded",
             outcome=AttemptOutcome.SUCCESS,
             changed=observation.changed,
         )
@@ -181,10 +233,9 @@ async def process_claimed_target(
         finished_at = now_factory()
         try:
             with session_factory() as session:
-                record_failed_attempt(
+                completed = _commit_failure(
                     session,
-                    monitor_target_id=claim.target_id,
-                    lease_token=claim.lease_token,
+                    claim=claim,
                     adapter_code=adapter.code,
                     access_strategy=adapter.access_strategy,
                     started_at=started_at,
@@ -193,13 +244,6 @@ async def process_claimed_target(
                     http_status=http_status,
                     error_code=error_code,
                     error_message=str(exc),
-                )
-            with session_factory() as session:
-                completed = reschedule_failure(
-                    session,
-                    target_id=claim.target_id,
-                    lease_token=claim.lease_token,
-                    checked_at=finished_at,
                 )
             return ScheduledTaskResult(
                 target_id=claim.target_id,
