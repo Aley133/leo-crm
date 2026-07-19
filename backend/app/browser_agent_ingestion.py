@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
@@ -82,12 +82,7 @@ def persist_browser_agent_success(
     payload: dict[str, Any],
     finished_at: datetime,
 ) -> tuple[int, bool]:
-    """Persist one successful local-browser result without committing.
-
-    Browser-agent work is asynchronous and does not own a scheduler lease. The
-    target and supplier product rows are locked directly, while the attempt keeps
-    a stable synthetic lease token for auditability.
-    """
+    """Persist one successful local-browser result without committing."""
     if job.monitor_target_id is None:
         raise BrowserAgentResultError("job is not linked to a monitor target")
 
@@ -198,6 +193,7 @@ def persist_browser_agent_success(
         )
 
     target.last_checked_at = finished_at
+    target.next_check_at = finished_at + timedelta(seconds=target.interval_seconds)
     target.consecutive_failures = 0
     apply_source_success(
         session,
