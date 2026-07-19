@@ -162,17 +162,18 @@ Access strategy and source health:
 - [x] adapter classifies one response and returns evidence; it never opens a breaker itself;
 - [x] breaker policy owns current hard-signal state transitions;
 - [x] explicit hard signals may open the appropriate strategy-scoped breaker immediately;
-- [x] open breaker is enforced before `adapter.fetch()` and defers the target until `blocked_until`;
+- [x] open breaker is enforced before `adapter.fetch()`;
+- [x] blocked targets resume with deterministic target-specific jitter after `blocked_until`;
 - [ ] parser-schema breaker requires a 15-minute window, at least 20 attempts, at least 10 distinct previously healthy targets and at least 40% classified failures;
 - [ ] breaker supports explicit `closed`, `open` and `half_open` states;
 - [x] per-target timeout/parse/not-found backoff remains separate from source-health state.
 
 C4 acceptance:
 
-- [x] all monitoring unit tests green for the latest implementation commit;
-- [x] all PostgreSQL concurrency tests green for the latest implementation commit;
+- [ ] all monitoring unit tests green for the latest jitter implementation commit;
+- [ ] all PostgreSQL concurrency tests green for the latest jitter implementation commit;
 - [x] migrations verified against PostgreSQL, including existing-data upgrade `20260719_0005 -> 20260719_0006`;
-- [x] CI green for the latest implementation commit;
+- [ ] CI green for the latest jitter implementation commit;
 - [x] architecture, monitoring contract, ORM and roadmap describe the same implemented invariants.
 
 Remaining Phase C requirements before Phase D:
