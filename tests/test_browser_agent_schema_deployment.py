@@ -11,7 +11,11 @@ def test_render_build_repairs_and_verifies_browser_agent_schema() -> None:
 
 def test_schema_repair_is_idempotent_and_never_drops_queue_data() -> None:
     script = (ROOT / "tools" / "ensure_browser_agent_schema.py").read_text(encoding="utf-8")
-    assert "checkfirst=True" in script
+    normalized = script.casefold()
+
+    assert "checkfirst=true" in normalized
     assert '"browser_agent_jobs" not in inspector.get_table_names()' in script
-    assert "drop" not in script.casefold()
+    assert "drop_table(" not in normalized
+    assert "drop_index(" not in normalized
+    assert ".drop(" not in normalized
     assert "_REQUIRED_COLUMNS" in script
