@@ -17,6 +17,7 @@ from .models import (
     MarketplaceOrder,
     OutboxEvent,
 )
+from .product_identity_service import ensure_marketplace_listing_for_order_line
 
 
 SessionFactory = Callable[[], Session]
@@ -42,9 +43,10 @@ def sync_kaspi_order_page(
     """Fetch one bounded page, then persist it in one business transaction.
 
     The external request happens with no SQLAlchemy session open. The page's raw
-    evidence, normalized orders, events, outbox records, execution result and
-    checkpoint are committed atomically. A failed persistence transaction cannot
-    advance the checkpoint or publish a downstream business event.
+    evidence, normalized orders, listing identities or resolution issues, events,
+    outbox records, execution result and checkpoint are committed atomically. A
+    failed persistence transaction cannot advance the checkpoint or publish a
+    downstream business event.
     """
 
     if limit < 1 or limit > 1000:
@@ -98,18 +100,27 @@ def sync_kaspi_order_page(
                     elif result.changed:
                         updated_count += 1
 
+                    order = session.get(MarketplaceOrder, result.order_id)
+                    if order is None:
+                        raise RuntimeError("Imported marketplace order disappeared")
+
+                    # Identity discovery is part of the same caller-owned import
+                    # transaction. Running it for unchanged orders also backfills
+                    # listings for orders imported before Product Identity Sprint 1.
+                    for order_line in order.lines:
+                        ensure_marketplace_listing_for_order_line(
+                            session,
+                            marketplace_account_id=marketplace_account_id,
+                            order_line=order_line,
+                        )
+
                     if result.created or result.changed:
-                        order = session.get(MarketplaceOrder, result.order_id)
-                        if order is None:
-                            raise RuntimeError("Imported marketplace order disappeared")
                         event_type = (
                             "marketplace.order.created"
                             if result.created
                             else "marketplace.order.updated"
                         )
-                        idempotency_key = (
-                            f"{event_type}:{order.id}:v{order.version}"
-                        )
+                        idempotency_key = f"{event_type}:{order.id}:v{order.version}"
                         existing_outbox = session.scalar(
                             select(OutboxEvent).where(
                                 OutboxEvent.idempotency_key == idempotency_key
