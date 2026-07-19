@@ -3,6 +3,7 @@ from enum import StrEnum
 from uuid import UUID, uuid4
 
 from sqlalchemy import (
+    JSON,
     CheckConstraint,
     DateTime,
     ForeignKey,
@@ -123,7 +124,7 @@ class PurchaseEvent(Base):
     event_type: Mapped[str] = mapped_column(String(64), index=True)
     previous_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
     current_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    metadata_json: Mapped[dict | None] = mapped_column(nullable=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now()
