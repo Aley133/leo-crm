@@ -94,21 +94,24 @@ async def _fake_launcher():
     return FakePlaywright(), FakeBrowser()
 
 
-def test_playwright_pool_uses_fresh_context_and_always_closes_it() -> None:
+async def _exercise_pool() -> tuple[object, object, object]:
     pool = PlaywrightBrowserPool(concurrency=1, launcher=_fake_launcher)
-
-    first = asyncio.run(pool.fetch_html("https://www.ozon.ru/product/1", timeout_seconds=5))
-    second = asyncio.run(pool.fetch_html("https://www.ozon.ru/product/2", timeout_seconds=5))
-
+    first = await pool.fetch_html("https://www.ozon.ru/product/1", timeout_seconds=5)
+    second = await pool.fetch_html("https://www.ozon.ru/product/2", timeout_seconds=5)
     browser = pool._browser
+    await pool.close()
+    return first, second, browser
+
+
+def test_playwright_pool_uses_fresh_context_and_always_closes_it() -> None:
+    first, second, browser = asyncio.run(_exercise_pool())
+
     assert first.content == "<html>ok</html>"
     assert second.final_url.endswith("final-1/")
     assert len(browser.contexts) == 2
     assert browser.contexts[0] is not browser.contexts[1]
     assert all(context.closed for context in browser.contexts)
     assert all(page.closed for page in browser.pages)
-
-    asyncio.run(pool.close())
     assert browser.closed is True
 
 
