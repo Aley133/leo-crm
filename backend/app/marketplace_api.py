@@ -10,6 +10,7 @@ from .kaspi_integration import (
     ensure_kaspi_marketplace_account,
     get_kaspi_integration_status,
 )
+from .marketplace_full_sync import sync_kaspi_orders
 from .marketplace_sync import sync_kaspi_order_page
 
 
@@ -30,17 +31,22 @@ def kaspi_status() -> dict[str, str | bool]:
     }
 
 
+def _bootstrap_live_import():
+    transport = build_kaspi_order_transport()
+    with SessionLocal() as session:
+        with session.begin():
+            account = ensure_kaspi_marketplace_account(session)
+            marketplace_account_id = account.id
+    return transport, marketplace_account_id
+
+
 @router.post("/orders/sync-page")
 def sync_order_page(
     limit: int = Query(default=10, ge=1, le=100),
 ) -> dict[str, str | int | None]:
     """Import one bounded live Kaspi page using deployment configuration."""
     try:
-        transport = build_kaspi_order_transport()
-        with SessionLocal() as session:
-            with session.begin():
-                account = ensure_kaspi_marketplace_account(session)
-                marketplace_account_id = account.id
+        transport, marketplace_account_id = _bootstrap_live_import()
     except KaspiConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -69,4 +75,45 @@ def sync_order_page(
         "imported_count": result.imported_count,
         "updated_count": result.updated_count,
         "next_cursor": result.next_cursor,
+    }
+
+
+@router.post("/orders/full-sync")
+def full_sync_orders(
+    page_size: int = Query(default=50, ge=1, le=100),
+    max_pages: int = Query(default=10, ge=1, le=100),
+) -> dict[str, str | int | bool | None]:
+    """Resume from checkpoint and process several pages with a safety cap."""
+    try:
+        transport, marketplace_account_id = _bootstrap_live_import()
+    except KaspiConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    try:
+        result = sync_kaspi_orders(
+            SessionLocal,
+            transport,
+            marketplace_account_id=marketplace_account_id,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
+    except KaspiTransportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    finally:
+        transport.close()
+
+    return {
+        "marketplace_account_id": marketplace_account_id,
+        "pages_processed": result.pages_processed,
+        "fetched_count": result.fetched_count,
+        "imported_count": result.imported_count,
+        "updated_count": result.updated_count,
+        "next_cursor": result.next_cursor,
+        "completed": result.completed,
     }
