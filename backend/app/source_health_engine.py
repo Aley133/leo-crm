@@ -39,7 +39,7 @@ def get_source_health(
     session: Session,
     *,
     supplier_id: int,
-    access_strategy: AccessStrategy | str,
+    access_strategy: AccessStrategy | str = AccessStrategy.DIRECT_HTTP,
     for_update: bool = False,
 ) -> SourceHealth | None:
     statement = select(SourceHealth).where(
@@ -76,10 +76,14 @@ def apply_source_success(
     session: Session,
     *,
     supplier_id: int,
-    access_strategy: AccessStrategy | str,
     occurred_at: datetime,
+    access_strategy: AccessStrategy | str = AccessStrategy.DIRECT_HTTP,
 ) -> SourceHealth:
-    """Apply a successful supplier result without committing."""
+    """Apply a successful supplier result without committing.
+
+    ``direct_http`` remains the compatibility default for older internal callers.
+    Runtime orchestration must pass the adapter strategy explicitly.
+    """
     health = _get_or_create_health(
         session,
         supplier_id=supplier_id,
@@ -98,16 +102,18 @@ def apply_source_failure(
     session: Session,
     *,
     supplier_id: int,
-    access_strategy: AccessStrategy | str,
     outcome: AttemptOutcome,
     error_code: str,
     occurred_at: datetime,
+    access_strategy: AccessStrategy | str = AccessStrategy.DIRECT_HTTP,
 ) -> SourceHealth:
     """Apply supplier evidence without committing.
 
     Infrastructure/persistence failures must never call this function. Hard
     signals open a bounded strategy-scoped breaker immediately. Ordinary
     failures degrade the strategy after three consecutive failed observations.
+    ``direct_http`` is retained only as a compatibility default; orchestrators
+    must provide the actual adapter strategy.
     """
     if outcome is AttemptOutcome.SUCCESS:
         raise ValueError("source failure cannot use success outcome")
