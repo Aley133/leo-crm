@@ -9,14 +9,15 @@ from .db import engine
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
+from .pricing_api import router as pricing_router
 from .product_identity_api import router as product_identity_router
 from .products import router as products_router
 from .purchase_api import router as purchase_router
 from .supplier_products_api import router as supplier_products_router
 from .suppliers import router as suppliers_router
 
-APP_VERSION = "0.11.2"
-DEPLOYMENT_MARKER = "continuous-browser-monitoring-v1"
+APP_VERSION = "0.12.0"
+DEPLOYMENT_MARKER = "auditable-pricing-recommendations-v1"
 
 app = FastAPI(
     title="LEO CRM API",
@@ -30,6 +31,7 @@ app.include_router(supplier_products_router)
 app.include_router(monitoring_router)
 app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
+app.include_router(pricing_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
 app.include_router(product_identity_router)
