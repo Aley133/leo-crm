@@ -17,6 +17,7 @@ from backend.app.models import (
     MarketplaceImportStatus,
     MarketplaceOrder,
     MarketplaceProvider,
+    OutboxEvent,
 )
 
 
@@ -93,7 +94,7 @@ def _payload(*, status: str = "NEW", order_id: str = "order-1") -> dict:
     }
 
 
-def test_sync_commits_orders_execution_and_checkpoint_together(session_factory) -> None:
+def test_sync_commits_orders_execution_checkpoint_and_outbox_together(session_factory) -> None:
     account_id = _account_id(session_factory)
     watermark = datetime(2026, 7, 19, 10, 5, tzinfo=UTC)
     transport = FakeTransport(
@@ -120,6 +121,7 @@ def test_sync_commits_orders_execution_and_checkpoint_together(session_factory) 
         order = session.scalar(select(MarketplaceOrder))
         checkpoint = session.scalar(select(MarketplaceImportCheckpoint))
         execution = session.get(MarketplaceImportExecution, result.execution_id)
+        outbox = session.scalar(select(OutboxEvent))
         assert order is not None
         assert checkpoint is not None
         assert checkpoint.cursor == "cursor-2"
@@ -127,9 +129,14 @@ def test_sync_commits_orders_execution_and_checkpoint_together(session_factory) 
         assert execution is not None
         assert execution.status == MarketplaceImportStatus.SUCCEEDED.value
         assert execution.imported_count == 1
+        assert outbox is not None
+        assert outbox.event_type == "marketplace.order.created"
+        assert outbox.aggregate_id == str(order.id)
+        assert outbox.payload_json["version"] == 1
+        assert outbox.published_at is None
 
 
-def test_failed_page_persistence_does_not_advance_checkpoint(session_factory) -> None:
+def test_failed_page_persistence_does_not_advance_checkpoint_or_emit_outbox(session_factory) -> None:
     account_id = _account_id(session_factory)
     old_watermark = datetime(2026, 7, 18, 10, 0, tzinfo=UTC)
     with session_factory() as session:
@@ -164,6 +171,7 @@ def test_failed_page_persistence_does_not_advance_checkpoint(session_factory) ->
     with session_factory() as session:
         checkpoint = session.scalar(select(MarketplaceImportCheckpoint))
         orders = session.scalars(select(MarketplaceOrder)).all()
+        outbox = session.scalars(select(OutboxEvent)).all()
         execution = session.scalar(
             select(MarketplaceImportExecution).order_by(MarketplaceImportExecution.started_at.desc())
         )
@@ -171,11 +179,12 @@ def test_failed_page_persistence_does_not_advance_checkpoint(session_factory) ->
         assert checkpoint.cursor == "cursor-old"
         assert checkpoint.watermark_at == old_watermark
         assert orders == []
+        assert outbox == []
         assert execution is not None
         assert execution.status == MarketplaceImportStatus.FAILED.value
 
 
-def test_second_page_uses_committed_checkpoint(session_factory) -> None:
+def test_second_page_uses_committed_checkpoint_and_emits_one_update_event(session_factory) -> None:
     account_id = _account_id(session_factory)
     first = FakeTransport(
         MarketplaceOrderPage(items=(_payload(),), next_cursor="cursor-2")
@@ -197,3 +206,23 @@ def test_second_page_uses_committed_checkpoint(session_factory) -> None:
     assert second.calls[0][0] == "cursor-2"
     assert result.imported_count == 0
     assert result.updated_count == 1
+
+    with session_factory() as session:
+        events = session.scalars(select(OutboxEvent).order_by(OutboxEvent.created_at)).all()
+        assert [event.event_type for event in events] == [
+            "marketplace.order.created",
+            "marketplace.order.updated",
+        ]
+        assert events[1].payload_json["status"] == "delivered"
+        assert events[1].payload_json["version"] == 2
+
+
+def test_repeating_unchanged_page_does_not_duplicate_outbox(session_factory) -> None:
+    account_id = _account_id(session_factory)
+    page = MarketplaceOrderPage(items=(_payload(),), next_cursor=None)
+    sync_kaspi_order_page(session_factory, FakeTransport(page), marketplace_account_id=account_id)
+    sync_kaspi_order_page(session_factory, FakeTransport(page), marketplace_account_id=account_id)
+
+    with session_factory() as session:
+        events = session.scalars(select(OutboxEvent)).all()
+        assert len(events) == 1
