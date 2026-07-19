@@ -7,21 +7,18 @@ from decimal import Decimal, InvalidOperation
 from typing import Any
 from urllib.parse import urlparse
 
-from backend.app.browser_runtime import (
-    BrowserFailureCode,
-    BrowserRequest,
-    BrowserRuntime,
-    BrowserRuntimeError,
-)
-
 from .base import AccessStrategy, AdapterRequest, NormalizedOffer
 from .errors import (
-    AdapterAuthRequiredError,
     AdapterBlockedError,
     AdapterCaptchaError,
     AdapterNetworkError,
     AdapterParseError,
     AdapterTimeoutError,
+)
+from .playwright_pool import (
+    PlaywrightBrowserPool,
+    PlaywrightNavigationTimeout,
+    PlaywrightPoolError,
 )
 
 _JSON_LD_RE = re.compile(
@@ -29,34 +26,50 @@ _JSON_LD_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _OZON_ROOT_DOMAINS = ("ozon.ru", "ozon.kz")
+_CAPTCHA_MARKERS = (
+    "captcha",
+    "подтвердите, что вы не робот",
+    "проверка безопасности",
+)
+_BLOCK_MARKERS = (
+    "access denied",
+    "доступ ограничен",
+    "request blocked",
+    "temporarily blocked",
+)
 
 
 class OzonBrowserAdapter:
-    code = "ozon-browser-v1"
+    code = "ozon-browser-v2"
     access_strategy = AccessStrategy.BROWSER
 
-    def __init__(self, runtime: BrowserRuntime, *, timeout_seconds: float = 30.0) -> None:
+    def __init__(
+        self,
+        pool: PlaywrightBrowserPool | None = None,
+        *,
+        timeout_seconds: float = 30.0,
+    ) -> None:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
-        self._runtime = runtime
+        self._pool = pool or PlaywrightBrowserPool()
         self._timeout_seconds = timeout_seconds
+
+    async def close(self) -> None:
+        await self._pool.close()
 
     async def fetch(self, request: AdapterRequest) -> NormalizedOffer:
         self._validate_url(request.url)
         try:
-            response = await self._runtime.execute(
-                BrowserRequest(
-                    url=request.url,
-                    operation="ozon.product.fetch",
-                    timeout_seconds=self._timeout_seconds,
-                    session_key="ozon",
-                    wait_for="domcontentloaded",
-                    metadata={"supplier_product_id": request.supplier_product_id},
-                )
+            response = await self._pool.fetch_html(
+                request.url,
+                timeout_seconds=self._timeout_seconds,
             )
-        except BrowserRuntimeError as exc:
-            raise self._map_runtime_error(exc) from exc
+        except PlaywrightNavigationTimeout as exc:
+            raise AdapterTimeoutError(str(exc)) from exc
+        except PlaywrightPoolError as exc:
+            raise AdapterNetworkError(str(exc)) from exc
 
+        self._classify_page(response.content)
         offer = self._extract_structured_offer(response.content)
         if offer is None:
             raise AdapterParseError(
@@ -71,14 +84,14 @@ class OzonBrowserAdapter:
             stock=None,
             delivery_days=None,
             seller=offer["seller"],
-            adapter_schema_version="ozon-browser-jsonld-v1",
-            observed_at=response.observed_at,
+            adapter_schema_version="ozon-browser-jsonld-v2",
+            observed_at=datetime.now(UTC),
             raw_metadata={
                 "source": "browser_json_ld",
                 "currency": offer["currency"],
                 "response_url": response.final_url,
-                "runtime_id": response.runtime_id,
                 "duration_ms": response.duration_ms,
+                "context_isolation": "fresh_per_check",
             },
         )
 
@@ -91,22 +104,12 @@ class OzonBrowserAdapter:
             raise ValueError("Ozon browser adapter accepts only ozon.ru or ozon.kz URLs")
 
     @staticmethod
-    def _map_runtime_error(exc: BrowserRuntimeError) -> Exception:
-        if exc.code == BrowserFailureCode.TIMEOUT:
-            return AdapterTimeoutError(str(exc))
-        if exc.code == BrowserFailureCode.CAPTCHA:
-            return AdapterCaptchaError(str(exc))
-        if exc.code == BrowserFailureCode.BLOCKED:
-            return AdapterBlockedError(str(exc))
-        if exc.code in {BrowserFailureCode.AUTH_REQUIRED, BrowserFailureCode.SESSION_EXPIRED}:
-            return AdapterAuthRequiredError(str(exc))
-        if exc.code in {
-            BrowserFailureCode.NAVIGATION_FAILED,
-            BrowserFailureCode.BROWSER_UNAVAILABLE,
-            BrowserFailureCode.UNEXPECTED,
-        }:
-            return AdapterNetworkError(str(exc))
-        return AdapterParseError(str(exc))
+    def _classify_page(content: str) -> None:
+        body = content.casefold()[:250_000]
+        if any(marker in body for marker in _CAPTCHA_MARKERS):
+            raise AdapterCaptchaError("Ozon returned a captcha page")
+        if any(marker in body for marker in _BLOCK_MARKERS):
+            raise AdapterBlockedError("Ozon blocked browser access")
 
     @classmethod
     def _extract_structured_offer(cls, content: str) -> dict[str, Any] | None:
