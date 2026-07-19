@@ -36,7 +36,7 @@ def queue_monitor_target_for_browser_agent(target_id: int, db: Session = Depends
     pending = db.scalar(
         select(BrowserAgentJob)
         .where(
-            BrowserAgentJob.supplier_product_id == supplier_product_id,
+            BrowserAgentJob.monitor_target_id == target_id,
             BrowserAgentJob.status.in_(
                 [BrowserAgentJobStatus.QUEUED.value, BrowserAgentJobStatus.LEASED.value]
             ),
@@ -48,6 +48,7 @@ def queue_monitor_target_for_browser_agent(target_id: int, db: Session = Depends
         return {"job_id": pending.id, "status": pending.status, "reused": True}
 
     job = BrowserAgentJob(
+        monitor_target_id=target_id,
         supplier_product_id=supplier_product_id,
         url=url,
         status=BrowserAgentJobStatus.QUEUED.value,
