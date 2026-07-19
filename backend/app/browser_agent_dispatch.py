@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from sqlalchemy import exists, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
@@ -20,6 +20,46 @@ class BrowserDispatchResult:
         return len(self.queued_job_ids)
 
 
+def build_due_browser_targets_statement(*, limit: int, supplier_code: str):
+    """Build the PostgreSQL-safe due-target claim statement.
+
+    MonitorTarget is the only scheduling source of truth. Existing queued or leased
+    browser jobs are excluded through a scalar subquery rather than a correlated
+    EXISTS expression, keeping the row-locking query predictable on PostgreSQL.
+    """
+    if limit < 1 or limit > 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    normalized_supplier = supplier_code.strip().casefold()
+    if not normalized_supplier:
+        raise ValueError("supplier_code must not be empty")
+
+    active_job_target_ids = (
+        select(BrowserAgentJob.monitor_target_id)
+        .where(
+            BrowserAgentJob.monitor_target_id.is_not(None),
+            BrowserAgentJob.status.in_(
+                (BrowserAgentJobStatus.QUEUED.value, BrowserAgentJobStatus.LEASED.value)
+            ),
+        )
+    )
+
+    return (
+        select(MonitorTarget, SupplierProduct.id, SupplierProduct.url)
+        .join(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
+        .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
+        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+        .where(
+            MonitorTarget.status == MonitorStatus.ACTIVE.value,
+            MonitorTarget.next_check_at <= utc_now(),
+            Supplier.code == normalized_supplier,
+            MonitorTarget.id.not_in(active_job_target_ids),
+        )
+        .order_by(MonitorTarget.next_check_at, MonitorTarget.id)
+        .with_for_update(of=MonitorTarget, skip_locked=True)
+        .limit(limit)
+    )
+
+
 def dispatch_due_browser_targets(
     session: Session,
     *,
@@ -28,41 +68,12 @@ def dispatch_due_browser_targets(
 ) -> BrowserDispatchResult:
     """Queue independently due monitor targets without committing.
 
-    MonitorTarget remains the scheduling source of truth. A target is eligible only
-    when it is active, its own next_check_at has arrived, and no queued/leased job
-    already exists for that exact target. Target rows are locked with SKIP LOCKED so
-    multiple dispatchers can run safely without producing duplicate work.
+    A target is eligible only when it is active, its own next_check_at has arrived,
+    and no queued or leased job exists for that exact target. Target rows are locked
+    with SKIP LOCKED so multiple dispatchers can run safely without duplicate work.
     """
-    if limit < 1 or limit > 1000:
-        raise ValueError("limit must be between 1 and 1000")
-    normalized_supplier = supplier_code.strip().casefold()
-    if not normalized_supplier:
-        raise ValueError("supplier_code must not be empty")
-
-    now = utc_now()
-    pending_for_target = exists(
-        select(BrowserAgentJob.id).where(
-            BrowserAgentJob.monitor_target_id == MonitorTarget.id,
-            BrowserAgentJob.status.in_(
-                (BrowserAgentJobStatus.QUEUED.value, BrowserAgentJobStatus.LEASED.value)
-            ),
-        )
-    )
-
     rows = session.execute(
-        select(MonitorTarget, SupplierProduct.id, SupplierProduct.url)
-        .join(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
-        .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
-        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
-        .where(
-            MonitorTarget.status == MonitorStatus.ACTIVE.value,
-            MonitorTarget.next_check_at <= now,
-            Supplier.code == normalized_supplier,
-            ~pending_for_target,
-        )
-        .order_by(MonitorTarget.next_check_at, MonitorTarget.id)
-        .with_for_update(of=MonitorTarget, skip_locked=True)
-        .limit(limit)
+        build_due_browser_targets_statement(limit=limit, supplier_code=supplier_code)
     ).all()
 
     jobs: list[BrowserAgentJob] = []
