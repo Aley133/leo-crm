@@ -31,6 +31,7 @@ class FakeAdapter:
 
 def test_browser_agent_routes_are_registered() -> None:
     paths = {route.path for route in app.routes}
+    assert "/api/browser-agent/dispatch-due" in paths
     assert "/api/browser-agent/jobs" in paths
     assert "/api/browser-agent/claim" in paths
     assert "/api/browser-agent/jobs/{job_id}/complete" in paths
