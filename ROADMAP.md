@@ -7,8 +7,8 @@ This roadmap is the single source of truth for delivery order and demonstrated p
 ```text
 Phase A — Foundation: verification pending
 Phase B — Product and supplier core: in progress
-Phase C — Monitoring stabilization: in progress
-Phase D — Browser access runtime: blocked by Phase C
+Phase C — Monitoring stabilization: core gate verified, remaining enhancements in progress
+Phase D — Browser access runtime: blocked by remaining Phase C requirements
 ```
 
 ## Phase A — Foundation
@@ -23,7 +23,7 @@ Completed:
 - `/health` endpoint;
 - Swagger documentation;
 - architecture v0.2 and Phase C addendum;
-- canonical monitoring contract;
+- canonical monitoring contract at `docs/MONITORING_CONTRACT.md`;
 - CI test workflow;
 - service-token protection for private `/api/*` endpoints;
 - explicit SQLAlchemy pool limits (`pool_size=2`, `max_overflow=1`) for PostgreSQL;
@@ -76,8 +76,8 @@ Phase C stabilizes the monitoring core before any browser automation is introduc
 - [x] SQLite CI compatibility for engine creation;
 - [x] migration immutability and recovery policy documented;
 - [ ] reusable test database fixture;
-- [ ] PostgreSQL migration upgrade/downgrade smoke test;
-- [ ] all C0 contract tests verified in green CI.
+- [x] PostgreSQL migration upgrade/downgrade smoke test;
+- [x] all current C0 contract tests verified in green CI.
 
 ### C1 — Lease and scheduler foundation
 
@@ -169,16 +169,23 @@ Access strategy and source health:
 
 C4 acceptance:
 
-- [ ] all monitoring unit tests green for the latest commit;
-- [ ] all PostgreSQL concurrency tests green for the latest commit;
-- [ ] migrations verified against PostgreSQL, including `20260719_0006`;
-- [ ] CI green for the latest commit;
-- [x] architecture, ORM and roadmap describe the implemented transaction and source-health scope invariants;
-- [ ] monitoring contract updated for enforced breaker and strategy scope.
+- [x] all monitoring unit tests green for the latest implementation commit;
+- [x] all PostgreSQL concurrency tests green for the latest implementation commit;
+- [x] migrations verified against PostgreSQL, including existing-data upgrade `20260719_0005 -> 20260719_0006`;
+- [x] CI green for the latest implementation commit;
+- [x] architecture, monitoring contract, ORM and roadmap describe the same implemented invariants.
+
+Remaining Phase C requirements before Phase D:
+
+- [ ] stale-worker audit-only attempt path;
+- [ ] stable execution/attempt UUID;
+- [ ] richer evidence and confidence model, including safe HTTP `403` handling;
+- [ ] statistical parser-schema breaker and half-open probes;
+- [ ] decide whether PostgreSQL `A -> B -> A` concurrency proof is required or the existing deterministic history test is sufficient.
 
 ## Phase D — Browser access runtime
 
-Blocked until C4 is complete.
+Blocked until the remaining Phase C requirements are explicitly completed or formally moved to a later production gate by an architecture decision.
 
 - [ ] separate worker process, never the web process;
 - [ ] browser profile lifecycle;
