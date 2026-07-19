@@ -6,7 +6,9 @@ from sqlalchemy.dialects import postgresql
 from sqlalchemy.orm import Session
 
 from backend.app.lease_engine import (
+    ClaimFailure,
     claim_due_targets,
+    claim_target,
     due_target_statement,
     leased_target_statement,
     release_target,
@@ -171,3 +173,100 @@ def test_failure_reschedule_uses_bounded_exponential_backoff(db_session: Session
     assert target.consecutive_failures == 1
     assert target.lease_token is None
     assert _without_tz(target.next_check_at) == _without_tz(completed_at + timedelta(seconds=600))
+
+
+def test_manual_claim_can_run_target_before_due_time(db_session: Session) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    target = _seed_target(db_session, next_check_at=now + timedelta(hours=1))
+
+    result = claim_target(
+        db_session,
+        target_id=target.id,
+        lease_owner="manual-api",
+        now=now,
+        require_due=False,
+    )
+
+    assert result.claimed is True
+    assert result.claim is not None
+    assert result.claim.target_id == target.id
+    assert result.claim.lease_owner == "manual-api"
+
+
+def test_scheduler_style_explicit_claim_rejects_not_due_target(db_session: Session) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    target = _seed_target(db_session, next_check_at=now + timedelta(hours=1))
+
+    result = claim_target(
+        db_session,
+        target_id=target.id,
+        lease_owner="worker-a",
+        now=now,
+        require_due=True,
+    )
+
+    assert result.claim is None
+    assert result.failure is ClaimFailure.NOT_DUE
+
+
+def test_explicit_claim_never_steals_active_lease(db_session: Session) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    target = _seed_target(db_session, next_check_at=now - timedelta(minutes=1))
+    first = claim_target(
+        db_session,
+        target_id=target.id,
+        lease_owner="worker-a",
+        now=now,
+        lease_seconds=120,
+    )
+
+    second = claim_target(
+        db_session,
+        target_id=target.id,
+        lease_owner="manual-api",
+        now=now + timedelta(seconds=1),
+    )
+
+    assert first.claim is not None
+    assert second.claim is None
+    assert second.failure is ClaimFailure.ALREADY_LEASED
+
+
+def test_explicit_claim_reclaims_expired_lease(db_session: Session) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    target = _seed_target(db_session, next_check_at=now - timedelta(minutes=1))
+    first = claim_target(
+        db_session,
+        target_id=target.id,
+        lease_owner="worker-a",
+        now=now,
+        lease_seconds=30,
+    )
+    second = claim_target(
+        db_session,
+        target_id=target.id,
+        lease_owner="manual-api",
+        now=now + timedelta(seconds=31),
+    )
+
+    assert first.claim is not None
+    assert second.claim is not None
+    assert second.claim.lease_token != first.claim.lease_token
+
+
+def test_explicit_claim_rejects_non_active_target(db_session: Session) -> None:
+    now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
+    target = _seed_target(db_session, next_check_at=now - timedelta(minutes=1))
+    target.status = MonitorStatus.PAUSED.value
+    db_session.commit()
+
+    result = claim_target(
+        db_session,
+        target_id=target.id,
+        lease_owner="manual-api",
+        now=now,
+    )
+
+    assert result.claim is None
+    assert result.failure is ClaimFailure.NOT_ACTIVE
+    assert result.target_status == MonitorStatus.PAUSED.value
