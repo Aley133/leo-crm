@@ -6,7 +6,7 @@ from decimal import Decimal
 from enum import StrEnum
 from typing import Any, Protocol
 
-from backend.app.monitoring import offer_fingerprint
+from backend.app.offer_contracts import offer_fingerprint
 
 
 class AccessStrategy(StrEnum):
