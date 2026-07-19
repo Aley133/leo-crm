@@ -17,4 +17,14 @@ jobs:
           python-version: "3.12"
           cache: pip
       - run: pip install -r requirements.txt
-      - run: python -m pytest -q
+      - name: Run pytest
+        id: pytest
+        continue-on-error: true
+        run: python -m pytest -q > pytest.log 2>&1
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pytest-log
+          path: pytest.log
+      - name: Fail when pytest failed
+        if: steps.pytest.outcome == 'failure'
+        run: exit 1
