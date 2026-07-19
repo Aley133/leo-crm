@@ -93,6 +93,15 @@ def classify_adapter_exception(exc: Exception) -> tuple[AttemptOutcome, str, int
     return AttemptOutcome.INTERNAL_ERROR, "adapter_internal_error", None
 
 
+def _comparable_datetimes(left: datetime, right: datetime) -> tuple[datetime, datetime]:
+    """Align SQLite's naive timestamps with timezone-aware production values."""
+    if left.tzinfo is None and right.tzinfo is not None:
+        left = left.replace(tzinfo=right.tzinfo)
+    elif right.tzinfo is None and left.tzinfo is not None:
+        right = right.replace(tzinfo=left.tzinfo)
+    return left, right
+
+
 def _defer_for_source_health(
     session: Session,
     *,
@@ -166,12 +175,13 @@ def _commit_failure(
             session.rollback()
             return False
         target = session.get(MonitorTarget, claim.target_id)
-        if (
-            target is not None
-            and health.blocked_until is not None
-            and target.next_check_at < health.blocked_until
-        ):
-            target.next_check_at = health.blocked_until
+        if target is not None and health.blocked_until is not None:
+            next_check_at, blocked_until = _comparable_datetimes(
+                target.next_check_at,
+                health.blocked_until,
+            )
+            if next_check_at < blocked_until:
+                target.next_check_at = health.blocked_until
         session.commit()
         return True
     except Exception:
