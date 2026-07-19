@@ -135,6 +135,39 @@ def _persist_failure_and_reschedule(
         raise StaleLeaseError(f"MonitorTarget {claim.target_id} lease changed before failure completion")
 
 
+def _commit_failure_result(
+    *,
+    session_factory: SessionFactory,
+    claim: LeaseClaim,
+    adapter_code: str,
+    access_strategy: str,
+    started_at: datetime,
+    finished_at: datetime,
+    outcome: AttemptOutcome,
+    error_code: str,
+    error_message: str,
+    http_status: int | None = None,
+) -> None:
+    with session_factory() as session:
+        try:
+            _persist_failure_and_reschedule(
+                session,
+                claim=claim,
+                adapter_code=adapter_code,
+                access_strategy=access_strategy,
+                started_at=started_at,
+                finished_at=finished_at,
+                outcome=outcome,
+                error_code=error_code,
+                error_message=error_message,
+                http_status=http_status,
+            )
+            session.commit()
+        except Exception:
+            session.rollback()
+            raise
+
+
 async def process_claimed_target(
     claim: LeaseClaim,
     *,
@@ -162,25 +195,26 @@ async def process_claimed_target(
         error_message = f"No adapter registered for supplier {context.supplier_code}"
         finished_at = now_factory()
         try:
-            with session_factory() as session:
-                try:
-                    _persist_failure_and_reschedule(
-                        session,
-                        claim=claim,
-                        adapter_code=context.supplier_code,
-                        access_strategy="registry",
-                        started_at=started_at,
-                        finished_at=finished_at,
-                        outcome=outcome,
-                        error_code=error_code,
-                        error_message=error_message,
-                    )
-                    session.commit()
-                except Exception:
-                    session.rollback()
-                    raise
+            _commit_failure_result(
+                session_factory=session_factory,
+                claim=claim,
+                adapter_code=context.supplier_code,
+                access_strategy="registry",
+                started_at=started_at,
+                finished_at=finished_at,
+                outcome=outcome,
+                error_code=error_code,
+                error_message=error_message,
+            )
         except StaleLeaseError:
             return ScheduledTaskResult(claim.target_id, "stale", outcome, error=error_message)
+        except Exception as exc:
+            return ScheduledTaskResult(
+                claim.target_id,
+                "persistence_error",
+                outcome,
+                error=str(exc),
+            )
         return ScheduledTaskResult(claim.target_id, "failed", outcome, error=error_message)
 
     request = AdapterRequest(
@@ -191,7 +225,42 @@ async def process_claimed_target(
 
     try:
         offer = await adapter.fetch(request)
+    except asyncio.CancelledError:
+        raise
+    except Exception as exc:
+        outcome, error_code, http_status = classify_adapter_exception(exc)
         finished_at = now_factory()
+        try:
+            _commit_failure_result(
+                session_factory=session_factory,
+                claim=claim,
+                adapter_code=adapter.code,
+                access_strategy=adapter.access_strategy,
+                started_at=started_at,
+                finished_at=finished_at,
+                outcome=outcome,
+                error_code=error_code,
+                error_message=str(exc),
+                http_status=http_status,
+            )
+        except StaleLeaseError:
+            return ScheduledTaskResult(claim.target_id, "stale", outcome, error=str(exc))
+        except Exception as persistence_exc:
+            return ScheduledTaskResult(
+                claim.target_id,
+                "persistence_error",
+                outcome,
+                error=str(persistence_exc),
+            )
+        return ScheduledTaskResult(
+            target_id=claim.target_id,
+            status="failed",
+            outcome=outcome,
+            error=str(exc),
+        )
+
+    finished_at = now_factory()
+    try:
         with session_factory() as session:
             try:
                 observation = persist_successful_observation(
@@ -218,46 +287,22 @@ async def process_claimed_target(
             except Exception:
                 session.rollback()
                 raise
-        return ScheduledTaskResult(
-            target_id=claim.target_id,
-            status="succeeded",
-            outcome=AttemptOutcome.SUCCESS,
-            changed=observation.changed,
-        )
     except StaleLeaseError:
         return ScheduledTaskResult(claim.target_id, "stale", None)
-    except asyncio.CancelledError:
-        raise
     except Exception as exc:
-        outcome, error_code, http_status = classify_adapter_exception(exc)
-        finished_at = now_factory()
-        try:
-            with session_factory() as session:
-                try:
-                    _persist_failure_and_reschedule(
-                        session,
-                        claim=claim,
-                        adapter_code=adapter.code,
-                        access_strategy=adapter.access_strategy,
-                        started_at=started_at,
-                        finished_at=finished_at,
-                        outcome=outcome,
-                        error_code=error_code,
-                        error_message=str(exc),
-                        http_status=http_status,
-                    )
-                    session.commit()
-                except Exception:
-                    session.rollback()
-                    raise
-            return ScheduledTaskResult(
-                target_id=claim.target_id,
-                status="failed",
-                outcome=outcome,
-                error=str(exc),
-            )
-        except StaleLeaseError:
-            return ScheduledTaskResult(claim.target_id, "stale", outcome, error=str(exc))
+        return ScheduledTaskResult(
+            target_id=claim.target_id,
+            status="persistence_error",
+            outcome=None,
+            error=str(exc),
+        )
+
+    return ScheduledTaskResult(
+        target_id=claim.target_id,
+        status="succeeded",
+        outcome=AttemptOutcome.SUCCESS,
+        changed=observation.changed,
+    )
 
 
 async def run_scheduler_tick(
