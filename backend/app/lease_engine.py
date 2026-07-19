@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from enum import StrEnum
 
 from sqlalchemy import Select, or_, select, update
 from sqlalchemy.orm import Session
@@ -19,12 +20,59 @@ class LeaseClaim:
     lease_until: datetime
 
 
+class ClaimFailure(StrEnum):
+    NOT_FOUND = "not_found"
+    NOT_ACTIVE = "not_active"
+    ALREADY_LEASED = "already_leased"
+    NOT_DUE = "not_due"
+    SHARD_MISMATCH = "shard_mismatch"
+
+
+@dataclass(frozen=True, slots=True)
+class ClaimTargetResult:
+    claim: LeaseClaim | None
+    failure: ClaimFailure | None = None
+    target_status: str | None = None
+
+    @property
+    def claimed(self) -> bool:
+        return self.claim is not None
+
+
 def utc_now() -> datetime:
     return datetime.now(UTC)
 
 
 def _new_lease_token() -> str:
     return secrets.token_urlsafe(32)
+
+
+def _validate_claim_arguments(*, lease_owner: str, lease_seconds: int) -> None:
+    if not lease_owner.strip():
+        raise ValueError("lease_owner must not be empty")
+    if lease_seconds < 1:
+        raise ValueError("lease_seconds must be at least 1")
+
+
+def _apply_claim(
+    target: MonitorTarget,
+    *,
+    lease_owner: str,
+    claimed_at: datetime,
+    lease_seconds: int,
+) -> LeaseClaim:
+    token = _new_lease_token()
+    lease_until = claimed_at + timedelta(seconds=lease_seconds)
+    target.lease_owner = lease_owner
+    target.lease_token = token
+    target.lease_until = lease_until
+    return LeaseClaim(
+        target_id=target.id,
+        product_binding_id=target.product_binding_id,
+        lease_owner=lease_owner,
+        lease_token=token,
+        lease_until=lease_until,
+    )
 
 
 def due_target_statement(
@@ -60,6 +108,69 @@ def leased_target_statement(*, target_id: int, lease_token: str) -> Select[tuple
     )
 
 
+def claim_target(
+    session: Session,
+    *,
+    target_id: int,
+    lease_owner: str,
+    lease_seconds: int = 120,
+    now: datetime | None = None,
+    require_due: bool = False,
+    shard: int | None = None,
+) -> ClaimTargetResult:
+    """Claim one explicit monitor target using the canonical lease rules.
+
+    The function owns and commits the short claim transaction. Manual run-now
+    sets ``require_due=False``; scheduler-oriented callers may require the target
+    to be due. A currently active lease is never stolen before expiry.
+    """
+    _validate_claim_arguments(lease_owner=lease_owner, lease_seconds=lease_seconds)
+    if target_id < 1:
+        raise ValueError("target_id must be positive")
+    if shard is not None and not 0 <= shard < 100:
+        raise ValueError("shard must be between 0 and 99")
+
+    claimed_at = now or utc_now()
+    try:
+        target = session.scalar(
+            select(MonitorTarget)
+            .where(MonitorTarget.id == target_id)
+            .with_for_update()
+        )
+        if target is None:
+            session.rollback()
+            return ClaimTargetResult(claim=None, failure=ClaimFailure.NOT_FOUND)
+        if target.status != MonitorStatus.ACTIVE.value:
+            status = target.status
+            session.rollback()
+            return ClaimTargetResult(
+                claim=None,
+                failure=ClaimFailure.NOT_ACTIVE,
+                target_status=status,
+            )
+        if shard is not None and target.shard != shard:
+            session.rollback()
+            return ClaimTargetResult(claim=None, failure=ClaimFailure.SHARD_MISMATCH)
+        if target.lease_until is not None and target.lease_until >= claimed_at:
+            session.rollback()
+            return ClaimTargetResult(claim=None, failure=ClaimFailure.ALREADY_LEASED)
+        if require_due and target.next_check_at > claimed_at:
+            session.rollback()
+            return ClaimTargetResult(claim=None, failure=ClaimFailure.NOT_DUE)
+
+        claim = _apply_claim(
+            target,
+            lease_owner=lease_owner,
+            claimed_at=claimed_at,
+            lease_seconds=lease_seconds,
+        )
+        session.commit()
+        return ClaimTargetResult(claim=claim)
+    except Exception:
+        session.rollback()
+        raise
+
+
 def claim_due_targets(
     session: Session,
     *,
@@ -69,37 +180,27 @@ def claim_due_targets(
     now: datetime | None = None,
     shard: int | None = None,
 ) -> list[LeaseClaim]:
-    """Atomically claim due targets and commit the short claim transaction."""
-    if not lease_owner.strip():
-        raise ValueError("lease_owner must not be empty")
+    """Atomically claim a due batch using the same canonical claim mutation."""
+    _validate_claim_arguments(lease_owner=lease_owner, lease_seconds=lease_seconds)
     if limit < 1:
         raise ValueError("limit must be at least 1")
-    if lease_seconds < 1:
-        raise ValueError("lease_seconds must be at least 1")
     if shard is not None and not 0 <= shard < 100:
         raise ValueError("shard must be between 0 and 99")
 
     claimed_at = now or utc_now()
-    lease_until = claimed_at + timedelta(seconds=lease_seconds)
     statement = due_target_statement(now=claimed_at, limit=limit, shard=shard)
 
     try:
         targets = list(session.scalars(statement).all())
-        claims: list[LeaseClaim] = []
-        for target in targets:
-            token = _new_lease_token()
-            target.lease_owner = lease_owner
-            target.lease_token = token
-            target.lease_until = lease_until
-            claims.append(
-                LeaseClaim(
-                    target_id=target.id,
-                    product_binding_id=target.product_binding_id,
-                    lease_owner=lease_owner,
-                    lease_token=token,
-                    lease_until=lease_until,
-                )
+        claims = [
+            _apply_claim(
+                target,
+                lease_owner=lease_owner,
+                claimed_at=claimed_at,
+                lease_seconds=lease_seconds,
             )
+            for target in targets
+        ]
         session.commit()
         return claims
     except Exception:
