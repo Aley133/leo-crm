@@ -12,6 +12,7 @@ from .db import SessionLocal
 from .lease_engine import LeaseClaim, claim_due_targets, reschedule_failure, reschedule_success, utc_now
 from .monitoring import AttemptOutcome, MonitorTarget
 from .observation_engine import StaleLeaseError, record_failed_attempt, record_successful_observation
+from .source_health_engine import record_source_failure, record_source_success, source_blocked_until
 from .supplier_adapters.base import AdapterRequest, SupplierAdapter
 from .supplier_adapters.errors import AdapterError
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -24,6 +25,7 @@ SessionFactory = Callable[[], Session]
 class MonitorTaskContext:
     monitor_target_id: int
     supplier_product_id: int
+    supplier_id: int
     supplier_code: str
     external_id: str
     url: str
@@ -57,6 +59,7 @@ def load_task_context(session: Session, target_id: int) -> MonitorTaskContext:
         select(
             MonitorTarget.id,
             SupplierProduct.id,
+            Supplier.id,
             Supplier.code,
             SupplierProduct.external_id,
             SupplierProduct.url,
@@ -71,9 +74,10 @@ def load_task_context(session: Session, target_id: int) -> MonitorTaskContext:
     return MonitorTaskContext(
         monitor_target_id=row[0],
         supplier_product_id=row[1],
-        supplier_code=row[2],
-        external_id=row[3],
-        url=row[4],
+        supplier_id=row[2],
+        supplier_code=row[3],
+        external_id=row[4],
+        url=row[5],
     )
 
 
@@ -89,10 +93,36 @@ def classify_adapter_exception(exc: Exception) -> tuple[AttemptOutcome, str, int
     return AttemptOutcome.INTERNAL_ERROR, "adapter_internal_error", None
 
 
+def _defer_for_source_health(
+    session: Session,
+    *,
+    claim: LeaseClaim,
+    blocked_until: datetime,
+) -> bool:
+    target = session.scalar(
+        select(MonitorTarget)
+        .where(
+            MonitorTarget.id == claim.target_id,
+            MonitorTarget.lease_token == claim.lease_token,
+        )
+        .with_for_update()
+    )
+    if target is None:
+        session.rollback()
+        return False
+    target.next_check_at = blocked_until
+    target.lease_owner = None
+    target.lease_token = None
+    target.lease_until = None
+    session.commit()
+    return True
+
+
 def _commit_failure(
     session: Session,
     *,
     claim: LeaseClaim,
+    supplier_id: int,
     adapter_code: str,
     access_strategy: str,
     started_at: datetime,
@@ -102,7 +132,7 @@ def _commit_failure(
     error_message: str,
     http_status: int | None = None,
 ) -> bool:
-    """Persist failure and reschedule in one transaction."""
+    """Persist attempt, SourceHealth, backoff, and lease release atomically."""
     try:
         record_failed_attempt(
             session,
@@ -118,6 +148,13 @@ def _commit_failure(
             error_message=error_message,
             commit=False,
         )
+        health = record_source_failure(
+            session,
+            supplier_id=supplier_id,
+            outcome=outcome,
+            error_code=error_code,
+            finished_at=finished_at,
+        )
         completed = reschedule_failure(
             session,
             target_id=claim.target_id,
@@ -128,6 +165,13 @@ def _commit_failure(
         if not completed:
             session.rollback()
             return False
+        target = session.get(MonitorTarget, claim.target_id)
+        if (
+            target is not None
+            and health.blocked_until is not None
+            and target.next_check_at < health.blocked_until
+        ):
+            target.next_check_at = health.blocked_until
         session.commit()
         return True
     except Exception:
@@ -153,9 +197,26 @@ async def process_claimed_target(
             error=str(exc),
         )
 
-    adapter = registry.get(context.supplier_code)
     started_at = now_factory()
+    with session_factory() as session:
+        blocked_until = source_blocked_until(
+            session,
+            supplier_id=context.supplier_id,
+            now=started_at,
+        )
+        if blocked_until is not None:
+            deferred = _defer_for_source_health(
+                session,
+                claim=claim,
+                blocked_until=blocked_until,
+            )
+            return ScheduledTaskResult(
+                claim.target_id,
+                "source_backoff" if deferred else "stale",
+                None,
+            )
 
+    adapter = registry.get(context.supplier_code)
     if adapter is None:
         outcome = AttemptOutcome.INTERNAL_ERROR
         error_code = "adapter_not_registered"
@@ -165,6 +226,7 @@ async def process_claimed_target(
                 completed = _commit_failure(
                     session,
                     claim=claim,
+                    supplier_id=context.supplier_id,
                     adapter_code=context.supplier_code,
                     access_strategy="registry",
                     started_at=started_at,
@@ -204,6 +266,11 @@ async def process_claimed_target(
                     offer=offer,
                     commit=False,
                 )
+                record_source_success(
+                    session,
+                    supplier_id=context.supplier_id,
+                    finished_at=finished_at,
+                )
                 completed = reschedule_success(
                     session,
                     target_id=claim.target_id,
@@ -236,6 +303,7 @@ async def process_claimed_target(
                 completed = _commit_failure(
                     session,
                     claim=claim,
+                    supplier_id=context.supplier_id,
                     adapter_code=adapter.code,
                     access_strategy=adapter.access_strategy,
                     started_at=started_at,
