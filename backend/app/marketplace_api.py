@@ -5,7 +5,11 @@ from fastapi import APIRouter, Depends, HTTPException, Query, status
 from .auth import require_service_token
 from .db import SessionLocal
 from .kaspi_http_transport import KaspiConfigurationError, KaspiTransportError
-from .kaspi_integration import build_kaspi_order_transport, get_kaspi_integration_status
+from .kaspi_integration import (
+    build_kaspi_order_transport,
+    ensure_kaspi_marketplace_account,
+    get_kaspi_integration_status,
+)
 from .marketplace_sync import sync_kaspi_order_page
 
 
@@ -28,11 +32,15 @@ def kaspi_status() -> dict[str, str | bool]:
 
 @router.post("/orders/sync-page")
 def sync_order_page(
-    marketplace_account_id: int = Query(gt=0),
-    limit: int = Query(default=50, ge=1, le=100),
+    limit: int = Query(default=10, ge=1, le=100),
 ) -> dict[str, str | int | None]:
+    """Import one bounded live Kaspi page using deployment configuration."""
     try:
         transport = build_kaspi_order_transport()
+        with SessionLocal() as session:
+            with session.begin():
+                account = ensure_kaspi_marketplace_account(session)
+                marketplace_account_id = account.id
     except KaspiConfigurationError as exc:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
@@ -55,6 +63,7 @@ def sync_order_page(
         transport.close()
 
     return {
+        "marketplace_account_id": marketplace_account_id,
         "execution_id": str(result.execution_id),
         "fetched_count": result.fetched_count,
         "imported_count": result.imported_count,
