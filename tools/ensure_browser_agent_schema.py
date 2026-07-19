@@ -1,52 +1,112 @@
 from __future__ import annotations
 
-"""Idempotently repair the browser-agent queue schema in an existing database.
+"""Idempotently repair browser-agent and pricing tables in an existing database.
 
-This command is a deployment safeguard for installations whose Alembic history was
-previously stamped without the browser_agent_jobs table. It never drops data and
-creates only the missing queue table/indexes represented by the current ORM model.
+This deployment safeguard covers installations whose Alembic history was stamped
+without the browser-agent queue or pricing-engine tables. It creates only missing
+ORM tables and indexes, verifies their required columns, and never removes data.
 """
 
 from sqlalchemy import inspect
 
-from backend.app import monitoring  # noqa: F401  # register monitor_targets metadata
+from backend.app import monitoring  # noqa: F401  # register monitoring metadata
+from backend.app import models  # noqa: F401  # register product metadata
 from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.db import engine
+from backend.app.pricing_models import FxRateSnapshot, PriceCalculation, PricingPolicy
 
 
-_REQUIRED_COLUMNS = {
-    "id",
-    "monitor_target_id",
-    "supplier_product_id",
-    "url",
-    "status",
-    "lease_owner",
-    "lease_token",
-    "lease_until",
-    "result_payload",
-    "error_code",
-    "error_message",
-    "created_at",
-    "updated_at",
-    "finished_at",
+_REQUIRED_COLUMNS: dict[str, set[str]] = {
+    "browser_agent_jobs": {
+        "id",
+        "monitor_target_id",
+        "supplier_product_id",
+        "url",
+        "status",
+        "lease_owner",
+        "lease_token",
+        "lease_until",
+        "result_payload",
+        "error_code",
+        "error_message",
+        "created_at",
+        "updated_at",
+        "finished_at",
+    },
+    "pricing_policies": {
+        "id",
+        "product_id",
+        "enabled",
+        "target_margin_pct",
+        "marketplace_fee_pct",
+        "payment_fee_pct",
+        "delivery_cost_kzt",
+        "fixed_cost_kzt",
+        "minimum_price_kzt",
+        "rounding_step_kzt",
+        "created_at",
+        "updated_at",
+    },
+    "fx_rate_snapshots": {
+        "id",
+        "base_currency",
+        "quote_currency",
+        "rate",
+        "source",
+        "observed_at",
+        "created_at",
+    },
+    "price_calculations": {
+        "id",
+        "product_id",
+        "pricing_policy_id",
+        "supplier_offer_state_id",
+        "fx_rate_snapshot_id",
+        "status",
+        "supplier_price",
+        "supplier_currency",
+        "fx_rate_to_kzt",
+        "supplier_cost_kzt",
+        "delivery_cost_kzt",
+        "fixed_cost_kzt",
+        "total_fee_pct",
+        "target_margin_pct",
+        "recommended_price_kzt",
+        "explanation_json",
+        "created_at",
+    },
 }
 
 
-def ensure_browser_agent_schema() -> None:
-    BrowserAgentJob.__table__.create(bind=engine, checkfirst=True)
-
+def _verify_required_columns() -> None:
     inspector = inspect(engine)
-    if "browser_agent_jobs" not in inspector.get_table_names():
-        raise RuntimeError("browser_agent_jobs was not created")
+    available_tables = set(inspector.get_table_names())
 
-    columns = {column["name"] for column in inspector.get_columns("browser_agent_jobs")}
-    missing = sorted(_REQUIRED_COLUMNS - columns)
-    if missing:
-        raise RuntimeError(
-            "browser_agent_jobs exists but is missing required columns: " + ", ".join(missing)
-        )
+    for table_name, required_columns in _REQUIRED_COLUMNS.items():
+        if table_name not in available_tables:
+            raise RuntimeError(f"{table_name} was not created")
 
-    print("browser_agent_jobs schema is ready")
+        columns = {
+            column["name"]
+            for column in inspector.get_columns(table_name)
+        }
+        missing = sorted(required_columns - columns)
+        if missing:
+            raise RuntimeError(
+                f"{table_name} exists but is missing required columns: "
+                + ", ".join(missing)
+            )
+
+
+def ensure_browser_agent_schema() -> None:
+    # Create in foreign-key dependency order. checkfirst keeps repeated deploys safe.
+    BrowserAgentJob.__table__.create(bind=engine, checkfirst=True)
+    PricingPolicy.__table__.create(bind=engine, checkfirst=True)
+    FxRateSnapshot.__table__.create(bind=engine, checkfirst=True)
+    PriceCalculation.__table__.create(bind=engine, checkfirst=True)
+
+    _verify_required_columns()
+    print("browser_agent_jobs and pricing engine schema are ready")
 
 
 if __name__ == "__main__":
