@@ -18,7 +18,7 @@ from .monitoring import (
     SupplierOfferState,
 )
 from .scheduler_engine import AdapterRegistry, ScheduledTaskResult, process_claimed_target
-from .supplier_adapters.ozon_http import OzonHttpAdapter
+from .supplier_adapters.ozon_browser import OzonBrowserAdapter
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
@@ -59,7 +59,14 @@ router = APIRouter(
 
 
 def _runtime_registry() -> AdapterRegistry:
-    return AdapterRegistry({"ozon": OzonHttpAdapter()})
+    return AdapterRegistry({"ozon": OzonBrowserAdapter()})
+
+
+async def _close_runtime_registry(registry: AdapterRegistry) -> None:
+    adapter = registry.get("ozon")
+    close = getattr(adapter, "close", None)
+    if close is not None:
+        await close()
 
 
 @router.post("", response_model=MonitorTargetRead, status_code=status.HTTP_201_CREATED)
@@ -135,10 +142,14 @@ def _claim_selected_target(db: Session, target_id: int, *, lease_seconds: int = 
 async def run_monitor_target_now(target_id: int, db: Session = Depends(get_db)):
     claim = _claim_selected_target(db, target_id)
     db.close()
-    result: ScheduledTaskResult = await process_claimed_target(
-        claim,
-        registry=_runtime_registry(),
-    )
+    registry = _runtime_registry()
+    try:
+        result: ScheduledTaskResult = await process_claimed_target(
+            claim,
+            registry=registry,
+        )
+    finally:
+        await _close_runtime_registry(registry)
     return ManualRunRead(
         target_id=result.target_id,
         status=result.status,
