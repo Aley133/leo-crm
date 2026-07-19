@@ -168,6 +168,70 @@ class PlaywrightBrowserPool:
         except Exception:
             return ""
 
+    @staticmethod
+    def _is_navigation_capture_error(exc: Exception) -> bool:
+        message = str(exc).casefold()
+        return any(
+            marker in message
+            for marker in (
+                "page is navigating",
+                "unable to retrieve content",
+                "execution context was destroyed",
+                "cannot find context with specified id",
+            )
+        )
+
+    async def _capture_stable_page(
+        self,
+        page: Any,
+        *,
+        started: float,
+        timeout_ms: int,
+    ) -> tuple[str, str, str, str]:
+        """Capture one coherent page snapshot despite late client-side redirects.
+
+        Ozon may start a second navigation after DOMContentLoaded. Playwright rejects
+        page.content() while that transition is active, so retry only that transient
+        class of error while staying inside the original navigation deadline.
+        """
+        last_error: Exception | None = None
+        for attempt in range(5):
+            remaining_ms = timeout_ms - int((monotonic() - started) * 1000)
+            if remaining_ms <= 0:
+                break
+            try:
+                await page.wait_for_load_state(
+                    "domcontentloaded",
+                    timeout=min(3000, remaining_ms),
+                )
+            except Exception as exc:
+                if exc.__class__.__name__ == "TimeoutError":
+                    last_error = exc
+                else:
+                    raise
+
+            remaining_ms = timeout_ms - int((monotonic() - started) * 1000)
+            if remaining_ms <= 0:
+                break
+            await page.wait_for_timeout(min(400 + attempt * 250, remaining_ms))
+
+            try:
+                content = await page.content()
+                final_url = page.url
+                title = await self._safe_title(page)
+                body_text = await self._safe_body_text(page)
+                return content, final_url, title, body_text
+            except Exception as exc:
+                if not self._is_navigation_capture_error(exc):
+                    raise
+                last_error = exc
+
+        if last_error is not None:
+            raise PlaywrightPoolError(
+                f"Page did not become stable before snapshot: {last_error}"
+            ) from last_error
+        raise PlaywrightNavigationTimeout("Browser page snapshot timed out")
+
     async def fetch_html(self, url: str, *, timeout_seconds: float) -> BrowserPageResult:
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
@@ -180,13 +244,11 @@ class PlaywrightBrowserPool:
                     wait_until="domcontentloaded",
                     timeout=timeout_ms,
                 )
-                remaining_ms = max(0, timeout_ms - int((monotonic() - started) * 1000))
-                if remaining_ms:
-                    await page.wait_for_timeout(min(2500, remaining_ms))
-                content = await page.content()
-                final_url = page.url
-                title = await self._safe_title(page)
-                body_text = await self._safe_body_text(page)
+                content, final_url, title, body_text = await self._capture_stable_page(
+                    page,
+                    started=started,
+                    timeout_ms=timeout_ms,
+                )
         except asyncio.TimeoutError as exc:
             raise PlaywrightNavigationTimeout("Browser navigation timed out") from exc
         except Exception as exc:
