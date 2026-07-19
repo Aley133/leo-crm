@@ -1,5 +1,3 @@
-import hashlib
-import json
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
@@ -8,6 +6,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, 
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .offer_contracts import offer_fingerprint
 
 
 class BindingStatus(StrEnum):
@@ -159,29 +158,3 @@ class SourceHealth(Base):
     last_failure_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(128), nullable=True)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
-
-
-def offer_fingerprint(
-    *,
-    supplier_product_id: int,
-    price: Decimal | None,
-    available: bool | None,
-    stock: int | None,
-    delivery_days: int | None,
-    seller: str | None,
-    adapter_schema_version: str,
-    currency: str | None = None,
-) -> str:
-    """Return a stable SHA-256 fingerprint from normalized business facts."""
-    payload = {
-        "supplier_product_id": supplier_product_id,
-        "price": format(price, "f") if price is not None else None,
-        "currency": currency.strip().upper() if currency else None,
-        "available": available,
-        "stock": stock,
-        "delivery_days": delivery_days,
-        "seller": " ".join((seller or "").split()).casefold() or None,
-        "adapter_schema_version": adapter_schema_version,
-    }
-    encoded = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    return hashlib.sha256(encoded.encode("utf-8")).hexdigest()
