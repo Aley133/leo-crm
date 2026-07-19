@@ -14,6 +14,8 @@ from .models import (
     MarketplaceImportCheckpoint,
     MarketplaceImportExecution,
     MarketplaceImportStatus,
+    MarketplaceOrder,
+    OutboxEvent,
 )
 
 
@@ -40,9 +42,9 @@ def sync_kaspi_order_page(
     """Fetch one bounded page, then persist it in one business transaction.
 
     The external request happens with no SQLAlchemy session open. The page's raw
-    evidence, normalized orders, events, execution result and checkpoint are
-    committed atomically. A failed persistence transaction cannot advance the
-    checkpoint.
+    evidence, normalized orders, events, outbox records, execution result and
+    checkpoint are committed atomically. A failed persistence transaction cannot
+    advance the checkpoint or publish a downstream business event.
     """
 
     if limit < 1 or limit > 1000:
@@ -95,6 +97,41 @@ def sync_kaspi_order_page(
                         imported_count += 1
                     elif result.changed:
                         updated_count += 1
+
+                    if result.created or result.changed:
+                        order = session.get(MarketplaceOrder, result.order_id)
+                        if order is None:
+                            raise RuntimeError("Imported marketplace order disappeared")
+                        event_type = (
+                            "marketplace.order.created"
+                            if result.created
+                            else "marketplace.order.updated"
+                        )
+                        idempotency_key = (
+                            f"{event_type}:{order.id}:v{order.version}"
+                        )
+                        existing_outbox = session.scalar(
+                            select(OutboxEvent).where(
+                                OutboxEvent.idempotency_key == idempotency_key
+                            )
+                        )
+                        if existing_outbox is None:
+                            session.add(
+                                OutboxEvent(
+                                    aggregate_type="marketplace_order",
+                                    aggregate_id=str(order.id),
+                                    event_type=event_type,
+                                    idempotency_key=idempotency_key,
+                                    payload_json={
+                                        "order_id": order.id,
+                                        "marketplace_account_id": order.marketplace_account_id,
+                                        "external_order_id": order.external_order_id,
+                                        "status": order.status,
+                                        "original_status": order.original_status,
+                                        "version": order.version,
+                                    },
+                                )
+                            )
 
                 checkpoint = session.scalar(
                     select(MarketplaceImportCheckpoint)
