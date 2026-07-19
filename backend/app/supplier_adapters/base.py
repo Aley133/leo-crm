@@ -45,6 +45,7 @@ class NormalizedOffer:
     adapter_schema_version: str
     observed_at: datetime
     raw_metadata: dict[str, Any] = field(default_factory=dict)
+    currency: str | None = None
 
     def __post_init__(self) -> None:
         if self.supplier_product_id < 1:
@@ -61,6 +62,11 @@ class NormalizedOffer:
             raise ValueError("adapter_schema_version must not be empty")
         if self.observed_at.tzinfo is None:
             raise ValueError("observed_at must be timezone-aware")
+        if self.currency is not None:
+            normalized = self.currency.strip().upper()
+            if len(normalized) != 3 or not normalized.isalpha():
+                raise ValueError("currency must be a three-letter ISO code or null")
+            object.__setattr__(self, "currency", normalized)
 
     @property
     def fingerprint(self) -> str:
@@ -72,6 +78,7 @@ class NormalizedOffer:
             delivery_days=self.delivery_days,
             seller=self.seller,
             adapter_schema_version=self.adapter_schema_version,
+            currency=self.currency,
         )
 
 
