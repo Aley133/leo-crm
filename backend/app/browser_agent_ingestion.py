@@ -37,6 +37,15 @@ def _decimal(value: Any, *, field: str) -> Decimal | None:
     return parsed
 
 
+def _currency(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    normalized = str(value).strip().upper()
+    if len(normalized) != 3 or not normalized.isalpha():
+        raise BrowserAgentResultError("currency must be a three-letter ISO code or null")
+    return normalized
+
+
 def normalized_offer_from_agent(job: BrowserAgentJob, payload: dict[str, Any]) -> NormalizedOffer:
     observed_raw = payload.get("observed_at")
     if not isinstance(observed_raw, str) or not observed_raw.strip():
@@ -72,6 +81,7 @@ def normalized_offer_from_agent(job: BrowserAgentJob, payload: dict[str, Any]) -
         adapter_schema_version=schema_version,
         observed_at=observed_at,
         raw_metadata=raw_metadata,
+        currency=_currency(payload.get("currency") or raw_metadata.get("currency")),
     )
 
 
@@ -117,7 +127,7 @@ def persist_browser_agent_success(
         monitor_target_id=target.id,
         lease_token=f"browser-agent:{job.id}",
         outcome=AttemptOutcome.SUCCESS.value,
-        adapter_code="ozon-browser-agent-v1",
+        adapter_code="ozon-browser-agent-v2",
         access_strategy=AccessStrategy.BROWSER.value,
         started_at=started_at,
         finished_at=finished_at,
@@ -140,6 +150,7 @@ def persist_browser_agent_success(
             supplier_product_id=supplier_product.id,
             price=offer.price,
             old_price=offer.old_price,
+            currency=offer.currency,
             available=offer.available,
             stock=offer.stock,
             delivery_days=offer.delivery_days,
@@ -155,6 +166,7 @@ def persist_browser_agent_success(
     elif changed:
         state.price = offer.price
         state.old_price = offer.old_price
+        state.currency = offer.currency
         state.available = offer.available
         state.stock = offer.stock
         state.delivery_days = offer.delivery_days
@@ -176,6 +188,7 @@ def persist_browser_agent_success(
                 monitor_attempt_id=attempt.id,
                 price=offer.price,
                 old_price=offer.old_price,
+                currency=offer.currency,
                 available=offer.available,
                 stock=offer.stock,
                 delivery_days=offer.delivery_days,
