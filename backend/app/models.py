@@ -153,6 +153,8 @@ class MarketplaceOrder(Base):
     status: Mapped[str] = mapped_column(
         String(32), default=MarketplaceOrderStatus.UNKNOWN.value, index=True
     )
+    original_status: Mapped[str] = mapped_column(String(128), default="unknown", index=True)
+    source_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
     currency: Mapped[str] = mapped_column(String(3), default="KZT")
     total_amount: Mapped[float] = mapped_column(Numeric(18, 2))
     ordered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), index=True)
