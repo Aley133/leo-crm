@@ -17,3 +17,10 @@ def test_local_browser_agent_import_does_not_require_database_url() -> None:
     )
     assert result.returncode == 0, result.stderr
     assert result.stdout.strip() == "ok"
+
+
+def test_monitoring_reexports_the_canonical_attempt_outcome() -> None:
+    from backend.app.attempt_contracts import AttemptOutcome as ContractAttemptOutcome
+    from backend.app.monitoring import AttemptOutcome as ModelAttemptOutcome
+
+    assert ModelAttemptOutcome is ContractAttemptOutcome
