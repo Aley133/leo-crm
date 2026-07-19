@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -24,6 +24,13 @@ def strategy_value(strategy: AccessStrategy | str) -> str:
     if not value:
         raise ValueError("access_strategy must not be empty")
     return value
+
+
+def _as_utc(value: datetime) -> datetime:
+    """Normalize database timestamps for consistent SQLite/PostgreSQL comparison."""
+    if value.tzinfo is None:
+        return value.replace(tzinfo=UTC)
+    return value.astimezone(UTC)
 
 
 def _lock_supplier(session: Session, supplier_id: int) -> Supplier:
@@ -143,4 +150,4 @@ def apply_source_failure(
 def source_is_blocked(health: SourceHealth | None, *, now: datetime) -> bool:
     if health is None or health.blocked_until is None:
         return False
-    return health.blocked_until > now
+    return _as_utc(health.blocked_until) > _as_utc(now)
