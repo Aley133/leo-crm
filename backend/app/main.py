@@ -4,6 +4,7 @@ from fastapi import FastAPI
 from sqlalchemy import text
 
 from .browser_agent_api import router as browser_agent_router
+from .browser_agent_monitoring_api import router as browser_agent_monitoring_router
 from .db import engine
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
@@ -28,6 +29,7 @@ app.include_router(suppliers_router)
 app.include_router(supplier_products_router)
 app.include_router(monitoring_router)
 app.include_router(browser_agent_router)
+app.include_router(browser_agent_monitoring_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
 app.include_router(product_identity_router)
