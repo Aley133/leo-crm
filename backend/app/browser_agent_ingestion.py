@@ -16,6 +16,7 @@ from .monitoring import (
     SupplierOfferObservation,
     SupplierOfferState,
 )
+from .pricing_service import calculate_product_price
 from .source_health_engine import apply_source_success
 from .supplier_adapters.base import AccessStrategy, NormalizedOffer
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -92,7 +93,12 @@ def persist_browser_agent_success(
     payload: dict[str, Any],
     finished_at: datetime,
 ) -> tuple[int, bool]:
-    """Persist one successful local-browser result without committing."""
+    """Persist one successful local-browser result without committing.
+
+    A changed supplier state creates its price recommendation in the same
+    transaction. Repeated checks with an identical fingerprint do not create
+    duplicate calculations.
+    """
     if job.monitor_target_id is None:
         raise BrowserAgentResultError("job is not linked to a monitor target")
 
@@ -105,7 +111,7 @@ def persist_browser_agent_success(
         raise BrowserAgentResultError("monitor target no longer exists")
 
     row = session.execute(
-        select(SupplierProduct, Supplier.id)
+        select(SupplierProduct, Supplier.id, ProductBinding.product_id)
         .join(ProductBinding, ProductBinding.supplier_product_id == SupplierProduct.id)
         .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
         .where(
@@ -116,7 +122,7 @@ def persist_browser_agent_success(
     ).one_or_none()
     if row is None:
         raise BrowserAgentResultError("job supplier product does not match monitor target")
-    supplier_product, supplier_id = row
+    supplier_product, supplier_id, product_id = row
 
     offer = normalized_offer_from_agent(job, payload)
     started_at = job.created_at
@@ -204,6 +210,8 @@ def persist_browser_agent_success(
                 observed_at=offer.observed_at,
             )
         )
+        session.flush()
+        calculate_product_price(session, product_id=product_id)
 
     target.last_checked_at = finished_at
     target.next_check_at = finished_at + timedelta(seconds=target.interval_seconds)
