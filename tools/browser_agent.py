@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import argparse
 import asyncio
 import json
 import os
@@ -62,6 +63,71 @@ async def _run_job(job: dict, adapter: OzonBrowserAccessAdapter) -> dict:
     }
 
 
+async def _complete_job(
+    *,
+    api_url: str,
+    token: str,
+    job: dict,
+    adapter: OzonBrowserAccessAdapter,
+) -> str:
+    print(f"Claimed browser job #{job['id']}: {job['url']}")
+    try:
+        result = await _run_job(job, adapter)
+        completion = {
+            "lease_token": job["lease_token"],
+            "status": "succeeded",
+            "payload": result,
+        }
+    except Exception as exc:
+        completion = {
+            "lease_token": job["lease_token"],
+            "status": "failed",
+            "error_code": exc.__class__.__name__,
+            "error_message": str(exc)[:4000],
+        }
+
+    response = await asyncio.to_thread(
+        _post_json,
+        f"{api_url}/api/browser-agent/jobs/{job['id']}/complete",
+        token,
+        completion,
+    )
+    print(f"Completed browser job #{job['id']}: {completion['status']}")
+    if completion["status"] == "succeeded":
+        print(json.dumps(completion["payload"], ensure_ascii=False, indent=2))
+    else:
+        print(completion["error_message"])
+    return str(response.get("status") or completion["status"])
+
+
+async def _claim_one(
+    *,
+    api_url: str,
+    token: str,
+    agent_id: str,
+    lease_seconds: int = 180,
+) -> dict | None:
+    claim = await asyncio.to_thread(
+        _post_json,
+        f"{api_url}/api/browser-agent/claim",
+        token,
+        {"agent_id": agent_id, "lease_seconds": lease_seconds},
+    )
+    return claim.get("job")
+
+
+async def _dispatch_once(*, api_url: str, token: str, dispatch_limit: int) -> int:
+    result = await asyncio.to_thread(
+        _post_json,
+        f"{api_url}/api/browser-agent/dispatch-due",
+        token,
+        {"limit": dispatch_limit, "supplier_code": "ozon"},
+    )
+    queued = int(result.get("queued_count") or 0)
+    print(f"Dispatcher queued {queued} due monitor targets")
+    return queued
+
+
 async def _dispatch_loop(
     *,
     api_url: str,
@@ -71,15 +137,11 @@ async def _dispatch_loop(
 ) -> None:
     while True:
         try:
-            result = await asyncio.to_thread(
-                _post_json,
-                f"{api_url}/api/browser-agent/dispatch-due",
-                token,
-                {"limit": dispatch_limit, "supplier_code": "ozon"},
+            await _dispatch_once(
+                api_url=api_url,
+                token=token,
+                dispatch_limit=dispatch_limit,
             )
-            queued = int(result.get("queued_count") or 0)
-            if queued:
-                print(f"Dispatcher queued {queued} due monitor targets")
         except Exception as exc:
             print(f"Dispatcher error: {exc}")
         await asyncio.sleep(poll_seconds)
@@ -97,51 +159,68 @@ async def _worker_loop(
     worker_id = f"{agent_id}-w{worker_number}"
     while True:
         try:
-            claim = await asyncio.to_thread(
-                _post_json,
-                f"{api_url}/api/browser-agent/claim",
-                token,
-                {"agent_id": worker_id, "lease_seconds": 180},
+            job = await _claim_one(
+                api_url=api_url,
+                token=token,
+                agent_id=worker_id,
             )
         except Exception as exc:
             print(f"Worker {worker_number} claim error: {exc}")
             await asyncio.sleep(poll_seconds)
             continue
 
-        job = claim.get("job")
         if not job:
             await asyncio.sleep(poll_seconds)
             continue
 
-        print(f"Worker {worker_number} claimed job #{job['id']}: {job['url']}")
         try:
-            result = await _run_job(job, adapter)
-            completion = {
-                "lease_token": job["lease_token"],
-                "status": "succeeded",
-                "payload": result,
-            }
-        except Exception as exc:
-            completion = {
-                "lease_token": job["lease_token"],
-                "status": "failed",
-                "error_code": exc.__class__.__name__,
-                "error_message": str(exc)[:4000],
-            }
-
-        try:
-            await asyncio.to_thread(
-                _post_json,
-                f"{api_url}/api/browser-agent/jobs/{job['id']}/complete",
-                token,
-                completion,
+            await _complete_job(
+                api_url=api_url,
+                token=token,
+                job=job,
+                adapter=adapter,
             )
-            print(f"Worker {worker_number} completed job #{job['id']}: {completion['status']}")
         except Exception as exc:
             print(f"Worker {worker_number} completion error for job #{job['id']}: {exc}")
 
 
-async def main() -> None:
+async def _run_once(
+    *,
+    api_url: str,
+    token: str,
+    agent_id: str,
+    adapter: OzonBrowserAccessAdapter,
+    dispatch_limit: int,
+) -> int:
+    await _dispatch_once(api_url=api_url, token=token, dispatch_limit=dispatch_limit)
+    job = await _claim_one(
+        api_url=api_url,
+        token=token,
+        agent_id=f"{agent_id}-once",
+    )
+    if not job:
+        print("No queued browser jobs. Queue one MonitorTarget in Swagger and run again.")
+        return 2
+    status = await _complete_job(
+        api_url=api_url,
+        token=token,
+        job=job,
+        adapter=adapter,
+    )
+    return 0 if status == "succeeded" else 1
+
+
+def _parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="LEO CRM local Chrome browser agent")
+    parser.add_argument(
+        "--once",
+        action="store_true",
+        help="dispatch and process exactly one job, then exit",
+    )
+    return parser.parse_args()
+
+
+async def main(*, once: bool = False) -> int:
     api_url = _required_env("CRM_API_URL").rstrip("/")
     token = _required_env("CRM_SERVICE_TOKEN")
     agent_id = (os.getenv("BROWSER_AGENT_ID") or "leo-local-chrome").strip()
@@ -151,14 +230,26 @@ async def main() -> None:
     dispatch_limit = max(1, min(1000, int(os.getenv("BROWSER_AGENT_DISPATCH_LIMIT") or "100")))
 
     pool = PlaywrightBrowserPool(
-        concurrency=concurrency,
+        concurrency=1 if once else concurrency,
         cdp_endpoint=cdp_endpoint,
         reuse_default_context=True,
     )
     adapter = OzonBrowserAccessAdapter(pool)
     print(f"Browser agent {agent_id} connected to CRM {api_url}")
     print(f"Chrome CDP endpoint: {cdp_endpoint}")
-    print(f"Parallel browser workers: {concurrency}")
+    print(f"Parallel browser workers: {1 if once else concurrency}")
+
+    if once:
+        try:
+            return await _run_once(
+                api_url=api_url,
+                token=token,
+                agent_id=agent_id,
+                adapter=adapter,
+                dispatch_limit=1,
+            )
+        finally:
+            await adapter.close()
 
     tasks = [
         asyncio.create_task(
@@ -193,11 +284,13 @@ async def main() -> None:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
         await adapter.close()
+    return 0
 
 
 if __name__ == "__main__":
     started = time.time()
+    args = _parse_args()
     try:
-        asyncio.run(main())
+        raise SystemExit(asyncio.run(main(once=args.once)))
     except KeyboardInterrupt:
         print(f"Browser agent stopped after {int(time.time() - started)} seconds")
