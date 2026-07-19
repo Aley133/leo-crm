@@ -8,7 +8,12 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from backend.app.models import Product
 from backend.app.monitoring import AttemptOutcome, MonitorAttempt, MonitorStatus, MonitorTarget, SourceHealth
-from backend.app.scheduler_engine import AdapterRegistry, run_scheduler_tick
+from backend.app.scheduler_engine import (
+    RECOVERY_JITTER_MAX_SECONDS,
+    AdapterRegistry,
+    recovery_jitter_seconds,
+    run_scheduler_tick,
+)
 from backend.app.source_health_engine import apply_source_failure
 from backend.app.supplier_adapters.base import AccessStrategy, AdapterRequest, NormalizedOffer
 from backend.app.suppliers import ProductBinding, Supplier, SupplierProduct
@@ -65,6 +70,17 @@ class CountingAdapter:
         raise AssertionError("blocked source must not reach adapter.fetch")
 
 
+def test_recovery_jitter_is_stable_bounded_and_distributed() -> None:
+    first = recovery_jitter_seconds(42)
+    assert first == recovery_jitter_seconds(42)
+    assert 1 <= first <= RECOVERY_JITTER_MAX_SECONDS
+
+    offsets = {recovery_jitter_seconds(target_id) for target_id in range(1, 201)}
+    assert len(offsets) >= 120
+    assert min(offsets) >= 1
+    assert max(offsets) <= RECOVERY_JITTER_MAX_SECONDS
+
+
 def test_open_breaker_skips_adapter_and_defers_target(db_session: Session) -> None:
     now = datetime(2026, 7, 19, 10, 0, tzinfo=UTC)
     target, supplier = _seed_target(db_session, now=now)
@@ -100,6 +116,9 @@ def test_open_breaker_skips_adapter_and_defers_target(db_session: Session) -> No
         assert refreshed is not None
         assert refreshed.lease_token is None
         assert refreshed.lease_owner is None
-        assert refreshed.next_check_at.replace(tzinfo=UTC) == blocked_until.replace(tzinfo=UTC)
+        expected_resume = blocked_until.replace(tzinfo=UTC) + timedelta(
+            seconds=recovery_jitter_seconds(target.id)
+        )
+        assert refreshed.next_check_at.replace(tzinfo=UTC) == expected_resume
         assert session.scalar(select(func.count()).select_from(MonitorAttempt)) == 0
         assert session.scalar(select(func.count()).select_from(SourceHealth)) == 1
