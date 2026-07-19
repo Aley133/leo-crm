@@ -16,6 +16,18 @@ A purchase request may reference a `MarketplaceOrder`, but it must never depend 
 
 Supplier recommendation is explicitly outside this phase. A supplier reference may be added later only after the recommendation contract is approved.
 
+## Current granularity decision
+
+The current implementation intentionally uses:
+
+```text
+1 MarketplaceOrder -> 1 PurchaseRequest
+```
+
+Each `PurchaseRequestLine` may reference at most one `MarketplaceOrderLine` through its direct nullable foreign key.
+
+This is a conscious first-release decision, not an accidental omission. Cross-order purchase aggregation and an allocation join table are postponed until a demonstrated business requirement justifies the additional schema and workflow complexity.
+
 ## Aggregate
 
 `PurchaseRequest` is the aggregate root.
@@ -66,6 +78,8 @@ Transitions are application-service decisions. Persistence helpers do not commit
 7. Receipt-line identity is scoped by `(purchase_receipt_id, purchase_request_line_id)`.
 8. Deleting an originating marketplace order is restricted while a purchase request references it.
 9. The application layer owns commit/rollback.
+10. `PurchaseRequestLine.product_id` is a historical snapshot captured when the line is created.
+11. Later binding, unbinding or rebinding of a `MarketplaceListing` never rewrites an existing purchase line's `product_id`.
 
 ## Transaction boundary
 
@@ -90,4 +104,5 @@ Phase E does not implement:
 - warehouse FIFO movements;
 - payment accounting;
 - automatic order creation at a supplier;
+- cross-order purchase aggregation;
 - dependence on Kaspi transport DTOs or raw payloads.
