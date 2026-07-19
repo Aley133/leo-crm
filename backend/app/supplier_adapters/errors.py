@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-from backend.app.monitoring import AttemptOutcome
+from backend.app.attempt_contracts import AttemptOutcome
 
 
 @dataclass(eq=False)
