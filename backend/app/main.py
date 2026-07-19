@@ -13,9 +13,12 @@ from .purchase_api import router as purchase_router
 from .supplier_products_api import router as supplier_products_router
 from .suppliers import router as suppliers_router
 
+APP_VERSION = "0.10.1"
+DEPLOYMENT_MARKER = "ozon-browser-v4-page-fingerprint"
+
 app = FastAPI(
     title="LEO CRM API",
-    version="0.10.0",
+    version=APP_VERSION,
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
 )
 
@@ -34,6 +37,8 @@ async def root() -> dict[str, str]:
     return {
         "service": "leo-crm",
         "status": "running",
+        "version": APP_VERSION,
+        "deployment_marker": DEPLOYMENT_MARKER,
         "docs": "/docs",
     }
 
@@ -46,5 +51,7 @@ async def health() -> dict[str, str]:
     return {
         "status": "ok",
         "database": "connected",
+        "version": APP_VERSION,
+        "deployment_marker": DEPLOYMENT_MARKER,
         "timestamp": datetime.now(UTC).isoformat(),
     }
