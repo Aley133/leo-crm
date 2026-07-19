@@ -6,6 +6,8 @@ import httpx
 import pytest
 
 from backend.app.kaspi_http_transport import (
+    DEFAULT_KASPI_API_BASE_URL,
+    DEFAULT_KASPI_API_TIMEOUT_SECONDS,
     KaspiAuthenticationError,
     KaspiConfigurationError,
     KaspiHttpSettings,
@@ -24,6 +26,18 @@ def test_environment_configuration_is_fail_closed(monkeypatch) -> None:
     monkeypatch.delenv("KASPI_API_TOKEN", raising=False)
     with pytest.raises(KaspiConfigurationError, match="KASPI_API_TOKEN"):
         KaspiHttpSettings.from_environment()
+
+
+def test_environment_configuration_uses_stable_defaults(monkeypatch) -> None:
+    monkeypatch.setenv("KASPI_API_TOKEN", "secret")
+    monkeypatch.delenv("KASPI_API_BASE_URL", raising=False)
+    monkeypatch.delenv("KASPI_API_TIMEOUT_SECONDS", raising=False)
+
+    settings = KaspiHttpSettings.from_environment()
+
+    assert settings.api_token == "secret"
+    assert settings.base_url == DEFAULT_KASPI_API_BASE_URL
+    assert settings.timeout_seconds == DEFAULT_KASPI_API_TIMEOUT_SECONDS
 
 
 def test_fetch_orders_builds_official_json_api_request_and_parses_page() -> None:
