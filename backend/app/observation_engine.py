@@ -38,7 +38,6 @@ def _lock_current_target(
     monitor_target_id: int,
     lease_token: str,
 ) -> MonitorTarget:
-    """Lock the target row and verify that the caller still owns its lease."""
     target = session.scalar(
         select(MonitorTarget)
         .where(
@@ -66,7 +65,6 @@ def _supplier_product_id_for_target(session: Session, target: MonitorTarget) -> 
 
 
 def _lock_supplier_product(session: Session, supplier_product_id: int) -> SupplierProduct:
-    """Lock the aggregate root so first-state creation is serialized."""
     supplier_product = session.scalar(
         select(SupplierProduct)
         .where(SupplierProduct.id == supplier_product_id)
@@ -143,6 +141,7 @@ def persist_successful_observation(
             supplier_product_id=supplier_product_id,
             price=offer.price,
             old_price=offer.old_price,
+            currency=offer.currency,
             available=offer.available,
             stock=offer.stock,
             delivery_days=offer.delivery_days,
@@ -158,6 +157,7 @@ def persist_successful_observation(
     elif changed:
         state.price = offer.price
         state.old_price = offer.old_price
+        state.currency = offer.currency
         state.available = offer.available
         state.stock = offer.stock
         state.delivery_days = offer.delivery_days
@@ -178,6 +178,7 @@ def persist_successful_observation(
             monitor_attempt_id=attempt.id,
             price=offer.price,
             old_price=offer.old_price,
+            currency=offer.currency,
             available=offer.available,
             stock=offer.stock,
             delivery_days=offer.delivery_days,
@@ -205,7 +206,6 @@ def record_successful_observation(
     session: Session,
     **kwargs: object,
 ) -> ObservationResult:
-    """Backward-compatible transaction-owning wrapper."""
     try:
         result = persist_successful_observation(session, **kwargs)
         session.commit()
@@ -262,7 +262,6 @@ def persist_failed_attempt(
 
 
 def record_failed_attempt(session: Session, **kwargs: object) -> int:
-    """Backward-compatible transaction-owning wrapper."""
     try:
         attempt_id = persist_failed_attempt(session, **kwargs)
         session.commit()
