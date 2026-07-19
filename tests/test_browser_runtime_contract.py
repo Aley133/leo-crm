@@ -292,6 +292,6 @@ def test_ozon_browser_adapter_classifies_runtime_and_page_failures() -> None:
                         title="Проверка",
                         body_text="Подтвердите, что вы не робот",
                     )
-                ).fetch(request)
-            )
+                )
+            ).fetch(request)
         )
