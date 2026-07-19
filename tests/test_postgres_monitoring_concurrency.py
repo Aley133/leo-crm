@@ -8,7 +8,7 @@ from decimal import Decimal
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
-from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.orm import sessionmaker
 
 from backend.app.db import Base
 from backend.app.lease_engine import claim_target, due_target_statement
@@ -139,9 +139,7 @@ def test_first_offer_state_creation_is_serialized_by_parent_lock(postgres_factor
     claim = result.claim
 
     first = postgres_factory()
-    second = postgres_factory()
     first.execute(text("SET LOCAL lock_timeout = '5s'"))
-    second.execute(text("SET LOCAL lock_timeout = '5s'"))
 
     try:
         first_result = persist_successful_observation(
@@ -161,22 +159,24 @@ def test_first_offer_state_creation_is_serialized_by_parent_lock(postgres_factor
         assert first_result.changed is True
 
         def persist_second():
-            result = persist_successful_observation(
-                second,
-                monitor_target_id=target_id,
-                lease_token=claim.lease_token,
-                adapter_code="pg-adapter-v1",
-                access_strategy="direct_http",
-                started_at=now + timedelta(seconds=2),
-                finished_at=now + timedelta(seconds=3),
-                offer=_offer(
-                    supplier_product_id,
-                    price="5000.00",
-                    observed_at=now + timedelta(seconds=3),
-                ),
-            )
-            second.commit()
-            return result
+            with postgres_factory() as second:
+                second.execute(text("SET LOCAL lock_timeout = '5s'"))
+                result = persist_successful_observation(
+                    second,
+                    monitor_target_id=target_id,
+                    lease_token=claim.lease_token,
+                    adapter_code="pg-adapter-v1",
+                    access_strategy="direct_http",
+                    started_at=now + timedelta(seconds=2),
+                    finished_at=now + timedelta(seconds=3),
+                    offer=_offer(
+                        supplier_product_id,
+                        price="5000.00",
+                        observed_at=now + timedelta(seconds=3),
+                    ),
+                )
+                second.commit()
+                return result
 
         with ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(persist_second)
@@ -193,9 +193,7 @@ def test_first_offer_state_creation_is_serialized_by_parent_lock(postgres_factor
             assert verification.scalar(select(func.count()).select_from(MonitorAttempt)) == 2
     finally:
         first.rollback()
-        second.rollback()
         first.close()
-        second.close()
 
 
 def test_reclaimed_lease_rejects_stale_observation_without_side_effects(postgres_factory) -> None:
