@@ -97,6 +97,7 @@ def test_list_orders_exposes_operational_summary_and_sku_search(monkeypatch) -> 
             offset=0,
             order_status="accepted",
             query="SKU-OMEGA",
+            include_lines=False,
         )
 
         assert response["total"] == 1
@@ -106,6 +107,32 @@ def test_list_orders_exposes_operational_summary_and_sku_search(monkeypatch) -> 
         assert item["total_amount"] == "15990.00"
         assert item["line_count"] == 2
         assert item["total_quantity"] == 3
+        assert item["hydrated"] is True
+        assert "lines" not in item
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_list_orders_can_expand_hydrated_lines(monkeypatch) -> None:
+    engine, factory = _factory()
+    try:
+        _seed(factory)
+        monkeypatch.setattr(marketplace_orders_api, "SessionLocal", factory)
+
+        response = marketplace_orders_api.list_marketplace_orders(
+            limit=50,
+            offset=0,
+            order_status=None,
+            query="996801988",
+            include_lines=True,
+        )
+
+        assert response["total"] == 1
+        assert [line["merchant_sku"] for line in response["items"][0]["lines"]] == [
+            "SKU-OMEGA",
+            "SKU-D3",
+        ]
     finally:
         Base.metadata.drop_all(engine)
         engine.dispose()
@@ -125,6 +152,24 @@ def test_order_detail_contains_lines_and_status_history(monkeypatch) -> None:
         ]
         assert response["events"][0]["previous_status"] == "new"
         assert response["events"][0]["current_status"] == "accepted"
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_order_can_be_opened_by_human_facing_kaspi_code(monkeypatch) -> None:
+    engine, factory = _factory()
+    try:
+        order_id = _seed(factory)
+        monkeypatch.setattr(marketplace_orders_api, "SessionLocal", factory)
+
+        response = marketplace_orders_api.get_marketplace_order_by_code("996801988")
+
+        assert response["id"] == order_id
+        assert response["external_code"] == "996801988"
+        assert response["hydrated"] is True
+        assert response["lines"][0]["title"] == "Omega 3"
+        assert response["lines"][0]["quantity"] == 2
     finally:
         Base.metadata.drop_all(engine)
         engine.dispose()
