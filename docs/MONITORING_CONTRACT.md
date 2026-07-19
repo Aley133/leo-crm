@@ -129,9 +129,24 @@ Before any `adapter.fetch()` call, orchestration must:
 1. resolve the adapter and its access strategy;
 2. load `SourceHealth` for `(supplier_id, access_strategy)`;
 3. check `blocked_until`;
-4. when blocked, skip external access, move `next_check_at` to `blocked_until`, release the lease and return `source_blocked`.
+4. when blocked, skip external access, release the lease and return `source_blocked`;
+5. set `next_check_at` to `blocked_until` plus a deterministic target-specific recovery offset.
 
 A blocked-source deferral must not create a `MonitorAttempt`, because no external attempt occurred.
+
+### Deterministic recovery scheduling
+
+Targets sharing one breaker must not all become due at the exact same instant. Recovery scheduling therefore adds a stable per-target offset in the range 1–180 seconds after `blocked_until`.
+
+The offset must:
+
+- be derived from `target_id`;
+- remain stable across retries and process restarts;
+- avoid runtime randomness and random seeds;
+- be bounded;
+- distribute sequential target ids across the recovery window.
+
+This staggered recovery prevents a thundering herd immediately after the breaker expires while preserving reproducible scheduling and tests.
 
 Per-target timeout/parse/not-found backoff remains separate from strategy-scoped SourceHealth.
 
@@ -164,6 +179,7 @@ The monitoring gate requires automated tests for:
 - repeated `A -> B -> A` history;
 - strategy-scoped SourceHealth;
 - breaker enforcement before network access;
+- deterministic, bounded and distributed recovery jitter;
 - migration chain linearity;
 - PostgreSQL migration of existing SourceHealth data from `0005` to `0006`.
 
