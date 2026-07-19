@@ -115,9 +115,6 @@ class SupplierOfferState(Base):
 
 class SupplierOfferObservation(Base):
     __tablename__ = "supplier_offer_observations"
-    __table_args__ = (
-        UniqueConstraint("supplier_product_id", "fingerprint", name="uq_supplier_observation_fingerprint"),
-    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     supplier_product_id: Mapped[int] = mapped_column(
