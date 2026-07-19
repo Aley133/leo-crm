@@ -22,7 +22,8 @@ from .observation_engine import (
     persist_failed_attempt,
     persist_successful_observation,
 )
-from .supplier_adapters.base import AdapterRequest, SupplierAdapter
+from .source_health_engine import apply_source_failure, apply_source_success
+from .supplier_adapters.base import AccessStrategy, AdapterRequest, SupplierAdapter
 from .supplier_adapters.errors import AdapterError
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
@@ -33,6 +34,7 @@ SessionFactory = Callable[[], Session]
 @dataclass(frozen=True, slots=True)
 class MonitorTaskContext:
     monitor_target_id: int
+    supplier_id: int
     supplier_product_id: int
     supplier_code: str
     external_id: str
@@ -62,10 +64,18 @@ class AdapterRegistry:
         return self._adapters.get(supplier_code.strip().lower())
 
 
+def _strategy_value(strategy: AccessStrategy | str) -> str:
+    value = strategy.value if isinstance(strategy, AccessStrategy) else strategy
+    if not value.strip():
+        raise ValueError("access_strategy must not be empty")
+    return value
+
+
 def load_task_context(session: Session, target_id: int) -> MonitorTaskContext:
     row = session.execute(
         select(
             MonitorTarget.id,
+            Supplier.id,
             SupplierProduct.id,
             Supplier.code,
             SupplierProduct.external_id,
@@ -80,10 +90,11 @@ def load_task_context(session: Session, target_id: int) -> MonitorTaskContext:
         raise LookupError(f"MonitorTarget {target_id} context not found")
     return MonitorTaskContext(
         monitor_target_id=row[0],
-        supplier_product_id=row[1],
-        supplier_code=row[2],
-        external_id=row[3],
-        url=row[4],
+        supplier_id=row[1],
+        supplier_product_id=row[2],
+        supplier_code=row[3],
+        external_id=row[4],
+        url=row[5],
     )
 
 
@@ -104,12 +115,13 @@ def _persist_failure_and_reschedule(
     *,
     claim: LeaseClaim,
     adapter_code: str,
-    access_strategy: str,
+    access_strategy: AccessStrategy | str,
     started_at: datetime,
     finished_at: datetime,
     outcome: AttemptOutcome,
     error_code: str,
     error_message: str,
+    supplier_id: int | None = None,
     http_status: int | None = None,
 ) -> None:
     persist_failed_attempt(
@@ -117,7 +129,7 @@ def _persist_failure_and_reschedule(
         monitor_target_id=claim.target_id,
         lease_token=claim.lease_token,
         adapter_code=adapter_code,
-        access_strategy=access_strategy,
+        access_strategy=_strategy_value(access_strategy),
         started_at=started_at,
         finished_at=finished_at,
         outcome=outcome,
@@ -125,6 +137,14 @@ def _persist_failure_and_reschedule(
         error_code=error_code,
         error_message=error_message,
     )
+    if supplier_id is not None:
+        apply_source_failure(
+            session,
+            supplier_id=supplier_id,
+            outcome=outcome,
+            error_code=error_code,
+            occurred_at=finished_at,
+        )
     completed = apply_failure_reschedule(
         session,
         target_id=claim.target_id,
@@ -140,12 +160,13 @@ def _commit_failure_result(
     session_factory: SessionFactory,
     claim: LeaseClaim,
     adapter_code: str,
-    access_strategy: str,
+    access_strategy: AccessStrategy | str,
     started_at: datetime,
     finished_at: datetime,
     outcome: AttemptOutcome,
     error_code: str,
     error_message: str,
+    supplier_id: int | None = None,
     http_status: int | None = None,
 ) -> None:
     with session_factory() as session:
@@ -160,6 +181,7 @@ def _commit_failure_result(
                 outcome=outcome,
                 error_code=error_code,
                 error_message=error_message,
+                supplier_id=supplier_id,
                 http_status=http_status,
             )
             session.commit()
@@ -199,22 +221,18 @@ async def process_claimed_target(
                 session_factory=session_factory,
                 claim=claim,
                 adapter_code=context.supplier_code,
-                access_strategy="registry",
+                access_strategy=AccessStrategy.REGISTRY,
                 started_at=started_at,
                 finished_at=finished_at,
                 outcome=outcome,
                 error_code=error_code,
                 error_message=error_message,
+                supplier_id=None,
             )
         except StaleLeaseError:
             return ScheduledTaskResult(claim.target_id, "stale", outcome, error=error_message)
         except Exception as exc:
-            return ScheduledTaskResult(
-                claim.target_id,
-                "persistence_error",
-                outcome,
-                error=str(exc),
-            )
+            return ScheduledTaskResult(claim.target_id, "persistence_error", outcome, error=str(exc))
         return ScheduledTaskResult(claim.target_id, "failed", outcome, error=error_message)
 
     request = AdapterRequest(
@@ -241,17 +259,13 @@ async def process_claimed_target(
                 outcome=outcome,
                 error_code=error_code,
                 error_message=str(exc),
+                supplier_id=context.supplier_id,
                 http_status=http_status,
             )
         except StaleLeaseError:
             return ScheduledTaskResult(claim.target_id, "stale", outcome, error=str(exc))
         except Exception as persistence_exc:
-            return ScheduledTaskResult(
-                claim.target_id,
-                "persistence_error",
-                outcome,
-                error=str(persistence_exc),
-            )
+            return ScheduledTaskResult(claim.target_id, "persistence_error", outcome, error=str(persistence_exc))
         return ScheduledTaskResult(
             target_id=claim.target_id,
             status="failed",
@@ -268,10 +282,15 @@ async def process_claimed_target(
                     monitor_target_id=claim.target_id,
                     lease_token=claim.lease_token,
                     adapter_code=adapter.code,
-                    access_strategy=adapter.access_strategy,
+                    access_strategy=_strategy_value(adapter.access_strategy),
                     started_at=started_at,
                     finished_at=finished_at,
                     offer=offer,
+                )
+                apply_source_success(
+                    session,
+                    supplier_id=context.supplier_id,
+                    occurred_at=finished_at,
                 )
                 completed = apply_success_reschedule(
                     session,
