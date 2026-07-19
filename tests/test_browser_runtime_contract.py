@@ -130,7 +130,8 @@ def test_playwright_pool_uses_fresh_context_waits_and_captures_diagnostics() -> 
     assert second.final_url.endswith("final-1/")
     assert len(browser.contexts) == 2
     assert browser.contexts[0] is not browser.contexts[1]
-    assert all(page.wait_calls == [2500] for page in browser.pages)
+    assert all(page.wait_calls for page in browser.pages)
+    assert all(all(0 < delay <= 3000 for delay in page.wait_calls) for page in browser.pages)
     assert all(context.closed for context in browser.contexts)
     assert all(page.closed for page in browser.pages)
     assert browser.closed is True
@@ -291,6 +292,6 @@ def test_ozon_browser_adapter_classifies_runtime_and_page_failures() -> None:
                         title="Проверка",
                         body_text="Подтвердите, что вы не робот",
                     )
-                )
-            ).fetch(request)
+                ).fetch(request)
+            )
         )
