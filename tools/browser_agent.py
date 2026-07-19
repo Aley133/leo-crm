@@ -51,6 +51,7 @@ async def _run_job(job: dict, adapter: OzonBrowserAccessAdapter) -> dict:
     return {
         "price": str(offer.price) if offer.price is not None else None,
         "old_price": str(offer.old_price) if offer.old_price is not None else None,
+        "currency": offer.currency,
         "available": offer.available,
         "stock": offer.stock,
         "delivery_days": offer.delivery_days,
