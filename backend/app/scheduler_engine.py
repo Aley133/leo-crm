@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import Callable, Mapping
@@ -74,14 +75,17 @@ class AdapterRegistry:
 def recovery_jitter_seconds(target_id: int, *, window_seconds: int = RECOVERY_JITTER_MAX_SECONDS) -> int:
     """Return a stable per-target recovery offset in the inclusive range 1..window.
 
-    The multiplicative mix distributes sequential database ids without using a
-    random-number generator, so recovery scheduling remains reproducible.
+    BLAKE2s provides deterministic avalanche mixing for sequential database ids
+    without any runtime RNG dependency. The same target therefore always receives
+    the same recovery offset while adjacent ids are distributed across the window.
     """
     if target_id < 1:
         raise ValueError("target_id must be positive")
     if window_seconds < 1:
         raise ValueError("window_seconds must be positive")
-    mixed = (target_id * 2_654_435_761) & 0xFFFFFFFF
+
+    digest = hashlib.blake2s(str(target_id).encode("ascii"), digest_size=4).digest()
+    mixed = int.from_bytes(digest, byteorder="big", signed=False)
     return 1 + (mixed % window_seconds)
 
 
