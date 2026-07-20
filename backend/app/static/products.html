@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LEO CRM — Товары Kaspi</title>
+  <title>LEO CRM — Product Center</title>
   <link rel="stylesheet" href="/static/dashboard.css">
   <link rel="stylesheet" href="/static/products.css">
 </head>
@@ -15,17 +15,17 @@
         <a href="/crm">Обзор</a>
         <a class="active" href="/crm/products">Товары</a>
         <a href="/crm/suppliers">Поставщики</a>
-        <a class="disabled" href="#" aria-disabled="true">Мониторинг</a>
+        <a href="/crm/monitoring">Мониторинг</a>
       </nav>
-      <div class="runtime-status"><span class="dot"></span><span>Control plane</span></div>
+      <div class="runtime-status"><span class="dot"></span><span>Product Center</span></div>
     </aside>
 
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">Каталог Kaspi</p>
+          <p class="eyebrow">Product Registry</p>
           <h1>Товары</h1>
-          <p class="subtitle">Одна строка — одна карточка Kaspi, независимо от количества поставщиков</p>
+          <p class="subtitle">Продажи, поставщики и мониторинг по каждой карточке Kaspi</p>
         </div>
         <button id="refresh" class="button secondary" type="button">Обновить</button>
       </header>
@@ -38,16 +38,27 @@
 
       <section id="products" class="products-page hidden" aria-busy="false">
         <form id="filters" class="filters">
-          <label><span>Поиск</span><input id="search" type="search" placeholder="Название, Kaspi ID, SKU или бренд"></label>
-          <label class="check"><input id="only-unbound" type="checkbox"><span>Только без поставщика</span></label>
-          <label class="check"><input id="only-failures" type="checkbox"><span>Только с ошибками</span></label>
+          <label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Название, Kaspi ID, SKU или бренд"></label>
+          <label><span>Статус</span><select id="status"><option value="">Все</option><option value="active">Активные</option><option value="draft">Черновики</option><option value="paused">Приостановленные</option><option value="archived">Архивные</option></select></label>
+          <label class="check"><input id="only-unbound" type="checkbox"><span>Без поставщика</span></label>
+          <label class="check"><input id="only-failures" type="checkbox"><span>С ошибками</span></label>
+          <label class="check"><input id="only-monitored" type="checkbox"><span>На мониторинге</span></label>
           <button class="button" type="submit">Применить</button>
           <button id="reset" class="button secondary" type="button">Сбросить</button>
         </form>
+
+        <section class="summary-grid" aria-label="Сводка товаров">
+          <article><span>Товаров</span><strong id="summary-products">0</strong></article>
+          <article><span>Продано единиц</span><strong id="summary-units">0</strong></article>
+          <article><span>Выручка</span><strong id="summary-revenue">0 ₸</strong></article>
+          <article><span>Без поставщика</span><strong id="summary-unbound">0</strong></article>
+          <article><span>С ошибками</span><strong id="summary-errors">0</strong></article>
+        </section>
+
         <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Kaspi-товар</th><th>Статус</th><th>Поставщиков</th><th>Лучший поставщик</th><th>Лучшая цена</th><th>Наличие</th><th>Мониторинг</th><th>Проверено</th></tr></thead>
+            <thead><tr><th>Kaspi-товар</th><th>Статус</th><th>Продажи</th><th>Выручка</th><th>Поставщики</th><th>Лучший поставщик</th><th>Лучшая цена</th><th>Мониторинг</th><th>Проверено</th></tr></thead>
             <tbody id="products-body"></tbody>
           </table>
         </div>
