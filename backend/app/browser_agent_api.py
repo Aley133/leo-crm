@@ -13,8 +13,8 @@ from .auth import require_service_token
 from .browser_agent_dispatch import dispatch_due_browser_targets
 from .browser_agent_failure import persist_browser_agent_failure
 from .browser_agent_ingestion import BrowserAgentResultError, persist_browser_agent_success
-from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
-from .browser_agent_presence import list_online_browser_agents, record_browser_agent_heartbeat
+from .browser_agent_models import BrowserAgent, BrowserAgentJob, BrowserAgentJobStatus
+from .browser_agent_presence import record_browser_agent_heartbeat
 from .db import get_db
 from .lease_engine import utc_now
 
@@ -28,6 +28,9 @@ class BrowserAgentJobCreate(BaseModel):
 class BrowserAgentClaim(BaseModel):
     agent_id: str = Field(min_length=1, max_length=128)
     lease_seconds: int = Field(default=120, ge=30, le=600)
+    hostname: str | None = Field(default=None, max_length=255)
+    platform: str | None = Field(default=None, max_length=128)
+    version: str | None = Field(default=None, max_length=32)
 
 
 class BrowserAgentDispatch(BaseModel):
@@ -39,6 +42,8 @@ class BrowserAgentHeartbeat(BaseModel):
     agent_id: str = Field(min_length=1, max_length=128)
     status: str = Field(default="idle", min_length=1, max_length=32)
     version: str | None = Field(default=None, max_length=32)
+    hostname: str | None = Field(default=None, max_length=255)
+    platform: str | None = Field(default=None, max_length=128)
     current_job_id: int | None = Field(default=None, gt=0)
 
 
@@ -57,53 +62,102 @@ router = APIRouter(
 )
 
 
+def _upsert_agent(
+    db: Session,
+    *,
+    agent_id: str,
+    status_value: str,
+    current_job_id: int | None = None,
+    hostname: str | None = None,
+    platform: str | None = None,
+    version: str | None = None,
+) -> BrowserAgent:
+    now = utc_now()
+    agent = db.scalar(select(BrowserAgent).where(BrowserAgent.agent_id == agent_id).with_for_update())
+    if agent is None:
+        agent = BrowserAgent(
+            agent_id=agent_id,
+            hostname=hostname,
+            platform=platform,
+            version=version,
+            status=status_value,
+            current_job_id=current_job_id,
+            last_seen_at=now,
+        )
+        db.add(agent)
+    else:
+        agent.status = status_value
+        agent.current_job_id = current_job_id
+        agent.last_seen_at = now
+        if hostname:
+            agent.hostname = hostname
+        if platform:
+            agent.platform = platform
+        if version:
+            agent.version = version
+    record_browser_agent_heartbeat(
+        agent_id=agent_id,
+        status=status_value,
+        version=version or agent.version,
+        current_job_id=current_job_id,
+    )
+    return agent
+
+
 @router.post("/heartbeat")
-def heartbeat_browser_agent(payload: BrowserAgentHeartbeat):
-    presence = record_browser_agent_heartbeat(
+def heartbeat_browser_agent(payload: BrowserAgentHeartbeat, db: Session = Depends(get_db)):
+    agent = _upsert_agent(
+        db,
         agent_id=payload.agent_id,
-        status=payload.status,
+        status_value=payload.status,
         version=payload.version,
+        hostname=payload.hostname,
+        platform=payload.platform,
         current_job_id=payload.current_job_id,
     )
+    db.commit()
+    db.refresh(agent)
     return {
-        "agent_id": presence.agent_id,
-        "status": presence.status,
-        "version": presence.version,
-        "current_job_id": presence.current_job_id,
-        "last_seen_at": presence.last_seen_at,
+        "agent_id": agent.agent_id,
+        "hostname": agent.hostname,
+        "platform": agent.platform,
+        "status": agent.status,
+        "version": agent.version,
+        "current_job_id": agent.current_job_id,
+        "last_seen_at": agent.last_seen_at,
     }
 
 
 @router.get("/agents")
-def list_browser_agents():
+def list_browser_agents(db: Session = Depends(get_db)):
+    cutoff = utc_now() - timedelta(seconds=30)
+    agents = db.scalars(select(BrowserAgent).order_by(BrowserAgent.agent_id)).all()
     return [
         {
             "agent_id": item.agent_id,
-            "status": item.status,
+            "hostname": item.hostname,
+            "platform": item.platform,
+            "status": item.status if item.last_seen_at >= cutoff else "offline",
             "version": item.version,
             "current_job_id": item.current_job_id,
             "last_seen_at": item.last_seen_at,
+            "leases_taken": item.leases_taken,
+            "leases_succeeded": item.leases_succeeded,
+            "leases_failed": item.leases_failed,
         }
-        for item in list_online_browser_agents()
+        for item in agents
     ]
 
 
 @router.post("/dispatch-due")
 def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_db)):
     try:
-        result = dispatch_due_browser_targets(
-            db,
-            limit=payload.limit,
-            supplier_code=payload.supplier_code,
-        )
+        result = dispatch_due_browser_targets(db, limit=payload.limit, supplier_code=payload.supplier_code)
         db.commit()
     except Exception:
         db.rollback()
         raise
-    return {
-        "queued_count": result.queued_count,
-        "job_ids": list(result.queued_job_ids),
-    }
+    return {"queued_count": result.queued_count, "job_ids": list(result.queued_job_ids)}
 
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
@@ -122,7 +176,14 @@ def create_browser_agent_job(payload: BrowserAgentJobCreate, db: Session = Depen
 
 @router.post("/claim")
 def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(get_db)):
-    record_browser_agent_heartbeat(agent_id=payload.agent_id, status="claiming")
+    agent = _upsert_agent(
+        db,
+        agent_id=payload.agent_id,
+        status_value="claiming",
+        hostname=payload.hostname,
+        platform=payload.platform,
+        version=payload.version,
+    )
     now = utc_now()
     job = db.scalar(
         select(BrowserAgentJob)
@@ -138,7 +199,10 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
         .limit(1)
     )
     if job is None:
-        record_browser_agent_heartbeat(agent_id=payload.agent_id, status="idle")
+        agent.status = "idle"
+        agent.current_job_id = None
+        db.commit()
+        record_browser_agent_heartbeat(agent_id=payload.agent_id, status="idle", version=agent.version)
         return {"job": None}
 
     token = secrets.token_hex(24)
@@ -146,10 +210,14 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
     job.lease_owner = payload.agent_id
     job.lease_token = token
     job.lease_until = now + timedelta(seconds=payload.lease_seconds)
+    agent.status = "running"
+    agent.current_job_id = job.id
+    agent.leases_taken += 1
     db.commit()
     record_browser_agent_heartbeat(
         agent_id=payload.agent_id,
         status="running",
+        version=agent.version,
         current_job_id=job.id,
     )
     return {
@@ -165,14 +233,8 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
 
 
 @router.post("/jobs/{job_id}/complete")
-def complete_browser_agent_job(
-    job_id: int,
-    payload: BrowserAgentResult,
-    db: Session = Depends(get_db),
-):
-    job = db.scalar(
-        select(BrowserAgentJob).where(BrowserAgentJob.id == job_id).with_for_update()
-    )
+def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Session = Depends(get_db)):
+    job = db.scalar(select(BrowserAgentJob).where(BrowserAgentJob.id == job_id).with_for_update())
     if job is None:
         raise HTTPException(status_code=404, detail="Browser agent job not found")
     if job.status != BrowserAgentJobStatus.LEASED.value or job.lease_token != payload.lease_token:
@@ -190,13 +252,11 @@ def complete_browser_agent_job(
 
     attempt_id: int | None = None
     changed: bool | None = None
+    agent_id = job.lease_owner
     try:
         if succeeded and job.monitor_target_id is not None:
             attempt_id, changed = persist_browser_agent_success(
-                db,
-                job=job,
-                payload=payload.payload or {},
-                finished_at=now,
+                db, job=job, payload=payload.payload or {}, finished_at=now
             )
         elif not succeeded:
             attempt_id = persist_browser_agent_failure(
@@ -216,10 +276,20 @@ def complete_browser_agent_job(
         job.error_code = payload.error_code
         job.error_message = payload.error_message
         job.finished_at = now
-        agent_id = job.lease_owner
         job.lease_owner = None
         job.lease_token = None
         job.lease_until = None
+
+        if agent_id:
+            agent = db.scalar(select(BrowserAgent).where(BrowserAgent.agent_id == agent_id).with_for_update())
+            if agent:
+                agent.status = "idle"
+                agent.current_job_id = None
+                agent.last_seen_at = now
+                if succeeded:
+                    agent.leases_succeeded += 1
+                else:
+                    agent.leases_failed += 1
         db.commit()
         if agent_id:
             record_browser_agent_heartbeat(agent_id=agent_id, status="idle")
