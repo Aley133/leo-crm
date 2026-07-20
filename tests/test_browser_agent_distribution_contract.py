@@ -9,6 +9,7 @@ def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     installer = (ROOT / "tools" / "windows" / "LEO-Browser-Agent.iss").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "browser-agent-release.yml").read_text(encoding="utf-8")
 
+    assert (ROOT / "tools" / "__init__.py").is_file()
     assert "SERVICE_API_TOKEN" in entrypoint
     assert "CRM_API_URL" in entrypoint
     assert "CHROME_CDP_ENDPOINT" in entrypoint
@@ -19,6 +20,9 @@ def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     assert "OutputDir=..\\..\\dist" in installer
     assert "LEO-Browser-Agent-Setup.exe" in workflow
     assert "pyinstaller" in workflow.lower()
+    assert "--paths ." in workflow
+    assert "--hidden-import tools.browser_agent" in workflow
+    assert "python -c \"import tools.browser_agent; import tools.browser_agent_desktop\"" in workflow
     assert "Inno Setup" in workflow
     assert "browser-agent-latest" in workflow
     assert "gh release upload" in workflow
