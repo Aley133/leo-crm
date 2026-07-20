@@ -55,7 +55,7 @@
         <section class="panel wide">
           <div class="panel-title"><h2>Сейчас выполняется</h2><span id="leased-label">Активные lease</span></div>
           <div id="leased-empty" class="agent-idle-card">
-            <div><span class="agent-state-dot"></span><strong>Browser Agent свободен</strong><p id="agent-idle-detail">Активных заданий нет.</p></div>
+            <div><span class="agent-state-dot"></span><strong>Проверяем Browser Agent…</strong><p id="agent-idle-detail">Ожидаем heartbeat от установленного агента.</p></div>
             <dl><div><dt>Очередь</dt><dd id="agent-queue-count">—</dd></div><div><dt>Последняя работа</dt><dd id="agent-last-work">—</dd></div><div><dt>Среднее время</dt><dd id="agent-average-time">—</dd></div></dl>
           </div>
           <div class="table-wrap"><table id="leased-table"><thead><tr><th>Job</th><th>Товар</th><th>Источник</th><th>Agent</th><th>Lease до</th><th>Выполняется</th></tr></thead><tbody id="leased-body"></tbody></table></div>
@@ -92,6 +92,7 @@
   </dialog>
   <script src="/static/monitoring-request-queue.js"></script>
   <script src="/static/monitoring.js" defer></script>
+  <script src="/static/browser-agent-presence.js" defer></script>
   <script src="/static/connection-status.js" defer></script>
 </body>
 </html>
