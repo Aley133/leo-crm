@@ -6,6 +6,7 @@ import ctypes
 import os
 import subprocess
 import sys
+import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
@@ -17,9 +18,12 @@ from tools.browser_agent import main as run_browser_agent
 
 API_URL = "https://leo-crm-api.onrender.com"
 CDP_ENDPOINT = "http://127.0.0.1:9222"
+APP_VERSION = "0.2.0"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
 TOKEN_FILE = APP_DIR / "agent-token.dat"
 LOG_FILE = APP_DIR / "agent.log"
+MUTEX_NAME = "Local\\LEO-CRM-Browser-Agent"
+_MUTEX_HANDLE = None
 
 
 class DATA_BLOB(ctypes.Structure):
@@ -151,7 +155,7 @@ def _start_browser() -> None:
             f"--user-data-dir={profile}",
             "--no-first-run",
             "--no-default-browser-check",
-            "https://www.ozon.ru/",
+            "https://www.ozon.kz/",
         ],
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
@@ -160,6 +164,29 @@ def _start_browser() -> None:
             return
         time.sleep(1)
     raise RuntimeError("Браузер запущен, но порт 9222 не отвечает")
+
+
+def _browser_watchdog() -> None:
+    while True:
+        try:
+            if not _cdp_ready():
+                print("Browser watchdog: CDP unavailable, restarting browser")
+                _start_browser()
+                print("Browser watchdog: CDP restored")
+        except Exception as exc:
+            print(f"Browser watchdog error: {exc!r}")
+        time.sleep(10)
+
+
+def _acquire_single_instance() -> None:
+    global _MUTEX_HANDLE
+    handle = ctypes.windll.kernel32.CreateMutexW(None, False, MUTEX_NAME)
+    if not handle:
+        raise ctypes.WinError()
+    if ctypes.windll.kernel32.GetLastError() == 183:
+        ctypes.windll.kernel32.CloseHandle(handle)
+        raise RuntimeError("LEO Browser Agent уже запущен")
+    _MUTEX_HANDLE = handle
 
 
 def _show_error(text: str) -> None:
@@ -174,15 +201,17 @@ def _redirect_output() -> None:
     stream = LOG_FILE.open("a", encoding="utf-8", buffering=1)
     sys.stdout = stream
     sys.stderr = stream
-    print(f"\n=== LEO Browser Agent start {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    print(f"\n=== LEO Browser Agent {APP_VERSION} start {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
 
 
 def main() -> int:
     try:
         _redirect_output()
+        _acquire_single_instance()
         token = _ask_token()
         _verify_crm(token)
         _start_browser()
+        threading.Thread(target=_browser_watchdog, name="browser-watchdog", daemon=True).start()
         os.environ["CRM_API_URL"] = API_URL
         os.environ["CRM_SERVICE_TOKEN"] = token
         os.environ["BROWSER_AGENT_ID"] = f"leo-windows-{os.environ.get('COMPUTERNAME', 'pc')}"
@@ -190,7 +219,7 @@ def main() -> int:
         os.environ["BROWSER_AGENT_POLL_SECONDS"] = "3"
         os.environ["BROWSER_AGENT_CONCURRENCY"] = "1"
         os.environ["BROWSER_AGENT_DISPATCH_LIMIT"] = "100"
-        os.environ["BROWSER_AGENT_VERSION"] = "0.1.1"
+        os.environ["BROWSER_AGENT_VERSION"] = APP_VERSION
         return asyncio.run(run_browser_agent())
     except KeyboardInterrupt:
         return 0
