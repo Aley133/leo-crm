@@ -83,6 +83,7 @@ def test_wildberries_adapter_ports_browser_verified_tgbad_strategy_without_leaki
     assert "_extract_visible_price" in source
     assert "_delivery_days_from_text" in source
     assert "wb_browser_verified" in source
+    assert "wb_card_api" not in source
     assert "https://card.wb.ru/cards/v2/detail" in source
     assert "https://card.wb.ru/cards/detail" in source
     assert '"123585444"' in source
