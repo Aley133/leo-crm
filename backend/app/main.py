@@ -9,6 +9,7 @@ from sqlalchemy.exc import SQLAlchemyError
 
 from .browser_agent_api import router as browser_agent_router
 from .browser_agent_monitoring_api import router as browser_agent_monitoring_router
+from .browser_agent_registry_api import router as browser_agent_registry_router
 from .catalog_api import router as catalog_router
 from .dashboard_api import router as dashboard_router
 from .db import engine
@@ -49,6 +50,7 @@ app.include_router(monitoring_router)
 app.include_router(monitoring_center_router)
 app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
+app.include_router(browser_agent_registry_router)
 app.include_router(pricing_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
@@ -96,7 +98,7 @@ async def ready():
         return JSONResponse(
             status_code=503,
             content={
-                "status": "degraded",
+                "status": "not_ready",
                 "database": "unavailable",
                 "version": APP_VERSION,
                 "deployment_marker": DEPLOYMENT_MARKER,
@@ -105,8 +107,8 @@ async def ready():
         )
 
     return {
-        "status": "ok",
-        "database": "connected",
+        "status": "ready",
+        "database": "ok",
         "version": APP_VERSION,
         "deployment_marker": DEPLOYMENT_MARKER,
         "timestamp": datetime.now(UTC).isoformat(),
