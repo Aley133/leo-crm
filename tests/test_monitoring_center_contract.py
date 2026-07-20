@@ -72,10 +72,12 @@ def test_monitoring_center_page_is_live_and_operable() -> None:
         "/api/monitoring-center/attempts",
         "/api/monitoring-center/sources",
         "/events",
-        "/retry",
-        "/cancel",
     ):
         assert endpoint in script
+    assert 'data-action="retry"' in script
+    assert 'data-action="cancel"' in script
+    assert 'const mutateJob' in script
+    assert '/${action}`' in script
     assert 'method:"POST"' in script
     assert 'method:"PUT"' not in script
     assert 'method:"PATCH"' not in script
