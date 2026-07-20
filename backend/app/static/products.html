@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LEO CRM — Товары</title>
+  <title>LEO CRM — Товары Kaspi</title>
   <link rel="stylesheet" href="/static/dashboard.css">
   <link rel="stylesheet" href="/static/products.css">
 </head>
@@ -14,7 +14,7 @@
       <nav aria-label="Основная навигация">
         <a href="/crm">Обзор</a>
         <a class="active" href="/crm/products">Товары</a>
-        <a class="disabled" href="#" aria-disabled="true">Поставщики</a>
+        <a href="/crm/suppliers">Поставщики</a>
         <a class="disabled" href="#" aria-disabled="true">Мониторинг</a>
       </nav>
       <div class="runtime-status"><span class="dot"></span><span>Control plane</span></div>
@@ -23,42 +23,35 @@
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">Каталог CRM</p>
-          <h1>Товары и поставщики</h1>
-          <p class="subtitle">Текущее состояние привязок, цен, наличия и мониторинга</p>
+          <p class="eyebrow">Каталог Kaspi</p>
+          <h1>Товары</h1>
+          <p class="subtitle">Одна строка — одна карточка Kaspi, независимо от количества поставщиков</p>
         </div>
         <button id="refresh" class="button secondary" type="button">Обновить</button>
       </header>
 
       <section id="auth-panel" class="auth-panel">
         <div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div>
-        <form id="token-form">
-          <input id="token" type="password" autocomplete="current-password" placeholder="Сервисный токен" required>
-          <button class="button" type="submit">Подключить</button>
-        </form>
+        <form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form>
       </section>
-
-      <div id="message" class="message" role="status" aria-live="polite"></div>
+      <div id="message" class="message" role="status"></div>
 
       <section id="products" class="products-page hidden" aria-busy="false">
         <form id="filters" class="filters">
-          <label><span>Поиск</span><input id="search" type="search" placeholder="Название, Kaspi ID или бренд"></label>
-          <label><span>Поставщик</span><input id="supplier-code" type="text" placeholder="ozon, wb..."></label>
-          <label><span>Наличие</span><select id="availability"><option value="">Все</option><option value="true">В наличии</option><option value="false">Нет в наличии</option></select></label>
-          <label class="check"><input id="only-stale" type="checkbox"><span>Только устаревшие</span></label>
+          <label><span>Поиск</span><input id="search" type="search" placeholder="Название, Kaspi ID, SKU или бренд"></label>
+          <label class="check"><input id="only-unbound" type="checkbox"><span>Только без поставщика</span></label>
           <label class="check"><input id="only-failures" type="checkbox"><span>Только с ошибками</span></label>
           <button class="button" type="submit">Применить</button>
           <button id="reset" class="button secondary" type="button">Сбросить</button>
         </form>
-
         <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Товар</th><th>Поставщик</th><th>Цена</th><th>Доставка</th><th>Наличие</th><th>Мониторинг</th><th>Проверено</th></tr></thead>
+            <thead><tr><th>Kaspi-товар</th><th>Статус</th><th>Поставщиков</th><th>Лучший поставщик</th><th>Лучшая цена</th><th>Наличие</th><th>Мониторинг</th><th>Проверено</th></tr></thead>
             <tbody id="products-body"></tbody>
           </table>
         </div>
-        <div id="empty" class="empty hidden">По выбранным фильтрам ничего не найдено.</div>
+        <div id="empty" class="empty hidden">Товары не найдены.</div>
       </section>
     </main>
   </div>
