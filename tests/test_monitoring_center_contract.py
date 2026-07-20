@@ -44,6 +44,25 @@ def test_monitoring_center_uses_only_real_runtime_entities() -> None:
         assert fictional_metric not in source
 
 
+def test_monitoring_center_exposes_runtime_lifecycle_without_new_schema() -> None:
+    source = (ROOT / "backend" / "app" / "monitoring_center_api.py").read_text(encoding="utf-8")
+
+    assert "def _job_lifecycle" in source
+    for state in (
+        '"waiting_for_agent"',
+        '"processing"',
+        '"lease_expired"',
+        '"finished"',
+        '"cancelled"',
+        '"failed"',
+    ):
+        assert state in source
+    assert "lifecycle_state" in source
+    assert "wait_reason" in source
+    assert "Job добавлен в очередь Browser Agent" in source
+    assert "Browser Agent выполняет навигацию, парсинг и сохранение результата" in source
+
+
 def test_monitoring_center_page_is_live_and_operable() -> None:
     ui = (ROOT / "backend" / "app" / "ui.py").read_text(encoding="utf-8")
     html = (ROOT / "backend" / "app" / "static" / "monitoring.html").read_text(encoding="utf-8")
@@ -65,6 +84,7 @@ def test_monitoring_center_page_is_live_and_operable() -> None:
         'id="job-dialog-content"',
     ):
         assert element_id in html
+    assert "<th>Этап</th>" in html
     assert '"leo_crm_service_token"' in script
     for endpoint in (
         "/api/monitoring-center/summary",
@@ -76,7 +96,7 @@ def test_monitoring_center_page_is_live_and_operable() -> None:
         assert endpoint in script
     assert 'data-action="retry"' in script
     assert 'data-action="cancel"' in script
-    assert 'const mutateJob' in script
+    assert "const mutateJob" in script
     assert '/${action}`' in script
     assert 'method:"POST"' in script
     assert 'method:"PUT"' not in script
@@ -98,6 +118,7 @@ def test_monitoring_center_formats_runtime_data_for_operators() -> None:
         assert metric_id in html
     assert "const formatDuration" in script
     assert "const errorCell" in script
+    assert "const lifecycleCell" in script
     assert '<details class="error-details">' in script
     assert "const renderLeased" in script
     assert "24*60*60*1000" in script
@@ -105,3 +126,6 @@ def test_monitoring_center_formats_runtime_data_for_operators() -> None:
     assert "cachedAttempts" in script
     assert "const actionButtons" in script
     assert "const inspectJob" in script
+    assert "Причина ожидания" in script
+    assert "Timeline" in script
+    assert "Сервис Render временно недоступен или перезапускается." in script
