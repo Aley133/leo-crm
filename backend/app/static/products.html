@@ -27,7 +27,10 @@
           <h1>Товары</h1>
           <p class="subtitle">Одна строка — одна карточка Kaspi: продажи, поставщики и мониторинг в одном операционном представлении</p>
         </div>
-        <button id="refresh" class="button secondary" type="button">Обновить</button>
+        <div class="topbar-actions">
+          <button id="import-xml" class="button" type="button">Импорт XML</button>
+          <button id="refresh" class="button secondary" type="button">Обновить</button>
+        </div>
       </header>
 
       <section id="auth-panel" class="auth-panel">
@@ -66,6 +69,24 @@
       </section>
     </main>
   </div>
+
+  <input id="xml-file" type="file" accept=".xml,text/xml,application/xml" hidden>
+  <dialog id="xml-dialog" class="xml-dialog">
+    <form method="dialog" class="dialog-card">
+      <div class="dialog-header">
+        <div><p class="eyebrow">Kaspi XML</p><h2>Предварительный просмотр импорта</h2></div>
+        <button class="dialog-close" value="cancel" aria-label="Закрыть">×</button>
+      </div>
+      <p id="xml-file-name" class="muted"></p>
+      <section id="xml-preview" class="xml-preview"></section>
+      <div id="xml-warnings" class="xml-warnings hidden"></div>
+      <div class="dialog-actions">
+        <button value="cancel" class="button secondary">Отмена</button>
+        <button id="confirm-import" value="default" class="button" type="button">Импортировать</button>
+      </div>
+    </form>
+  </dialog>
+
   <script src="/static/products.js" defer></script>
 </body>
 </html>
