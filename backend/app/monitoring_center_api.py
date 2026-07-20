@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 from .auth import require_service_token
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import get_db
+from .lease_engine import utc_now
 from .models import Product
 from .monitoring import MonitorAttempt, MonitorTarget, SourceHealth
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -78,11 +79,28 @@ class SourceHealthRow(BaseModel):
     updated_at: datetime
 
 
+class RuntimeEventRow(BaseModel):
+    event: str
+    occurred_at: datetime
+    detail: str | None = None
+
+
 router = APIRouter(
     prefix="/api/monitoring-center",
     tags=["monitoring-center"],
     dependencies=[Depends(require_service_token)],
 )
+
+
+def _get_job_for_update(db: Session, job_id: int) -> BrowserAgentJob:
+    job = db.scalar(
+        select(BrowserAgentJob)
+        .where(BrowserAgentJob.id == job_id)
+        .with_for_update()
+    )
+    if job is None:
+        raise HTTPException(status_code=404, detail="Browser agent job not found")
+    return job
 
 
 @router.get("/summary", response_model=MonitoringSummary)
@@ -153,6 +171,75 @@ def list_monitoring_jobs(
         updated_at=job.updated_at,
         finished_at=job.finished_at,
     ) for job, product_id, kaspi_id, product_name, supplier_code, supplier_name in rows]
+
+
+@router.get("/jobs/{job_id}")
+def inspect_monitoring_job(job_id: int, db: Session = Depends(get_db)) -> dict:
+    job = db.get(BrowserAgentJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Browser agent job not found")
+    return {
+        "id": job.id,
+        "status": job.status,
+        "monitor_target_id": job.monitor_target_id,
+        "supplier_product_id": job.supplier_product_id,
+        "url": job.url,
+        "lease_owner": job.lease_owner,
+        "lease_until": job.lease_until,
+        "error_code": job.error_code,
+        "error_message": job.error_message,
+        "created_at": job.created_at,
+        "updated_at": job.updated_at,
+        "finished_at": job.finished_at,
+    }
+
+
+@router.get("/jobs/{job_id}/events", response_model=list[RuntimeEventRow])
+def list_monitoring_job_events(job_id: int, db: Session = Depends(get_db)) -> list[RuntimeEventRow]:
+    job = db.get(BrowserAgentJob, job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Browser agent job not found")
+    events = [RuntimeEventRow(event="created", occurred_at=job.created_at, detail="Job added to Browser Agent queue")]
+    if job.lease_owner and job.lease_until:
+        events.append(RuntimeEventRow(event="leased", occurred_at=job.updated_at, detail=f"Lease owner: {job.lease_owner}"))
+    if job.finished_at:
+        detail = job.error_code or job.status
+        events.append(RuntimeEventRow(event=job.status, occurred_at=job.finished_at, detail=detail))
+    return sorted(events, key=lambda item: item.occurred_at)
+
+
+@router.post("/jobs/{job_id}/retry", status_code=status.HTTP_201_CREATED)
+def retry_monitoring_job(job_id: int, db: Session = Depends(get_db)) -> dict:
+    original = _get_job_for_update(db, job_id)
+    if original.status in (BrowserAgentJobStatus.QUEUED.value, BrowserAgentJobStatus.LEASED.value):
+        raise HTTPException(status_code=409, detail="Only completed jobs can be retried")
+    retry = BrowserAgentJob(
+        monitor_target_id=original.monitor_target_id,
+        supplier_product_id=original.supplier_product_id,
+        url=original.url,
+        status=BrowserAgentJobStatus.QUEUED.value,
+    )
+    db.add(retry)
+    db.commit()
+    db.refresh(retry)
+    return {"id": retry.id, "status": retry.status, "retried_from_job_id": original.id}
+
+
+@router.post("/jobs/{job_id}/cancel")
+def cancel_monitoring_job(job_id: int, db: Session = Depends(get_db)) -> dict:
+    job = _get_job_for_update(db, job_id)
+    if job.status != BrowserAgentJobStatus.QUEUED.value:
+        raise HTTPException(status_code=409, detail="Only queued jobs can be cancelled")
+    now = utc_now()
+    job.status = BrowserAgentJobStatus.FAILED.value
+    job.error_code = "operator_cancelled"
+    job.error_message = "Cancelled by CRM operator before lease acquisition"
+    job.finished_at = now
+    job.lease_owner = None
+    job.lease_token = None
+    job.lease_until = None
+    db.commit()
+    return {"id": job.id, "status": job.status, "error_code": job.error_code}
 
 
 @router.get("/attempts", response_model=list[MonitoringAttemptRow])
