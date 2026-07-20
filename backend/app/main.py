@@ -2,8 +2,10 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
+from sqlalchemy.exc import SQLAlchemyError
 
 from .browser_agent_api import router as browser_agent_router
 from .browser_agent_monitoring_api import router as browser_agent_monitoring_router
@@ -68,8 +70,39 @@ async def root() -> dict[str, str]:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    with engine.connect() as connection:
-        connection.execute(text("SELECT 1"))
+    """Cheap liveness probe used by Render.
+
+    This endpoint intentionally does not acquire a database connection. A busy
+    database pool must not make Render restart an otherwise healthy web process.
+    """
+
+    return {
+        "status": "ok",
+        "database": "not_checked",
+        "version": APP_VERSION,
+        "deployment_marker": DEPLOYMENT_MARKER,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
+
+
+@app.get("/ready")
+async def ready():
+    """Readiness probe that verifies PostgreSQL without crashing the service."""
+
+    try:
+        with engine.connect() as connection:
+            connection.execute(text("SELECT 1"))
+    except SQLAlchemyError:
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "degraded",
+                "database": "unavailable",
+                "version": APP_VERSION,
+                "deployment_marker": DEPLOYMENT_MARKER,
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+        )
 
     return {
         "status": "ok",
