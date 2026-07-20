@@ -5,6 +5,7 @@ from sqlalchemy import text
 
 from .browser_agent_api import router as browser_agent_router
 from .browser_agent_monitoring_api import router as browser_agent_monitoring_router
+from .dashboard_api import router as dashboard_router
 from .db import engine
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
@@ -30,6 +31,7 @@ app.include_router(products_router)
 app.include_router(suppliers_router)
 app.include_router(supplier_products_router)
 app.include_router(supplier_state_router)
+app.include_router(dashboard_router)
 app.include_router(monitoring_router)
 app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
