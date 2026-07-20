@@ -14,6 +14,7 @@ from .browser_agent_dispatch import dispatch_due_browser_targets
 from .browser_agent_failure import persist_browser_agent_failure
 from .browser_agent_ingestion import BrowserAgentResultError, persist_browser_agent_success
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
+from .browser_agent_presence import list_online_browser_agents, record_browser_agent_heartbeat
 from .db import get_db
 from .lease_engine import utc_now
 
@@ -34,6 +35,13 @@ class BrowserAgentDispatch(BaseModel):
     supplier_code: str = Field(default="ozon", min_length=1, max_length=64)
 
 
+class BrowserAgentHeartbeat(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=128)
+    status: str = Field(default="idle", min_length=1, max_length=32)
+    version: str | None = Field(default=None, max_length=32)
+    current_job_id: int | None = Field(default=None, gt=0)
+
+
 class BrowserAgentResult(BaseModel):
     lease_token: str = Field(min_length=16, max_length=128)
     status: str
@@ -47,6 +55,37 @@ router = APIRouter(
     tags=["browser-agent"],
     dependencies=[Depends(require_service_token)],
 )
+
+
+@router.post("/heartbeat")
+def heartbeat_browser_agent(payload: BrowserAgentHeartbeat):
+    presence = record_browser_agent_heartbeat(
+        agent_id=payload.agent_id,
+        status=payload.status,
+        version=payload.version,
+        current_job_id=payload.current_job_id,
+    )
+    return {
+        "agent_id": presence.agent_id,
+        "status": presence.status,
+        "version": presence.version,
+        "current_job_id": presence.current_job_id,
+        "last_seen_at": presence.last_seen_at,
+    }
+
+
+@router.get("/agents")
+def list_browser_agents():
+    return [
+        {
+            "agent_id": item.agent_id,
+            "status": item.status,
+            "version": item.version,
+            "current_job_id": item.current_job_id,
+            "last_seen_at": item.last_seen_at,
+        }
+        for item in list_online_browser_agents()
+    ]
 
 
 @router.post("/dispatch-due")
@@ -83,6 +122,7 @@ def create_browser_agent_job(payload: BrowserAgentJobCreate, db: Session = Depen
 
 @router.post("/claim")
 def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(get_db)):
+    record_browser_agent_heartbeat(agent_id=payload.agent_id, status="claiming")
     now = utc_now()
     job = db.scalar(
         select(BrowserAgentJob)
@@ -98,6 +138,7 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
         .limit(1)
     )
     if job is None:
+        record_browser_agent_heartbeat(agent_id=payload.agent_id, status="idle")
         return {"job": None}
 
     token = secrets.token_hex(24)
@@ -106,6 +147,11 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
     job.lease_token = token
     job.lease_until = now + timedelta(seconds=payload.lease_seconds)
     db.commit()
+    record_browser_agent_heartbeat(
+        agent_id=payload.agent_id,
+        status="running",
+        current_job_id=job.id,
+    )
     return {
         "job": {
             "id": job.id,
@@ -170,10 +216,13 @@ def complete_browser_agent_job(
         job.error_code = payload.error_code
         job.error_message = payload.error_message
         job.finished_at = now
+        agent_id = job.lease_owner
         job.lease_owner = None
         job.lease_token = None
         job.lease_until = None
         db.commit()
+        if agent_id:
+            record_browser_agent_heartbeat(agent_id=agent_id, status="idle")
     except BrowserAgentResultError as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
