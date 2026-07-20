@@ -12,7 +12,13 @@ from urllib.parse import urlencode, urlparse
 from urllib.request import Request, urlopen
 
 from .base import AccessStrategy, AdapterRequest, NormalizedOffer
-from .errors import AdapterBlockedError, AdapterCaptchaError, AdapterNetworkError, AdapterParseError, AdapterTimeoutError
+from .errors import (
+    AdapterBlockedError,
+    AdapterCaptchaError,
+    AdapterNetworkError,
+    AdapterParseError,
+    AdapterTimeoutError,
+)
 from .playwright_pool import PlaywrightBrowserPool, PlaywrightPoolError
 
 _WB_ROOT_DOMAINS = ("wildberries.ru", "wb.ru")
@@ -26,14 +32,13 @@ _DAY_RE = re.compile(r"(?:через\s*)?(\d{1,2})\s*(?:день|дня|дней
 
 
 class WildberriesBrowserAccessAdapter:
-    """WB adapter with browser-verified price and API diagnostics.
+    """Browser-verified Wildberries adapter with optional card API enrichment.
 
-    The adapter preserves the application boundary:
-    AdapterRequest -> NormalizedOffer. It never writes Product, Binding,
-    Observation, XML or queue state directly.
+    Boundary: AdapterRequest -> NormalizedOffer. The adapter never writes product,
+    binding, observation, XML or queue state directly.
     """
 
-    code = "wildberries-browser-verified-v5"
+    code = "wildberries-browser-verified-v6"
     access_strategy = AccessStrategy.BROWSER
 
     def __init__(
@@ -67,14 +72,14 @@ class WildberriesBrowserAccessAdapter:
 
         return NormalizedOffer(
             supplier_product_id=request.supplier_product_id,
-            price=browser_offer["price"],
+            price=browser_offer.get("price"),
             old_price=browser_offer.get("old_price"),
             currency=browser_offer.get("currency") or "KZT",
             available=browser_offer.get("available"),
             stock=browser_offer.get("stock"),
             delivery_days=browser_offer.get("delivery_days"),
             seller=browser_offer.get("seller"),
-            adapter_schema_version="wildberries-browser-verified-v5",
+            adapter_schema_version=self.code,
             observed_at=datetime.now(UTC),
             raw_metadata={
                 "source": "wb_browser_verified",
@@ -128,8 +133,28 @@ class WildberriesBrowserAccessAdapter:
 
                 body_text = await self._body_text(page)
                 stock_status, stock_reason = await self._detect_stock(page, body_text)
+
                 if stock_status == "out_of_stock":
-                    raise AdapterParseError("Wildberries product is out of stock")
+                    seller = await self._seller_from_page(page)
+                    price, candidates = await self._extract_visible_price(page)
+                    return (
+                        {
+                            "price": price,
+                            "old_price": None,
+                            "currency": "KZT",
+                            "available": False,
+                            "stock": 0,
+                            "delivery_days": self._delivery_days_from_text(body_text),
+                            "seller": seller,
+                        },
+                        {
+                            "response_url": final_url,
+                            "duration_ms": int((monotonic() - started) * 1000),
+                            "stock_reason": stock_reason,
+                            "price_candidates": candidates[:10],
+                        },
+                    )
+
                 if stock_status != "in_stock":
                     raise AdapterParseError(
                         f"Wildberries stock could not be verified: {stock_reason}"
@@ -218,34 +243,67 @@ class WildberriesBrowserAccessAdapter:
 
     @staticmethod
     async def _detect_stock(page: Any, body_text: str) -> tuple[str, str]:
-        low = body_text.casefold().replace("ё", "е")
-        out_markers = (
-            "нет в наличии",
-            "товар закончился",
-            "временно отсутствует",
-            "распродано",
-        )
-        if any(marker in low for marker in out_markers):
-            return "out_of_stock", "visible out-of-stock marker"
+        """Resolve availability from purchase controls before any page-wide text.
 
-        selectors = (
+        Wildberries may render out-of-stock phrases in recommendations or hidden
+        variants. A visible and enabled purchase control on the current card is
+        therefore authoritative.
+        """
+        purchase_selectors = (
             "button:has-text('Добавить в корзину')",
             "button:has-text('Купить сейчас')",
             "[data-testid*='cart']",
             "[class*='order'] button",
         )
-        for selector in selectors:
+        for selector in purchase_selectors:
             try:
                 locator = page.locator(selector)
                 for index in range(min(await locator.count(), 8)):
-                    if await locator.nth(index).is_visible():
-                        return "in_stock", f"visible purchase control: {selector}"
+                    control = locator.nth(index)
+                    if not await control.is_visible():
+                        continue
+                    try:
+                        if not await control.is_enabled():
+                            continue
+                    except Exception:
+                        pass
+                    return "in_stock", f"visible enabled purchase control: {selector}"
             except Exception:
                 continue
 
+        low = body_text.casefold().replace("ё", "е")
         if "добавить в корзину" in low or "купить сейчас" in low:
             return "in_stock", "purchase text is visible"
-        return "unknown", "purchase control and out-of-stock marker are both absent"
+
+        out_selectors = (
+            "[class*='product'] :text-is('Нет в наличии')",
+            "[class*='order'] :text-is('Нет в наличии')",
+            "[data-testid*='product'] :text-is('Нет в наличии')",
+            "[data-testid*='availability']",
+        )
+        for selector in out_selectors:
+            try:
+                locator = page.locator(selector)
+                for index in range(min(await locator.count(), 8)):
+                    item = locator.nth(index)
+                    if not await item.is_visible():
+                        continue
+                    text = " ".join(str(await item.inner_text(timeout=2_000)).split())
+                    low_text = text.casefold().replace("ё", "е")
+                    if any(
+                        marker in low_text
+                        for marker in (
+                            "нет в наличии",
+                            "товар закончился",
+                            "временно отсутствует",
+                            "распродано",
+                        )
+                    ):
+                        return "out_of_stock", f"visible product availability marker: {text[:80]}"
+            except Exception:
+                continue
+
+        return "unknown", "purchase control and local out-of-stock marker are both absent"
 
     @classmethod
     async def _extract_visible_price(
