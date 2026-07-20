@@ -43,26 +43,37 @@ router = APIRouter(
 )
 
 
+OZON_HOSTS = {"ozon.ru", "ozon.kz"}
+WB_HOSTS = {"wildberries.ru", "wb.ru"}
+
+
+def _host_matches(host: str, supported_hosts: set[str]) -> bool:
+    return any(host == item or host.endswith(f".{item}") for item in supported_hosts)
+
+
 def _source_from_url(url: str) -> tuple[str, str, str]:
     parsed = urlparse(url)
     host = (parsed.hostname or "").lower().removeprefix("www.")
     path = parsed.path.rstrip("/")
 
-    if host == "ozon.ru" or host.endswith(".ozon.ru"):
+    if _host_matches(host, OZON_HOSTS):
         match = re.search(r"(?:product|context/detail/id)/(?:[^/]*-)?(\d+)(?:/|$)", path)
         external_id = match.group(1) if match else path.split("/")[-1]
         if not external_id:
             raise HTTPException(status_code=422, detail="Не удалось определить Ozon ID из ссылки")
         return "ozon", "Ozon", external_id
 
-    if host in {"wildberries.ru", "www.wildberries.ru", "wb.ru"} or host.endswith(".wildberries.ru"):
+    if _host_matches(host, WB_HOSTS):
         match = re.search(r"/catalog/(\d+)(?:/|$)", path)
         external_id = match.group(1) if match else path.split("/")[-1]
         if not external_id:
             raise HTTPException(status_code=422, detail="Не удалось определить WB ID из ссылки")
         return "wb", "Wildberries", external_id
 
-    raise HTTPException(status_code=422, detail="Поддерживаются только ссылки Ozon и Wildberries")
+    raise HTTPException(
+        status_code=422,
+        detail="Поддерживаются ссылки Ozon (ozon.ru, ozon.kz) и Wildberries",
+    )
 
 
 @router.post(
