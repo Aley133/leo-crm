@@ -29,12 +29,15 @@ def test_manual_supplier_binding_command_is_registered_and_atomic() -> None:
     assert "db.commit()" in source
 
 
-def test_manual_supplier_binding_accepts_only_supported_marketplaces() -> None:
+def test_manual_supplier_binding_accepts_supported_marketplaces_and_ozon_kz() -> None:
     source = (ROOT / "backend" / "app" / "product_supplier_binding_api.py").read_text(encoding="utf-8")
 
+    assert 'OZON_HOSTS = {"ozon.ru", "ozon.kz"}' in source
+    assert 'WB_HOSTS = {"wildberries.ru", "wb.ru"}' in source
     assert 'return "ozon", "Ozon"' in source
     assert 'return "wb", "Wildberries"' in source
-    assert "Поддерживаются только ссылки Ozon и Wildberries" in source
+    assert "ozon.kz" in source
+    assert "Поддерживаются ссылки Ozon" in source
     assert "created_supplier_product" in source
     assert "created_binding" in source
     assert "queued_initial_check" in source
