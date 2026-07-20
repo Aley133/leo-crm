@@ -131,6 +131,7 @@ def list_products(
     status: ProductStatus | None = None,
     only_without_supplier: bool = False,
     only_failures: bool = False,
+    only_monitored: bool = False,
     limit: int = Query(default=200, ge=1, le=500),
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
@@ -152,6 +153,8 @@ def list_products(
         rows = [row for row in rows if row.supplier_count == 0]
     if only_failures:
         rows = [row for row in rows if row.failed_monitor_count > 0]
+    if only_monitored:
+        rows = [row for row in rows if row.active_monitor_count > 0]
     return rows
 
 
