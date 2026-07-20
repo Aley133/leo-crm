@@ -43,7 +43,7 @@ const statusBadge = (row) => {
 const render = (rows) => {
   body.innerHTML = rows.map((row) => `
     <tr data-product-id="${row.product_id}">
-      <td><span class="product-title">${escapeHtml(row.product_name)}</span><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></td>
+      <td><a class="product-title" href="/crm/products/${row.product_id}">${escapeHtml(row.product_name)}</a><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></td>
       <td><a href="${escapeHtml(row.supplier_product_url)}" target="_blank" rel="noreferrer">${escapeHtml(row.supplier_name)}</a><span class="muted">${escapeHtml(row.supplier_code)}${row.is_primary ? " · основной" : ""}</span></td>
       <td>${money(row.price, row.currency)}${row.old_price != null ? `<span class="muted">было ${money(row.old_price, row.currency)}</span>` : ""}</td>
       <td>${row.delivery_days == null ? "—" : `${row.delivery_days} дн.`}</td>
