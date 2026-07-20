@@ -12,12 +12,27 @@ from sqlalchemy import inspect, text
 
 from backend.app import monitoring  # noqa: F401  # register monitoring metadata
 from backend.app import models  # noqa: F401  # register product metadata
-from backend.app.browser_agent_models import BrowserAgentJob
+from backend.app.browser_agent_models import BrowserAgent, BrowserAgentJob
 from backend.app.db import engine
 from backend.app.pricing_models import FxRateSnapshot, PriceCalculation, PricingPolicy
 
 
 _REQUIRED_COLUMNS: dict[str, set[str]] = {
+    "browser_agents": {
+        "id",
+        "agent_id",
+        "hostname",
+        "platform",
+        "version",
+        "status",
+        "current_job_id",
+        "last_seen_at",
+        "leases_taken",
+        "leases_succeeded",
+        "leases_failed",
+        "created_at",
+        "updated_at",
+    },
     "browser_agent_jobs": {
         "id",
         "monitor_target_id",
@@ -168,6 +183,7 @@ def _verify_required_columns() -> None:
 
 def ensure_browser_agent_schema() -> None:
     # Create in foreign-key dependency order. checkfirst keeps repeated deploys safe.
+    BrowserAgent.__table__.create(bind=engine, checkfirst=True)
     BrowserAgentJob.__table__.create(bind=engine, checkfirst=True)
     PricingPolicy.__table__.create(bind=engine, checkfirst=True)
     FxRateSnapshot.__table__.create(bind=engine, checkfirst=True)
@@ -175,7 +191,7 @@ def ensure_browser_agent_schema() -> None:
 
     _repair_safe_nullable_columns()
     _verify_required_columns()
-    print("browser-agent, monitoring currency and pricing schema are ready")
+    print("browser-agent registry, jobs, monitoring currency and pricing schema are ready")
 
 
 if __name__ == "__main__":
