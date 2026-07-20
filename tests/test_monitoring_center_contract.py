@@ -71,6 +71,12 @@ def test_monitoring_center_page_is_live_and_operable() -> None:
     assert '@router.get("/crm/monitoring"' in ui
     assert 'FileResponse(STATIC_DIR / "monitoring.html")' in ui
     for element_id in (
+        'id="runtime-health"',
+        'id="runtime-health-title"',
+        'id="runtime-health-detail"',
+        'id="agent-queue-count"',
+        'id="agent-last-work"',
+        'id="agent-average-time"',
         'id="leased-body"',
         'id="jobs-body"',
         'id="attempts-body"',
@@ -119,6 +125,12 @@ def test_monitoring_center_formats_runtime_data_for_operators() -> None:
     assert "const formatDuration" in script
     assert "const errorCell" in script
     assert "const lifecycleCell" in script
+    assert "const renderRuntimeHealth" in script
+    assert "const recentAttemptStats" in script
+    assert "cachedSources" in script
+    assert "Runtime работает нормально" in script
+    assert "Ожидает Browser Agent" in script
+    assert "Ошибка сети" in script
     assert '<details class="error-details">' in script
     assert "const renderLeased" in script
     assert "24*60*60*1000" in script
@@ -127,5 +139,5 @@ def test_monitoring_center_formats_runtime_data_for_operators() -> None:
     assert "const actionButtons" in script
     assert "const inspectJob" in script
     assert "Причина ожидания" in script
-    assert "Timeline" in script
+    assert "Хронология Job" in script
     assert "Сервис Render временно недоступен или перезапускается." in script
