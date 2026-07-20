@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Карточка товара</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/product-detail.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a>
+        <a class="active" href="/crm/products">Товары</a>
+        <a class="disabled" href="#" aria-disabled="true">Поставщики</a>
+        <a class="disabled" href="#" aria-disabled="true">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Control plane</span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Карточка товара</p>
+          <h1 id="product-name">Загрузка…</h1>
+          <p id="product-meta" class="subtitle"></p>
+        </div>
+        <div class="header-actions">
+          <a class="button secondary" href="/crm/products">Назад к товарам</a>
+          <button id="refresh" class="button secondary" type="button">Обновить</button>
+        </div>
+      </header>
+
+      <section id="auth-panel" class="auth-panel">
+        <div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div>
+        <form id="token-form">
+          <input id="token" type="password" autocomplete="current-password" placeholder="Сервисный токен" required>
+          <button class="button" type="submit">Подключить</button>
+        </form>
+      </section>
+
+      <div id="message" class="message" role="status" aria-live="polite"></div>
+
+      <section id="detail" class="detail-page hidden" aria-busy="false">
+        <div class="summary-grid">
+          <article class="metric"><span>Привязок</span><strong id="bindings-count">—</strong><small>поставщиков</small></article>
+          <article class="metric"><span>Наблюдений</span><strong id="observations-count">—</strong><small>в истории</small></article>
+          <article class="metric"><span>В наличии</span><strong id="available-count">—</strong><small>актуальных предложений</small></article>
+          <article class="metric"><span>Ошибки</span><strong id="failures-count">—</strong><small>мониторингов</small></article>
+        </div>
+
+        <section class="panel wide">
+          <div class="panel-title"><h2>Поставщики</h2><span>Текущее состояние</span></div>
+          <div id="bindings" class="binding-list"></div>
+          <div id="bindings-empty" class="empty hidden">У товара пока нет привязанных поставщиков.</div>
+        </section>
+
+        <section class="panel wide">
+          <div class="panel-title"><h2>История наблюдений</h2><span id="updated-at"></span></div>
+          <div class="table-wrap">
+            <table>
+              <thead><tr><th>Время</th><th>Источник</th><th>Цена</th><th>Доставка</th><th>Наличие</th><th>Продавец</th></tr></thead>
+              <tbody id="observations-body"></tbody>
+            </table>
+          </div>
+          <div id="observations-empty" class="empty hidden">История наблюдений пока отсутствует.</div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script src="/static/product-detail.js" defer></script>
+</body>
+</html>
