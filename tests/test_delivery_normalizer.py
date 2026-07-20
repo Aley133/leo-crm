@@ -50,6 +50,22 @@ def test_ozon_context_ignores_promotion_countdown() -> None:
     ) == 1
 
 
+def test_ozon_context_handles_flattened_browser_text() -> None:
+    now = datetime(2026, 7, 20, 12, 0, tzinfo=KZ)
+    text = (
+        "Распродажа 3772 единицы осталось 10 дней до конца 2632 ₸ "
+        "В корзину Доставим завтра У других продавцов от 5061 ₸ "
+        "Доставка и возврат Бокина, 18 Со склада Ozon"
+    )
+
+    assert DeliveryNormalizer.from_context(
+        text,
+        markers=("доставим", "доставка", "пункт ozon"),
+        excluded_phrases=("до конца", "распродажа", "осталось"),
+        now=now,
+    ) == 1
+
+
 def test_ozon_adapter_uses_contextual_delivery_normalizer() -> None:
     source = open(
         "backend/app/supplier_adapters/ozon_browser_access.py",
