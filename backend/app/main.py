@@ -14,10 +14,11 @@ from .product_identity_api import router as product_identity_router
 from .products import router as products_router
 from .purchase_api import router as purchase_router
 from .supplier_products_api import router as supplier_products_router
+from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 
-APP_VERSION = "0.12.2"
-DEPLOYMENT_MARKER = "local-browser-verification-v1"
+APP_VERSION = "0.13.0"
+DEPLOYMENT_MARKER = "supplier-state-control-plane-v1"
 
 app = FastAPI(
     title="LEO CRM API",
@@ -28,6 +29,7 @@ app = FastAPI(
 app.include_router(products_router)
 app.include_router(suppliers_router)
 app.include_router(supplier_products_router)
+app.include_router(supplier_state_router)
 app.include_router(monitoring_router)
 app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
