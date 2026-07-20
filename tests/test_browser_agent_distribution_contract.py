@@ -17,18 +17,25 @@ def test_windows_agent_has_desktop_entrypoint_and_release_workflow() -> None:
     assert "softprops/action-gh-release" in workflow
 
 
-def test_monitoring_page_exposes_stable_agent_download() -> None:
+def test_monitoring_page_downloads_agent_directly_from_crm() -> None:
     html = (ROOT / "backend" / "app" / "static" / "monitoring.html").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "backend" / "app" / "static" / "LEO-Browser-Agent-Setup.cmd").read_text(encoding="utf-8")
 
     assert 'id="download-browser-agent"' in html
-    assert "releases/latest/download/LEO-Browser-Agent.exe" in html
+    assert 'href="/static/LEO-Browser-Agent-Setup.cmd"' in html
+    assert 'download="LEO-Browser-Agent-Setup.cmd"' in html
+    assert "releases/latest/download" not in html
     assert "Скачать Browser Agent" in html
+    assert "main.zip" in bootstrap
+    assert "start_browser_agent_windows.ps1" in bootstrap
 
 
 def test_release_does_not_embed_service_token() -> None:
     entrypoint = (ROOT / "tools" / "browser_agent_desktop.py").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "browser-agent-release.yml").read_text(encoding="utf-8")
+    bootstrap = (ROOT / "backend" / "app" / "static" / "LEO-Browser-Agent-Setup.cmd").read_text(encoding="utf-8")
 
     assert "simpledialog.askstring" in entrypoint
     assert "PASTE_" not in entrypoint
     assert "SERVICE_API_TOKEN=" not in workflow
+    assert "SERVICE_API_TOKEN=" not in bootstrap
