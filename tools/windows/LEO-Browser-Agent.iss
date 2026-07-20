@@ -31,9 +31,6 @@ Name: "{userstartup}\LEO Browser Agent"; Filename: "{app}\{#MyAppExeName}"; Work
 [Tasks]
 Name: "desktopicon"; Description: "Создать ярлык на рабочем столе"; GroupDescription: "Дополнительные ярлыки:"; Flags: checkedonce
 
-[Run]
-Filename: "{app}\{#MyAppExeName}"; Description: "Запустить LEO Browser Agent"; Flags: nowait postinstall skipifsilent
-
 [Code]
 function PrepareToInstall(var NeedsRestart: Boolean): String;
 var
