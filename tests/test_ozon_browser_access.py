@@ -40,10 +40,10 @@ def test_ozon_challenge_shell_is_blocked_not_parse_error() -> None:
     assert "challenge=challenge" in message
 
 
-def test_runtime_registry_uses_observable_semantic_delivery_adapter() -> None:
+def test_runtime_registry_uses_scoped_semantic_delivery_adapter() -> None:
     registry = _runtime_registry()
     adapter = registry.get("ozon")
-    assert adapter.code == "ozon-browser-v11"
+    assert adapter.code == "ozon-browser-v12"
 
 
 def test_ozon_semantic_delivery_is_authoritative_and_observable() -> None:
@@ -53,9 +53,10 @@ def test_ozon_semantic_delivery_is_authoritative_and_observable() -> None:
     ).read()
 
     assert 'base_delivery_days = offer.delivery_days' in source
-    assert 'semantic_delivery_days = OzonDeliveryExtractor.from_text(raw_text)' in source
+    assert 'semantic_delivery_days = OzonDeliveryExtractor.from_candidates(' in source
     assert 'metadata["base_delivery_days"]' in source
     assert 'metadata["semantic_delivery_days"]' in source
+    assert 'metadata["delivery_candidates"]' in source
     assert 'metadata["delivery_context"]' in source
     assert 'metadata["delivery_input_length"]' in source
     assert 'delivery_days=semantic_delivery_days' in source
