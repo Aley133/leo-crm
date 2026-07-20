@@ -17,3 +17,8 @@ def crm_dashboard() -> FileResponse:
 @router.get("/crm/products", response_class=FileResponse)
 def crm_products() -> FileResponse:
     return FileResponse(STATIC_DIR / "products.html")
+
+
+@router.get("/crm/products/{product_id}", response_class=FileResponse)
+def crm_product_detail(product_id: int) -> FileResponse:
+    return FileResponse(STATIC_DIR / "product-detail.html")
