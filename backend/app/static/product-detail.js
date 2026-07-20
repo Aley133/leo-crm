@@ -7,10 +7,12 @@ const tokenInput = document.querySelector("#token");
 const refreshButton = document.querySelector("#refresh");
 const bindingsContainer = document.querySelector("#bindings");
 const observationsBody = document.querySelector("#observations-body");
+const bestOfferContainer = document.querySelector("#best-offer");
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
-const money = (value, currency) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU")} ${currency || ""}`.trim();
+const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency || "KZT"}`.trim();
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "Никогда";
+const statusLabel = (status) => ({active:"Активен",draft:"Черновик",paused:"Приостановлен",archived:"Архив"}[status] || status || "—");
 const productId = Number(location.pathname.split("/").filter(Boolean).at(-1));
 
 const setText = (id, value) => {
@@ -37,13 +39,31 @@ const monitorBadge = (binding) => {
   return '<span class="badge">Не настроен</span>';
 };
 
+const renderBestOffer = (bindings) => {
+  const candidates = bindings.filter((item) => item.available === true && item.price != null);
+  const best = candidates.sort((left, right) => Number(left.price) - Number(right.price))[0];
+  const empty = document.querySelector("#best-offer-empty");
+  if (!best) {
+    bestOfferContainer.innerHTML = "";
+    empty.classList.remove("hidden");
+    return;
+  }
+  empty.classList.add("hidden");
+  bestOfferContainer.innerHTML = `
+    <div><span>Поставщик</span><strong>${escapeHtml(best.supplier_name)}</strong><small>${escapeHtml(best.supplier_code)}</small></div>
+    <div><span>Цена</span><strong>${money(best.price, best.currency)}</strong>${best.old_price != null ? `<small>было ${money(best.old_price, best.currency)}</small>` : ""}</div>
+    <div><span>Доставка</span><strong>${best.delivery_days == null ? "—" : `${best.delivery_days} дн.`}</strong><small>${escapeHtml(best.seller || "продавец не указан")}</small></div>
+    <div><span>Проверено</span><strong>${dateTime(best.last_checked_at)}</strong><small>${best.is_primary ? "основная привязка" : "доступное предложение"}</small></div>
+    <a class="button secondary" href="${escapeHtml(best.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть поставщика</a>`;
+};
+
 const renderBindings = (bindings) => {
   bindingsContainer.innerHTML = bindings.map((binding) => `
     <article class="binding-card">
       <div class="binding-head">
         <h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3>
         <a href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть карточку поставщика</a>
-        <span class="muted">${escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)}</span>
+        <span class="muted">${escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span>
       </div>
       <div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div>
       <div><span class="label">Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "продавец не указан")}</span></div>
@@ -67,14 +87,24 @@ const renderObservations = (observations) => {
 };
 
 const render = (data) => {
-  const { product, bindings, observations } = data;
+  const { product, sales, bindings, observations } = data;
   setText("product-name", product.name);
   setText("product-meta", `Kaspi ${product.kaspi_product_id}${product.brand ? ` · ${product.brand}` : ""}${product.merchant_sku ? ` · SKU ${product.merchant_sku}` : ""}`);
+  setText("kaspi-product-id", product.kaspi_product_id);
+  setText("merchant-sku", product.merchant_sku || "—");
+  setText("product-brand", product.brand || "—");
+  setText("product-status", statusLabel(product.status));
+  setText("product-updated-at", `Обновлено в CRM ${dateTime(product.updated_at)}`);
+  setText("units-sold", Number(sales.units_sold || 0).toLocaleString("ru-RU"));
+  setText("orders-count", `строк заказов: ${Number(sales.orders_count || 0).toLocaleString("ru-RU")}`);
+  setText("revenue-kzt", money(sales.revenue_kzt));
+  setText("last-ordered-at", `последняя продажа: ${dateTime(sales.last_ordered_at)}`);
   setText("bindings-count", bindings.length);
   setText("observations-count", observations.length);
   setText("available-count", bindings.filter((item) => item.available === true).length);
   setText("failures-count", bindings.filter((item) => item.consecutive_failures > 0).length);
   setText("updated-at", `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`);
+  renderBestOffer(bindings);
   renderBindings(bindings);
   renderObservations(observations);
   authPanel.classList.add("hidden");
