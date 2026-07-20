@@ -20,6 +20,7 @@ from .monitoring_center_api import router as monitoring_center_router
 from .pricing_api import router as pricing_router
 from .product_detail_api import router as product_detail_router
 from .product_identity_api import router as product_identity_router
+from .product_registry_api import router as product_registry_router
 from .products import router as products_router
 from .purchase_api import router as purchase_router
 from .supplier_products_api import router as supplier_products_router
@@ -41,6 +42,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
+app.include_router(product_registry_router)
 app.include_router(catalog_router)
 app.include_router(suppliers_router)
 app.include_router(supplier_products_router)
