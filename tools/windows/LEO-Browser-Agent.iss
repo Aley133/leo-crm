@@ -1,5 +1,5 @@
 #define MyAppName "LEO Browser Agent"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.0"
 #define MyAppPublisher "LEO CRM"
 #define MyAppExeName "LEO-Browser-Agent.exe"
 
@@ -17,9 +17,11 @@ Compression=lzma
 SolidCompression=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#MyAppExeName}
+CloseApplications=yes
+RestartApplications=no
 
 [Files]
-Source: "..\..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\..\dist\{#MyAppExeName}"; DestDir: "{app}"; Flags: ignoreversion restartreplace
 
 [Icons]
 Name: "{autoprograms}\LEO Browser Agent"; Filename: "{app}\{#MyAppExeName}"
@@ -31,3 +33,21 @@ Name: "desktopicon"; Description: "Создать ярлык на рабочем
 
 [Run]
 Filename: "{app}\{#MyAppExeName}"; Description: "Запустить LEO Browser Agent"; Flags: nowait postinstall skipifsilent
+
+[Code]
+function PrepareToInstall(var NeedsRestart: Boolean): String;
+var
+  ResultCode: Integer;
+begin
+  Exec(ExpandConstant('{cmd}'), '/C taskkill /F /IM "{#MyAppExeName}" >NUL 2>&1', '', SW_HIDE, ewWaitUntilTerminated, ResultCode);
+  Sleep(800);
+  Result := '';
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var
+  ResultCode: Integer;
+begin
+  if CurStep = ssPostInstall then
+    Exec(ExpandConstant('{app}\{#MyAppExeName}'), '', ExpandConstant('{app}'), SW_SHOWNORMAL, ewNoWait, ResultCode);
+end;
