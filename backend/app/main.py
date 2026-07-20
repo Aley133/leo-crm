@@ -13,6 +13,7 @@ from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
 from .pricing_api import router as pricing_router
+from .product_detail_api import router as product_detail_router
 from .product_identity_api import router as product_identity_router
 from .products import router as products_router
 from .purchase_api import router as purchase_router
@@ -34,6 +35,7 @@ app = FastAPI(
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
 app.include_router(products_router)
+app.include_router(product_detail_router)
 app.include_router(suppliers_router)
 app.include_router(supplier_products_router)
 app.include_router(supplier_state_router)
