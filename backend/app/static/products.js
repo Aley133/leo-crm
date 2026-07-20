@@ -23,36 +23,32 @@ const setLoading = (loading) => {
 const queryString = () => {
   const params = new URLSearchParams({limit:"200"});
   const q = document.querySelector("#search").value.trim();
-  const supplier = document.querySelector("#supplier-code").value.trim();
-  const availability = document.querySelector("#availability").value;
   if (q) params.set("q", q);
-  if (supplier) params.set("supplier_code", supplier.toLowerCase());
-  if (availability) params.set("availability", availability);
-  if (document.querySelector("#only-stale").checked) params.set("only_stale", "true");
+  if (document.querySelector("#only-unbound").checked) params.set("only_without_supplier", "true");
   if (document.querySelector("#only-failures").checked) params.set("only_failures", "true");
   return params.toString();
 };
 
-const statusBadge = (row) => {
-  if (row.consecutive_failures > 0) return '<span class="badge bad">Ошибка</span>';
-  if (row.is_stale) return '<span class="badge warn">Устарело</span>';
-  if (row.monitor_status === "active") return '<span class="badge ok">Активен</span>';
-  return `<span class="badge">${escapeHtml(row.monitor_status || "Не настроен")}</span>`;
+const monitoringBadge = (row) => {
+  if (row.failed_monitor_count > 0) return '<span class="badge bad">Есть ошибки</span>';
+  if (row.monitored_count > 0) return '<span class="badge ok">Активен</span>';
+  return '<span class="badge">Не настроен</span>';
 };
 
 const render = (rows) => {
   body.innerHTML = rows.map((row) => `
-    <tr data-product-id="${row.product_id}">
-      <td><a class="product-title" href="/crm/products/${row.product_id}">${escapeHtml(row.product_name)}</a><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></td>
-      <td><a href="${escapeHtml(row.supplier_product_url)}" target="_blank" rel="noreferrer">${escapeHtml(row.supplier_name)}</a><span class="muted">${escapeHtml(row.supplier_code)}${row.is_primary ? " · основной" : ""}</span></td>
-      <td>${money(row.price, row.currency)}${row.old_price != null ? `<span class="muted">было ${money(row.old_price, row.currency)}</span>` : ""}</td>
-      <td>${row.delivery_days == null ? "—" : `${row.delivery_days} дн.`}</td>
-      <td>${row.available === true ? '<span class="badge ok">В наличии</span>' : row.available === false ? '<span class="badge bad">Нет</span>' : '<span class="badge">Неизвестно</span>'}${row.stock != null ? `<span class="muted">остаток ${row.stock}</span>` : ""}</td>
-      <td>${statusBadge(row)}${row.consecutive_failures ? `<span class="muted">ошибок подряд: ${row.consecutive_failures}</span>` : ""}</td>
+    <tr>
+      <td><a class="product-title" href="/crm/products/${row.product_id}">${escapeHtml(row.product_name)}</a><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></td>
+      <td><span class="badge">${escapeHtml(row.product_status)}</span></td>
+      <td><strong>${row.supplier_count}</strong><span class="muted">привязок</span></td>
+      <td>${row.best_supplier_name ? `<strong>${escapeHtml(row.best_supplier_name)}</strong><span class="muted">${escapeHtml(row.best_supplier_code || "")}</span>` : '<span class="badge bad">Нет поставщика</span>'}</td>
+      <td>${money(row.best_supplier_price, row.best_supplier_currency)}</td>
+      <td>${row.available_offer_count > 0 ? `<span class="badge ok">${row.available_offer_count} в наличии</span>` : '<span class="badge warn">Нет доступных</span>'}</td>
+      <td>${monitoringBadge(row)}<span class="muted">${row.monitored_count} целей</span></td>
       <td>${checkedAt(row.last_checked_at)}</td>
     </tr>`).join("");
   empty.classList.toggle("hidden", rows.length > 0);
-  document.querySelector("#rows-label").textContent = `Показано строк: ${rows.length}`;
+  document.querySelector("#rows-label").textContent = `Показано товаров: ${rows.length}`;
   document.querySelector("#updated-at").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`;
   authPanel.classList.add("hidden");
   productsPage.classList.remove("hidden");
@@ -60,27 +56,15 @@ const render = (rows) => {
 
 const loadProducts = async () => {
   const token = localStorage.getItem(storageKey);
-  if (!token) {
-    authPanel.classList.remove("hidden");
-    productsPage.classList.add("hidden");
-    return;
-  }
-  setLoading(true);
-  message.textContent = "";
+  if (!token) { authPanel.classList.remove("hidden"); productsPage.classList.add("hidden"); return; }
+  setLoading(true); message.textContent = "";
   try {
-    const response = await fetch(`/api/supplier-state/offers?${queryString()}`, {headers:{Authorization:`Bearer ${token}`},cache:"no-store"});
-    if (response.status === 401) {
-      localStorage.removeItem(storageKey);
-      authPanel.classList.remove("hidden");
-      productsPage.classList.add("hidden");
-      message.textContent = "Токен не принят. Проверьте SERVICE_API_TOKEN.";
-      return;
-    }
+    const response = await fetch(`/api/catalog/products?${queryString()}`, {headers:{Authorization:`Bearer ${token}`},cache:"no-store"});
+    if (response.status === 401) { localStorage.removeItem(storageKey); authPanel.classList.remove("hidden"); productsPage.classList.add("hidden"); message.textContent = "Токен не принят."; return; }
     if (!response.ok) throw new Error(`API вернул ошибку ${response.status}`);
     render(await response.json());
-  } catch (error) {
-    message.textContent = error instanceof Error ? error.message : "Не удалось загрузить товары.";
-  } finally { setLoading(false); }
+  } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось загрузить товары."; }
+  finally { setLoading(false); }
 };
 
 tokenForm.addEventListener("submit", (event) => {event.preventDefault();const token=tokenInput.value.trim();if(!token)return;localStorage.setItem(storageKey,token);tokenInput.value="";loadProducts();});
