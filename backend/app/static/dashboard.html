@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Dashboard</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a class="active" href="/crm">Обзор</a>
+        <a class="disabled" href="#" aria-disabled="true">Товары</a>
+        <a class="disabled" href="#" aria-disabled="true">Поставщики</a>
+        <a class="disabled" href="#" aria-disabled="true">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Control plane</span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Операционный центр</p>
+          <h1>Состояние бизнеса</h1>
+          <p class="subtitle">Товары, поставщики и мониторинг в одном окне</p>
+        </div>
+        <button id="refresh" class="button secondary" type="button">Обновить</button>
+      </header>
+
+      <section id="auth-panel" class="auth-panel">
+        <div>
+          <h2>Подключение к LEO CRM</h2>
+          <p>Введите SERVICE_API_TOKEN из Render. Он хранится только в этом браузере.</p>
+        </div>
+        <form id="token-form">
+          <input id="token" type="password" autocomplete="current-password" placeholder="Сервисный токен" required>
+          <button class="button" type="submit">Подключить</button>
+        </form>
+      </section>
+
+      <div id="message" class="message" role="status" aria-live="polite"></div>
+
+      <section id="dashboard" class="dashboard hidden" aria-busy="false">
+        <div class="section-heading">
+          <div><p class="eyebrow">Сегодня</p><h2>Ключевые показатели</h2></div>
+          <span id="updated-at" class="updated-at"></span>
+        </div>
+
+        <div class="metrics">
+          <article class="metric"><span>Всего товаров</span><strong id="products-total">—</strong><small>в каталоге CRM</small></article>
+          <article class="metric"><span>Без поставщика</span><strong id="products-unbound">—</strong><small>требуют привязки</small></article>
+          <article class="metric"><span>Активный мониторинг</span><strong id="monitoring-active">—</strong><small>целей работает</small></article>
+          <article class="metric"><span>Ошибки</span><strong id="monitoring-errors">—</strong><small>целей с проблемами</small></article>
+        </div>
+
+        <div class="content-grid">
+          <section class="panel attention">
+            <div class="panel-title"><h2>Требуют внимания</h2><span>Приоритет</span></div>
+            <div class="attention-list">
+              <div><span class="indicator danger"></span><p><b id="attention-failures">—</b> мониторингов с ошибками</p></div>
+              <div><span class="indicator warning"></span><p><b id="attention-stale">—</b> устаревших состояний</p></div>
+              <div><span class="indicator neutral"></span><p><b id="attention-unbound">—</b> товаров без поставщика</p></div>
+              <div><span class="indicator warning"></span><p><b id="attention-unavailable">—</b> предложений нет в наличии</p></div>
+            </div>
+          </section>
+
+          <section class="panel">
+            <div class="panel-title"><h2>Browser Runtime</h2><span id="runtime-label">Состояние</span></div>
+            <dl class="runtime-grid">
+              <div><dt>В очереди</dt><dd id="queue-count">—</dd></div>
+              <div><dt>В работе</dt><dd id="leased-count">—</dd></div>
+              <div><dt>Деградировано</dt><dd id="degraded-count">—</dd></div>
+              <div><dt>Источников</dt><dd id="suppliers-active">—</dd></div>
+            </dl>
+          </section>
+
+          <section class="panel wide">
+            <div class="panel-title"><h2>Поставщики</h2><span>Актуальное состояние</span></div>
+            <div class="supplier-stats">
+              <div><span>Предложений</span><strong id="offers-total">—</strong></div>
+              <div><span>Получено состояний</span><strong id="offers-state">—</strong></div>
+              <div><span>В наличии</span><strong id="offers-available">—</strong></div>
+              <div><span>Нет в наличии</span><strong id="offers-unavailable">—</strong></div>
+            </div>
+          </section>
+        </div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/dashboard.js" defer></script>
+</body>
+</html>
