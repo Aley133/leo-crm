@@ -81,6 +81,17 @@ const render = (data) => {
   detailPage.classList.remove("hidden");
 };
 
+const responseError = async (response) => {
+  if ([502, 503, 504].includes(response.status)) {
+    return new Error("Сервис Render временно недоступен или перезапускается. Подождите минуту и нажмите «Обновить».");
+  }
+  try {
+    const body = await response.json();
+    if (body.detail) return new Error(String(body.detail));
+  } catch {}
+  return new Error(`API вернул ошибку ${response.status}`);
+};
+
 const loadDetail = async () => {
   const token = localStorage.getItem(storageKey);
   if (!token) {
@@ -104,7 +115,7 @@ const loadDetail = async () => {
       return;
     }
     if (response.status === 404) throw new Error("Товар не найден.");
-    if (!response.ok) throw new Error(`API вернул ошибку ${response.status}`);
+    if (!response.ok) throw await responseError(response);
     render(await response.json());
   } catch (error) {
     message.textContent = error instanceof Error ? error.message : "Не удалось загрузить карточку товара.";
