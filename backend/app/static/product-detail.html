@@ -19,75 +19,23 @@
       </nav>
       <div class="runtime-status"><span class="dot"></span><span>Product Card</span></div>
     </aside>
-
     <main>
       <header class="topbar">
-        <div>
-          <p class="eyebrow">Карточка Kaspi-товара</p>
-          <h1 id="product-name">Загрузка…</h1>
-          <p id="product-meta" class="subtitle"></p>
-        </div>
-        <div class="header-actions">
-          <a class="button secondary" href="/crm/products">Назад к товарам</a>
-          <button id="refresh" class="button secondary" type="button">Обновить</button>
-        </div>
+        <div><p class="eyebrow">Карточка Kaspi-товара</p><h1 id="product-name">Загрузка…</h1><p id="product-meta" class="subtitle"></p></div>
+        <div class="header-actions"><a class="button secondary" href="/crm/products">Назад к товарам</a><button id="add-supplier" class="button" type="button">Добавить поставщика</button><button id="refresh" class="button secondary" type="button">Обновить</button></div>
       </header>
-
-      <section id="auth-panel" class="auth-panel">
-        <div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div>
-        <form id="token-form">
-          <input id="token" type="password" autocomplete="current-password" placeholder="Сервисный токен" required>
-          <button class="button" type="submit">Подключить</button>
-        </form>
-      </section>
-
+      <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" autocomplete="current-password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
       <div id="message" class="message" role="status" aria-live="polite"></div>
-
       <section id="detail" class="detail-page hidden" aria-busy="false">
-        <section class="product-overview panel wide">
-          <div class="panel-title"><h2>Общее</h2><span id="product-updated-at"></span></div>
-          <div class="overview-grid">
-            <div><span>Kaspi ID</span><strong id="kaspi-product-id">—</strong></div>
-            <div><span>SKU продавца</span><strong id="merchant-sku">—</strong></div>
-            <div><span>Бренд</span><strong id="product-brand">—</strong></div>
-            <div><span>Статус</span><strong id="product-status">—</strong></div>
-          </div>
-        </section>
-
-        <div class="summary-grid">
-          <article class="metric"><span>Продано</span><strong id="units-sold">—</strong><small id="orders-count">строк заказов: —</small></article>
-          <article class="metric"><span>Выручка</span><strong id="revenue-kzt">—</strong><small id="last-ordered-at">последняя продажа: —</small></article>
-          <article class="metric"><span>Привязок</span><strong id="bindings-count">—</strong><small>поставщиков</small></article>
-          <article class="metric"><span>Наблюдений</span><strong id="observations-count">—</strong><small>в истории</small></article>
-          <article class="metric"><span>В наличии</span><strong id="available-count">—</strong><small>актуальных предложений</small></article>
-          <article class="metric"><span>Ошибки</span><strong id="failures-count">—</strong><small>мониторингов</small></article>
-        </div>
-
-        <section class="panel wide best-offer-panel">
-          <div class="panel-title"><h2>Лучшее доступное предложение</h2><span>По текущим наблюдениям</span></div>
-          <div id="best-offer" class="best-offer"></div>
-          <div id="best-offer-empty" class="empty hidden">Нет доступных предложений с ценой.</div>
-        </section>
-
-        <section class="panel wide">
-          <div class="panel-title"><h2>Поставщики</h2><span>Текущее состояние</span></div>
-          <div id="bindings" class="binding-list"></div>
-          <div id="bindings-empty" class="empty hidden">У товара пока нет привязанных поставщиков.</div>
-        </section>
-
-        <section class="panel wide">
-          <div class="panel-title"><h2>История наблюдений</h2><span id="updated-at"></span></div>
-          <div class="table-wrap">
-            <table>
-              <thead><tr><th>Время</th><th>Источник</th><th>Цена</th><th>Доставка</th><th>Наличие</th><th>Продавец</th></tr></thead>
-              <tbody id="observations-body"></tbody>
-            </table>
-          </div>
-          <div id="observations-empty" class="empty hidden">История наблюдений пока отсутствует.</div>
-        </section>
+        <section class="product-overview panel wide"><div class="panel-title"><h2>Общее</h2><span id="product-updated-at"></span></div><div class="overview-grid"><div><span>Kaspi ID</span><strong id="kaspi-product-id">—</strong></div><div><span>SKU продавца</span><strong id="merchant-sku">—</strong></div><div><span>Бренд</span><strong id="product-brand">—</strong></div><div><span>Статус</span><strong id="product-status">—</strong></div></div></section>
+        <div class="summary-grid"><article class="metric"><span>Продано</span><strong id="units-sold">—</strong><small id="orders-count">строк заказов: —</small></article><article class="metric"><span>Выручка</span><strong id="revenue-kzt">—</strong><small id="last-ordered-at">последняя продажа: —</small></article><article class="metric"><span>Привязок</span><strong id="bindings-count">—</strong><small>поставщиков</small></article><article class="metric"><span>Наблюдений</span><strong id="observations-count">—</strong><small>в истории</small></article><article class="metric"><span>В наличии</span><strong id="available-count">—</strong><small>актуальных предложений</small></article><article class="metric"><span>Ошибки</span><strong id="failures-count">—</strong><small>мониторингов</small></article></div>
+        <section class="panel wide best-offer-panel"><div class="panel-title"><h2>Лучшее доступное предложение</h2><span>По текущим наблюдениям</span></div><div id="best-offer" class="best-offer"></div><div id="best-offer-empty" class="empty hidden">Нет доступных предложений с ценой.</div></section>
+        <section class="panel wide"><div class="panel-title"><h2>Поставщики</h2><span>Текущее состояние</span></div><div id="bindings" class="binding-list"></div><div id="bindings-empty" class="empty hidden">У товара пока нет привязанных поставщиков.</div></section>
+        <section class="panel wide"><div class="panel-title"><h2>История наблюдений</h2><span id="updated-at"></span></div><div class="table-wrap"><table><thead><tr><th>Время</th><th>Источник</th><th>Цена</th><th>Доставка</th><th>Наличие</th><th>Продавец</th></tr></thead><tbody id="observations-body"></tbody></table></div><div id="observations-empty" class="empty hidden">История наблюдений пока отсутствует.</div></section>
       </section>
     </main>
   </div>
+  <dialog id="supplier-dialog" class="supplier-dialog"><form id="supplier-form"><div class="dialog-head"><div><p class="eyebrow">Ручная привязка</p><h2>Добавить поставщика</h2></div><button id="close-supplier-dialog" class="icon-button" type="button">×</button></div><p class="muted">Вставьте ссылку Ozon или Wildberries. CRM создаст привязку и поставит первую проверку в очередь.</p><label><span>Ссылка поставщика</span><input id="supplier-url" type="url" required placeholder="https://www.ozon.ru/product/..."></label><label><span>Название у поставщика</span><input id="supplier-title" type="text" maxlength="1000" placeholder="Необязательно"></label><label class="check"><input id="supplier-primary" type="checkbox"><span>Сделать основным поставщиком</span></label><label class="check"><input id="supplier-run-check" type="checkbox" checked><span>Сразу запустить первую проверку</span></label><div id="supplier-result" class="message"></div><div class="dialog-actions"><button id="cancel-supplier" class="button secondary" type="button">Отмена</button><button id="save-supplier" class="button" type="submit">Привязать и проверить</button></div></form></dialog>
   <script src="/static/product-detail.js" defer></script>
 </body>
 </html>
