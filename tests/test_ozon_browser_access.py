@@ -40,7 +40,7 @@ def test_ozon_challenge_shell_is_blocked_not_parse_error() -> None:
     assert "challenge=challenge" in message
 
 
-def test_runtime_registry_uses_antibot_aware_adapter() -> None:
+def test_runtime_registry_uses_antibot_and_delivery_aware_adapter() -> None:
     registry = _runtime_registry()
     adapter = registry.get("ozon")
-    assert adapter.code == "ozon-browser-v6"
+    assert adapter.code == "ozon-browser-v7"
