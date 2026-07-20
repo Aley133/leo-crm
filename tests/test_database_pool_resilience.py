@@ -4,15 +4,30 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_postgres_pool_supports_parallel_crm_reads() -> None:
+def test_postgres_pool_keeps_approved_small_connection_budget() -> None:
     source = (ROOT / "backend" / "app" / "db.py").read_text(encoding="utf-8")
 
-    assert '"DATABASE_POOL_SIZE", 5' in source
-    assert '"DATABASE_MAX_OVERFLOW", 5' in source
-    assert '"DATABASE_POOL_TIMEOUT", 10' in source
-    assert '"pool_use_lifo": True' in source
-    assert "def _bounded_env_int" in source
+    assert '"pool_size": 2' in source
+    assert '"max_overflow": 1' in source
+    assert '"pool_timeout": 10' in source
     assert "finally:\n        db.close()" in source
+
+
+def test_monitoring_page_serializes_database_backed_reads() -> None:
+    html = (ROOT / "backend" / "app" / "static" / "monitoring.html").read_text(
+        encoding="utf-8"
+    )
+    queue_script = (
+        ROOT / "backend" / "app" / "static" / "monitoring-request-queue.js"
+    ).read_text(encoding="utf-8")
+
+    queue_position = html.index('/static/monitoring-request-queue.js')
+    monitoring_position = html.index('/static/monitoring.js')
+    assert queue_position < monitoring_position
+    assert 'url.startsWith("/api/monitoring-center/")' in queue_script
+    assert 'method === "GET"' in queue_script
+    assert "monitoringReadQueue.then" in queue_script
+    assert "originalFetch(input, init)" in queue_script
 
 
 def test_liveness_does_not_acquire_database_connection() -> None:
