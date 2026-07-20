@@ -68,6 +68,14 @@ _CHALLENGE_MARKERS = (
 )
 _PRICE_KEYS = ("price", "finalPrice", "salePrice", "currentPrice", "cardPrice")
 _OLD_PRICE_KEYS = ("oldPrice", "originalPrice", "basePrice")
+_DELIVERY_KEYS = (
+    "deliveryDays",
+    "delivery_days",
+    "maxDeliveryDays",
+    "minDeliveryDays",
+    "deliveryPeriod",
+    "deliveryTime",
+)
 
 
 class OzonBrowserAdapter:
@@ -114,10 +122,10 @@ class OzonBrowserAdapter:
             price=offer["price"],
             old_price=offer.get("old_price"),
             available=offer["available"],
-            stock=None,
-            delivery_days=None,
-            seller=offer["seller"],
-            adapter_schema_version="ozon-browser-structured-v4",
+            stock=offer.get("stock"),
+            delivery_days=offer.get("delivery_days"),
+            seller=offer.get("seller"),
+            adapter_schema_version="ozon-browser-structured-v5",
             observed_at=datetime.now(UTC),
             raw_metadata={
                 "source": source,
@@ -183,6 +191,8 @@ class OzonBrowserAdapter:
                     "price": price,
                     "old_price": None,
                     "available": None,
+                    "stock": None,
+                    "delivery_days": None,
                     "seller": None,
                     "currency": (
                         currency_match.group(1).upper() if currency_match else "RUB"
@@ -244,10 +254,14 @@ class OzonBrowserAdapter:
             seller = str(seller_value.get("name") or "").strip() or None
         elif seller_value:
             seller = str(seller_value).strip() or None
+        shipping = offers.get("shippingDetails")
+        delivery_days = cls._delivery_days(shipping)
         return {
             "price": price,
             "old_price": None,
             "available": availability,
+            "stock": cls._parse_int(offers.get("inventoryLevel")),
+            "delivery_days": delivery_days,
             "seller": seller,
             "currency": str(offers.get("priceCurrency") or "RUB").upper(),
         }
@@ -292,15 +306,29 @@ class OzonBrowserAdapter:
         available = cls._availability(
             node.get("availability", node.get("isAvailable", node.get("available")))
         )
-        seller = node.get("sellerName") or node.get("seller")
+        seller = (
+            node.get("sellerName")
+            or node.get("seller")
+            or node.get("sellerTitle")
+            or node.get("shopName")
+        )
         if isinstance(seller, dict):
-            seller = seller.get("name")
+            seller = seller.get("name") or seller.get("title")
         seller_text = str(seller).strip() if seller not in (None, "") else None
         currency = node.get("currencyCode") or node.get("currency") or "RUB"
+        delivery_days = None
+        for key in _DELIVERY_KEYS:
+            if key in node:
+                delivery_days = cls._delivery_days(node.get(key))
+                if delivery_days is not None:
+                    break
+        stock = cls._parse_int(node.get("stock", node.get("quantity", node.get("availableQuantity"))))
         return {
             "price": price,
             "old_price": old_price,
             "available": available,
+            "stock": stock,
+            "delivery_days": delivery_days,
             "seller": seller_text,
             "currency": str(currency).upper(),
         }
@@ -321,6 +349,51 @@ class OzonBrowserAdapter:
         if price <= 0:
             return None
         return price
+
+    @staticmethod
+    def _parse_int(value: Any) -> int | None:
+        if isinstance(value, dict):
+            value = value.get("value") or value.get("amount") or value.get("maxValue")
+        try:
+            return int(value) if value not in (None, "") else None
+        except (TypeError, ValueError):
+            return None
+
+    @classmethod
+    def _delivery_days(cls, value: Any) -> int | None:
+        if isinstance(value, list):
+            for item in value:
+                parsed = cls._delivery_days(item)
+                if parsed is not None:
+                    return parsed
+            return None
+        if isinstance(value, dict):
+            for key in (
+                "deliveryDays",
+                "maxDeliveryDays",
+                "minDeliveryDays",
+                "maxValue",
+                "value",
+                "handlingTime",
+                "transitTime",
+            ):
+                if key in value:
+                    parsed = cls._delivery_days(value.get(key))
+                    if parsed is not None:
+                        return parsed
+            return None
+        if isinstance(value, (int, float)):
+            days = int(value)
+            return days if 0 <= days <= 365 else None
+        text = str(value or "").casefold()
+        match = re.search(r"(\d{1,3})\s*(?:дн|день|дня|дней|day|days)", text)
+        if match:
+            days = int(match.group(1))
+            return days if days <= 365 else None
+        if text.isdigit():
+            days = int(text)
+            return days if days <= 365 else None
+        return None
 
     @staticmethod
     def _availability(value: Any) -> bool | None:
