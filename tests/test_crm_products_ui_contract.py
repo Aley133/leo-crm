@@ -66,10 +66,13 @@ def test_products_page_renders_product_registry_fields() -> None:
     assert 'href="/crm/products/${row.product_id}"' in script
 
 
-def test_products_frontend_remains_read_only() -> None:
+def test_products_frontend_only_writes_through_explicit_xml_import() -> None:
     script = (ROOT / "backend" / "app" / "static" / "products.js").read_text(encoding="utf-8")
 
-    assert 'method:"POST"' not in script
+    assert 'method:"POST"' in script
+    assert "/api/product-registry/imports/xml/${action}" in script
+    assert 'xmlRequest("preview", file)' in script
+    assert 'xmlRequest("commit", selectedXmlFile)' in script
     assert 'method:"PUT"' not in script
     assert 'method:"PATCH"' not in script
     assert 'method:"DELETE"' not in script
