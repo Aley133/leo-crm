@@ -1,6 +1,7 @@
 from datetime import datetime, timedelta, timezone
 
 from backend.app.supplier_adapters.delivery_normalizer import DeliveryNormalizer
+from backend.app.supplier_adapters.ozon_delivery import OzonDeliveryExtractor
 
 
 KZ = timezone(timedelta(hours=5))
@@ -28,29 +29,18 @@ def test_delivery_normalizer_does_not_require_system_tzdata() -> None:
     assert DeliveryNormalizer.from_text("Доставка 26 июля", now=now) == 6
 
 
-def test_ozon_context_ignores_promotion_countdown() -> None:
-    now = datetime(2026, 7, 20, 12, 0, tzinfo=KZ)
-    text = """
-    Распродажа
-    10 дней до конца
-    3772 единицы осталось
-    2632 ₸
-    В корзину
-    Доставим завтра
-    Доставка и возврат
-    Пункт Ozon: Бокина, 18
-    """
+def test_ozon_delivery_extractor_ignores_installment_today() -> None:
+    now = datetime(2026, 7, 21, 0, 5, tzinfo=KZ)
+    text = (
+        "Оригинальный товар Оплата после получения При заказе в пункт выдачи "
+        "2632 ₸ 658 ₸ × 4 месяца 0 ₸ сегодня В корзину Доставим завтра "
+        "Доставка и возврат Бокина, 18 Со склада Ozon"
+    )
 
-    assert DeliveryNormalizer.from_context(
-        text,
-        markers=("доставим", "доставка", "пункт ozon"),
-        excluded_phrases=("до конца", "распродажа", "осталось"),
-        window=2,
-        now=now,
-    ) == 1
+    assert OzonDeliveryExtractor.from_text(text, now=now) == 1
 
 
-def test_ozon_context_handles_flattened_browser_text() -> None:
+def test_ozon_delivery_extractor_ignores_promotion_countdown() -> None:
     now = datetime(2026, 7, 20, 12, 0, tzinfo=KZ)
     text = (
         "Распродажа 3772 единицы осталось 10 дней до конца 2632 ₸ "
@@ -58,12 +48,7 @@ def test_ozon_context_handles_flattened_browser_text() -> None:
         "Доставка и возврат Бокина, 18 Со склада Ozon"
     )
 
-    assert DeliveryNormalizer.from_context(
-        text,
-        markers=("доставим", "доставка", "пункт ozon"),
-        excluded_phrases=("до конца", "распродажа", "осталось"),
-        now=now,
-    ) == 1
+    assert OzonDeliveryExtractor.from_text(text, now=now) == 1
 
 
 def test_ozon_adapter_waits_and_reads_full_delivery_text() -> None:
@@ -72,10 +57,10 @@ def test_ozon_adapter_waits_and_reads_full_delivery_text() -> None:
         encoding="utf-8",
     ).read()
 
-    assert 'code = "ozon-browser-v9"' in source
-    assert "DeliveryNormalizer.from_context(" in source
+    assert 'code = "ozon-browser-v10"' in source
+    assert "OzonDeliveryExtractor.from_text(" in source
     assert 'wait_for_function(' in source
     assert 'page.mouse.wheel(0, 500)' in source
     assert 'page.locator("body").inner_text(timeout=10000)' in source
-    assert 'metadata["delivery_source"] = "ozon_waited_full_visible_text"' in source
+    assert 'metadata["delivery_source"] = "ozon_trusted_delivery_semantics"' in source
     assert 'visible_delivery_context_normalized' not in source
