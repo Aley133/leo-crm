@@ -43,16 +43,46 @@ def test_wildberries_adapter_normalizes_tgbad_api_product_shape() -> None:
     assert offer["seller"] == "Wildberries"
 
 
-def test_wildberries_adapter_is_api_first_with_browser_fallback() -> None:
+def test_wildberries_adapter_normalizes_current_nested_price_shape() -> None:
+    node = {
+        "id": 51853964,
+        "name": "Формула сна Экспресс",
+        "brand": "Эвалар",
+        "sizes": [
+            {
+                "price": {
+                    "basic": 319000,
+                    "product": 283000,
+                    "total": 274500,
+                },
+                "stocks": [{"qty": 4}, {"qty": 3}],
+            }
+        ],
+    }
+
+    assert WildberriesBrowserAccessAdapter._looks_like_product(node) is True
+    offer = WildberriesBrowserAccessAdapter._offer_from_node(node)
+
+    assert offer is not None
+    assert offer["price"] == Decimal("2830")
+    assert offer["old_price"] == Decimal("3190")
+    assert offer["stock"] == 7
+    assert offer["available"] is True
+
+
+def test_wildberries_adapter_is_api_first_and_browser_fallback_is_opt_in() -> None:
     source = (
         ROOT / "backend" / "app" / "supplier_adapters" / "wildberries_browser_access.py"
     ).read_text(encoding="utf-8")
 
     assert "https://card.wb.ru/cards/v2/detail" in source
     assert "https://search.wb.ru/exactmatch/ru/common/v18/search" in source
+    assert "https://search.wb.ru/exactmatch/ru/common/v13/search" in source
     assert "salePriceU" in source
     assert "priceU" in source
+    assert 'for key in ("product", "total")' in source
     assert "wb_card_api" in source
     assert "wb_search_api" in source
-    assert "wb_browser_fallback" in source
-    assert source.index("_fetch_card_payload") < source.index("fetch_html")
+    assert "WB_BROWSER_FALLBACK" in source
+    assert "if self._browser_fallback" in source
+    assert source.index("_fetch_card_payload") < source.index("_fetch_browser_fallback")
