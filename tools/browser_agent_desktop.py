@@ -14,7 +14,11 @@ from tkinter import Tk, messagebox, simpledialog
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from tools.browser_agent import main as run_browser_agent
+import tools.browser_agent as browser_agent_module
+from backend.app.supplier_adapters.wildberries_delivery_aware import WildberriesDeliveryAwareAdapter
+
+run_browser_agent = browser_agent_module.main
+browser_agent_module.WildberriesBrowserAccessAdapter = WildberriesDeliveryAwareAdapter
 
 API_URL = "https://leo-crm-api.onrender.com"
 CDP_ENDPOINT = "http://127.0.0.1:9222"
