@@ -8,7 +8,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
-from .browser_agent_jobs import BrowserAgentJob, BrowserAgentJobStatus
+from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import get_db
 from .models import Product
 from .monitoring import MonitorAttempt, MonitorTarget, SourceHealth
