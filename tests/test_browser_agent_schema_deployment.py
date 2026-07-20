@@ -14,6 +14,7 @@ def test_schema_repair_is_idempotent_and_never_drops_queue_data() -> None:
     normalized = script.casefold()
 
     assert normalized.count("checkfirst=true") >= 4
+    assert "add column if not exists" in normalized
     assert "drop_table(" not in normalized
     assert "drop_index(" not in normalized
     assert ".drop(" not in normalized
@@ -25,12 +26,16 @@ def test_browser_ingestion_dependencies_are_repaired_and_verified() -> None:
 
     for table_name in (
         "browser_agent_jobs",
+        "supplier_offer_states",
+        "supplier_offer_observations",
         "pricing_policies",
         "fx_rate_snapshots",
         "price_calculations",
     ):
         assert f'"{table_name}"' in script
 
+    assert '"currency": "VARCHAR(3)"' in script
+    assert "_repair_safe_nullable_columns()" in script
     assert "PricingPolicy.__table__.create" in script
     assert "FxRateSnapshot.__table__.create" in script
     assert "PriceCalculation.__table__.create" in script
