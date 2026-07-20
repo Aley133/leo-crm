@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timedelta, timezone
+from typing import Iterable
 
 KAZAKHSTAN_TZ = timezone(timedelta(hours=5), name="Asia/Almaty")
 
@@ -32,6 +33,38 @@ class DeliveryNormalizer:
     The normalizer is marketplace-agnostic and has no database, queue, browser,
     pricing or XML dependencies.
     """
+
+    @classmethod
+    def from_context(
+        cls,
+        text: str,
+        *,
+        markers: Iterable[str],
+        excluded_phrases: Iterable[str] = (),
+        window: int = 2,
+        now: datetime | None = None,
+    ) -> int | None:
+        """Parse delivery only from lines surrounding trusted delivery markers."""
+        lines = [" ".join(line.split()) for line in str(text or "").splitlines() if line.strip()]
+        marker_values = tuple(value.casefold().replace("ё", "е") for value in markers)
+        excluded_values = tuple(value.casefold().replace("ё", "е") for value in excluded_phrases)
+        selected: list[str] = []
+
+        for index, line in enumerate(lines):
+            normalized_line = line.casefold().replace("ё", "е")
+            if not any(marker in normalized_line for marker in marker_values):
+                continue
+            start = max(0, index - window)
+            end = min(len(lines), index + window + 1)
+            for candidate in lines[start:end]:
+                normalized_candidate = candidate.casefold().replace("ё", "е")
+                if any(phrase in normalized_candidate for phrase in excluded_values):
+                    continue
+                selected.append(candidate)
+
+        if not selected:
+            return None
+        return cls.from_text("\n".join(selected), now=now)
 
     @classmethod
     def from_text(cls, text: str, *, now: datetime | None = None) -> int | None:
