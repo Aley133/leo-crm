@@ -51,16 +51,19 @@ def test_ozon_delivery_extractor_ignores_promotion_countdown() -> None:
     assert OzonDeliveryExtractor.from_text(text, now=now) == 1
 
 
-def test_ozon_adapter_waits_and_reads_full_delivery_text() -> None:
+def test_ozon_adapter_waits_reads_and_records_delivery_evidence() -> None:
     source = open(
         "backend/app/supplier_adapters/ozon_browser_access.py",
         encoding="utf-8",
     ).read()
 
-    assert 'code = "ozon-browser-v10"' in source
+    assert 'code = "ozon-browser-v11"' in source
     assert "OzonDeliveryExtractor.from_text(" in source
     assert 'wait_for_function(' in source
     assert 'page.mouse.wheel(0, 500)' in source
     assert 'page.locator("body").inner_text(timeout=10000)' in source
     assert 'metadata["delivery_source"] = "ozon_trusted_delivery_semantics"' in source
+    assert 'metadata["base_delivery_days"]' in source
+    assert 'metadata["semantic_delivery_days"]' in source
+    assert 'metadata["delivery_context"]' in source
     assert 'visible_delivery_context_normalized' not in source
