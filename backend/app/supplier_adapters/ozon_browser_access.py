@@ -3,35 +3,16 @@ from __future__ import annotations
 from dataclasses import replace
 
 from .base import AdapterRequest, NormalizedOffer
-from .delivery_normalizer import DeliveryNormalizer
 from .errors import AdapterBlockedError
 from .ozon_browser import OzonBrowserAdapter
+from .ozon_delivery import OzonDeliveryExtractor
 from .playwright_pool import BrowserPageResult
 
 
 class OzonBrowserAccessAdapter(OzonBrowserAdapter):
     """Ozon browser adapter with anti-bot and delivery normalization."""
 
-    code = "ozon-browser-v9"
-
-    _DELIVERY_MARKERS = (
-        "доставим",
-        "доставка",
-        "получить",
-        "получение",
-        "пункт ozon",
-        "пункт выдачи",
-        "курьер",
-        "самовывоз",
-    )
-    _DELIVERY_EXCLUSIONS = (
-        "до конца",
-        "распродажа",
-        "акция",
-        "скидка",
-        "купон",
-        "осталось",
-    )
+    code = "ozon-browser-v10"
 
     async def fetch(self, request: AdapterRequest) -> NormalizedOffer:
         offer = await super().fetch(request)
@@ -52,17 +33,12 @@ class OzonBrowserAccessAdapter(OzonBrowserAdapter):
             return offer
 
         self._classify_page(response)
-        delivery_days = DeliveryNormalizer.from_context(
-            response.body_text,
-            markers=self._DELIVERY_MARKERS,
-            excluded_phrases=self._DELIVERY_EXCLUSIONS,
-            window=2,
-        )
+        delivery_days = OzonDeliveryExtractor.from_text(response.body_text)
         if delivery_days is None:
             return offer
 
         metadata = dict(offer.raw_metadata)
-        metadata["delivery_source"] = "ozon_waited_full_visible_text"
+        metadata["delivery_source"] = "ozon_trusted_delivery_semantics"
         metadata["delivery_response_url"] = response.final_url
         return replace(
             offer,
