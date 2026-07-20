@@ -21,9 +21,10 @@ def test_products_page_is_kaspi_centric() -> None:
     script = (ROOT / "backend" / "app" / "static" / "products.js").read_text(encoding="utf-8")
 
     assert "Одна строка — одна карточка Kaspi" in html
-    assert "/api/catalog/products" in script
+    assert "/api/product-registry/products" in script
     assert "supplier_count" in script
     assert "best_supplier_name" in script
+    assert "/api/catalog/supplier-offers" not in script
     assert "/api/supplier-state/offers" not in script
 
 
