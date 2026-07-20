@@ -31,6 +31,8 @@ class MonitoringSummary(BaseModel):
 class MonitoringJobRow(BaseModel):
     id: int
     status: str
+    lifecycle_state: str
+    wait_reason: str | None
     monitor_target_id: int | None
     product_id: int | None
     kaspi_product_id: str | None
@@ -103,6 +105,20 @@ def _get_job_for_update(db: Session, job_id: int) -> BrowserAgentJob:
     return job
 
 
+def _job_lifecycle(job: BrowserAgentJob) -> tuple[str, str | None]:
+    if job.status == BrowserAgentJobStatus.QUEUED.value:
+        return "waiting_for_agent", "Ожидает свободный Browser Agent и получение lease"
+    if job.status == BrowserAgentJobStatus.LEASED.value:
+        if job.lease_until is not None and job.lease_until < utc_now():
+            return "lease_expired", "Lease истёк; задание может быть повторно забрано агентом"
+        return "processing", f"Выполняется агентом {job.lease_owner or 'unknown'}"
+    if job.status == BrowserAgentJobStatus.SUCCEEDED.value:
+        return "finished", None
+    if job.error_code == "operator_cancelled":
+        return "cancelled", "Отменено оператором до получения lease"
+    return "failed", job.error_code or "Завершено с ошибкой"
+
+
 @router.get("/summary", response_model=MonitoringSummary)
 def get_monitoring_summary(db: Session = Depends(get_db)) -> MonitoringSummary:
     targets_total = db.scalar(select(func.count()).select_from(MonitorTarget)) or 0
@@ -153,24 +169,30 @@ def list_monitoring_jobs(
     if status:
         stmt = stmt.where(BrowserAgentJob.status == status)
     rows = db.execute(stmt).all()
-    return [MonitoringJobRow(
-        id=job.id,
-        status=job.status,
-        monitor_target_id=job.monitor_target_id,
-        product_id=product_id,
-        kaspi_product_id=kaspi_id,
-        product_name=product_name,
-        supplier_code=supplier_code,
-        supplier_name=supplier_name,
-        supplier_product_url=job.url,
-        lease_owner=job.lease_owner,
-        lease_until=job.lease_until,
-        error_code=job.error_code,
-        error_message=job.error_message,
-        created_at=job.created_at,
-        updated_at=job.updated_at,
-        finished_at=job.finished_at,
-    ) for job, product_id, kaspi_id, product_name, supplier_code, supplier_name in rows]
+    result: list[MonitoringJobRow] = []
+    for job, product_id, kaspi_id, product_name, supplier_code, supplier_name in rows:
+        lifecycle_state, wait_reason = _job_lifecycle(job)
+        result.append(MonitoringJobRow(
+            id=job.id,
+            status=job.status,
+            lifecycle_state=lifecycle_state,
+            wait_reason=wait_reason,
+            monitor_target_id=job.monitor_target_id,
+            product_id=product_id,
+            kaspi_product_id=kaspi_id,
+            product_name=product_name,
+            supplier_code=supplier_code,
+            supplier_name=supplier_name,
+            supplier_product_url=job.url,
+            lease_owner=job.lease_owner,
+            lease_until=job.lease_until,
+            error_code=job.error_code,
+            error_message=job.error_message,
+            created_at=job.created_at,
+            updated_at=job.updated_at,
+            finished_at=job.finished_at,
+        ))
+    return result
 
 
 @router.get("/jobs/{job_id}")
@@ -178,9 +200,12 @@ def inspect_monitoring_job(job_id: int, db: Session = Depends(get_db)) -> dict:
     job = db.get(BrowserAgentJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Browser agent job not found")
+    lifecycle_state, wait_reason = _job_lifecycle(job)
     return {
         "id": job.id,
         "status": job.status,
+        "lifecycle_state": lifecycle_state,
+        "wait_reason": wait_reason,
         "monitor_target_id": job.monitor_target_id,
         "supplier_product_id": job.supplier_product_id,
         "url": job.url,
@@ -199,12 +224,16 @@ def list_monitoring_job_events(job_id: int, db: Session = Depends(get_db)) -> li
     job = db.get(BrowserAgentJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Browser agent job not found")
-    events = [RuntimeEventRow(event="created", occurred_at=job.created_at, detail="Job added to Browser Agent queue")]
+    lifecycle_state, wait_reason = _job_lifecycle(job)
+    events = [RuntimeEventRow(event="created", occurred_at=job.created_at, detail="Job добавлен в очередь Browser Agent")]
+    if job.status == BrowserAgentJobStatus.QUEUED.value:
+        events.append(RuntimeEventRow(event="waiting_for_agent", occurred_at=job.updated_at, detail=wait_reason))
     if job.lease_owner and job.lease_until:
-        events.append(RuntimeEventRow(event="leased", occurred_at=job.updated_at, detail=f"Lease owner: {job.lease_owner}"))
+        events.append(RuntimeEventRow(event="lease_acquired", occurred_at=job.updated_at, detail=f"Lease owner: {job.lease_owner}; lease до {job.lease_until.isoformat()}"))
+        events.append(RuntimeEventRow(event="processing", occurred_at=job.updated_at, detail="Browser Agent выполняет навигацию, парсинг и сохранение результата"))
     if job.finished_at:
-        detail = job.error_code or job.status
-        events.append(RuntimeEventRow(event=job.status, occurred_at=job.finished_at, detail=detail))
+        detail = job.error_message or job.error_code or job.status
+        events.append(RuntimeEventRow(event=lifecycle_state, occurred_at=job.finished_at, detail=detail))
     return sorted(events, key=lambda item: item.occurred_at)
 
 
