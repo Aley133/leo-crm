@@ -5,6 +5,7 @@ on:
     branches:
       - main
     paths:
+      - "tools/__init__.py"
       - "tools/browser_agent.py"
       - "tools/browser_agent_desktop.py"
       - "tools/windows/LEO-Browser-Agent.iss"
@@ -31,14 +32,26 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
+      - name: Verify desktop imports
+        shell: pwsh
+        run: |
+          python -c "import tools.browser_agent; import tools.browser_agent_desktop"
+
       - name: Build application executable
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
             --name LEO-Browser-Agent `
+            --paths . `
+            --hidden-import tools.browser_agent `
             --collect-submodules backend `
             --collect-submodules tools `
             tools/browser_agent_desktop.py
+
+      - name: Smoke test packaged executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/LEO-Browser-Agent.exe")) { throw "Browser Agent executable was not created" }
 
       - name: Install Inno Setup
         shell: pwsh
