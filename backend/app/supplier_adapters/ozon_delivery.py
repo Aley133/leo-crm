@@ -15,11 +15,17 @@ class OzonDeliveryExtractor:
     Ozon delivery controls, then delegates calendar arithmetic to DeliveryNormalizer.
     """
 
-    _CONTEXT = (
-        r"доставим|доставка|доставят|доставить|получите|получить|получение|"
-        r"курьером(?:\s+ozon)?|курьер(?:\s+ozon)?|пункт(?:ы)?\s+выдачи|"
-        r"постамат(?:ы)?|самовывоз|в\s+корзину"
+    # Direct fulfillment verbs are the strongest signal and must be evaluated before
+    # weaker location/context labels such as "пункт выдачи" or "в корзину".
+    _PRIMARY = (
+        r"доставим|доставят|доставить|привезем|привезут|получите|"
+        r"получить|заберите|забрать"
     )
+    _SECONDARY = (
+        r"доставка|получение|курьером(?:\s+ozon)?|курьер(?:\s+ozon)?|"
+        r"пункт(?:ы)?\s+выдачи|постамат(?:ы)?|самовывоз|в\s+корзину"
+    )
+    _CONTEXT = rf"{_PRIMARY}|{_SECONDARY}"
     _RELATIVE = r"сегодня|завтра|послезавтра"
     _MONTH = (
         r"января|февраля|марта|апреля|мая|июня|июля|августа|"
@@ -33,35 +39,72 @@ class OzonDeliveryExtractor:
         if not normalized:
             return None
 
-        # Strongest signal: a calendar date adjacent to an Ozon delivery marker.
-        date_patterns = (
-            rf"(?:{cls._CONTEXT})[^\n]{{0,140}}?\b\d{{1,2}}\s+(?:{cls._MONTH})\b",
-            rf"\b\d{{1,2}}\s+(?:{cls._MONTH})\b[^\n]{{0,100}}?(?:{cls._CONTEXT})",
-            rf"(?:{cls._CONTEXT})[^\n]{{0,140}}?\b\d{{1,2}}[./-]\d{{1,2}}(?:[./-]\d{{2,4}})?\b",
+        # Payment/installment labels are not delivery promises. Remove them before any
+        # relative-day parsing so "0 ₸ сегодня" can never outrank "Доставим завтра".
+        normalized = re.sub(
+            r"\b\d[\d\s.,]*\s*(?:₸|тг|тенге)\s*(?:за\s*\d+\s*(?:шт|ед)\s*)?сегодня\b",
+            " ",
+            normalized,
+            flags=re.IGNORECASE,
         )
-        for pattern in date_patterns:
+
+        # Strongest signal: a calendar date adjacent to a direct delivery verb.
+        primary_date_patterns = (
+            rf"(?:{cls._PRIMARY})[^\n]{{0,100}}?\b\d{{1,2}}\s+(?:{cls._MONTH})\b",
+            rf"\b\d{{1,2}}\s+(?:{cls._MONTH})\b[^\n]{{0,70}}?(?:{cls._PRIMARY})",
+            rf"(?:{cls._PRIMARY})[^\n]{{0,100}}?\b\d{{1,2}}[./-]\d{{1,2}}(?:[./-]\d{{2,4}})?\b",
+        )
+        for pattern in primary_date_patterns:
             match = re.search(pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
             if match:
                 days = DeliveryNormalizer.from_text(match.group(0), now=now)
                 if days is not None:
                     return days
 
-        # Then relative promises, but only when attached to delivery semantics.
-        relative_patterns = (
-            rf"(?:{cls._CONTEXT})[^\n]{{0,120}}?\b(?:{cls._RELATIVE})\b",
-            rf"\b(?:{cls._RELATIVE})\b[^\n]{{0,80}}?(?:{cls._CONTEXT})",
+        # Direct relative promises such as "Доставим завтра" have absolute priority.
+        primary_relative_patterns = (
+            rf"(?:{cls._PRIMARY})[^\n]{{0,60}}?\b(?:{cls._RELATIVE})\b",
+            rf"\b(?:{cls._RELATIVE})\b[^\n]{{0,40}}?(?:{cls._PRIMARY})",
         )
-        for pattern in relative_patterns:
+        for pattern in primary_relative_patterns:
             match = re.search(pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
             if match:
                 days = DeliveryNormalizer.from_text(match.group(0), now=now)
                 if days is not None:
                     return days
 
-        # Finally accept an explicit day count only inside delivery context.
-        count_pattern = rf"(?:{cls._CONTEXT})[^\n]{{0,120}}?(?:через\s*)?\d{{1,2}}\s*(?:день|дня|дней|дн)\b"
-        match = re.search(count_pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
-        if match:
-            return DeliveryNormalizer.from_text(match.group(0), now=now)
+        # Fall back to broader delivery context only when no direct promise exists.
+        secondary_date_patterns = (
+            rf"(?:{cls._SECONDARY})[^\n]{{0,100}}?\b\d{{1,2}}\s+(?:{cls._MONTH})\b",
+            rf"\b\d{{1,2}}\s+(?:{cls._MONTH})\b[^\n]{{0,70}}?(?:{cls._SECONDARY})",
+        )
+        for pattern in secondary_date_patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                days = DeliveryNormalizer.from_text(match.group(0), now=now)
+                if days is not None:
+                    return days
+
+        secondary_relative_patterns = (
+            rf"(?:{cls._SECONDARY})[^\n]{{0,70}}?\b(?:{cls._RELATIVE})\b",
+            rf"\b(?:{cls._RELATIVE})\b[^\n]{{0,50}}?(?:{cls._SECONDARY})",
+        )
+        for pattern in secondary_relative_patterns:
+            match = re.search(pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                days = DeliveryNormalizer.from_text(match.group(0), now=now)
+                if days is not None:
+                    return days
+
+        # Finally accept an explicit day count only inside direct delivery context first,
+        # then broader delivery context.
+        for context in (cls._PRIMARY, cls._SECONDARY):
+            count_pattern = (
+                rf"(?:{context})[^\n]{{0,100}}?(?:через\s*)?"
+                rf"\d{{1,2}}\s*(?:день|дня|дней|дн)\b"
+            )
+            match = re.search(count_pattern, normalized, flags=re.IGNORECASE | re.DOTALL)
+            if match:
+                return DeliveryNormalizer.from_text(match.group(0), now=now)
 
         return None
