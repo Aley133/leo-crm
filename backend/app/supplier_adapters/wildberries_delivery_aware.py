@@ -34,7 +34,7 @@ class WildberriesDeliveryAwareAdapter(WildberriesBrowserAccessAdapter):
     keeps the parent adapter's browser verification and application boundary.
     """
 
-    code = "wildberries-browser-verified-v7"
+    code = "wildberries-browser-verified-v8"
 
     @classmethod
     def _delivery_days_from_text(cls, body_text: str) -> int | None:
@@ -68,32 +68,49 @@ class WildberriesDeliveryAwareAdapter(WildberriesBrowserAccessAdapter):
         text = " ".join(selected).casefold().replace("ё", "е")
         if not text:
             return None
+
+        # An explicit calendar promise is authoritative. WB pages can contain
+        # unrelated relative words in recommendations or secondary widgets.
+        calendar_days = cls._calendar_delivery_days(text)
+        if calendar_days is not None:
+            return calendar_days
+
+        values = [int(match) for match in _DAY_RE.findall(text)]
+        if values:
+            return min(values)
+
         if "послезавтра" in text:
             return 2
         if "завтра" in text:
             return 1
         if "сегодня" in text:
             return 0
+        return None
 
-        values = [int(match) for match in _DAY_RE.findall(text)]
-        if values:
-            return min(values)
-
-        date_match = _DATE_RE.search(text)
-        if not date_match:
-            return None
-
-        day = int(date_match.group(1))
-        month = _MONTHS[date_match.group(2).casefold()]
+    @classmethod
+    def _calendar_delivery_days(cls, text: str) -> int | None:
         now = datetime.now(ZoneInfo("Asia/Almaty"))
-        try:
-            candidate = now.replace(month=month, day=day, hour=0, minute=0, second=0, microsecond=0)
-        except ValueError:
-            return None
-        if candidate.date() < now.date():
+        candidates: list[int] = []
+        for match in _DATE_RE.finditer(text):
+            day = int(match.group(1))
+            month = _MONTHS[match.group(2).casefold()]
             try:
-                candidate = candidate.replace(year=now.year + 1)
+                candidate = now.replace(
+                    month=month,
+                    day=day,
+                    hour=0,
+                    minute=0,
+                    second=0,
+                    microsecond=0,
+                )
             except ValueError:
-                return None
-        delta = (candidate.date() - now.date()).days
-        return delta if 0 <= delta <= 30 else None
+                continue
+            if candidate.date() < now.date():
+                try:
+                    candidate = candidate.replace(year=now.year + 1)
+                except ValueError:
+                    continue
+            delta = (candidate.date() - now.date()).days
+            if 0 <= delta <= 30:
+                candidates.append(delta)
+        return min(candidates) if candidates else None
