@@ -18,26 +18,12 @@ def _database_url() -> str:
     return value
 
 
-def _bounded_env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
-    raw = (os.getenv(name) or "").strip()
-    if not raw:
-        return default
-    try:
-        value = int(raw)
-    except ValueError as exc:
-        raise RuntimeError(f"{name} must be an integer") from exc
-    if value < minimum or value > maximum:
-        raise RuntimeError(f"{name} must be between {minimum} and {maximum}")
-    return value
-
-
 def _engine_options(database_url: str) -> dict[str, Any]:
     """Return safe engine settings for the selected database dialect.
 
-    The CRM dashboard performs several independent read requests in parallel.
-    PostgreSQL therefore needs enough pooled connections for one page load plus
-    health/readiness traffic. Values remain configurable so the deployment can
-    stay within the Supabase connection budget.
+    PostgreSQL keeps the deliberately small pool approved for the Supabase
+    connection budget. Application code must avoid opening more concurrent
+    request sessions than this contract permits.
     """
 
     url = make_url(database_url)
@@ -54,16 +40,9 @@ def _engine_options(database_url: str) -> dict[str, Any]:
 
     options.update(
         {
-            "pool_size": _bounded_env_int(
-                "DATABASE_POOL_SIZE", 5, minimum=1, maximum=20
-            ),
-            "max_overflow": _bounded_env_int(
-                "DATABASE_MAX_OVERFLOW", 5, minimum=0, maximum=20
-            ),
-            "pool_timeout": _bounded_env_int(
-                "DATABASE_POOL_TIMEOUT", 10, minimum=1, maximum=60
-            ),
-            "pool_use_lifo": True,
+            "pool_size": 2,
+            "max_overflow": 1,
+            "pool_timeout": 10,
         }
     )
     return options
