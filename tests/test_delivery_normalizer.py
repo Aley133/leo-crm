@@ -66,12 +66,14 @@ def test_ozon_context_handles_flattened_browser_text() -> None:
     ) == 1
 
 
-def test_ozon_adapter_uses_contextual_delivery_normalizer() -> None:
+def test_ozon_adapter_waits_and_reads_full_delivery_text() -> None:
     source = open(
         "backend/app/supplier_adapters/ozon_browser_access.py",
         encoding="utf-8",
     ).read()
 
     assert "DeliveryNormalizer.from_context(" in source
-    assert '"до конца"' in source
-    assert 'metadata["delivery_source"] = "visible_delivery_context_normalized"' in source
+    assert 'wait_for_function(' in source
+    assert 'page.mouse.wheel(0, 500)' in source
+    assert 'page.locator("body").inner_text(timeout=10000)' in source
+    assert 'metadata["delivery_source"] = "ozon_waited_full_visible_text"' in source
