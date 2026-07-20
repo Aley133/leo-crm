@@ -51,19 +51,41 @@ def test_ozon_delivery_extractor_ignores_promotion_countdown() -> None:
     assert OzonDeliveryExtractor.from_text(text, now=now) == 1
 
 
+def test_ozon_delivery_candidates_prioritize_current_product_widget() -> None:
+    now = datetime(2026, 7, 21, 0, 5, tzinfo=KZ)
+
+    assert OzonDeliveryExtractor.from_candidates(
+        ["В корзину\nДоставим завтра"],
+        fallback_text="0 ₸ сегодня. Рекомендации: Послезавтра",
+        now=now,
+    ) == 1
+
+
+def test_ozon_delivery_candidate_accepts_compact_current_product_promise() -> None:
+    now = datetime(2026, 7, 21, 0, 5, tzinfo=KZ)
+
+    assert OzonDeliveryExtractor.from_candidates(["Послезавтра"], now=now) == 2
+    assert OzonDeliveryExtractor.from_candidates(["В корзину\n26 июля"], now=now) == 5
+
+
+def test_ozon_full_page_does_not_use_weak_context_today() -> None:
+    now = datetime(2026, 7, 21, 0, 5, tzinfo=KZ)
+    text = "Пункт выдачи 2632 ₸ 0 ₸ сегодня В корзину рекомендации послезавтра"
+
+    assert OzonDeliveryExtractor.from_text(text, now=now) is None
+
+
 def test_ozon_adapter_waits_reads_and_records_delivery_evidence() -> None:
     source = open(
         "backend/app/supplier_adapters/ozon_browser_access.py",
         encoding="utf-8",
     ).read()
 
-    assert 'code = "ozon-browser-v11"' in source
-    assert "OzonDeliveryExtractor.from_text(" in source
-    assert 'wait_for_function(' in source
-    assert 'page.mouse.wheel(0, 500)' in source
-    assert 'page.locator("body").inner_text(timeout=10000)' in source
-    assert 'metadata["delivery_source"] = "ozon_trusted_delivery_semantics"' in source
+    assert 'code = "ozon-browser-v12"' in source
+    assert "OzonDeliveryExtractor.from_candidates(" in source
+    assert 'document.querySelectorAll(\'[data-widget="webAddToCart"]\')' in source
+    assert 'metadata["delivery_source"] = "ozon_current_product_dom"' in source
     assert 'metadata["base_delivery_days"]' in source
     assert 'metadata["semantic_delivery_days"]' in source
+    assert 'metadata["delivery_candidates"]' in source
     assert 'metadata["delivery_context"]' in source
-    assert 'visible_delivery_context_normalized' not in source
