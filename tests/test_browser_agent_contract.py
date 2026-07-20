@@ -3,11 +3,15 @@ from __future__ import annotations
 import asyncio
 from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
-from backend.app.browser_agent_models import BrowserAgentJobStatus
+from backend.app.browser_agent_models import BrowserAgent, BrowserAgentJobStatus
 from backend.app.main import app
 from backend.app.supplier_adapters.base import NormalizedOffer
 from tools.browser_agent import _run_job
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 class FakeAdapter:
@@ -38,6 +42,8 @@ def test_browser_agent_routes_are_registered() -> None:
     assert "/api/browser-agent/agents" in paths
     assert "/api/browser-agent/jobs/{job_id}/complete" in paths
     assert "/api/browser-agent/jobs/{job_id}" in paths
+    assert "/api/browser-agent-registry/agents" in paths
+    assert "/api/browser-agent-registry/agents/{agent_id}/events" in paths
     assert "/api/monitor-targets/{target_id}/queue-browser-agent" in paths
 
 
@@ -65,3 +71,33 @@ def test_browser_agent_status_contract_is_explicit() -> None:
         "succeeded",
         "failed",
     }
+
+
+def test_browser_agent_registry_model_is_persistent() -> None:
+    assert BrowserAgent.__tablename__ == "browser_agents"
+    columns = {column.name for column in BrowserAgent.__table__.columns}
+    assert {
+        "agent_id",
+        "hostname",
+        "platform",
+        "version",
+        "status",
+        "current_job_id",
+        "last_seen_at",
+        "leases_taken",
+        "leases_succeeded",
+        "leases_failed",
+    }.issubset(columns)
+
+
+def test_deploy_schema_creates_browser_agent_registry() -> None:
+    source = (ROOT / "tools" / "ensure_browser_agent_schema.py").read_text(encoding="utf-8")
+    assert "BrowserAgent.__table__.create(bind=engine, checkfirst=True)" in source
+    assert '"browser_agents"' in source
+
+
+def test_agent_claim_sends_machine_identity() -> None:
+    source = (ROOT / "tools" / "browser_agent.py").read_text(encoding="utf-8")
+    assert '"hostname": socket.gethostname()' in source
+    assert '"platform": platform.platform()' in source
+    assert '"version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip()' in source
