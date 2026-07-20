@@ -47,4 +47,4 @@ def test_readiness_checks_database_without_crashing_process() -> None:
     assert "except SQLAlchemyError" in ready_block
     assert "status_code=503" in ready_block
     assert '"database": "unavailable"' in ready_block
-    assert '"database": "connected"' in ready_block
+    assert '"database": "ok"' in ready_block
