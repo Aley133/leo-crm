@@ -21,7 +21,11 @@ def test_wildberries_calendar_delivery_date(monkeypatch) -> None:
     import backend.app.supplier_adapters.wildberries_delivery_aware as module
 
     monkeypatch.setattr(module, "datetime", FixedDateTime)
-    assert WildberriesDeliveryAwareAdapter._delivery_days_from_text("26 июля, склад WB") == 6
+    parser = WildberriesDeliveryAwareAdapter._delivery_days_from_text
+
+    assert parser("26 июля, склад WB") == 6
+    assert parser("Послезавтра в рекомендациях\n26 июля, склад WB") == 6
+    assert parser("Получение через 2 дня\n26 июля, склад WB") == 6
 
 
 def test_wildberries_ignores_unrelated_rating() -> None:
