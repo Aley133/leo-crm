@@ -7,6 +7,7 @@ from sqlalchemy import text
 
 from .browser_agent_api import router as browser_agent_router
 from .browser_agent_monitoring_api import router as browser_agent_monitoring_router
+from .catalog_api import router as catalog_router
 from .dashboard_api import router as dashboard_router
 from .db import engine
 from .marketplace_api import router as marketplace_router
@@ -36,6 +37,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
+app.include_router(catalog_router)
 app.include_router(suppliers_router)
 app.include_router(supplier_products_router)
 app.include_router(supplier_state_router)
