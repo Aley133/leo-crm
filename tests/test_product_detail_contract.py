@@ -16,12 +16,19 @@ def test_product_detail_api_is_registered_and_protected() -> None:
     assert "ProductDetailResponse" in source
 
 
-def test_product_detail_contract_contains_bindings_and_history() -> None:
+def test_product_detail_contract_contains_sales_bindings_and_history() -> None:
     source = (ROOT / "backend" / "app" / "product_detail_api.py").read_text(encoding="utf-8")
 
     for field in (
         "kaspi_product_id",
         "merchant_sku",
+        "created_at",
+        "updated_at",
+        "sales",
+        "orders_count",
+        "units_sold",
+        "revenue_kzt",
+        "last_ordered_at",
         "bindings",
         "observations",
         "supplier_product_url",
@@ -35,6 +42,8 @@ def test_product_detail_contract_contains_bindings_and_history() -> None:
     ):
         assert field in source
 
+    assert "MarketplaceOrderLine" in source
+    assert "MarketplaceOrder" in source
     assert "observation_limit" in source
     assert "SupplierOfferObservation.observed_at.desc()" in source
 
@@ -46,11 +55,28 @@ def test_product_detail_ui_route_and_assets_are_exposed() -> None:
     products_script = (ROOT / "backend" / "app" / "static" / "products.js").read_text(encoding="utf-8")
 
     assert '@router.get("/crm/products/{product_id}"' in ui
-    assert 'product-detail.html' in ui
-    assert '/static/product-detail.css' in html
-    assert '/static/product-detail.js' in html
+    assert "product-detail.html" in ui
+    assert "/static/product-detail.css" in html
+    assert "/static/product-detail.js" in html
+    for element_id in (
+        'id="kaspi-product-id"',
+        'id="merchant-sku"',
+        'id="product-brand"',
+        'id="product-status"',
+        'id="units-sold"',
+        'id="orders-count"',
+        'id="revenue-kzt"',
+        'id="last-ordered-at"',
+        'id="best-offer"',
+        'id="bindings"',
+        'id="observations-body"',
+    ):
+        assert element_id in html
     assert '/api/products/${productId}/detail?observation_limit=100' in script
-    assert 'leo_crm_service_token' in script
+    assert "renderBestOffer" in script
+    assert "sales.units_sold" in script
+    assert "sales.revenue_kzt" in script
+    assert "leo_crm_service_token" in script
     assert 'href="/crm/products/${row.product_id}"' in products_script
 
 
@@ -70,3 +96,5 @@ def test_product_detail_frontend_remains_read_only() -> None:
     assert "method:" not in script
     assert 'fetch(`/api/products/${productId}/detail' in script
     assert "/run-now" not in script
+    assert "method:\"PATCH\"" not in script
+    assert "method:\"DELETE\"" not in script
