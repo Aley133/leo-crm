@@ -11,8 +11,10 @@ const body = document.querySelector("#products-body");
 const empty = document.querySelector("#empty");
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
-const money = (value, currency) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU")} ${currency || ""}`.trim();
+const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
 const checkedAt = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "Никогда";
+const statusLabel = (status) => ({active:"Активен",draft:"Черновик",paused:"Приостановлен",archived:"Архив"}[status] || status || "—");
+const statusClass = (status) => status === "active" ? "ok" : status === "paused" ? "warn" : status === "archived" ? "bad" : "";
 
 const setLoading = (loading) => {
   productsPage.setAttribute("aria-busy", String(loading));
@@ -23,28 +25,43 @@ const setLoading = (loading) => {
 const queryString = () => {
   const params = new URLSearchParams({limit:"200"});
   const q = document.querySelector("#search").value.trim();
+  const status = document.querySelector("#status").value;
   if (q) params.set("q", q);
+  if (status) params.set("status", status);
   if (document.querySelector("#only-unbound").checked) params.set("only_without_supplier", "true");
   if (document.querySelector("#only-failures").checked) params.set("only_failures", "true");
+  if (document.querySelector("#only-monitored").checked) params.set("only_monitored", "true");
   return params.toString();
 };
 
 const monitoringBadge = (row) => {
   if (row.failed_monitor_count > 0) return '<span class="badge bad">Есть ошибки</span>';
-  if (row.monitored_count > 0) return '<span class="badge ok">Активен</span>';
+  if (row.active_monitor_count > 0) return '<span class="badge ok">Активен</span>';
   return '<span class="badge">Не настроен</span>';
 };
 
+const renderSummary = (rows) => {
+  const units = rows.reduce((sum, row) => sum + Number(row.units_sold || 0), 0);
+  const revenue = rows.reduce((sum, row) => sum + Number(row.revenue_kzt || 0), 0);
+  document.querySelector("#summary-products").textContent = rows.length.toLocaleString("ru-RU");
+  document.querySelector("#summary-units").textContent = units.toLocaleString("ru-RU");
+  document.querySelector("#summary-revenue").textContent = money(revenue);
+  document.querySelector("#summary-unbound").textContent = rows.filter((row) => row.supplier_count === 0).length;
+  document.querySelector("#summary-errors").textContent = rows.filter((row) => row.failed_monitor_count > 0).length;
+};
+
 const render = (rows) => {
+  renderSummary(rows);
   body.innerHTML = rows.map((row) => `
     <tr>
-      <td><a class="product-title" href="/crm/products/${row.product_id}">${escapeHtml(row.product_name)}</a><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></td>
-      <td><span class="badge">${escapeHtml(row.product_status)}</span></td>
-      <td><strong>${row.supplier_count}</strong><span class="muted">привязок</span></td>
-      <td>${row.best_supplier_name ? `<strong>${escapeHtml(row.best_supplier_name)}</strong><span class="muted">${escapeHtml(row.best_supplier_code || "")}</span>` : '<span class="badge bad">Нет поставщика</span>'}</td>
-      <td>${money(row.best_supplier_price, row.best_supplier_currency)}</td>
-      <td>${row.available_offer_count > 0 ? `<span class="badge ok">${row.available_offer_count} в наличии</span>` : '<span class="badge warn">Нет доступных</span>'}</td>
-      <td>${monitoringBadge(row)}<span class="muted">${row.monitored_count} целей</span></td>
+      <td><a class="product-title" href="/crm/products/${row.product_id}">${escapeHtml(row.name)}</a><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></td>
+      <td><span class="badge ${statusClass(row.status)}">${escapeHtml(statusLabel(row.status))}</span></td>
+      <td><strong>${Number(row.units_sold || 0).toLocaleString("ru-RU")}</strong><span class="muted">строк заказов: ${Number(row.orders_count || 0).toLocaleString("ru-RU")}</span></td>
+      <td><strong>${money(row.revenue_kzt)}</strong></td>
+      <td><strong>${row.supplier_count}</strong><span class="muted">доступно: ${row.available_offer_count}</span></td>
+      <td>${row.best_supplier_name ? `<strong>${escapeHtml(row.best_supplier_name)}</strong>` : '<span class="badge bad">Нет поставщика</span>'}</td>
+      <td>${money(row.best_supplier_price, row.best_supplier_currency || "KZT")}</td>
+      <td>${monitoringBadge(row)}<span class="muted">активных целей: ${row.active_monitor_count}</span></td>
       <td>${checkedAt(row.last_checked_at)}</td>
     </tr>`).join("");
   empty.classList.toggle("hidden", rows.length > 0);
@@ -59,7 +76,7 @@ const loadProducts = async () => {
   if (!token) { authPanel.classList.remove("hidden"); productsPage.classList.add("hidden"); return; }
   setLoading(true); message.textContent = "";
   try {
-    const response = await fetch(`/api/catalog/products?${queryString()}`, {headers:{Authorization:`Bearer ${token}`},cache:"no-store"});
+    const response = await fetch(`/api/product-registry/products?${queryString()}`, {headers:{Authorization:`Bearer ${token}`},cache:"no-store"});
     if (response.status === 401) { localStorage.removeItem(storageKey); authPanel.classList.remove("hidden"); productsPage.classList.add("hidden"); message.textContent = "Токен не принят."; return; }
     if (!response.ok) throw new Error(`API вернул ошибку ${response.status}`);
     render(await response.json());
