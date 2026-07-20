@@ -2,8 +2,14 @@ name: Browser Agent Release
 
 on:
   push:
-    tags:
-      - "browser-agent-v*"
+    branches:
+      - main
+    paths:
+      - "tools/browser_agent.py"
+      - "tools/browser_agent_desktop.py"
+      - "tools/windows/LEO-Browser-Agent.iss"
+      - ".github/workflows/browser-agent-release.yml"
+      - "requirements.txt"
   workflow_dispatch:
 
 permissions:
@@ -19,28 +25,47 @@ jobs:
         with:
           python-version: "3.12"
 
-      - name: Install dependencies
+      - name: Install Python dependencies
+        shell: pwsh
         run: |
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Build executable
+      - name: Build application executable
+        shell: pwsh
         run: |
-          pyinstaller --noconfirm --clean --onefile --console `
+          pyinstaller --noconfirm --clean --onefile --windowed `
             --name LEO-Browser-Agent `
             --collect-submodules backend `
             --collect-submodules tools `
             tools/browser_agent_desktop.py
 
+      - name: Install Inno Setup
+        shell: pwsh
+        run: choco install innosetup --no-progress -y
+
+      - name: Build Windows installer
+        shell: pwsh
+        run: |
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "tools\windows\LEO-Browser-Agent.iss"
+
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: LEO-Browser-Agent-Windows
-          path: dist/LEO-Browser-Agent.exe
+          path: dist/LEO-Browser-Agent-Setup.exe
 
-      - name: Publish GitHub Release asset
-        if: startsWith(github.ref, 'refs/tags/browser-agent-v')
-        uses: softprops/action-gh-release@v2
-        with:
-          files: dist/LEO-Browser-Agent.exe
-          generate_release_notes: true
+      - name: Publish rolling GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f browser-agent-latest $env:GITHUB_SHA
+          git push origin refs/tags/browser-agent-latest --force
+          gh release view browser-agent-latest *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create browser-agent-latest --title "LEO Browser Agent" --notes "Автоматическая сборка Windows Browser Agent."
+          }
+          gh release upload browser-agent-latest dist/LEO-Browser-Agent-Setup.exe --clobber
