@@ -1,13 +1,14 @@
 from __future__ import annotations
 
-"""Idempotently repair browser-agent and pricing tables in an existing database.
+"""Idempotently repair browser-agent, monitoring and pricing schema drift.
 
 This deployment safeguard covers installations whose Alembic history was stamped
-without the browser-agent queue or pricing-engine tables. It creates only missing
-ORM tables and indexes, verifies their required columns, and never removes data.
+without later browser-agent, monitoring-currency or pricing-engine changes. It
+creates only missing ORM tables/indexes, adds only known nullable columns, verifies
+required columns, and never removes data.
 """
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 
 from backend.app import monitoring  # noqa: F401  # register monitoring metadata
 from backend.app import models  # noqa: F401  # register product metadata
@@ -32,6 +33,40 @@ _REQUIRED_COLUMNS: dict[str, set[str]] = {
         "created_at",
         "updated_at",
         "finished_at",
+    },
+    "supplier_offer_states": {
+        "id",
+        "supplier_product_id",
+        "price",
+        "old_price",
+        "currency",
+        "available",
+        "stock",
+        "delivery_days",
+        "seller",
+        "fingerprint",
+        "adapter_schema_version",
+        "observed_at",
+        "last_checked_at",
+        "version",
+        "updated_at",
+    },
+    "supplier_offer_observations": {
+        "id",
+        "supplier_product_id",
+        "monitor_attempt_id",
+        "price",
+        "old_price",
+        "currency",
+        "available",
+        "stock",
+        "delivery_days",
+        "seller",
+        "fingerprint",
+        "adapter_schema_version",
+        "raw_metadata",
+        "observed_at",
+        "created_at",
     },
     "pricing_policies": {
         "id",
@@ -78,6 +113,39 @@ _REQUIRED_COLUMNS: dict[str, set[str]] = {
 }
 
 
+_SAFE_NULLABLE_COLUMN_REPAIRS: dict[str, dict[str, str]] = {
+    "supplier_offer_states": {
+        "currency": "VARCHAR(3)",
+    },
+    "supplier_offer_observations": {
+        "currency": "VARCHAR(3)",
+    },
+}
+
+
+def _repair_safe_nullable_columns() -> None:
+    """Add known nullable columns that are safe on existing production rows."""
+    inspector = inspect(engine)
+    available_tables = set(inspector.get_table_names())
+
+    with engine.begin() as connection:
+        for table_name, columns in _SAFE_NULLABLE_COLUMN_REPAIRS.items():
+            if table_name not in available_tables:
+                continue
+            existing_columns = {
+                column["name"] for column in inspector.get_columns(table_name)
+            }
+            for column_name, sql_type in columns.items():
+                if column_name in existing_columns:
+                    continue
+                connection.execute(
+                    text(
+                        f'ALTER TABLE "{table_name}" '
+                        f'ADD COLUMN IF NOT EXISTS "{column_name}" {sql_type} NULL'
+                    )
+                )
+
+
 def _verify_required_columns() -> None:
     inspector = inspect(engine)
     available_tables = set(inspector.get_table_names())
@@ -105,8 +173,9 @@ def ensure_browser_agent_schema() -> None:
     FxRateSnapshot.__table__.create(bind=engine, checkfirst=True)
     PriceCalculation.__table__.create(bind=engine, checkfirst=True)
 
+    _repair_safe_nullable_columns()
     _verify_required_columns()
-    print("browser_agent_jobs and pricing engine schema are ready")
+    print("browser-agent, monitoring currency and pricing schema are ready")
 
 
 if __name__ == "__main__":
