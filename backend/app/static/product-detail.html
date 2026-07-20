@@ -14,16 +14,16 @@
       <nav aria-label="Основная навигация">
         <a href="/crm">Обзор</a>
         <a class="active" href="/crm/products">Товары</a>
-        <a class="disabled" href="#" aria-disabled="true">Поставщики</a>
-        <a class="disabled" href="#" aria-disabled="true">Мониторинг</a>
+        <a href="/crm/suppliers">Поставщики</a>
+        <a href="/crm/monitoring">Мониторинг</a>
       </nav>
-      <div class="runtime-status"><span class="dot"></span><span>Control plane</span></div>
+      <div class="runtime-status"><span class="dot"></span><span>Product Card</span></div>
     </aside>
 
     <main>
       <header class="topbar">
         <div>
-          <p class="eyebrow">Карточка товара</p>
+          <p class="eyebrow">Карточка Kaspi-товара</p>
           <h1 id="product-name">Загрузка…</h1>
           <p id="product-meta" class="subtitle"></p>
         </div>
@@ -44,12 +44,30 @@
       <div id="message" class="message" role="status" aria-live="polite"></div>
 
       <section id="detail" class="detail-page hidden" aria-busy="false">
+        <section class="product-overview panel wide">
+          <div class="panel-title"><h2>Общее</h2><span id="product-updated-at"></span></div>
+          <div class="overview-grid">
+            <div><span>Kaspi ID</span><strong id="kaspi-product-id">—</strong></div>
+            <div><span>SKU продавца</span><strong id="merchant-sku">—</strong></div>
+            <div><span>Бренд</span><strong id="product-brand">—</strong></div>
+            <div><span>Статус</span><strong id="product-status">—</strong></div>
+          </div>
+        </section>
+
         <div class="summary-grid">
+          <article class="metric"><span>Продано</span><strong id="units-sold">—</strong><small id="orders-count">строк заказов: —</small></article>
+          <article class="metric"><span>Выручка</span><strong id="revenue-kzt">—</strong><small id="last-ordered-at">последняя продажа: —</small></article>
           <article class="metric"><span>Привязок</span><strong id="bindings-count">—</strong><small>поставщиков</small></article>
           <article class="metric"><span>Наблюдений</span><strong id="observations-count">—</strong><small>в истории</small></article>
           <article class="metric"><span>В наличии</span><strong id="available-count">—</strong><small>актуальных предложений</small></article>
           <article class="metric"><span>Ошибки</span><strong id="failures-count">—</strong><small>мониторингов</small></article>
         </div>
+
+        <section class="panel wide best-offer-panel">
+          <div class="panel-title"><h2>Лучшее доступное предложение</h2><span>По текущим наблюдениям</span></div>
+          <div id="best-offer" class="best-offer"></div>
+          <div id="best-offer-empty" class="empty hidden">Нет доступных предложений с ценой.</div>
+        </section>
 
         <section class="panel wide">
           <div class="panel-title"><h2>Поставщики</h2><span>Текущее состояние</span></div>
