@@ -4,38 +4,40 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_windows_agent_has_desktop_entrypoint_and_release_workflow() -> None:
+def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     entrypoint = (ROOT / "tools" / "browser_agent_desktop.py").read_text(encoding="utf-8")
+    installer = (ROOT / "tools" / "windows" / "LEO-Browser-Agent.iss").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "browser-agent-release.yml").read_text(encoding="utf-8")
 
     assert "SERVICE_API_TOKEN" in entrypoint
     assert "CRM_API_URL" in entrypoint
     assert "CHROME_CDP_ENDPOINT" in entrypoint
     assert "run_browser_agent" in entrypoint
-    assert "LEO-Browser-Agent.exe" in workflow
+    assert "CryptProtectData" in entrypoint
+    assert "CryptUnprotectData" in entrypoint
+    assert "LEO-Browser-Agent-Setup.exe" in installer
+    assert "LEO-Browser-Agent-Setup.exe" in workflow
     assert "pyinstaller" in workflow.lower()
-    assert "softprops/action-gh-release" in workflow
+    assert "Inno Setup" in workflow
+    assert "browser-agent-latest" in workflow
+    assert "gh release upload" in workflow
 
 
-def test_monitoring_page_downloads_agent_directly_from_crm() -> None:
+def test_monitoring_page_downloads_windows_installer_directly() -> None:
     html = (ROOT / "backend" / "app" / "static" / "monitoring.html").read_text(encoding="utf-8")
-    bootstrap = (ROOT / "backend" / "app" / "static" / "LEO-Browser-Agent-Setup.cmd").read_text(encoding="utf-8")
 
     assert 'id="download-browser-agent"' in html
-    assert 'href="/static/LEO-Browser-Agent-Setup.cmd"' in html
-    assert 'download="LEO-Browser-Agent-Setup.cmd"' in html
-    assert "releases/latest/download" not in html
+    assert "releases/download/browser-agent-latest/LEO-Browser-Agent-Setup.exe" in html
+    assert "LEO-Browser-Agent-Setup.cmd" not in html
     assert "Скачать Browser Agent" in html
-    assert "main.zip" in bootstrap
-    assert "start_browser_agent_windows.ps1" in bootstrap
 
 
 def test_release_does_not_embed_service_token() -> None:
     entrypoint = (ROOT / "tools" / "browser_agent_desktop.py").read_text(encoding="utf-8")
     workflow = (ROOT / ".github" / "workflows" / "browser-agent-release.yml").read_text(encoding="utf-8")
-    bootstrap = (ROOT / "backend" / "app" / "static" / "LEO-Browser-Agent-Setup.cmd").read_text(encoding="utf-8")
+    installer = (ROOT / "tools" / "windows" / "LEO-Browser-Agent.iss").read_text(encoding="utf-8")
 
     assert "simpledialog.askstring" in entrypoint
     assert "PASTE_" not in entrypoint
     assert "SERVICE_API_TOKEN=" not in workflow
-    assert "SERVICE_API_TOKEN=" not in bootstrap
+    assert "SERVICE_API_TOKEN=" not in installer
