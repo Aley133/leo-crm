@@ -8,7 +8,7 @@ from pathlib import Path
 from backend.app.browser_agent_models import BrowserAgent, BrowserAgentJobStatus
 from backend.app.main import app
 from backend.app.supplier_adapters.base import NormalizedOffer
-from tools.browser_agent import _run_job
+from tools.browser_agent import _adapter_code_for_url, _run_job
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -27,7 +27,7 @@ class FakeAdapter:
             stock=None,
             delivery_days=2,
             seller="Ozon",
-            adapter_schema_version="ozon-browser-structured-v4",
+            adapter_schema_version="ozon-browser-structured-v5",
             observed_at=datetime.now(UTC),
             raw_metadata={"source": "browser_json_ld"},
         )
@@ -54,7 +54,7 @@ def test_local_agent_serializes_normalized_offer() -> None:
                 "supplier_product_id": 17,
                 "url": "https://www.ozon.ru/product/example-17/",
             },
-            FakeAdapter(),
+            {"ozon": FakeAdapter()},
         )
     )
     assert result["price"] == "3734"
@@ -62,6 +62,13 @@ def test_local_agent_serializes_normalized_offer() -> None:
     assert result["available"] is True
     assert result["delivery_days"] == 2
     assert result["raw_metadata"]["source"] == "browser_json_ld"
+
+
+def test_local_agent_routes_marketplace_urls_to_distinct_adapters() -> None:
+    assert _adapter_code_for_url("https://ozon.kz/product/example-17/") == "ozon"
+    assert _adapter_code_for_url("https://www.ozon.ru/product/example-17/") == "ozon"
+    assert _adapter_code_for_url("https://www.wildberries.ru/catalog/123/detail.aspx") == "wb"
+    assert _adapter_code_for_url("https://wb.ru/catalog/123") == "wb"
 
 
 def test_browser_agent_status_contract_is_explicit() -> None:
@@ -101,3 +108,5 @@ def test_agent_claim_sends_machine_identity() -> None:
     assert '"hostname": socket.gethostname()' in source
     assert '"platform": platform.platform()' in source
     assert '"version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip()' in source
+    assert '"wb": WildberriesBrowserAccessAdapter(pool)' in source
+    assert 'for supplier_code in ("ozon", "wb")' in source
