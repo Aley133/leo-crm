@@ -18,7 +18,7 @@ def test_wildberries_calendar_delivery_date(monkeypatch) -> None:
         def now(cls, tz=None):
             return cls(2026, 7, 20, 12, 0, tzinfo=tz)
 
-    import backend.app.supplier_adapters.wildberries_delivery_aware as module
+    import backend.app.supplier_adapters.delivery_normalizer as module
 
     monkeypatch.setattr(module, "datetime", FixedDateTime)
     parser = WildberriesDeliveryAwareAdapter._delivery_days_from_text
