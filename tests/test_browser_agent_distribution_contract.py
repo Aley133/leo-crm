@@ -15,7 +15,8 @@ def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     assert "run_browser_agent" in entrypoint
     assert "CryptProtectData" in entrypoint
     assert "CryptUnprotectData" in entrypoint
-    assert "LEO-Browser-Agent-Setup.exe" in installer
+    assert "OutputBaseFilename=LEO-Browser-Agent-Setup" in installer
+    assert "OutputDir=..\\..\\dist" in installer
     assert "LEO-Browser-Agent-Setup.exe" in workflow
     assert "pyinstaller" in workflow.lower()
     assert "Inno Setup" in workflow
