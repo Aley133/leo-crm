@@ -72,11 +72,17 @@ def test_wildberries_adapter_normalizes_current_nested_price_shape() -> None:
     assert offer["available"] is True
 
 
-def test_wildberries_adapter_ports_tgbad_card_api_without_leaking_monolith() -> None:
+def test_wildberries_adapter_ports_browser_verified_tgbad_strategy_without_leaking_monolith() -> None:
     source = (
         ROOT / "backend" / "app" / "supplier_adapters" / "wildberries_browser_access.py"
     ).read_text(encoding="utf-8")
 
+    assert 'wait_until="commit"' in source
+    assert "_verify_product_page" in source
+    assert "_detect_stock" in source
+    assert "_extract_visible_price" in source
+    assert "_delivery_days_from_text" in source
+    assert "wb_browser_verified" in source
     assert "https://card.wb.ru/cards/v2/detail" in source
     assert "https://card.wb.ru/cards/detail" in source
     assert '"123585444"' in source
@@ -85,9 +91,8 @@ def test_wildberries_adapter_ports_tgbad_card_api_without_leaking_monolith() -> 
     assert "salePriceU" in source
     assert "priceU" in source
     assert 'for key in ("total", "product", "basic", "final", "discounted", "price")' in source
-    assert "wb_card_api" in source
-    assert "fetch_html" not in source
     assert "calculate_our_price" not in source
     assert "preOrder" not in source
     assert "telegram" not in source.casefold()
-    assert "xml" not in source.casefold()
+    assert "BrowserAgentJob" not in source
+    assert "ProductBinding" not in source
