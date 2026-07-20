@@ -4,6 +4,8 @@ import argparse
 import asyncio
 import json
 import os
+import platform
+import socket
 import time
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -111,7 +113,13 @@ async def _claim_one(
         _post_json,
         f"{api_url}/api/browser-agent/claim",
         token,
-        {"agent_id": agent_id, "lease_seconds": lease_seconds},
+        {
+            "agent_id": agent_id,
+            "lease_seconds": lease_seconds,
+            "hostname": socket.gethostname(),
+            "platform": platform.platform(),
+            "version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip(),
+        },
     )
     return claim.get("job")
 
