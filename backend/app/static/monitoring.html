@@ -22,10 +22,14 @@
     <main>
       <header class="topbar">
         <div><p class="eyebrow">Browser Runtime</p><h1>Центр мониторинга</h1><p class="subtitle">Очередь, проверки, ошибки и состояние источников</p></div>
-        <button id="refresh" class="button secondary" type="button">Обновить</button>
+        <div class="topbar-actions">
+          <div id="crm-connection" class="connection-state checking" aria-live="polite"><span></span><strong>Проверка подключения…</strong></div>
+          <button id="disconnect" class="button secondary hidden" type="button">Отключиться</button>
+          <button id="refresh" class="button secondary" type="button">Обновить</button>
+        </div>
       </header>
-      <section id="auth-panel" class="auth-panel">
-        <div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div>
+      <section id="auth-panel" class="auth-panel hidden">
+        <div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render. Токен сохранится только в этом браузере.</p></div>
         <form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form>
       </section>
       <div id="message" class="message" role="status"></div>
@@ -86,5 +90,6 @@
     <div id="job-dialog-content"></div>
   </dialog>
   <script src="/static/monitoring.js" defer></script>
+  <script src="/static/connection-status.js" defer></script>
 </body>
 </html>
