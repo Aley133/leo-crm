@@ -26,6 +26,7 @@ def test_wildberries_adapter_normalizes_tgbad_api_product_shape() -> None:
         "salePriceU": 283000,
         "priceU": 319000,
         "supplierName": "Wildberries",
+        "time1": 48,
         "sizes": [
             {"stocks": [{"qty": 3}, {"qty": 2}]},
             {"stocks": [{"qty": 1}]},
@@ -41,6 +42,7 @@ def test_wildberries_adapter_normalizes_tgbad_api_product_shape() -> None:
     assert offer["stock"] == 6
     assert offer["available"] is True
     assert offer["seller"] == "Wildberries"
+    assert offer["delivery_days"] == 2
 
 
 def test_wildberries_adapter_normalizes_current_nested_price_shape() -> None:
@@ -64,25 +66,28 @@ def test_wildberries_adapter_normalizes_current_nested_price_shape() -> None:
     offer = WildberriesBrowserAccessAdapter._offer_from_node(node)
 
     assert offer is not None
-    assert offer["price"] == Decimal("2830")
+    assert offer["price"] == Decimal("2745")
     assert offer["old_price"] == Decimal("3190")
     assert offer["stock"] == 7
     assert offer["available"] is True
 
 
-def test_wildberries_adapter_is_api_first_and_browser_fallback_is_opt_in() -> None:
+def test_wildberries_adapter_ports_tgbad_card_api_without_leaking_monolith() -> None:
     source = (
         ROOT / "backend" / "app" / "supplier_adapters" / "wildberries_browser_access.py"
     ).read_text(encoding="utf-8")
 
     assert "https://card.wb.ru/cards/v2/detail" in source
-    assert "https://search.wb.ru/exactmatch/ru/common/v18/search" in source
-    assert "https://search.wb.ru/exactmatch/ru/common/v13/search" in source
+    assert "https://card.wb.ru/cards/detail" in source
+    assert '"123585444"' in source
+    assert '"-1257786"' in source
+    assert "search.wb.ru" not in source
     assert "salePriceU" in source
     assert "priceU" in source
-    assert 'for key in ("product", "total")' in source
+    assert 'for key in ("total", "product", "basic", "final", "discounted", "price")' in source
     assert "wb_card_api" in source
-    assert "wb_search_api" in source
-    assert "WB_BROWSER_FALLBACK" in source
-    assert "if self._browser_fallback" in source
-    assert source.index("_fetch_card_payload") < source.index("_fetch_browser_fallback")
+    assert "fetch_html" not in source
+    assert "calculate_our_price" not in source
+    assert "preOrder" not in source
+    assert "telegram" not in source.casefold()
+    assert "xml" not in source.casefold()
