@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Мониторинг</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/monitoring.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a>
+        <a href="/crm/products">Товары</a>
+        <a href="/crm/suppliers">Поставщики</a>
+        <a class="active" href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Control plane</span></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">Browser Runtime</p><h1>Центр мониторинга</h1><p class="subtitle">Очередь, проверки, ошибки и состояние источников</p></div>
+        <button id="refresh" class="button secondary" type="button">Обновить</button>
+      </header>
+      <section id="auth-panel" class="auth-panel">
+        <div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div>
+        <form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form>
+      </section>
+      <div id="message" class="message" role="status"></div>
+      <section id="monitoring" class="monitoring-page hidden" aria-busy="false">
+        <div class="metrics monitoring-metrics">
+          <article class="metric"><span>Целей</span><strong id="targets-total">—</strong><small>всего</small></article>
+          <article class="metric"><span>Активны</span><strong id="targets-active">—</strong><small>работают</small></article>
+          <article class="metric"><span>В очереди</span><strong id="jobs-queued">—</strong><small>Browser Agent</small></article>
+          <article class="metric"><span>Ошибки</span><strong id="attempts-failed">—</strong><small>проверок</small></article>
+        </div>
+        <section class="panel wide">
+          <div class="panel-title"><h2>Очередь и задания</h2><span id="jobs-updated"></span></div>
+          <div class="table-wrap"><table><thead><tr><th>Статус</th><th>Товар</th><th>Источник</th><th>Lease</th><th>Ошибка</th><th>Создано</th></tr></thead><tbody id="jobs-body"></tbody></table></div>
+        </section>
+        <section class="panel wide">
+          <div class="panel-title"><h2>Последние проверки</h2><label class="inline-check"><input id="only-errors" type="checkbox"> Только ошибки</label></div>
+          <div class="table-wrap"><table><thead><tr><th>Результат</th><th>Товар</th><th>Источник</th><th>Длительность</th><th>HTTP</th><th>Ошибка</th><th>Время</th></tr></thead><tbody id="attempts-body"></tbody></table></div>
+        </section>
+        <section class="panel wide">
+          <div class="panel-title"><h2>Состояние источников</h2><span>SourceHealth</span></div>
+          <div class="table-wrap"><table><thead><tr><th>Источник</th><th>Стратегия</th><th>Статус</th><th>Ошибок подряд</th><th>Последний успех</th><th>Последняя ошибка</th></tr></thead><tbody id="sources-body"></tbody></table></div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script src="/static/monitoring.js" defer></script>
+</body>
+</html>
