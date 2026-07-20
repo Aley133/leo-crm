@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import ctypes
 import os
 import subprocess
-import sys
 import time
+from ctypes import wintypes
 from pathlib import Path
 from tkinter import Tk, messagebox, simpledialog
 from urllib.error import URLError
@@ -14,21 +16,95 @@ from tools.browser_agent import main as run_browser_agent
 
 API_URL = "https://leo-crm-api.onrender.com"
 CDP_ENDPOINT = "http://127.0.0.1:9222"
+APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
+TOKEN_FILE = APP_DIR / "agent-token.dat"
+
+
+class DATA_BLOB(ctypes.Structure):
+    _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_byte))]
+
+
+def _blob(data: bytes) -> tuple[DATA_BLOB, ctypes.Array[ctypes.c_char]]:
+    buffer = ctypes.create_string_buffer(data)
+    return DATA_BLOB(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_byte))), buffer
+
+
+def _protect(data: bytes) -> bytes:
+    source, source_buffer = _blob(data)
+    target = DATA_BLOB()
+    if not ctypes.windll.crypt32.CryptProtectData(
+        ctypes.byref(source),
+        "LEO Browser Agent",
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(target),
+    ):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(target.pbData, target.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(target.pbData)
+        del source_buffer
+
+
+def _unprotect(data: bytes) -> bytes:
+    source, source_buffer = _blob(data)
+    target = DATA_BLOB()
+    if not ctypes.windll.crypt32.CryptUnprotectData(
+        ctypes.byref(source),
+        None,
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(target),
+    ):
+        raise ctypes.WinError()
+    try:
+        return ctypes.string_at(target.pbData, target.cbData)
+    finally:
+        ctypes.windll.kernel32.LocalFree(target.pbData)
+        del source_buffer
+
+
+def _load_saved_token() -> str | None:
+    if not TOKEN_FILE.is_file():
+        return None
+    try:
+        encrypted = base64.b64decode(TOKEN_FILE.read_bytes(), validate=True)
+        token = _unprotect(encrypted).decode("utf-8").strip()
+        return token or None
+    except Exception:
+        TOKEN_FILE.unlink(missing_ok=True)
+        return None
+
+
+def _save_token(token: str) -> None:
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    TOKEN_FILE.write_bytes(base64.b64encode(_protect(token.encode("utf-8"))))
 
 
 def _ask_token() -> str:
+    saved = _load_saved_token()
+    if saved:
+        return saved
+
     root = Tk()
     root.withdraw()
     token = simpledialog.askstring(
         "LEO Browser Agent",
-        "Вставьте SERVICE_API_TOKEN из LEO CRM:",
+        "Вставьте SERVICE_API_TOKEN из LEO CRM. Он будет зашифрован средствами Windows и сохранён только для этого пользователя:",
         show="*",
         parent=root,
     )
     root.destroy()
     if not token or not token.strip():
         raise RuntimeError("SERVICE_API_TOKEN не введён")
-    return token.strip()
+    value = token.strip()
+    _save_token(value)
+    return value
 
 
 def _find_browser() -> Path:
@@ -57,7 +133,7 @@ def _start_browser() -> None:
     if _cdp_ready():
         return
     browser = _find_browser()
-    profile = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM/browser-agent/chrome-profile"
+    profile = APP_DIR / "chrome-profile"
     profile.mkdir(parents=True, exist_ok=True)
     subprocess.Popen(
         [
