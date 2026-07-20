@@ -28,11 +28,34 @@ def test_delivery_normalizer_does_not_require_system_tzdata() -> None:
     assert DeliveryNormalizer.from_text("Доставка 26 июля", now=now) == 6
 
 
-def test_ozon_adapter_uses_shared_delivery_normalizer() -> None:
+def test_ozon_context_ignores_promotion_countdown() -> None:
+    now = datetime(2026, 7, 20, 12, 0, tzinfo=KZ)
+    text = """
+    Распродажа
+    10 дней до конца
+    3772 единицы осталось
+    2632 ₸
+    В корзину
+    Доставим завтра
+    Доставка и возврат
+    Пункт Ozon: Бокина, 18
+    """
+
+    assert DeliveryNormalizer.from_context(
+        text,
+        markers=("доставим", "доставка", "пункт ozon"),
+        excluded_phrases=("до конца", "распродажа", "осталось"),
+        window=2,
+        now=now,
+    ) == 1
+
+
+def test_ozon_adapter_uses_contextual_delivery_normalizer() -> None:
     source = open(
         "backend/app/supplier_adapters/ozon_browser_access.py",
         encoding="utf-8",
     ).read()
 
-    assert "DeliveryNormalizer.from_text(response.body_text)" in source
-    assert 'metadata["delivery_source"] = "visible_text_normalized"' in source
+    assert "DeliveryNormalizer.from_context(" in source
+    assert '"до конца"' in source
+    assert 'metadata["delivery_source"] = "visible_delivery_context_normalized"' in source
