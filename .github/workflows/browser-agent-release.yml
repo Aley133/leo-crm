@@ -9,6 +9,7 @@ on:
       - "tools/browser_agent.py"
       - "tools/browser_agent_desktop.py"
       - "tools/windows/LEO-Browser-Agent.iss"
+      - "backend/app/supplier_adapters/**"
       - ".github/workflows/browser-agent-release.yml"
       - "requirements.txt"
   workflow_dispatch:
@@ -36,6 +37,17 @@ jobs:
         shell: pwsh
         run: |
           python -c "import tools.browser_agent; import tools.browser_agent_desktop"
+
+      - name: Verify release version alignment
+        shell: pwsh
+        run: |
+          $desktop = Get-Content "tools/browser_agent_desktop.py" -Raw
+          $installer = Get-Content "tools/windows/LEO-Browser-Agent.iss" -Raw
+          $desktopVersion = [regex]::Match($desktop, 'APP_VERSION = "([^"]+)"').Groups[1].Value
+          $installerVersion = [regex]::Match($installer, '#define MyAppVersion "([^"]+)"').Groups[1].Value
+          if (-not $desktopVersion -or $desktopVersion -ne $installerVersion) {
+            throw "Browser Agent version mismatch: desktop=$desktopVersion installer=$installerVersion"
+          }
 
       - name: Build application executable
         shell: pwsh
