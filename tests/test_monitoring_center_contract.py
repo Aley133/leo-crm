@@ -33,9 +33,18 @@ def test_monitoring_center_page_is_live_and_read_only() -> None:
 
     assert '@router.get("/crm/monitoring"' in ui
     assert 'FileResponse(STATIC_DIR / "monitoring.html")' in ui
-    assert 'id="jobs-body"' in html
-    assert 'id="attempts-body"' in html
-    assert 'id="sources-body"' in html
+    for element_id in (
+        'id="leased-body"',
+        'id="jobs-body"',
+        'id="attempts-body"',
+        'id="sources-body"',
+        'id="job-status"',
+        'id="job-source"',
+        'id="attempt-source"',
+        'id="attempt-period"',
+        'id="only-errors"',
+    ):
+        assert element_id in html
     assert '"leo_crm_service_token"' in script
     for endpoint in (
         "/api/monitoring-center/summary",
@@ -46,3 +55,24 @@ def test_monitoring_center_page_is_live_and_read_only() -> None:
         assert endpoint in script
     for method in ('method:"POST"', 'method:"PUT"', 'method:"PATCH"', 'method:"DELETE"'):
         assert method not in script
+
+
+def test_monitoring_center_formats_runtime_data_for_operators() -> None:
+    html = (ROOT / "backend" / "app" / "static" / "monitoring.html").read_text(encoding="utf-8")
+    script = (ROOT / "backend" / "app" / "static" / "monitoring.js").read_text(encoding="utf-8")
+
+    for metric_id in (
+        'id="jobs-leased"',
+        'id="attempts-success-24h"',
+        'id="attempts-failed-24h"',
+        'id="attempts-average"',
+        'id="last-attempt"',
+    ):
+        assert metric_id in html
+    assert "const formatDuration" in script
+    assert "const errorCell" in script
+    assert '<details class="error-details">' in script
+    assert "const renderLeased" in script
+    assert "24 * 60 * 60 * 1000" in script
+    assert "cachedJobs" in script
+    assert "cachedAttempts" in script
