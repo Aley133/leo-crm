@@ -62,6 +62,51 @@ router = APIRouter(
 )
 
 
+def _normalize_known_business_outcome(
+    payload: BrowserAgentResult,
+    *,
+    job: BrowserAgentJob,
+    observed_at,
+) -> BrowserAgentResult:
+    """Convert verified supplier business states into successful observations.
+
+    A supplier card being out of stock is not an adapter failure. Older Browser
+    Agent builds reported the verified WB state as AdapterParseError; accept that
+    exact legacy result and persist a normal unavailable observation instead.
+    Unknown parse errors remain failures.
+    """
+
+    message = (payload.error_message or "").strip()
+    host_is_wildberries = "wildberries.ru" in job.url.casefold() or "wb.ru" in job.url.casefold()
+    if (
+        payload.status == BrowserAgentJobStatus.FAILED.value
+        and payload.error_code == "AdapterParseError"
+        and host_is_wildberries
+        and message == "Wildberries product is out of stock"
+    ):
+        return BrowserAgentResult(
+            lease_token=payload.lease_token,
+            status=BrowserAgentJobStatus.SUCCEEDED.value,
+            payload={
+                "price": None,
+                "old_price": None,
+                "currency": "KZT",
+                "available": False,
+                "stock": 0,
+                "delivery_days": None,
+                "seller": None,
+                "adapter_schema_version": "wildberries-browser-verified-v5",
+                "observed_at": observed_at.isoformat(),
+                "raw_metadata": {
+                    "source": "wb_browser_verified",
+                    "business_state": "out_of_stock",
+                    "normalized_from_legacy_error": True,
+                },
+            },
+        )
+    return payload
+
+
 def _upsert_agent(
     db: Session,
     *,
@@ -244,6 +289,7 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
     if job.lease_until is None or job.lease_until < now:
         raise HTTPException(status_code=409, detail="Browser agent lease expired")
 
+    payload = _normalize_known_business_outcome(payload, job=job, observed_at=now)
     succeeded = payload.status == BrowserAgentJobStatus.SUCCEEDED.value
     if not succeeded and payload.status != BrowserAgentJobStatus.FAILED.value:
         raise HTTPException(status_code=422, detail="status must be succeeded or failed")
