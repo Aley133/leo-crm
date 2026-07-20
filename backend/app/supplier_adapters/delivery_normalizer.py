@@ -44,18 +44,49 @@ class DeliveryNormalizer:
         window: int = 2,
         now: datetime | None = None,
     ) -> int | None:
-        """Parse delivery only from lines surrounding trusted delivery markers."""
-        lines = [" ".join(line.split()) for line in str(text or "").splitlines() if line.strip()]
+        """Parse delivery from trusted marker neighborhoods.
+
+        Browser ``inner_text`` is not guaranteed to preserve useful line breaks.
+        Therefore marker-local character windows are attempted first. The old
+        line-based fallback remains for pages that do preserve semantic lines.
+        """
+        raw_text = str(text or "")
+        normalized_text = " ".join(raw_text.split()).casefold().replace("ё", "е")
         marker_values = tuple(value.casefold().replace("ё", "е") for value in markers)
         excluded_values = tuple(value.casefold().replace("ё", "е") for value in excluded_phrases)
-        selected: list[str] = []
 
+        # Prefer the text immediately following a trusted delivery marker. This
+        # avoids unrelated promotion counters elsewhere on a flattened page.
+        for marker in marker_values:
+            start = 0
+            while True:
+                index = normalized_text.find(marker, start)
+                if index < 0:
+                    break
+                context = normalized_text[index : index + 120]
+                # Stop a context before a known advertising phrase, but never
+                # discard the trusted marker itself.
+                cut_at = len(context)
+                for phrase in excluded_values:
+                    phrase_index = context.find(phrase, len(marker))
+                    if phrase_index >= 0:
+                        cut_at = min(cut_at, phrase_index)
+                result = cls.from_text(context[:cut_at], now=now)
+                if result is not None:
+                    return result
+                start = index + len(marker)
+
+        # Fallback for pages with meaningful line breaks and delivery values on
+        # a neighboring line rather than directly after the marker.
+        lines = [" ".join(line.split()) for line in raw_text.splitlines() if line.strip()]
+        selected: list[str] = []
         for index, line in enumerate(lines):
             normalized_line = line.casefold().replace("ё", "е")
             if not any(marker in normalized_line for marker in marker_values):
                 continue
-            start = max(0, index - window)
-            end = min(len(lines), index + window + 1)
+            line_window = max(0, int(window))
+            start = max(0, index - line_window)
+            end = min(len(lines), index + line_window + 1)
             for candidate in lines[start:end]:
                 normalized_candidate = candidate.casefold().replace("ё", "е")
                 if any(phrase in normalized_candidate for phrase in excluded_values):
