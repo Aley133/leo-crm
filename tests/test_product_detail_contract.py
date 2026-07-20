@@ -54,6 +54,16 @@ def test_product_detail_ui_route_and_assets_are_exposed() -> None:
     assert 'href="/crm/products/${row.product_id}"' in products_script
 
 
+def test_product_detail_distinguishes_render_outage_from_domain_errors() -> None:
+    script = (ROOT / "backend" / "app" / "static" / "product-detail.js").read_text(encoding="utf-8")
+
+    assert "const responseError" in script
+    assert "[502, 503, 504]" in script
+    assert "Сервис Render временно недоступен или перезапускается" in script
+    assert 'response.status === 404' in script
+    assert "Товар не найден." in script
+
+
 def test_product_detail_frontend_remains_read_only() -> None:
     script = (ROOT / "backend" / "app" / "static" / "product-detail.js").read_text(encoding="utf-8")
 
