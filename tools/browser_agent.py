@@ -7,12 +7,15 @@ import os
 import platform
 import socket
 import time
+from typing import Any
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from backend.app.supplier_adapters.base import AdapterRequest
 from backend.app.supplier_adapters.ozon_browser_access import OzonBrowserAccessAdapter
 from backend.app.supplier_adapters.playwright_pool import PlaywrightBrowserPool
+from backend.app.supplier_adapters.wildberries_browser_access import WildberriesBrowserAccessAdapter
 
 
 def _required_env(name: str) -> str:
@@ -42,8 +45,19 @@ def _post_json(url: str, token: str, payload: dict) -> dict:
         raise RuntimeError(f"CRM is unavailable: {exc}") from exc
 
 
-async def _run_job(job: dict, adapter: OzonBrowserAccessAdapter) -> dict:
+def _adapter_code_for_url(url: str) -> str:
+    host = (urlparse(url).hostname or "").casefold().removeprefix("www.")
+    if host in {"ozon.ru", "ozon.kz"} or host.endswith(".ozon.ru") or host.endswith(".ozon.kz"):
+        return "ozon"
+    if host in {"wildberries.ru", "wb.ru"} or host.endswith(".wildberries.ru"):
+        return "wb"
+    raise ValueError(f"Unsupported supplier URL host: {host or '-'}")
+
+
+async def _run_job(job: dict, adapters: dict[str, Any]) -> dict:
     supplier_product_id = int(job["supplier_product_id"])
+    adapter_code = _adapter_code_for_url(str(job["url"]))
+    adapter = adapters[adapter_code]
     offer = await adapter.fetch(
         AdapterRequest(
             supplier_product_id=supplier_product_id,
@@ -70,11 +84,11 @@ async def _complete_job(
     api_url: str,
     token: str,
     job: dict,
-    adapter: OzonBrowserAccessAdapter,
+    adapters: dict[str, Any],
 ) -> str:
     print(f"Claimed browser job #{job['id']}: {job['url']}")
     try:
-        result = await _run_job(job, adapter)
+        result = await _run_job(job, adapters)
         completion = {
             "lease_token": job["lease_token"],
             "status": "succeeded",
@@ -124,15 +138,27 @@ async def _claim_one(
     return claim.get("job")
 
 
-async def _dispatch_once(*, api_url: str, token: str, dispatch_limit: int) -> int:
+async def _dispatch_source_once(*, api_url: str, token: str, dispatch_limit: int, supplier_code: str) -> int:
     result = await asyncio.to_thread(
         _post_json,
         f"{api_url}/api/browser-agent/dispatch-due",
         token,
-        {"limit": dispatch_limit, "supplier_code": "ozon"},
+        {"limit": dispatch_limit, "supplier_code": supplier_code},
     )
     queued = int(result.get("queued_count") or 0)
-    print(f"Dispatcher queued {queued} due monitor targets")
+    print(f"Dispatcher queued {queued} due {supplier_code} monitor targets")
+    return queued
+
+
+async def _dispatch_once(*, api_url: str, token: str, dispatch_limit: int) -> int:
+    queued = 0
+    for supplier_code in ("ozon", "wb"):
+        queued += await _dispatch_source_once(
+            api_url=api_url,
+            token=token,
+            dispatch_limit=dispatch_limit,
+            supplier_code=supplier_code,
+        )
     return queued
 
 
@@ -161,7 +187,7 @@ async def _worker_loop(
     api_url: str,
     token: str,
     agent_id: str,
-    adapter: OzonBrowserAccessAdapter,
+    adapters: dict[str, Any],
     poll_seconds: float,
 ) -> None:
     worker_id = f"{agent_id}-w{worker_number}"
@@ -186,7 +212,7 @@ async def _worker_loop(
                 api_url=api_url,
                 token=token,
                 job=job,
-                adapter=adapter,
+                adapters=adapters,
             )
         except Exception as exc:
             print(f"Worker {worker_number} completion error for job #{job['id']}: {exc}")
@@ -197,7 +223,7 @@ async def _run_once(
     api_url: str,
     token: str,
     agent_id: str,
-    adapter: OzonBrowserAccessAdapter,
+    adapters: dict[str, Any],
     dispatch_limit: int,
 ) -> int:
     await _dispatch_once(api_url=api_url, token=token, dispatch_limit=dispatch_limit)
@@ -207,13 +233,13 @@ async def _run_once(
         agent_id=f"{agent_id}-once",
     )
     if not job:
-        print("No queued browser jobs. Queue one MonitorTarget in Swagger and run again.")
+        print("No queued browser jobs. Queue one MonitorTarget in CRM and run again.")
         return 2
     status = await _complete_job(
         api_url=api_url,
         token=token,
         job=job,
-        adapter=adapter,
+        adapters=adapters,
     )
     return 0 if status == "succeeded" else 1
 
@@ -242,10 +268,14 @@ async def main(*, once: bool = False) -> int:
         cdp_endpoint=cdp_endpoint,
         reuse_default_context=True,
     )
-    adapter = OzonBrowserAccessAdapter(pool)
+    adapters: dict[str, Any] = {
+        "ozon": OzonBrowserAccessAdapter(pool),
+        "wb": WildberriesBrowserAccessAdapter(pool),
+    }
     print(f"Browser agent {agent_id} connected to CRM {api_url}")
     print(f"Chrome CDP endpoint: {cdp_endpoint}")
     print(f"Parallel browser workers: {1 if once else concurrency}")
+    print("Enabled suppliers: ozon, wb")
 
     if once:
         try:
@@ -253,11 +283,11 @@ async def main(*, once: bool = False) -> int:
                 api_url=api_url,
                 token=token,
                 agent_id=agent_id,
-                adapter=adapter,
+                adapters=adapters,
                 dispatch_limit=1,
             )
         finally:
-            await adapter.close()
+            await pool.close()
 
     tasks = [
         asyncio.create_task(
@@ -277,7 +307,7 @@ async def main(*, once: bool = False) -> int:
                 api_url=api_url,
                 token=token,
                 agent_id=agent_id,
-                adapter=adapter,
+                adapters=adapters,
                 poll_seconds=poll_seconds,
             ),
             name=f"browser-agent-worker-{number}",
@@ -291,7 +321,7 @@ async def main(*, once: bool = False) -> int:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await adapter.close()
+        await pool.close()
     return 0
 
 
