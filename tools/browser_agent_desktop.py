@@ -5,12 +5,13 @@ import base64
 import ctypes
 import os
 import subprocess
+import sys
 import time
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import Tk, messagebox, simpledialog
-from urllib.error import URLError
-from urllib.request import urlopen
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 from tools.browser_agent import main as run_browser_agent
 
@@ -18,6 +19,7 @@ API_URL = "https://leo-crm-api.onrender.com"
 CDP_ENDPOINT = "http://127.0.0.1:9222"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
 TOKEN_FILE = APP_DIR / "agent-token.dat"
+LOG_FILE = APP_DIR / "agent.log"
 
 
 class DATA_BLOB(ctypes.Structure):
@@ -33,13 +35,7 @@ def _protect(data: bytes) -> bytes:
     source, source_buffer = _blob(data)
     target = DATA_BLOB()
     if not ctypes.windll.crypt32.CryptProtectData(
-        ctypes.byref(source),
-        "LEO Browser Agent",
-        None,
-        None,
-        None,
-        0,
-        ctypes.byref(target),
+        ctypes.byref(source), "LEO Browser Agent", None, None, None, 0, ctypes.byref(target)
     ):
         raise ctypes.WinError()
     try:
@@ -53,13 +49,7 @@ def _unprotect(data: bytes) -> bytes:
     source, source_buffer = _blob(data)
     target = DATA_BLOB()
     if not ctypes.windll.crypt32.CryptUnprotectData(
-        ctypes.byref(source),
-        None,
-        None,
-        None,
-        None,
-        0,
-        ctypes.byref(target),
+        ctypes.byref(source), None, None, None, None, 0, ctypes.byref(target)
     ):
         raise ctypes.WinError()
     try:
@@ -90,7 +80,6 @@ def _ask_token() -> str:
     saved = _load_saved_token()
     if saved:
         return saved
-
     root = Tk()
     root.withdraw()
     token = simpledialog.askstring(
@@ -105,6 +94,25 @@ def _ask_token() -> str:
     value = token.strip()
     _save_token(value)
     return value
+
+
+def _verify_crm(token: str) -> None:
+    request = Request(
+        f"{API_URL}/api/browser-agent/agents",
+        headers={"Authorization": f"Bearer {token}"},
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=20) as response:
+            if response.status != 200:
+                raise RuntimeError(f"CRM вернула HTTP {response.status}")
+    except HTTPError as exc:
+        if exc.code == 401:
+            TOKEN_FILE.unlink(missing_ok=True)
+            raise RuntimeError("API-токен не принят CRM. Запустите агент ещё раз и введите актуальный токен.") from exc
+        raise RuntimeError(f"CRM вернула HTTP {exc.code}") from exc
+    except URLError as exc:
+        raise RuntimeError(f"CRM недоступна: {exc}") from exc
 
 
 def _find_browser() -> Path:
@@ -157,13 +165,23 @@ def _start_browser() -> None:
 def _show_error(text: str) -> None:
     root = Tk()
     root.withdraw()
-    messagebox.showerror("LEO Browser Agent", text, parent=root)
+    messagebox.showerror("LEO Browser Agent", f"{text}\n\nЛог: {LOG_FILE}", parent=root)
     root.destroy()
+
+
+def _redirect_output() -> None:
+    APP_DIR.mkdir(parents=True, exist_ok=True)
+    stream = LOG_FILE.open("a", encoding="utf-8", buffering=1)
+    sys.stdout = stream
+    sys.stderr = stream
+    print(f"\n=== LEO Browser Agent start {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
 
 
 def main() -> int:
     try:
+        _redirect_output()
         token = _ask_token()
+        _verify_crm(token)
         _start_browser()
         os.environ["CRM_API_URL"] = API_URL
         os.environ["CRM_SERVICE_TOKEN"] = token
@@ -172,10 +190,12 @@ def main() -> int:
         os.environ["BROWSER_AGENT_POLL_SECONDS"] = "3"
         os.environ["BROWSER_AGENT_CONCURRENCY"] = "1"
         os.environ["BROWSER_AGENT_DISPATCH_LIMIT"] = "100"
+        os.environ["BROWSER_AGENT_VERSION"] = "0.1.1"
         return asyncio.run(run_browser_agent())
     except KeyboardInterrupt:
         return 0
     except Exception as exc:
+        print(f"Fatal error: {exc!r}")
         _show_error(str(exc))
         return 1
 
