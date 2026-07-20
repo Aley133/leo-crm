@@ -34,6 +34,8 @@ def test_browser_agent_routes_are_registered() -> None:
     assert "/api/browser-agent/dispatch-due" in paths
     assert "/api/browser-agent/jobs" in paths
     assert "/api/browser-agent/claim" in paths
+    assert "/api/browser-agent/heartbeat" in paths
+    assert "/api/browser-agent/agents" in paths
     assert "/api/browser-agent/jobs/{job_id}/complete" in paths
     assert "/api/browser-agent/jobs/{job_id}" in paths
     assert "/api/monitor-targets/{target_id}/queue-browser-agent" in paths
