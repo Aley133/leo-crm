@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+from datetime import timedelta
+
 from fastapi import APIRouter, Depends, Query
+from sqlalchemy import select
+from sqlalchemy.orm import Session
 
 from .auth import require_service_token
-from .browser_agent_presence import list_browser_agent_events, list_online_browser_agents
+from .browser_agent_models import BrowserAgent
+from .browser_agent_presence import list_browser_agent_events
+from .db import get_db
+from .lease_engine import utc_now
 
 
 router = APIRouter(
@@ -14,16 +21,25 @@ router = APIRouter(
 
 
 @router.get("/agents")
-def list_agents() -> list[dict]:
+def list_agents(db: Session = Depends(get_db)) -> list[dict]:
+    cutoff = utc_now() - timedelta(seconds=30)
+    agents = db.scalars(select(BrowserAgent).order_by(BrowserAgent.agent_id)).all()
     return [
         {
             "agent_id": item.agent_id,
-            "status": item.status,
+            "hostname": item.hostname,
+            "platform": item.platform,
+            "status": item.status if item.last_seen_at >= cutoff else "offline",
             "version": item.version,
             "current_job_id": item.current_job_id,
             "last_seen_at": item.last_seen_at,
+            "leases_taken": item.leases_taken,
+            "leases_succeeded": item.leases_succeeded,
+            "leases_failed": item.leases_failed,
+            "created_at": item.created_at,
+            "updated_at": item.updated_at,
         }
-        for item in list_online_browser_agents()
+        for item in agents
     ]
 
 
