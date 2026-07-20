@@ -34,14 +34,34 @@
           <article class="metric"><span>Целей</span><strong id="targets-total">—</strong><small>всего</small></article>
           <article class="metric"><span>Активны</span><strong id="targets-active">—</strong><small>работают</small></article>
           <article class="metric"><span>В очереди</span><strong id="jobs-queued">—</strong><small>Browser Agent</small></article>
-          <article class="metric"><span>Ошибки</span><strong id="attempts-failed">—</strong><small>проверок</small></article>
+          <article class="metric"><span>В работе</span><strong id="jobs-leased">—</strong><small>активных lease</small></article>
+          <article class="metric"><span>Успешно за 24 ч</span><strong id="attempts-success-24h">—</strong><small>проверок</small></article>
+          <article class="metric"><span>Ошибок за 24 ч</span><strong id="attempts-failed-24h">—</strong><small>проверок</small></article>
+          <article class="metric"><span>Среднее время</span><strong id="attempts-average">—</strong><small>последние проверки</small></article>
+          <article class="metric"><span>Последняя проверка</span><strong id="last-attempt">—</strong><small>активность runtime</small></article>
         </div>
+
+        <section class="panel wide">
+          <div class="panel-title"><h2>Сейчас выполняется</h2><span id="leased-label">Активные lease</span></div>
+          <div id="leased-empty" class="empty-state">Сейчас активных заданий нет.</div>
+          <div class="table-wrap"><table id="leased-table"><thead><tr><th>Job</th><th>Товар</th><th>Источник</th><th>Agent</th><th>Lease до</th><th>Выполняется</th></tr></thead><tbody id="leased-body"></tbody></table></div>
+        </section>
+
         <section class="panel wide">
           <div class="panel-title"><h2>Очередь и задания</h2><span id="jobs-updated"></span></div>
-          <div class="table-wrap"><table><thead><tr><th>Статус</th><th>Товар</th><th>Источник</th><th>Lease</th><th>Ошибка</th><th>Создано</th></tr></thead><tbody id="jobs-body"></tbody></table></div>
+          <div class="monitor-filters">
+            <label><span>Статус</span><select id="job-status"><option value="">Все</option><option value="queued">В очереди</option><option value="leased">В работе</option><option value="succeeded">Успешные</option><option value="failed">Ошибки</option></select></label>
+            <label><span>Источник</span><input id="job-source" type="search" placeholder="ozon, wb..."></label>
+          </div>
+          <div class="table-wrap"><table><thead><tr><th>Job</th><th>Статус</th><th>Товар</th><th>Источник</th><th>Lease</th><th>Ошибка</th><th>Создано</th></tr></thead><tbody id="jobs-body"></tbody></table></div>
         </section>
         <section class="panel wide">
-          <div class="panel-title"><h2>Последние проверки</h2><label class="inline-check"><input id="only-errors" type="checkbox"> Только ошибки</label></div>
+          <div class="panel-title"><h2>Последние проверки</h2><span id="attempts-label"></span></div>
+          <div class="monitor-filters">
+            <label class="inline-check"><input id="only-errors" type="checkbox"> Только ошибки</label>
+            <label><span>Источник</span><input id="attempt-source" type="search" placeholder="ozon, wb..."></label>
+            <label><span>Период</span><select id="attempt-period"><option value="all">Все</option><option value="24h">Последние 24 часа</option></select></label>
+          </div>
           <div class="table-wrap"><table><thead><tr><th>Результат</th><th>Товар</th><th>Источник</th><th>Длительность</th><th>HTTP</th><th>Ошибка</th><th>Время</th></tr></thead><tbody id="attempts-body"></tbody></table></div>
         </section>
         <section class="panel wide">
