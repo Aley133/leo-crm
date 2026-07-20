@@ -12,7 +12,7 @@ from .playwright_pool import BrowserPageResult
 class OzonBrowserAccessAdapter(OzonBrowserAdapter):
     """Ozon browser adapter with anti-bot and delivery normalization."""
 
-    code = "ozon-browser-v7"
+    code = "ozon-browser-v8"
 
     async def fetch(self, request: AdapterRequest) -> NormalizedOffer:
         offer = await super().fetch(request)
@@ -22,19 +22,40 @@ class OzonBrowserAccessAdapter(OzonBrowserAdapter):
             return offer
 
         # Ozon frequently exposes price in structured JSON but delivery only in
-        # visible text. Read the page through the same managed browser pool and
-        # normalize relative words or an explicit calendar date.
+        # visible text. Restrict parsing to delivery-related page context so
+        # promotion countdowns such as "10 дней до конца" are ignored.
         response = await self._pool.fetch_html(
             request.url,
             timeout_seconds=self._timeout_seconds,
         )
         self._classify_page(response)
-        delivery_days = DeliveryNormalizer.from_text(response.body_text)
+        delivery_days = DeliveryNormalizer.from_context(
+            response.body_text,
+            markers=(
+                "доставим",
+                "доставка",
+                "получить",
+                "получение",
+                "пункт ozon",
+                "пункт выдачи",
+                "курьер",
+                "самовывоз",
+            ),
+            excluded_phrases=(
+                "до конца",
+                "распродажа",
+                "акция",
+                "скидка",
+                "купон",
+                "осталось",
+            ),
+            window=2,
+        )
         if delivery_days is None:
             return offer
 
         metadata = dict(offer.raw_metadata)
-        metadata["delivery_source"] = "visible_text_normalized"
+        metadata["delivery_source"] = "visible_delivery_context_normalized"
         metadata["delivery_response_url"] = response.final_url
         return replace(
             offer,
