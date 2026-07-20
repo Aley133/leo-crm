@@ -1,6 +1,8 @@
 from datetime import UTC, datetime
+from pathlib import Path
 
 from fastapi import FastAPI
+from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 
 from .browser_agent_api import router as browser_agent_router
@@ -17,9 +19,11 @@ from .purchase_api import router as purchase_router
 from .supplier_products_api import router as supplier_products_router
 from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
+from .ui import router as ui_router
 
 APP_VERSION = "0.13.0"
 DEPLOYMENT_MARKER = "supplier-state-control-plane-v1"
+STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
     title="LEO CRM API",
@@ -27,6 +31,8 @@ app = FastAPI(
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
 )
 
+app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
+app.include_router(ui_router)
 app.include_router(products_router)
 app.include_router(suppliers_router)
 app.include_router(supplier_products_router)
@@ -50,6 +56,7 @@ async def root() -> dict[str, str]:
         "version": APP_VERSION,
         "deployment_marker": DEPLOYMENT_MARKER,
         "docs": "/docs",
+        "crm": "/crm",
     }
 
 
