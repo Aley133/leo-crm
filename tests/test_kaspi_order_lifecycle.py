@@ -56,14 +56,17 @@ def test_kaspi_delivery_bucket_never_defines_stage_by_itself() -> None:
     assert _normalized(_payload(status="APPROVED_BY_BANK")) == "new"
 
 
-def test_preorder_is_detected_from_explicit_preorder_flag() -> None:
+def test_preorder_candidate_is_detected_from_explicit_preorder_flag() -> None:
+    # Verified order 1002303844. The final preorder-vs-packaging decision belongs
+    # to Commerce Core because Kaspi exposes the same flags for 1006563363.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=True,
         assembled=False,
         kaspiDelivery={
             "courierTransmissionDate": None,
-            "courierTransmissionPlanningDate": 1784642859000,
+            "courierTransmissionPlanningDate": 1784818800000,
+            "waybill": None,
         },
     )
 
@@ -74,19 +77,22 @@ def test_preorder_is_detected_from_explicit_preorder_flag() -> None:
     assert _order(status="accepted", line=_line()).stage == CommerceOrderStage.PREORDER
 
 
-def test_preorder_flag_wins_over_technical_transmission_date() -> None:
+def test_packaging_candidate_can_share_same_kaspi_flags_as_preorder() -> None:
+    # Verified order 1006563363. Kaspi alone cannot distinguish it from
+    # 1002303844; warehouse availability/reservation must override this candidate
+    # to ASSEMBLY in Commerce Core.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=True,
-        assembled=True,
+        assembled=False,
         kaspiDelivery={
-            "courierTransmissionDate": 1784642859000,
-            "courierTransmissionPlanningDate": 1784642859000,
+            "courierTransmissionDate": None,
+            "courierTransmissionPlanningDate": 1784732400000,
+            "waybill": None,
         },
     )
 
     assert _normalized(payload) == "accepted"
-    assert _order(status="accepted", line=_line()).stage == CommerceOrderStage.PREORDER
 
 
 def test_normal_merchant_acceptance_is_packaging() -> None:
@@ -101,25 +107,29 @@ def test_normal_merchant_acceptance_is_packaging() -> None:
     assert _order(status="assembly", line=_line()).stage == CommerceOrderStage.ASSEMBLY
 
 
-def test_assembled_flag_alone_does_not_promote_packaging_to_handover() -> None:
+def test_assembled_order_without_actual_transmission_is_handover() -> None:
+    # Verified order 1006480798.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=False,
         assembled=True,
         kaspiDelivery={
             "courierTransmissionDate": None,
-            "courierTransmissionPlanningDate": 1784642859000,
+            "courierTransmissionPlanningDate": 1784732400000,
+            "waybill": "https://kaspi.kz/shop/api/waybill/example",
+            "waybillNumber": "395637626",
         },
     )
 
-    assert _normalized(payload) == "assembly"
-    assert _order(status="assembly", line=_line()).stage == CommerceOrderStage.ASSEMBLY
+    assert _normalized(payload) == "handover"
+    assert _order(status="handover", line=_line()).stage == CommerceOrderStage.HANDOVER
 
 
-def test_actual_courier_transmission_after_preorder_means_shipping() -> None:
+def test_actual_courier_transmission_wins_over_stale_preorder_and_assembled_flags() -> None:
+    # Verified order 1000772384.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
-        preOrder=False,
+        preOrder=True,
         assembled=True,
         kaspiDelivery={
             "courierTransmissionDate": 1784642859000,
@@ -157,6 +167,7 @@ def test_planned_transmission_deadline_alone_does_not_mean_shipping() -> None:
 
 
 def test_cancelled_completed_and_returned_are_authoritative() -> None:
+    # Verified cancellation order 1006187575.
     assert _normalized(
         _payload(
             status="CANCELLED",
