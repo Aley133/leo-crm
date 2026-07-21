@@ -13,10 +13,10 @@ const empty = document.querySelector("#empty");
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
-const stageLabel = (stage) => ({new:"Новый",accepted:"Принят — ожидает решения по запасу",preorder:"Предзаказ / в пути",assembly:"В сборке",handover:"Передача",shipping:"На доставке",delivered:"Доставлен",cancelled:"Отменён",returned:"Возврат",unknown:"Статус не детализирован"}[stage] || stage || "—");
-const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelled","returned"].includes(stage) ? "bad" : ["new","accepted","preorder","assembly","handover","shipping"].includes(stage) ? "warn" : "";
+const stageLabel = (stage) => ({new:"Новый",accepted:"Принят — требуется решение по запасу",preorder:"Предзаказ — закупка создана",in_transit:"Закупка в пути",assembly:"В сборке — товар подтверждён",handover:"Передача",shipping:"На доставке",delivered:"Доставлен",cancelled:"Отменён",returned:"Возврат",unknown:"Статус не детализирован"}[stage] || stage || "—");
+const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelled","returned"].includes(stage) ? "bad" : ["new","accepted","preorder","in_transit","assembly","handover","shipping"].includes(stage) ? "warn" : "";
 const rawStatusLabel = (status) => ({new:"new",accepted:"accepted",assembly:"assembly",shipping:"shipping",delivered:"delivered",cancelled:"cancelled",returned:"returned",unknown:"unknown"}[status] || status || "—");
-const procurementLabel = (state) => ({required:"Нужно решить закупку/остаток",in_progress:"Закупка в работе",received:"Получено",not_required:"Не требуется",unresolved:"Товар не распознан",cancelled:"Закупка отменена"}[state] || state || "—");
+const procurementLabel = (state) => ({required:"Нужно решить закупку/остаток",in_progress:"Закупка оформлена",received:"Получено",not_required:"Не требуется",unresolved:"Товар не распознан",cancelled:"Закупка отменена"}[state] || state || "—");
 const procurementClass = (state) => state === "required" ? "procurement-required" : state === "received" ? "procurement-ready" : "";
 
 const headers = () => ({"Authorization": `Bearer ${localStorage.getItem(storageKey) || ""}`});
