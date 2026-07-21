@@ -41,7 +41,16 @@ def list_commerce_orders(
         total=total,
         limit=limit,
         offset=offset,
-        summary=CommerceSummaryRead(**summary.__dict__),
+        summary=CommerceSummaryRead(
+            orders_count=summary.orders_count,
+            units_count=summary.units_count,
+            revenue=summary.revenue,
+            active_orders=summary.active_orders,
+            delivered_orders=summary.delivered_orders,
+            cancelled_orders=summary.cancelled_orders,
+            unresolved_lines=summary.unresolved_lines,
+            procurement_required_lines=summary.procurement_required_lines,
+        ),
         items=[
             CommerceOrderRead(
                 order_id=order.order_id,
