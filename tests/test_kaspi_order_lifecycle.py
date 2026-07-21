@@ -56,10 +56,15 @@ def test_kaspi_delivery_bucket_never_defines_stage_by_itself() -> None:
     assert _normalized(_payload(status="APPROVED_BY_BANK")) == "new"
 
 
-def test_preorder_is_detected_from_planned_arrival_fact() -> None:
+def test_preorder_is_detected_from_explicit_preorder_flag() -> None:
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
-        reservationDate="2026-07-21T00:00:00Z",
+        preOrder=True,
+        assembled=False,
+        kaspiDelivery={
+            "courierTransmissionDate": None,
+            "courierTransmissionPlanningDate": 1784642859000,
+        },
     )
 
     canonical = canonicalize_kaspi_order_payload(payload)
@@ -69,12 +74,49 @@ def test_preorder_is_detected_from_planned_arrival_fact() -> None:
     assert _order(status="accepted", line=_line()).stage == CommerceOrderStage.PREORDER
 
 
-def test_accepted_by_merchant_without_arrival_fact_is_assembly() -> None:
-    assert _normalized(_payload(status="ACCEPTED_BY_MERCHANT")) == "assembly"
+def test_normal_merchant_acceptance_is_packaging() -> None:
+    payload = _payload(
+        status="ACCEPTED_BY_MERCHANT",
+        preOrder=False,
+        assembled=False,
+        kaspiDelivery={"courierTransmissionDate": None},
+    )
+
+    assert _normalized(payload) == "assembly"
     assert _order(status="assembly", line=_line()).stage == CommerceOrderStage.ASSEMBLY
 
 
-def test_actual_shipment_means_handed_to_kaspi_delivery() -> None:
+def test_assembled_order_without_actual_transmission_is_handover() -> None:
+    payload = _payload(
+        status="ACCEPTED_BY_MERCHANT",
+        preOrder=False,
+        assembled=True,
+        kaspiDelivery={
+            "courierTransmissionDate": None,
+            "courierTransmissionPlanningDate": 1784642859000,
+        },
+    )
+
+    assert _normalized(payload) == "handover"
+    assert _order(status="handover", line=_line()).stage == CommerceOrderStage.HANDOVER
+
+
+def test_actual_courier_transmission_wins_over_stale_preorder_and_assembled_flags() -> None:
+    payload = _payload(
+        status="ACCEPTED_BY_MERCHANT",
+        preOrder=True,
+        assembled=True,
+        kaspiDelivery={
+            "courierTransmissionDate": 1784642859000,
+            "courierTransmissionPlanningDate": 1784642859000,
+        },
+    )
+
+    assert _normalized(payload) == "shipping"
+    assert _order(status="shipping", line=_line()).stage == CommerceOrderStage.SHIPPING
+
+
+def test_legacy_actual_shipment_field_means_handed_to_kaspi_delivery() -> None:
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         shipmentDate="2026-07-21T12:00:00Z",
@@ -82,21 +124,32 @@ def test_actual_shipment_means_handed_to_kaspi_delivery() -> None:
     )
 
     assert _normalized(payload) == "shipping"
-    assert _order(status="shipping", line=_line()).stage == CommerceOrderStage.SHIPPING
 
 
-def test_planned_shipment_deadline_alone_does_not_mean_shipping() -> None:
+def test_planned_transmission_deadline_alone_does_not_mean_shipping() -> None:
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
-        plannedShipmentDate="2026-07-21T20:00:00Z",
+        preOrder=False,
+        assembled=False,
+        kaspiDelivery={
+            "courierTransmissionDate": None,
+            "courierTransmissionPlanningDate": 1784642859000,
+        },
     )
 
     assert _normalized(payload) == "assembly"
 
 
 def test_cancelled_completed_and_returned_are_authoritative() -> None:
-    assert _normalized(_payload(status="CANCELLED", shipmentDate="2026-07-21T12:00:00Z")) == "cancelled"
-    assert _normalized(_payload(status="COMPLETED", reservationDate="2026-07-21T00:00:00Z")) == "delivered"
+    assert _normalized(
+        _payload(
+            status="CANCELLED",
+            preOrder=True,
+            assembled=True,
+            kaspiDelivery={"courierTransmissionDate": 1784642859000},
+        )
+    ) == "cancelled"
+    assert _normalized(_payload(status="COMPLETED", preOrder=True)) == "delivered"
     assert _normalized(_payload(status="KASPI_DELIVERY_RETURN_REQUESTED")) == "returned"
 
 
