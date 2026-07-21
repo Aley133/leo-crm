@@ -60,12 +60,12 @@ class CommerceOrder:
     external_code: str | None
     marketplace: str
     status: str
-    original_status: str
     currency: str
     total_amount: Decimal
     ordered_at: datetime | None
     delivered_at: datetime | None
     lines: tuple[CommerceOrderLine, ...]
+    original_status: str = "UNKNOWN"
 
     @property
     def units(self) -> int:
