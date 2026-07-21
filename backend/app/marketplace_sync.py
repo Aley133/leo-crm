@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Callable
+from typing import Any, Callable
 from uuid import UUID
 
 from sqlalchemy import select
@@ -22,6 +23,7 @@ from .product_identity_service import ensure_marketplace_listing_for_order_line
 
 
 SessionFactory = Callable[[], Session]
+_KASPI_DETAIL_WORKERS = 6
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +33,63 @@ class MarketplaceSyncResult:
     imported_count: int
     updated_count: int
     next_cursor: str | None
+
+
+def _seller_order_code(payload: dict[str, Any]) -> str | None:
+    attributes = payload.get("attributes")
+    if not isinstance(attributes, dict):
+        return None
+    value = attributes.get("code") or attributes.get("orderCode")
+    normalized = str(value or "").strip()
+    return normalized or None
+
+
+def _requires_seller_detail(payload: dict[str, Any]) -> bool:
+    attributes = payload.get("attributes")
+    if not isinstance(attributes, dict):
+        return False
+    return str(attributes.get("status") or "").strip().upper() == "ACCEPTED_BY_MERCHANT"
+
+
+def _hydrate_seller_truth(
+    transport: MarketplaceOrderTransport,
+    items: tuple[dict[str, Any], ...],
+) -> tuple[dict[str, Any], ...]:
+    """Replace coarse accepted list payloads with seller-detail payloads.
+
+    Kaspi's page response often keeps every active delivery order under
+    ``ACCEPTED_BY_MERCHANT`` and omits the seller-operation facts required to
+    distinguish preorder, packaging, handover and actual courier transmission.
+    The optional direct lookup already used by diagnostics exposes those facts.
+    Detail failures are isolated per order so one transient Kaspi response never
+    aborts the whole committed page.
+    """
+
+    fetch_by_code = getattr(transport, "fetch_order_by_code", None)
+    if not callable(fetch_by_code):
+        return items
+
+    result = list(items)
+    candidates: dict[Any, int] = {}
+    with ThreadPoolExecutor(max_workers=_KASPI_DETAIL_WORKERS) as executor:
+        for index, payload in enumerate(items):
+            if not _requires_seller_detail(payload):
+                continue
+            code = _seller_order_code(payload)
+            if code is None:
+                continue
+            candidates[executor.submit(fetch_by_code, code)] = index
+
+        for future in as_completed(candidates):
+            index = candidates[future]
+            try:
+                detailed = future.result()
+            except Exception:
+                continue
+            if isinstance(detailed, dict):
+                result[index] = detailed
+
+    return tuple(result)
 
 
 def sync_kaspi_order_page(
@@ -79,6 +138,7 @@ def sync_kaspi_order_page(
             updated_after=watermark_at,
             limit=limit,
         )
+        source_items = _hydrate_seller_truth(transport, page.items)
 
         imported_count = 0
         updated_count = 0
@@ -88,7 +148,7 @@ def sync_kaspi_order_page(
                 if execution is None:
                     raise RuntimeError("Marketplace import execution disappeared")
 
-                for source_payload in page.items:
+                for source_payload in source_items:
                     payload = canonicalize_kaspi_order_payload(source_payload)
                     result = import_kaspi_order(
                         session,
@@ -173,7 +233,7 @@ def sync_kaspi_order_page(
 
         return MarketplaceSyncResult(
             execution_id=execution_id,
-            fetched_count=len(page.items),
+            fetched_count=len(source_items),
             imported_count=imported_count,
             updated_count=updated_count,
             next_cursor=page.next_cursor,
