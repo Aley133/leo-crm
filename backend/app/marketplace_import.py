@@ -30,6 +30,8 @@ KASPI_STATUS_MAP: dict[str, str] = {
     "ASSEMBLY": MarketplaceOrderStatus.ASSEMBLY.value,
     "KASPI_DELIVERY": MarketplaceOrderStatus.SHIPPING.value,
     "DELIVERY": MarketplaceOrderStatus.SHIPPING.value,
+    "SHIPPING": MarketplaceOrderStatus.SHIPPING.value,
+    "HANDED_OVER_TO_COURIER": MarketplaceOrderStatus.SHIPPING.value,
     "DELIVERED": MarketplaceOrderStatus.DELIVERED.value,
     "ARCHIVE": MarketplaceOrderStatus.DELIVERED.value,
     "ARCHIVED": MarketplaceOrderStatus.DELIVERED.value,
@@ -114,7 +116,20 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
     if not external_order_id:
         raise ValueError("Kaspi order payload has no external order identity")
 
-    original_status = str(_first(attributes, "status", "state") or "UNKNOWN").strip()
+    # Kaspi can expose an historical/acceptance status alongside the current
+    # fulfilment state. The state shown at the top of Seller Cabinet is the
+    # authoritative current position of the order, so it must win over the
+    # historical status field when both are present.
+    original_status = str(
+        _first(
+            attributes,
+            "state",
+            "fulfillmentState",
+            "deliveryStatus",
+            "status",
+        )
+        or "UNKNOWN"
+    ).strip()
     normalized_status = KASPI_STATUS_MAP.get(original_status.upper(), MarketplaceOrderStatus.UNKNOWN.value)
 
     raw_lines = _first(attributes, "entries", "orderEntries", "lines") or []
