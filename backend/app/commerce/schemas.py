@@ -18,6 +18,7 @@ class CommerceOrderLineRead(BaseModel):
     is_resolved: bool
     purchase_request_id: str | None
     purchase_status: str | None
+    purchase_version: int | None
     procurement_state: str
 
 
