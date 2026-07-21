@@ -10,6 +10,16 @@ from backend.app.browser_agent_api import (
 from backend.app.browser_agent_models import BrowserAgentJobStatus
 
 
+def _supplier_job(url: str) -> SimpleNamespace:
+    """Return the smallest object that satisfies the Browser Agent job contract."""
+
+    return SimpleNamespace(
+        supplier_product_id=51853964,
+        monitor_target_id=None,
+        url=url,
+    )
+
+
 def test_verified_wildberries_out_of_stock_is_a_successful_observation() -> None:
     observed_at = datetime(2026, 7, 20, 22, 4, tzinfo=UTC)
     payload = BrowserAgentResult(
@@ -21,7 +31,7 @@ def test_verified_wildberries_out_of_stock_is_a_successful_observation() -> None
 
     normalized = _normalize_known_business_outcome(
         payload,
-        job=SimpleNamespace(url="https://www.wildberries.ru/catalog/51853964/detail.aspx"),
+        job=_supplier_job("https://www.wildberries.ru/catalog/51853964/detail.aspx"),
         observed_at=observed_at,
     )
 
@@ -46,7 +56,7 @@ def test_unknown_parse_error_remains_failed() -> None:
 
     normalized = _normalize_known_business_outcome(
         payload,
-        job=SimpleNamespace(url="https://www.wildberries.ru/catalog/51853964/detail.aspx"),
+        job=_supplier_job("https://www.wildberries.ru/catalog/51853964/detail.aspx"),
         observed_at=datetime.now(UTC),
     )
 
