@@ -1,0 +1,63 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Orders Center</title>
+  <link rel="stylesheet" href="/static/dashboard.css">
+  <link rel="stylesheet" href="/static/orders.css">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a>
+        <a href="/crm/products">Товары</a>
+        <a class="active" href="/crm/orders">Заказы</a>
+        <a href="/crm/suppliers">Поставщики</a>
+        <a href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Commerce Core</span></div>
+    </aside>
+
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">Commerce Core</p>
+          <h1>Заказы</h1>
+          <p class="subtitle">Продажи, распознавание товаров и состояние закупки в одном рабочем центре</p>
+        </div>
+        <button id="refresh" class="button secondary" type="button">Обновить</button>
+      </header>
+
+      <section id="auth-panel" class="auth-panel">
+        <div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div>
+        <form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form>
+      </section>
+      <div id="message" class="message" role="status"></div>
+
+      <section id="orders-page" class="hidden" aria-busy="false">
+        <section class="metrics" aria-label="Сводка заказов">
+          <article class="metric"><span>Заказов</span><strong id="summary-orders">0</strong><small>в текущей выборке</small></article>
+          <article class="metric"><span>Активных</span><strong id="summary-active">0</strong><small>требуют обработки</small></article>
+          <article class="metric"><span>Выручка</span><strong id="summary-revenue">0 ₸</strong><small>по выбранным заказам</small></article>
+          <article class="metric"><span>Нужно закупить</span><strong id="summary-procurement">0</strong><small>строк заказа</small></article>
+        </section>
+
+        <form id="filters" class="filters">
+          <label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Номер заказа, товар, Kaspi ID или SKU"></label>
+          <label><span>Статус</span><select id="status"><option value="">Все</option><option value="new">Новые</option><option value="accepted">Принятые</option><option value="assembly">Сборка</option><option value="shipping">Доставка</option><option value="delivered">Доставленные</option><option value="cancelled">Отменённые</option><option value="returned">Возвраты</option></select></label>
+          <button class="button" type="submit">Применить</button>
+          <button id="reset" class="button secondary" type="button">Сбросить</button>
+        </form>
+
+        <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div>
+        <div id="orders-list" class="orders-list"></div>
+        <div id="empty" class="empty hidden">Заказы не найдены. Запустите синхронизацию Kaspi или измените фильтры.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/orders.js" defer></script>
+</body>
+</html>
