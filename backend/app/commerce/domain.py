@@ -93,7 +93,7 @@ class CommerceOrder:
 
     @property
     def procurement_required_lines(self) -> int:
-        if self.status in {"cancelled", "returned", "delivered", "shipping"}:
+        if self.status in {"cancelled", "returned", "delivered", "shipping", "assembly"}:
             return 0
         return sum(
             1
@@ -131,6 +131,9 @@ class CommerceOrder:
 
     @property
     def stage(self) -> CommerceOrderStage:
+        # Marketplace lifecycle facts are authoritative. Procurement state is a
+        # separate workflow and must never rewrite what Kaspi says happened to
+        # the customer order.
         if self.status == "cancelled":
             return CommerceOrderStage.CANCELLED
         if self.status == "returned":
@@ -144,16 +147,10 @@ class CommerceOrder:
         if self.status == "new":
             return CommerceOrderStage.NEW
         if self.status == "accepted":
-            if self.all_procurement_received:
-                return CommerceOrderStage.ASSEMBLY
-            if self.has_procurement_in_transit:
-                return CommerceOrderStage.IN_TRANSIT
-            if self.has_preorder_request:
-                return CommerceOrderStage.PREORDER
-            # Until Warehouse/Reservations exists, an accepted Kaspi order cannot
-            # be truthfully classified as either preorder or assembly. Keep the
-            # operational stage explicit instead of guessing from a missing PR.
-            return CommerceOrderStage.ACCEPTED
+            # The payload canonicalizer uses accepted only for Kaspi's visible
+            # "В пути" preorder state. Normal merchant acceptance without a
+            # planned arrival date is normalized to assembly before persistence.
+            return CommerceOrderStage.PREORDER
         return CommerceOrderStage.UNKNOWN
 
 
