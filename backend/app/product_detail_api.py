@@ -10,6 +10,11 @@ from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .db import get_db
+from .decision_timeline import (
+    DecisionTimelineProjector,
+    TimelineBinding,
+    TimelineObservation,
+)
 from .models import MarketplaceOrder, MarketplaceOrderLine, Product
 from .monitoring import MonitorTarget, SupplierOfferObservation, SupplierOfferState
 from .supplier_intelligence import BestOfferEngine, SupplierCandidate, SupplierScore
@@ -95,6 +100,24 @@ class BestOfferDecisionRead(BaseModel):
     eligible_count: int
 
 
+class DecisionTimelineEntryRead(BaseModel):
+    observation_id: int
+    occurred_at: datetime
+    event_type: str
+    leader_binding_id: int | None
+    leader_supplier_code: str | None
+    leader_supplier_name: str | None
+    previous_binding_id: int | None
+    previous_supplier_code: str | None
+    previous_supplier_name: str | None
+    leader_score: Decimal | None
+    score_gap: Decimal | None
+    confidence: str
+    price_delta: Decimal | None
+    delivery_delta: int | None
+    reason: str
+
+
 class ProductDetailResponse(BaseModel):
     product: ProductDetailHeader
     sales: ProductSalesSummary
@@ -103,6 +126,7 @@ class ProductDetailResponse(BaseModel):
     best_offer: SupplierScoreRead | None
     supplier_scores: list[SupplierScoreRead]
     best_offer_decision: BestOfferDecisionRead
+    decision_timeline: list[DecisionTimelineEntryRead]
 
 
 router = APIRouter(
@@ -200,6 +224,7 @@ def get_product_detail(
 
     bindings: list[ProductBindingDetail] = []
     candidates: list[SupplierCandidate] = []
+    timeline_bindings: list[TimelineBinding] = []
     for binding, supplier_product, supplier, monitor_target, state in binding_rows:
         bindings.append(
             ProductBindingDetail(
@@ -241,9 +266,34 @@ def get_product_detail(
                 last_checked_at=None if state is None else state.last_checked_at,
             )
         )
+        timeline_bindings.append(
+            TimelineBinding(
+                binding_id=binding.id,
+                supplier_product_id=supplier_product.id,
+                supplier_code=supplier.code,
+                supplier_name=supplier.name,
+                is_primary=binding.is_primary,
+                priority=binding.priority,
+            )
+        )
 
     decision = BestOfferEngine.decide(candidates)
     score_rows = [_score_read(score) for score in decision.ranked]
+    timeline = DecisionTimelineProjector.project(
+        timeline_bindings,
+        [
+            TimelineObservation(
+                observation_id=observation.id,
+                supplier_product_id=observation.supplier_product_id,
+                price=observation.price,
+                currency=observation.currency,
+                available=observation.available,
+                delivery_days=observation.delivery_days,
+                observed_at=observation.observed_at,
+            )
+            for observation in observations
+        ],
+    )
 
     return ProductDetailResponse(
         product=ProductDetailHeader(
@@ -273,4 +323,24 @@ def get_product_detail(
             warnings=list(decision.warnings),
             eligible_count=sum(1 for score in decision.ranked if score.eligible),
         ),
+        decision_timeline=[
+            DecisionTimelineEntryRead(
+                observation_id=entry.observation_id,
+                occurred_at=entry.occurred_at,
+                event_type=entry.event_type,
+                leader_binding_id=entry.leader_binding_id,
+                leader_supplier_code=entry.leader_supplier_code,
+                leader_supplier_name=entry.leader_supplier_name,
+                previous_binding_id=entry.previous_binding_id,
+                previous_supplier_code=entry.previous_supplier_code,
+                previous_supplier_name=entry.previous_supplier_name,
+                leader_score=entry.leader_score,
+                score_gap=entry.score_gap,
+                confidence=entry.confidence,
+                price_delta=entry.price_delta,
+                delivery_delta=entry.delivery_delta,
+                reason=entry.reason,
+            )
+            for entry in timeline
+        ],
     )
