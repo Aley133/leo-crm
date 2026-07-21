@@ -128,13 +128,108 @@ class MarketplaceImportCheckpoint(Base):
     marketplace_account_id: Mapped[int] = mapped_column(
         ForeignKey("marketplace_accounts.id", ondelete="CASCADE"), index=True
     )
-    stream_name: Mapped[str] = mapped_column(String(64), index=True)
-    cursor: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    stream_name: Mapped[str] = mapped_column(String(64))
+    cursor: Mapped[str | None] = mapped_column(Text, nullable=True)
     watermark_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
+    )
+
+
+class MarketplaceOrder(Base):
+    __tablename__ = "marketplace_orders"
+    __table_args__ = (
+        UniqueConstraint(
+            "marketplace_account_id",
+            "external_order_id",
+            name="uq_marketplace_order_account_external",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    marketplace_account_id: Mapped[int] = mapped_column(
+        ForeignKey("marketplace_accounts.id", ondelete="RESTRICT"), index=True
+    )
+    external_order_id: Mapped[str] = mapped_column(String(128))
+    external_code: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    status: Mapped[str] = mapped_column(
+        String(32), default=MarketplaceOrderStatus.UNKNOWN.value, index=True
+    )
+    original_status: Mapped[str] = mapped_column(String(128), default="unknown", index=True)
+    source_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    currency: Mapped[str] = mapped_column(String(3), default="KZT")
+    total_amount: Mapped[float] = mapped_column(Numeric(18, 2))
+    ordered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), index=True)
+    planned_delivery_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    source_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
+    version: Mapped[int] = mapped_column(Integer, default=1)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
     )
+
+    account: Mapped[MarketplaceAccount] = relationship(back_populates="orders")
+    lines: Mapped[list["MarketplaceOrderLine"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan"
+    )
+    events: Mapped[list["MarketplaceOrderEvent"]] = relationship(
+        back_populates="order", cascade="all, delete-orphan"
+    )
+
+
+class MarketplaceOrderLine(Base):
+    __tablename__ = "marketplace_order_lines"
+    __table_args__ = (
+        UniqueConstraint(
+            "marketplace_order_id",
+            "external_line_id",
+            name="uq_marketplace_order_line_external",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    marketplace_order_id: Mapped[int] = mapped_column(
+        ForeignKey("marketplace_orders.id", ondelete="CASCADE"), index=True
+    )
+    external_line_id: Mapped[str] = mapped_column(String(128))
+    product_id: Mapped[int | None] = mapped_column(
+        ForeignKey("products.id", ondelete="SET NULL"), index=True, nullable=True
+    )
+    external_product_id: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    merchant_sku: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
+    title: Mapped[str] = mapped_column(String(500))
+    quantity: Mapped[int] = mapped_column(Integer)
+    unit_price: Mapped[float] = mapped_column(Numeric(18, 2))
+    line_total: Mapped[float] = mapped_column(Numeric(18, 2))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    order: Mapped[MarketplaceOrder] = relationship(back_populates="lines")
+
+
+class MarketplaceOrderEvent(Base):
+    __tablename__ = "marketplace_order_events"
+    __table_args__ = (
+        UniqueConstraint(
+            "marketplace_order_id",
+            "source_event_key",
+            name="uq_marketplace_order_event_source_key",
+        ),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    marketplace_order_id: Mapped[int] = mapped_column(
+        ForeignKey("marketplace_orders.id", ondelete="CASCADE"), index=True
+    )
+    source_event_key: Mapped[str] = mapped_column(String(255))
+    event_type: Mapped[str] = mapped_column(String(64), index=True)
+    previous_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    current_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
+    metadata_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+
+    order: Mapped[MarketplaceOrder] = relationship(back_populates="events")
 
 
 class MarketplaceRawPayload(Base):
@@ -155,102 +250,26 @@ class MarketplaceRawPayload(Base):
     )
     import_execution_id: Mapped[UUID | None] = mapped_column(
         ForeignKey("marketplace_import_executions.id", ondelete="SET NULL"),
-        nullable=True,
         index=True,
+        nullable=True,
     )
     payload_type: Mapped[str] = mapped_column(String(64), index=True)
-    external_object_id: Mapped[str] = mapped_column(String(255), index=True)
-    content_hash: Mapped[str] = mapped_column(String(64), index=True)
+    external_object_id: Mapped[str] = mapped_column(String(128), index=True)
+    content_hash: Mapped[str] = mapped_column(String(64))
     payload_json: Mapped[dict] = mapped_column(JSON)
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class MarketplaceOrder(Base):
-    __tablename__ = "marketplace_orders"
-    __table_args__ = (
-        UniqueConstraint(
-            "marketplace_account_id",
-            "external_order_id",
-            name="uq_marketplace_order_account_external",
-        ),
-    )
+class OutboxEvent(Base):
+    __tablename__ = "outbox_events"
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    marketplace_account_id: Mapped[int] = mapped_column(
-        ForeignKey("marketplace_accounts.id", ondelete="CASCADE"), index=True
-    )
-    external_order_id: Mapped[str] = mapped_column(String(255), index=True)
-    external_code: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
-    status: Mapped[str] = mapped_column(String(32), index=True)
-    original_status: Mapped[str] = mapped_column(String(64))
-    source_revision: Mapped[str | None] = mapped_column(String(128), nullable=True)
-    currency: Mapped[str] = mapped_column(String(8), default="KZT")
-    total_amount: Mapped[float] = mapped_column(Numeric(18, 2), default=0)
-    ordered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True, index=True)
-    planned_delivery_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    delivered_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    source_updated_at: Mapped[datetime | None] = mapped_column(UTCDateTime(), nullable=True)
-    version: Mapped[int] = mapped_column(Integer, default=1)
+    id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
+    aggregate_type: Mapped[str] = mapped_column(String(64), index=True)
+    aggregate_id: Mapped[str] = mapped_column(String(128), index=True)
+    event_type: Mapped[str] = mapped_column(String(128), index=True)
+    idempotency_key: Mapped[str] = mapped_column(String(255), unique=True)
+    payload_json: Mapped[dict] = mapped_column(JSON)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
-    updated_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now(), onupdate=func.now()
-    )
-
-    account: Mapped[MarketplaceAccount] = relationship(back_populates="orders")
-    lines: Mapped[list["MarketplaceOrderLine"]] = relationship(
-        back_populates="order",
-        cascade="all, delete-orphan",
-    )
-    events: Mapped[list["MarketplaceOrderEvent"]] = relationship(
-        back_populates="order",
-        cascade="all, delete-orphan",
-    )
-
-
-class MarketplaceOrderLine(Base):
-    __tablename__ = "marketplace_order_lines"
-    __table_args__ = (
-        UniqueConstraint(
-            "marketplace_order_id",
-            "external_line_id",
-            name="uq_marketplace_order_line_external",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    marketplace_order_id: Mapped[int] = mapped_column(
-        ForeignKey("marketplace_orders.id", ondelete="CASCADE"), index=True
-    )
-    external_line_id: Mapped[str] = mapped_column(String(255), index=True)
-    external_product_id: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    merchant_sku: Mapped[str | None] = mapped_column(String(255), nullable=True, index=True)
-    title: Mapped[str] = mapped_column(String(500))
-    quantity: Mapped[int] = mapped_column(Integer)
-    unit_price: Mapped[float] = mapped_column(Numeric(18, 2))
-    line_total: Mapped[float] = mapped_column(Numeric(18, 2))
-
-    order: Mapped[MarketplaceOrder] = relationship(back_populates="lines")
-
-
-class MarketplaceOrderEvent(Base):
-    __tablename__ = "marketplace_order_events"
-    __table_args__ = (
-        UniqueConstraint(
-            "marketplace_order_id",
-            "source_event_key",
-            name="uq_marketplace_order_event_source_key",
-        ),
-    )
-
-    id: Mapped[int] = mapped_column(primary_key=True)
-    marketplace_order_id: Mapped[int] = mapped_column(
-        ForeignKey("marketplace_orders.id", ondelete="CASCADE"), index=True
-    )
-    source_event_key: Mapped[str] = mapped_column(String(255), index=True)
-    event_type: Mapped[str] = mapped_column(String(64), index=True)
-    previous_status: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    current_status: Mapped[str] = mapped_column(String(32))
-    occurred_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
-    metadata_json: Mapped[dict] = mapped_column(JSON, default=dict)
-
-    order: Mapped[MarketplaceOrder] = relationship(back_populates="events")
+    published_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    publish_attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
