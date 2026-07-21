@@ -43,7 +43,10 @@ def test_best_offer_engine_prefers_better_price_and_delivery() -> None:
 
     assert decision.best is not None
     assert decision.best.supplier_code == "ozon"
-    assert decision.best.total_score > decision.ranked[1].total_score
+    assert decision.runner_up is not None
+    assert decision.runner_up.supplier_code == "wb"
+    assert decision.score_gap is not None
+    assert decision.best.total_score > decision.runner_up.total_score
     assert "Самая низкая подтверждённая цена" in decision.best.reasons
     assert "Доставка за 2 дн." in decision.best.reasons
 
@@ -57,6 +60,8 @@ def test_unavailable_or_unpriced_offer_is_not_eligible() -> None:
     )
 
     assert decision.best is None
+    assert decision.runner_up is None
+    assert decision.confidence == "none"
     assert all(score.eligible is False for score in decision.ranked)
 
 
@@ -87,3 +92,48 @@ def test_score_is_explainable_and_bounded() -> None:
     assert score.delivery_score == Decimal("25.00")
     assert score.preference_score == Decimal("15")
     assert score.freshness_score == Decimal("5")
+
+
+def test_single_offer_has_low_confidence_even_with_perfect_score() -> None:
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    decision = BestOfferEngine.decide(
+        [candidate(1, code="ozon", price="3156", delivery_days=0, is_primary=True, priority=0)],
+        now=now,
+    )
+
+    assert decision.confidence == "low"
+    assert decision.runner_up is None
+    assert decision.score_gap is None
+    assert "Решение основано только на одном доступном предложении" in decision.warnings
+
+
+def test_clear_score_gap_produces_high_confidence() -> None:
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    decision = BestOfferEngine.decide(
+        [
+            candidate(1, code="ozon", price="3000", delivery_days=0, is_primary=True, priority=0),
+            candidate(2, code="wb", price="6000", delivery_days=10),
+        ],
+        now=now,
+    )
+
+    assert decision.confidence == "high"
+    assert decision.score_gap is not None
+    assert decision.score_gap >= BestOfferEngine.HIGH_CONFIDENCE_GAP
+    assert decision.warnings == ()
+
+
+def test_close_scores_produce_low_confidence_warning() -> None:
+    now = datetime(2026, 7, 21, 12, 0, tzinfo=UTC)
+    decision = BestOfferEngine.decide(
+        [
+            candidate(1, code="ozon", price="3000", delivery_days=2),
+            candidate(2, code="wb", price="3050", delivery_days=2),
+        ],
+        now=now,
+    )
+
+    assert decision.confidence == "low"
+    assert decision.score_gap is not None
+    assert decision.score_gap < BestOfferEngine.MEDIUM_CONFIDENCE_GAP
+    assert "Первое и второе предложения имеют близкий рейтинг" in decision.warnings
