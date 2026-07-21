@@ -14,6 +14,18 @@ class ProcurementState(StrEnum):
     CANCELLED = "cancelled"
 
 
+class CommerceOrderStage(StrEnum):
+    NEW = "new"
+    PREORDER = "preorder"
+    ASSEMBLY = "assembly"
+    HANDOVER = "handover"
+    SHIPPING = "shipping"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+    RETURNED = "returned"
+    UNKNOWN = "unknown"
+
+
 @dataclass(frozen=True, slots=True)
 class CommerceOrderLine:
     line_id: int
@@ -48,6 +60,7 @@ class CommerceOrder:
     external_code: str | None
     marketplace: str
     status: str
+    original_status: str
     currency: str
     total_amount: Decimal
     ordered_at: datetime | None
@@ -64,13 +77,38 @@ class CommerceOrder:
 
     @property
     def procurement_required_lines(self) -> int:
-        if self.status in {"cancelled", "returned", "delivered"}:
+        if self.status in {"cancelled", "returned", "delivered", "shipping"}:
             return 0
         return sum(
             1
             for line in self.lines
             if line.procurement_state == ProcurementState.REQUIRED
         )
+
+    @property
+    def has_procurement_in_progress(self) -> bool:
+        return any(
+            line.procurement_state in {ProcurementState.REQUIRED, ProcurementState.IN_PROGRESS}
+            for line in self.lines
+        )
+
+    @property
+    def stage(self) -> CommerceOrderStage:
+        if self.status == "cancelled":
+            return CommerceOrderStage.CANCELLED
+        if self.status == "returned":
+            return CommerceOrderStage.RETURNED
+        if self.status == "delivered":
+            return CommerceOrderStage.DELIVERED
+        if self.status == "shipping":
+            return CommerceOrderStage.SHIPPING
+        if self.status == "assembly":
+            return CommerceOrderStage.ASSEMBLY
+        if self.status in {"new", "accepted"}:
+            if self.has_procurement_in_progress:
+                return CommerceOrderStage.PREORDER
+            return CommerceOrderStage.ASSEMBLY
+        return CommerceOrderStage.UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
