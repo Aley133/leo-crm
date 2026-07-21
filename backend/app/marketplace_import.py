@@ -24,20 +24,32 @@ from .models import (
 KASPI_STATUS_MAP: dict[str, str] = {
     "NEW": MarketplaceOrderStatus.NEW.value,
     "SIGN_REQUIRED": MarketplaceOrderStatus.NEW.value,
-    "PICKUP": MarketplaceOrderStatus.ACCEPTED.value,
     "APPROVED_BY_BANK": MarketplaceOrderStatus.ACCEPTED.value,
     "ACCEPTED_BY_MERCHANT": MarketplaceOrderStatus.ACCEPTED.value,
+    "PICKUP": MarketplaceOrderStatus.ACCEPTED.value,
+    "ASSEMBLE": MarketplaceOrderStatus.ASSEMBLY.value,
     "ASSEMBLY": MarketplaceOrderStatus.ASSEMBLY.value,
-    "KASPI_DELIVERY": MarketplaceOrderStatus.SHIPPING.value,
-    "DELIVERY": MarketplaceOrderStatus.SHIPPING.value,
     "SHIPPING": MarketplaceOrderStatus.SHIPPING.value,
     "HANDED_OVER_TO_COURIER": MarketplaceOrderStatus.SHIPPING.value,
     "DELIVERED": MarketplaceOrderStatus.DELIVERED.value,
+    "COMPLETED": MarketplaceOrderStatus.DELIVERED.value,
     "ARCHIVE": MarketplaceOrderStatus.DELIVERED.value,
     "ARCHIVED": MarketplaceOrderStatus.DELIVERED.value,
     "CANCELLED": MarketplaceOrderStatus.CANCELLED.value,
     "CANCELED": MarketplaceOrderStatus.CANCELLED.value,
+    "CANCELLING": MarketplaceOrderStatus.RETURNED.value,
+    "KASPI_DELIVERY_RETURN_REQUESTED": MarketplaceOrderStatus.RETURNED.value,
     "RETURNED": MarketplaceOrderStatus.RETURNED.value,
+}
+
+# These are fulfilment channels/sections, not authoritative lifecycle statuses.
+KASPI_STATE_FALLBACK_MAP: dict[str, str] = {
+    "NEW": MarketplaceOrderStatus.NEW.value,
+    "PICKUP": MarketplaceOrderStatus.ACCEPTED.value,
+    "DELIVERY": MarketplaceOrderStatus.ACCEPTED.value,
+    "KASPI_DELIVERY": MarketplaceOrderStatus.ACCEPTED.value,
+    "ARCHIVE": MarketplaceOrderStatus.DELIVERED.value,
+    "ARCHIVED": MarketplaceOrderStatus.DELIVERED.value,
 }
 
 
@@ -110,27 +122,43 @@ def _canonical_hash(payload: dict[str, Any]) -> str:
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
+def _normalize_kaspi_status(attributes: dict[str, Any]) -> tuple[str, str]:
+    """Return normalized lifecycle status and its raw authoritative value.
+
+    Kaspi `status` describes the lifecycle. `state` describes the seller-cabinet
+    section/fulfilment channel and is used only when a payload genuinely omits
+    the lifecycle status.
+    """
+    raw_status = _first(attributes, "status", "orderStatus")
+    if raw_status not in (None, ""):
+        original = str(raw_status).strip()
+        normalized = KASPI_STATUS_MAP.get(
+            original.upper(),
+            MarketplaceOrderStatus.UNKNOWN.value,
+        )
+        return normalized, original
+
+    raw_state = _first(attributes, "state", "fulfillmentState", "deliveryStatus")
+    if raw_state not in (None, ""):
+        original = str(raw_state).strip()
+        normalized = KASPI_STATE_FALLBACK_MAP.get(
+            original.upper(),
+            MarketplaceOrderStatus.UNKNOWN.value,
+        )
+        return normalized, original
+
+    return MarketplaceOrderStatus.UNKNOWN.value, "UNKNOWN"
+
+
 def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
     attributes = payload.get("attributes") if isinstance(payload.get("attributes"), dict) else payload
-    external_order_id = str(_first(payload, "id") or _first(attributes, "id", "orderId", "code") or "").strip()
+    external_order_id = str(
+        _first(payload, "id") or _first(attributes, "id", "orderId", "code") or ""
+    ).strip()
     if not external_order_id:
         raise ValueError("Kaspi order payload has no external order identity")
 
-    # Kaspi can expose an historical/acceptance status alongside the current
-    # fulfilment state. The state shown at the top of Seller Cabinet is the
-    # authoritative current position of the order, so it must win over the
-    # historical status field when both are present.
-    original_status = str(
-        _first(
-            attributes,
-            "state",
-            "fulfillmentState",
-            "deliveryStatus",
-            "status",
-        )
-        or "UNKNOWN"
-    ).strip()
-    normalized_status = KASPI_STATUS_MAP.get(original_status.upper(), MarketplaceOrderStatus.UNKNOWN.value)
+    normalized_status, original_status = _normalize_kaspi_status(attributes)
 
     raw_lines = _first(attributes, "entries", "orderEntries", "lines") or []
     lines: list[NormalizedOrderLine] = []
@@ -153,19 +181,15 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
             or _first(line_attributes, "id", "entryId")
             or f"{external_order_id}:{index}"
         )
+        external_product_value = _first(line_attributes, "productId", "externalProductId")
+        merchant_sku_value = _first(line_attributes, "offerCode", "merchantSku", "sku")
         lines.append(
             NormalizedOrderLine(
                 external_line_id=external_line_id,
                 external_product_id=(
-                    str(_first(line_attributes, "productId", "externalProductId"))
-                    if _first(line_attributes, "productId", "externalProductId") is not None
-                    else None
+                    str(external_product_value) if external_product_value is not None else None
                 ),
-                merchant_sku=(
-                    str(_first(line_attributes, "offerCode", "merchantSku", "sku"))
-                    if _first(line_attributes, "offerCode", "merchantSku", "sku") is not None
-                    else None
-                ),
+                merchant_sku=(str(merchant_sku_value) if merchant_sku_value is not None else None),
                 title=str(_first(line_attributes, "name", "title") or "Unknown product"),
                 quantity=quantity,
                 unit_price=unit_price,
@@ -177,19 +201,16 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
         _first(attributes, "totalPrice", "totalAmount", "amount"),
         default=str(sum((line.line_total for line in lines), Decimal("0"))),
     )
+    external_code_value = _first(attributes, "code", "orderCode")
+    source_revision_value = _first(attributes, "revision", "version", "updatedAt")
+
     return NormalizedOrder(
         external_order_id=external_order_id,
-        external_code=(
-            str(_first(attributes, "code", "orderCode"))
-            if _first(attributes, "code", "orderCode") is not None
-            else None
-        ),
+        external_code=(str(external_code_value) if external_code_value is not None else None),
         status=normalized_status,
         original_status=original_status,
         source_revision=(
-            str(_first(attributes, "revision", "version", "updatedAt"))
-            if _first(attributes, "revision", "version", "updatedAt") is not None
-            else None
+            str(source_revision_value) if source_revision_value is not None else None
         ),
         currency=str(_first(attributes, "currency") or "KZT"),
         total_amount=total_amount,
@@ -213,13 +234,7 @@ def import_kaspi_order(
     checkpoint_cursor: str | None = None,
     checkpoint_watermark_at: datetime | None = None,
 ) -> ImportResult:
-    """Persist one Kaspi order inside the caller-owned transaction.
-
-    This function deliberately never commits. Raw evidence, normalized state,
-    status event and checkpoint become visible together only when the caller
-    commits the surrounding transaction.
-    """
-
+    """Persist one Kaspi order inside the caller-owned transaction."""
     normalized = normalize_kaspi_order(payload)
     content_hash = _canonical_hash(payload)
 
@@ -233,15 +248,16 @@ def import_kaspi_order(
     )
     raw_payload_created = raw_payload is None
     if raw_payload is None:
-        raw_payload = MarketplaceRawPayload(
-            marketplace_account_id=marketplace_account_id,
-            import_execution_id=import_execution_id,
-            payload_type="order",
-            external_object_id=normalized.external_order_id,
-            content_hash=content_hash,
-            payload_json=payload,
+        session.add(
+            MarketplaceRawPayload(
+                marketplace_account_id=marketplace_account_id,
+                import_execution_id=import_execution_id,
+                payload_type="order",
+                external_object_id=normalized.external_order_id,
+                content_hash=content_hash,
+                payload_json=payload,
+            )
         )
-        session.add(raw_payload)
 
     order = session.scalar(
         select(MarketplaceOrder).where(
