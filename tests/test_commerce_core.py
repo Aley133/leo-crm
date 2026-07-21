@@ -40,7 +40,7 @@ def _order(*, status="new", lines=(), original_status="NEW"):
     )
 
 
-def test_commerce_order_exposes_operational_procurement_state() -> None:
+def test_commerce_order_exposes_procurement_state_separately() -> None:
     line = _line()
     order = _order(lines=(line,))
 
@@ -50,11 +50,11 @@ def test_commerce_order_exposes_operational_procurement_state() -> None:
     assert order.procurement_required_lines == 1
 
 
-def test_cancelled_and_delivered_orders_do_not_request_procurement() -> None:
+def test_cancelled_delivered_shipping_and_assembly_do_not_request_procurement() -> None:
     line = _line()
 
-    assert _order(status="cancelled", lines=(line,)).procurement_required_lines == 0
-    assert _order(status="delivered", lines=(line,)).procurement_required_lines == 0
+    for status in ("cancelled", "delivered", "shipping", "assembly"):
+        assert _order(status=status, lines=(line,)).procurement_required_lines == 0
 
 
 def test_existing_purchase_is_reported_as_in_progress_or_received() -> None:
@@ -68,47 +68,30 @@ def test_existing_purchase_is_reported_as_in_progress_or_received() -> None:
     ).procurement_state == ProcurementState.RECEIVED
 
 
-def test_accepted_order_without_stock_evidence_remains_accepted() -> None:
-    order = _order(status="accepted", lines=(_line(),), original_status="ACCEPTED_BY_MERCHANT")
-
-    assert order.stage == CommerceOrderStage.ACCEPTED
-
-
-def test_requested_purchase_moves_accepted_order_to_preorder() -> None:
-    order = _order(
-        status="accepted",
-        lines=(_line(purchase_request_id="purchase-1", purchase_status="requested"),),
-        original_status="ACCEPTED_BY_MERCHANT",
-    )
-
-    assert order.stage == CommerceOrderStage.PREORDER
-
-
-def test_ordered_purchase_moves_accepted_order_to_in_transit() -> None:
-    order = _order(
-        status="accepted",
-        lines=(_line(purchase_request_id="purchase-1", purchase_status="ordered"),),
-        original_status="ACCEPTED_BY_MERCHANT",
-    )
-
-    assert order.stage == CommerceOrderStage.IN_TRANSIT
-
-
-def test_received_procurement_moves_accepted_order_to_assembly() -> None:
-    order = _order(
+def test_kaspi_visible_stages_are_authoritative_over_procurement() -> None:
+    preorder = _order(
         status="accepted",
         lines=(_line(purchase_request_id="purchase-1", purchase_status="received"),),
         original_status="ACCEPTED_BY_MERCHANT",
     )
+    assembly = _order(
+        status="assembly",
+        lines=(_line(purchase_request_id="purchase-2", purchase_status="requested"),),
+        original_status="ASSEMBLY",
+    )
 
-    assert order.stage == CommerceOrderStage.ASSEMBLY
+    assert preorder.stage == CommerceOrderStage.PREORDER
+    assert assembly.stage == CommerceOrderStage.ASSEMBLY
 
 
-def test_shipping_and_delivered_states_are_authoritative() -> None:
+def test_new_shipping_delivered_and_cancelled_states_are_exact() -> None:
     line = _line()
 
+    assert _order(status="new", lines=(line,)).stage == CommerceOrderStage.NEW
     assert _order(status="shipping", lines=(line,)).stage == CommerceOrderStage.SHIPPING
     assert _order(status="delivered", lines=(line,)).stage == CommerceOrderStage.DELIVERED
+    assert _order(status="cancelled", lines=(line,)).stage == CommerceOrderStage.CANCELLED
+    assert _order(status="returned", lines=(line,)).stage == CommerceOrderStage.RETURNED
 
 
 def test_cancelled_and_returned_orders_are_excluded_from_revenue() -> None:
