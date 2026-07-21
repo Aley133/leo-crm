@@ -220,7 +220,7 @@ def test_fetch_orders_falls_back_to_order_entries_subresource() -> None:
     assert entry["attributes"]["productId"] == "merchant-1"
 
 
-def test_initial_request_uses_zero_based_page_and_configured_lookback_window() -> None:
+def test_initial_request_uses_production_one_based_page_and_configured_lookback_window() -> None:
     seen: dict = {}
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 
@@ -236,7 +236,7 @@ def test_initial_request_uses_zero_based_page_and_configured_lookback_window() -
     transport.fetch_orders(cursor=None, updated_after=None, limit=10)
 
     params = seen["request"].url.params
-    assert params["page[number]"] == "0"
+    assert params["page[number]"] == "1"
     assert params["filter[orders][creationDate][$ge]"] == str(
         int((now - timedelta(days=3)).timestamp() * 1000)
     )
