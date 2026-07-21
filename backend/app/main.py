@@ -19,6 +19,7 @@ from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
 from .monitoring_center_api import router as monitoring_center_router
 from .pricing_api import router as pricing_router
+from .product_commerce_api import router as product_commerce_router
 from .product_detail_api import router as product_detail_router
 from .product_identity_api import router as product_identity_router
 from .product_registry_api import router as product_registry_router
@@ -31,8 +32,8 @@ from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 from .ui import router as ui_router
 
-APP_VERSION = "0.13.0"
-DEPLOYMENT_MARKER = "supplier-state-control-plane-v1"
+APP_VERSION = "0.14.0"
+DEPLOYMENT_MARKER = "product-commerce-analytics-v1"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -45,6 +46,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
+app.include_router(product_commerce_router)
 app.include_router(action_router)
 app.include_router(product_registry_router)
 app.include_router(product_supplier_binding_router)
