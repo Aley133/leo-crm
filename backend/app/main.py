@@ -12,6 +12,7 @@ from .browser_agent_api import router as browser_agent_router
 from .browser_agent_monitoring_api import router as browser_agent_monitoring_router
 from .browser_agent_registry_api import router as browser_agent_registry_router
 from .catalog_api import router as catalog_router
+from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
 from .db import engine
 from .marketplace_api import router as marketplace_router
@@ -64,6 +65,7 @@ app.include_router(browser_agent_registry_router)
 app.include_router(pricing_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
+app.include_router(commerce_router)
 app.include_router(product_identity_router)
 app.include_router(purchase_router)
 
