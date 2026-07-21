@@ -57,7 +57,6 @@ def test_kaspi_delivery_bucket_never_defines_stage_by_itself() -> None:
 
 
 def test_preorder_candidate_is_detected_from_explicit_preorder_flag() -> None:
-    # Verified order 1002303844.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=True,
@@ -77,8 +76,6 @@ def test_preorder_candidate_is_detected_from_explicit_preorder_flag() -> None:
 
 
 def test_arrived_preorder_is_packaging_in_leo_even_if_kaspi_candidate_is_unchanged() -> None:
-    # A preorder marked as arrived may still retain the coarse Kaspi candidate.
-    # LEO closes the internal waiting stage when the linked purchase is received.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=True,
@@ -110,7 +107,6 @@ def test_normal_merchant_acceptance_is_packaging() -> None:
 
 
 def test_assembled_order_without_actual_transmission_is_handover() -> None:
-    # Verified order 1006480798.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=False,
@@ -128,7 +124,6 @@ def test_assembled_order_without_actual_transmission_is_handover() -> None:
 
 
 def test_actual_courier_transmission_wins_over_stale_preorder_and_assembled_flags() -> None:
-    # Verified order 1000772384.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=True,
@@ -169,7 +164,6 @@ def test_planned_transmission_deadline_alone_does_not_mean_shipping() -> None:
 
 
 def test_cancelled_completed_and_returned_are_authoritative() -> None:
-    # Verified cancellation order 1006187575.
     assert _normalized(
         _payload(
             status="CANCELLED",
@@ -194,3 +188,73 @@ def test_arrival_fact_only_advances_preorder_and_never_rewrites_physical_kaspi_s
 
     assert arrived_preorder.stage == CommerceOrderStage.ASSEMBLY
     assert shipping_with_requested_purchase.stage == CommerceOrderStage.SHIPPING
+
+
+def test_seller_graphql_preorder_waiting_for_arrival_is_preorder() -> None:
+    payload = _payload(
+        state="KASPI_DELIVERY_WAIT_FOR_POINT_DELIVERY",
+        status="ACCEPTED",
+        preOrder=True,
+        delivery={
+            "kdAssembled": False,
+            "kdTransmittedToCourier": False,
+            "isOrderArrived": False,
+        },
+        orderSteps=[
+            {"step": "PRE_ORDER", "actualTime": None, "plannedTime": "2026-07-22T18:59:50.999Z"},
+        ],
+    )
+
+    assert _normalized(payload) == "accepted"
+
+
+def test_seller_graphql_cargo_assembly_is_packaging() -> None:
+    payload = _payload(
+        state="KASPI_DELIVERY_CARGO_ASSEMBLY",
+        status="PRE_ORDERED",
+        preOrder=True,
+        delivery={
+            "kdAssembled": False,
+            "kdTransmittedToCourier": False,
+            "isOrderArrived": True,
+        },
+        orderSteps=[
+            {"step": "PRE_ORDER", "actualTime": "2026-07-21T16:07:04.986Z"},
+        ],
+    )
+
+    assert _normalized(payload) == "assembly"
+
+
+def test_seller_graphql_wait_for_courier_is_handover() -> None:
+    payload = _payload(
+        state="KASPI_DELIVERY_WAIT_FOR_COURIER",
+        status="ASSEMBLED",
+        preOrder=False,
+        delivery={
+            "kdAssembled": True,
+            "kdTransmittedToCourier": False,
+            "isOrderArrived": True,
+        },
+        markers=[{"marker": "CARGO_ASSEMBLED"}],
+    )
+
+    assert _normalized(payload) == "handover"
+
+
+def test_seller_graphql_transmitted_is_shipping() -> None:
+    payload = _payload(
+        state="KASPI_DELIVERY_TRANSMITTED",
+        status="TRANSMITTED",
+        preOrder=True,
+        delivery={
+            "kdAssembled": True,
+            "kdTransmittedToCourier": True,
+            "isOrderArrived": True,
+        },
+        orderSteps=[
+            {"step": "TRANSMISSION", "actualTime": "2026-07-21T14:07:39.000Z"},
+        ],
+    )
+
+    assert _normalized(payload) == "shipping"
