@@ -57,6 +57,8 @@ def list_commerce_orders(
                 external_code=order.external_code,
                 marketplace=order.marketplace,
                 status=order.status,
+                original_status=order.original_status,
+                operational_stage=order.stage.value,
                 currency=order.currency,
                 total_amount=order.total_amount,
                 ordered_at=order.ordered_at,
