@@ -151,6 +151,38 @@ class KaspiHttpTransport:
             watermark_at=self._watermark(items),
         )
 
+    def fetch_order_by_code(self, order_code: str) -> dict[str, Any] | None:
+        """Fetch one order by seller-visible Kaspi code without a date window."""
+        normalized_code = order_code.strip()
+        if not normalized_code:
+            raise ValueError("Kaspi order code must not be empty")
+
+        document = self._get_json(
+            "/orders",
+            params={
+                "filter[orders][code]": normalized_code,
+                "include": "entries",
+                "page[number]": 0,
+                "page[size]": 1,
+            },
+        )
+        data = document.get("data")
+        if not isinstance(data, list):
+            raise KaspiTransportError("Kaspi JSON:API response has no data list")
+        included_index = self._index_included(document.get("included"))
+        for item in data:
+            if not isinstance(item, dict):
+                continue
+            attributes = item.get("attributes")
+            candidate_code = (
+                attributes.get("code") or attributes.get("orderCode")
+                if isinstance(attributes, dict)
+                else None
+            )
+            if str(candidate_code or "").strip() == normalized_code:
+                return self._hydrate_order(item, included_index)
+        return None
+
     def _get_json(self, path: str, *, params: dict[str, str | int]) -> dict[str, Any]:
         try:
             response = self._client.get(
@@ -319,14 +351,14 @@ class KaspiHttpTransport:
 
     @staticmethod
     def _parse_cursor(cursor: str | None) -> int:
-        if not cursor:
-            return 1
+        if cursor in (None, ""):
+            return 0
         try:
             value = int(cursor)
         except ValueError as exc:
-            raise ValueError("Kaspi cursor must be a positive page number") from exc
-        if value < 1:
-            raise ValueError("Kaspi cursor must be a positive page number")
+            raise ValueError("Kaspi cursor must be a non-negative page number") from exc
+        if value < 0:
+            raise ValueError("Kaspi cursor must be a non-negative page number")
         return value
 
     @staticmethod
@@ -351,7 +383,7 @@ class KaspiHttpTransport:
                 page_count = int(meta["pageCount"])
             except (TypeError, ValueError):
                 page_count = 0
-            return str(current_page + 1) if current_page < page_count else None
+            return str(current_page + 1) if current_page + 1 < page_count else None
         return str(current_page + 1) if item_count == limit else None
 
     @staticmethod
