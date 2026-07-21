@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Orders Center</title>
-  <link rel="stylesheet" href="/static/dashboard.css">
-  <link rel="stylesheet" href="/static/orders.css">
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260721-1">
+  <link rel="stylesheet" href="/static/orders.css?v=20260721-1">
 </head>
 <body>
   <div class="shell">
@@ -47,7 +47,7 @@
 
         <form id="filters" class="filters">
           <label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Номер заказа, товар, Kaspi ID или SKU"></label>
-          <label><span>Этап Kaspi</span><select id="status"><option value="">Все</option><option value="new">Новые</option><option value="preorder">Предзаказ / В пути</option><option value="assembly">Упаковка</option><option value="shipping">Передан курьеру / На доставке</option><option value="delivered">Доставленные</option><option value="cancelled">Отменённые</option><option value="returned">Возвраты</option><option value="unknown">Не распознано</option></select></label>
+          <label><span>Этап Kaspi</span><select id="status"><option value="">Все</option><option value="new">Новые</option><option value="preorder">Предзаказ / В пути</option><option value="assembly">Упаковка</option><option value="handover">Передача</option><option value="shipping">Передан курьеру / На доставке</option><option value="delivered">Доставленные</option><option value="cancelled">Отменённые</option><option value="returned">Возвраты</option><option value="unknown">Не распознано</option></select></label>
           <button class="button" type="submit">Применить</button>
           <button id="reset" class="button secondary" type="button">Сбросить</button>
         </form>
@@ -58,6 +58,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/orders.js" defer></script>
+  <script src="/static/orders.js?v=20260721-1" defer></script>
 </body>
 </html>
