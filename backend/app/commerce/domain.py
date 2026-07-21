@@ -93,7 +93,14 @@ class CommerceOrder:
 
     @property
     def procurement_required_lines(self) -> int:
-        if self.status in {"cancelled", "returned", "delivered", "shipping", "assembly"}:
+        if self.status in {
+            "cancelled",
+            "returned",
+            "delivered",
+            "shipping",
+            "handover",
+            "assembly",
+        }:
             return 0
         return sum(
             1
@@ -142,14 +149,15 @@ class CommerceOrder:
             return CommerceOrderStage.DELIVERED
         if self.status == "shipping":
             return CommerceOrderStage.SHIPPING
+        if self.status == "handover":
+            return CommerceOrderStage.HANDOVER
         if self.status == "assembly":
             return CommerceOrderStage.ASSEMBLY
         if self.status == "new":
             return CommerceOrderStage.NEW
         if self.status == "accepted":
             # The payload canonicalizer uses accepted only for Kaspi's visible
-            # "В пути" preorder state. Normal merchant acceptance without a
-            # planned arrival date is normalized to assembly before persistence.
+            # preorder state (`preOrder=true`) before physical handover.
             return CommerceOrderStage.PREORDER
         return CommerceOrderStage.UNKNOWN
 
