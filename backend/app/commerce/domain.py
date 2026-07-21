@@ -40,6 +40,7 @@ class CommerceOrderLine:
     line_total: Decimal
     purchase_request_id: str | None
     purchase_status: str | None
+    purchase_version: int | None = None
 
     @property
     def is_resolved(self) -> bool:
