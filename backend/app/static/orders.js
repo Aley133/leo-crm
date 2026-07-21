@@ -13,11 +13,19 @@ const empty = document.querySelector("#empty");
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
-const stageLabel = (stage) => ({new:"Новый",preorder:"Предзаказ — товар в пути",assembly:"Упаковка",shipping:"Передан курьеру / на доставке",delivered:"Доставлен",cancelled:"Отменён",returned:"Возврат",unknown:"Статус не распознан"}[stage] || stage || "—");
-const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelled","returned"].includes(stage) ? "bad" : ["new","preorder","assembly","shipping"].includes(stage) ? "warn" : "";
-const rawStatusLabel = (status) => ({new:"new",accepted:"accepted",assembly:"assembly",shipping:"shipping",delivered:"delivered",cancelled:"cancelled",returned:"returned",unknown:"unknown"}[status] || status || "—");
+const stageLabel = (stage) => ({new:"Новый",preorder:"Предзаказ — товар в пути",assembly:"Упаковка",handover:"Передача",shipping:"Передан курьеру / на доставке",delivered:"Доставлен",cancelled:"Отменён",returned:"Возврат",unknown:"Статус не распознан"}[stage] || stage || "—");
+const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelled","returned"].includes(stage) ? "bad" : ["new","preorder","assembly","handover","shipping"].includes(stage) ? "warn" : "";
+const rawStatusLabel = (status) => ({new:"new",accepted:"accepted",assembly:"assembly",handover:"handover",shipping:"shipping",delivered:"delivered",cancelled:"cancelled",returned:"returned",unknown:"unknown"}[status] || status || "—");
 const procurementLabel = (state) => ({required:"Нужно закупить",in_progress:"Закупка оформлена",received:"Получено",not_required:"Не требуется",unresolved:"Товар не распознан",cancelled:"Закупка отменена"}[state] || state || "—");
 const procurementClass = (state) => state === "required" ? "procurement-required" : state === "received" ? "procurement-ready" : "";
+const purchaseStatusLabel = (status) => ({draft:"Черновик",requested:"Заявка отправлена",ordered:"Заказано",partially_received:"Получено частично",received:"Получено",closed:"Закрыто",cancelled:"Отменено"}[status] || status || "—");
+const nextPurchaseAction = (status) => ({
+  draft: {target:"requested", label:"Отправить заявку"},
+  requested: {target:"ordered", label:"Отметить заказанным"},
+  ordered: {target:"received", label:"Отметить полученным"},
+  partially_received: {target:"received", label:"Отметить полученным"},
+  received: {target:"closed", label:"Закрыть закупку"}
+}[status] || null);
 
 const headers = () => ({"Authorization": `Bearer ${localStorage.getItem(storageKey) || ""}`});
 const setLoading = (loading) => {
@@ -41,6 +49,12 @@ const renderSummary = (summary) => {
   document.querySelector("#summary-procurement").textContent = Number(summary.procurement_required_lines || 0).toLocaleString("ru-RU");
 };
 
+const renderPurchaseAction = (line) => {
+  const action = nextPurchaseAction(line.purchase_status);
+  if (!action || !line.purchase_request_id || !line.purchase_version) return "";
+  return `<button class="button purchase-transition" type="button" data-purchase-id="${escapeHtml(line.purchase_request_id)}" data-version="${Number(line.purchase_version)}" data-target-status="${action.target}">${escapeHtml(action.label)}</button>`;
+};
+
 const renderLine = (line) => `
   <div class="order-line">
     <div>
@@ -50,7 +64,7 @@ const renderLine = (line) => `
     <div><span class="muted">Количество</span><strong>${Number(line.quantity || 0)}</strong></div>
     <div><span class="muted">Цена</span><strong>${money(line.unit_price)}</strong></div>
     <div><span class="muted">Сумма</span><strong>${money(line.line_total)}</strong></div>
-    <div class="${procurementClass(line.procurement_state)}"><span class="muted">Закупка</span><strong>${escapeHtml(procurementLabel(line.procurement_state))}</strong>${line.purchase_status ? `<span class="muted">${escapeHtml(line.purchase_status)}</span>` : ""}</div>
+    <div class="${procurementClass(line.procurement_state)}"><span class="muted">Закупка</span><strong>${escapeHtml(procurementLabel(line.procurement_state))}</strong>${line.purchase_status ? `<span class="muted">${escapeHtml(purchaseStatusLabel(line.purchase_status))}</span>` : ""}${renderPurchaseAction(line)}</div>
   </div>`;
 
 const renderOrder = (order) => {
@@ -83,7 +97,7 @@ const render = (payload) => {
 
 const responseError = async (response) => {
   let detail = `HTTP ${response.status}`;
-  try { const payload = await response.json(); detail = payload.detail || detail; } catch (_) {}
+  try { const payload = await response.json(); detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail || detail); } catch (_) {}
   return new Error(detail);
 };
 
@@ -119,9 +133,34 @@ const createPurchase = async (orderId, button) => {
   }
 };
 
+const transitionPurchase = async (button) => {
+  const purchaseId = button.dataset.purchaseId;
+  const targetStatus = button.dataset.targetStatus;
+  const version = Number(button.dataset.version);
+  button.disabled = true; const oldText = button.textContent; button.textContent = "Сохранение…"; message.textContent = "";
+  try {
+    const response = await fetch(`/api/purchases/${encodeURIComponent(purchaseId)}/transition`, {
+      method:"POST",
+      headers:{...headers(), "Content-Type":"application/json"},
+      body:JSON.stringify({target_status:targetStatus, expected_version:version, idempotency_key:`orders-center:${purchaseId}:${version}:${targetStatus}`, metadata:{source:"orders-center"}})
+    });
+    if (!response.ok) throw await responseError(response);
+    message.textContent = targetStatus === "received" ? "Товар отмечен полученным. Заказ переведён в упаковку." : "Статус закупки обновлён.";
+    await loadOrders();
+  } catch (error) {
+    message.textContent = error.message || "Не удалось обновить статус закупки.";
+    button.disabled = false; button.textContent = oldText;
+  }
+};
+
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, tokenInput.value.trim()); tokenInput.value = ""; loadOrders(); });
 filters.addEventListener("submit", (event) => { event.preventDefault(); loadOrders(); });
 resetButton.addEventListener("click", () => { filters.reset(); loadOrders(); });
 refreshButton.addEventListener("click", loadOrders);
-ordersList.addEventListener("click", (event) => { const button = event.target.closest(".create-purchase"); if (button) createPurchase(button.dataset.orderId, button); });
+ordersList.addEventListener("click", (event) => {
+  const createButton = event.target.closest(".create-purchase");
+  if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; }
+  const transitionButton = event.target.closest(".purchase-transition");
+  if (transitionButton) transitionPurchase(transitionButton);
+});
 loadOrders();
