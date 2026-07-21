@@ -16,6 +16,7 @@ class ProcurementState(StrEnum):
 
 class CommerceOrderStage(StrEnum):
     NEW = "new"
+    ACCEPTED = "accepted"
     PREORDER = "preorder"
     ASSEMBLY = "assembly"
     HANDOVER = "handover"
@@ -88,7 +89,14 @@ class CommerceOrder:
     @property
     def has_procurement_in_progress(self) -> bool:
         return any(
-            line.procurement_state in {ProcurementState.REQUIRED, ProcurementState.IN_PROGRESS}
+            line.procurement_state == ProcurementState.IN_PROGRESS
+            for line in self.lines
+        )
+
+    @property
+    def all_procurement_received(self) -> bool:
+        return bool(self.lines) and all(
+            line.procurement_state == ProcurementState.RECEIVED
             for line in self.lines
         )
 
@@ -104,10 +112,17 @@ class CommerceOrder:
             return CommerceOrderStage.SHIPPING
         if self.status == "assembly":
             return CommerceOrderStage.ASSEMBLY
-        if self.status in {"new", "accepted"}:
+        if self.status == "new":
+            return CommerceOrderStage.NEW
+        if self.status == "accepted":
             if self.has_procurement_in_progress:
                 return CommerceOrderStage.PREORDER
-            return CommerceOrderStage.ASSEMBLY
+            if self.all_procurement_received:
+                return CommerceOrderStage.ASSEMBLY
+            # Until Warehouse/Reservations exists, an accepted Kaspi order cannot
+            # be truthfully classified as either preorder or assembly. Keep the
+            # operational stage explicit instead of guessing from a missing PR.
+            return CommerceOrderStage.ACCEPTED
         return CommerceOrderStage.UNKNOWN
 
 
