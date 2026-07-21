@@ -26,7 +26,7 @@
         <div>
           <p class="eyebrow">Commerce Core</p>
           <h1>Заказы</h1>
-          <p class="subtitle">Продажи, распознавание товаров и состояние закупки в одном рабочем центре</p>
+          <p class="subtitle">Фактические этапы Kaspi, закупка и состояние товара в одном рабочем центре</p>
         </div>
         <button id="refresh" class="button secondary" type="button">Обновить</button>
       </header>
@@ -42,12 +42,12 @@
           <article class="metric"><span>Заказов</span><strong id="summary-orders">0</strong><small>в текущей выборке</small></article>
           <article class="metric"><span>Активных</span><strong id="summary-active">0</strong><small>требуют обработки</small></article>
           <article class="metric"><span>Выручка</span><strong id="summary-revenue">0 ₸</strong><small>без отмен и возвратов</small></article>
-          <article class="metric"><span>Нужно решить</span><strong id="summary-procurement">0</strong><small>закупка или остаток</small></article>
+          <article class="metric"><span>К закупке</span><strong id="summary-procurement">0</strong><small>строк предзаказа</small></article>
         </section>
 
         <form id="filters" class="filters">
           <label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Номер заказа, товар, Kaspi ID или SKU"></label>
-          <label><span>Этап работы</span><select id="status"><option value="">Все</option><option value="new">Новые</option><option value="accepted">Приняты — ждут решения по запасу</option><option value="preorder">Предзаказ — заявка создана</option><option value="in_transit">Закупка в пути</option><option value="assembly">В сборке</option><option value="handover">Передача</option><option value="shipping">На доставке</option><option value="delivered">Доставленные</option><option value="cancelled">Отменённые</option><option value="returned">Возвраты</option><option value="unknown">Не детализировано Kaspi API</option></select></label>
+          <label><span>Этап Kaspi</span><select id="status"><option value="">Все</option><option value="new">Новые</option><option value="preorder">Предзаказ / В пути</option><option value="assembly">Упаковка</option><option value="shipping">Передан курьеру / На доставке</option><option value="delivered">Доставленные</option><option value="cancelled">Отменённые</option><option value="returned">Возвраты</option><option value="unknown">Не распознано</option></select></label>
           <button class="button" type="submit">Применить</button>
           <button id="reset" class="button secondary" type="button">Сбросить</button>
         </form>
