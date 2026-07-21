@@ -68,8 +68,13 @@ def test_existing_purchase_is_reported_as_in_progress_or_received() -> None:
     ).procurement_state == ProcurementState.RECEIVED
 
 
-def test_kaspi_visible_stages_are_authoritative_over_procurement() -> None:
-    preorder = _order(
+def test_received_preorder_moves_to_packaging_while_other_kaspi_stages_stay_authoritative() -> None:
+    awaiting_preorder = _order(
+        status="accepted",
+        lines=(_line(purchase_request_id="purchase-1", purchase_status="ordered"),),
+        original_status="ACCEPTED_BY_MERCHANT",
+    )
+    arrived_preorder = _order(
         status="accepted",
         lines=(_line(purchase_request_id="purchase-1", purchase_status="received"),),
         original_status="ACCEPTED_BY_MERCHANT",
@@ -80,8 +85,33 @@ def test_kaspi_visible_stages_are_authoritative_over_procurement() -> None:
         original_status="ASSEMBLY",
     )
 
-    assert preorder.stage == CommerceOrderStage.PREORDER
+    assert awaiting_preorder.stage == CommerceOrderStage.PREORDER
+    assert arrived_preorder.stage == CommerceOrderStage.ASSEMBLY
     assert assembly.stage == CommerceOrderStage.ASSEMBLY
+
+
+def test_mixed_received_and_unreceived_lines_remain_preorder() -> None:
+    order = _order(
+        status="accepted",
+        lines=(
+            _line(purchase_request_id="purchase-1", purchase_status="received"),
+            CommerceOrderLine(
+                line_id=2,
+                product_id=2,
+                external_product_id="106",
+                merchant_sku="SKU-2",
+                title="Второй товар",
+                quantity=1,
+                unit_price=Decimal("1000"),
+                line_total=Decimal("1000"),
+                purchase_request_id="purchase-2",
+                purchase_status="ordered",
+            ),
+        ),
+        original_status="ACCEPTED_BY_MERCHANT",
+    )
+
+    assert order.stage == CommerceOrderStage.PREORDER
 
 
 def test_new_shipping_delivered_and_cancelled_states_are_exact() -> None:
