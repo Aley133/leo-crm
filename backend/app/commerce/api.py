@@ -79,6 +79,7 @@ def list_commerce_orders(
                         is_resolved=line.is_resolved,
                         purchase_request_id=line.purchase_request_id,
                         purchase_status=line.purchase_status,
+                        purchase_version=line.purchase_version,
                         procurement_state=line.procurement_state.value,
                     )
                     for line in order.lines
