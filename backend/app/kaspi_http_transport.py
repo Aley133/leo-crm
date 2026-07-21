@@ -351,14 +351,17 @@ class KaspiHttpTransport:
 
     @staticmethod
     def _parse_cursor(cursor: str | None) -> int:
+        # The production Kaspi seller API used by this account is one-based for
+        # order-list pagination. Page zero returns an empty successful document,
+        # which previously made a full sync look completed with fetched_count=0.
         if cursor in (None, ""):
-            return 0
+            return 1
         try:
             value = int(cursor)
         except ValueError as exc:
-            raise ValueError("Kaspi cursor must be a non-negative page number") from exc
-        if value < 0:
-            raise ValueError("Kaspi cursor must be a non-negative page number")
+            raise ValueError("Kaspi cursor must be a positive page number") from exc
+        if value < 1:
+            raise ValueError("Kaspi cursor must be a positive page number")
         return value
 
     @staticmethod
@@ -383,7 +386,7 @@ class KaspiHttpTransport:
                 page_count = int(meta["pageCount"])
             except (TypeError, ValueError):
                 page_count = 0
-            return str(current_page + 1) if current_page + 1 < page_count else None
+            return str(current_page + 1) if current_page < page_count else None
         return str(current_page + 1) if item_count == limit else None
 
     @staticmethod
