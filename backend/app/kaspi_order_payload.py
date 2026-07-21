@@ -4,17 +4,13 @@ from typing import Any
 
 
 # Kaspi exposes a coarse lifecycle status plus seller-operation facts. LEO CRM
-# derives the visible operational stage only from facts confirmed by the seller
-# cabinet/API:
-# - terminal lifecycle statuses (cancelled, returned, completed) are authoritative;
-# - preOrder=true means the seller is still waiting for the preorder item;
-# - a non-null kaspiDelivery.courierTransmissionDate means the parcel was
-#   physically handed to Kaspi logistics, but only after preorder has ended;
-# - accepted merchant orders that are neither preorder nor shipped are packaging.
-#
-# The assembled flag is deliberately not used as a standalone stage signal. A
-# verified Kaspi packaging order may already expose assembled=true, so promoting
-# it to HANDOVER would misclassify real seller-cabinet data.
+# derives only stages that can be proven from the live seller payload:
+# - terminal lifecycle statuses are authoritative;
+# - actual courierTransmissionDate means the order left the seller;
+# - assembled=true without actual transmission means the parcel is packed and
+#   waiting for handover;
+# - preOrder=true without assembly/transmission means the order still requires a
+#   separate stock decision in Commerce Core.
 _STATUS_TO_IMPORT_TOKEN: dict[str, str] = {
     "NEW": "NEW",
     "SIGN_REQUIRED": "NEW",
@@ -58,8 +54,8 @@ def _nested_value(attributes: dict[str, Any], container: str, key: str) -> Any:
 
 
 def _operational_token(attributes: dict[str, Any], source_status: str) -> str:
-    # Terminal customer-order lifecycle statuses always win over operational
-    # flags left on the payload from earlier stages.
+    # Terminal customer-order lifecycle statuses always win over stale
+    # fulfilment flags retained by Kaspi.
     if source_status in _CANCELLED_STATUSES:
         return "CANCELLED"
     if source_status in _RETURN_STATUSES:
@@ -72,37 +68,41 @@ def _operational_token(attributes: dict[str, Any], source_status: str) -> str:
     ):
         return "DELIVERED"
 
+    # Verified order 1000772384: this is the authoritative fact that the parcel
+    # was physically transferred to Kaspi logistics. It wins over stale
+    # preOrder/assembled flags.
+    courier_transmission_date = _nested_value(
+        attributes,
+        "kaspiDelivery",
+        "courierTransmissionDate",
+    )
+    if courier_transmission_date not in (None, ""):
+        return "SHIPPING"
+
+    if source_status in {"SHIPPING", "HANDED_OVER_TO_COURIER"} or _has_value(
+        attributes,
+        "shipmentDate",
+        "shippedAt",
+        "actualShipmentDate",
+        "handoverDate",
+        "handedOverAt",
+    ):
+        return "SHIPPING"
+
     if source_status == "ACCEPTED_BY_MERCHANT":
-        # Verified seller-cabinet fact: preorder must remain preorder even when
-        # Kaspi has already populated technical transmission-related dates.
+        # Verified order 1006480798: packed, waybill created, but not yet
+        # physically transferred to Kaspi logistics.
+        if attributes.get("assembled") is True:
+            return "HANDOVER"
+
+        # Kaspi alone cannot distinguish preorder 1002303844 from packaging
+        # 1006563363: both expose preOrder=true, assembled=false and no actual
+        # courier transmission. Commerce Core must resolve that boundary using
+        # warehouse availability/reservation facts.
         if attributes.get("preOrder") is True:
             return "ACCEPTED_BY_MERCHANT"
 
-        courier_transmission_date = _nested_value(
-            attributes,
-            "kaspiDelivery",
-            "courierTransmissionDate",
-        )
-        if courier_transmission_date not in (None, ""):
-            return "SHIPPING"
-
-        if _has_value(
-            attributes,
-            "shipmentDate",
-            "shippedAt",
-            "actualShipmentDate",
-            "handoverDate",
-            "handedOverAt",
-        ):
-            return "SHIPPING"
-
-        # assembled is retained in the raw payload for diagnostics but is not a
-        # safe standalone stage discriminator. Verified packaging orders may
-        # expose assembled=true.
         return "ASSEMBLY"
-
-    if source_status in {"SHIPPING", "HANDED_OVER_TO_COURIER"}:
-        return "SHIPPING"
 
     return _STATUS_TO_IMPORT_TOKEN.get(source_status, "UNKNOWN")
 
