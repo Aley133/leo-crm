@@ -138,9 +138,7 @@ class CommerceOrder:
 
     @property
     def stage(self) -> CommerceOrderStage:
-        # Marketplace lifecycle facts are authoritative. Procurement state is a
-        # separate workflow and must never rewrite what Kaspi says happened to
-        # the customer order.
+        # Terminal and physical Kaspi lifecycle facts are authoritative.
         if self.status == "cancelled":
             return CommerceOrderStage.CANCELLED
         if self.status == "returned":
@@ -156,8 +154,12 @@ class CommerceOrder:
         if self.status == "new":
             return CommerceOrderStage.NEW
         if self.status == "accepted":
-            # The payload canonicalizer uses accepted only for Kaspi's visible
-            # preorder state (`preOrder=true`) before physical handover.
+            # Kaspi exposes accepted/preOrder while the item is awaited. LEO owns
+            # the internal arrival transition: once every linked purchase line is
+            # received or closed, the order is ready for packaging even if the
+            # marketplace payload still retains its historical preOrder marker.
+            if self.all_procurement_received:
+                return CommerceOrderStage.ASSEMBLY
             return CommerceOrderStage.PREORDER
         return CommerceOrderStage.UNKNOWN
 
