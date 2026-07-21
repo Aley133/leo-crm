@@ -7,6 +7,7 @@ from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 
+from .action_api import router as action_router
 from .browser_agent_api import router as browser_agent_router
 from .browser_agent_monitoring_api import router as browser_agent_monitoring_router
 from .browser_agent_registry_api import router as browser_agent_registry_router
@@ -44,6 +45,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
+app.include_router(action_router)
 app.include_router(product_registry_router)
 app.include_router(product_supplier_binding_router)
 app.include_router(product_xml_import_router)
