@@ -120,6 +120,44 @@ def test_fetch_orders_builds_proven_bounded_request_and_hydrates_included_entrie
     assert page.watermark_at == datetime(2026, 7, 19, 10, 5, tzinfo=UTC)
 
 
+def test_fetch_order_by_code_uses_official_filter_without_date_window() -> None:
+    seen: dict = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["request"] = request
+        return httpx.Response(
+            200,
+            json={
+                "data": [
+                    {
+                        "type": "orders",
+                        "id": "order-1",
+                        "attributes": {
+                            "code": "1002303844",
+                            "status": "ACCEPTED_BY_MERCHANT",
+                        },
+                        "relationships": {"entries": {"data": []}},
+                    }
+                ],
+                "included": [],
+            },
+        )
+
+    transport = KaspiHttpTransport(
+        KaspiHttpSettings(api_token="secret"),
+        client=_client(handler),
+    )
+    order = transport.fetch_order_by_code("1002303844")
+
+    request = seen["request"]
+    assert request.url.params["filter[orders][code]"] == "1002303844"
+    assert request.url.params["page[number]"] == "0"
+    assert request.url.params["page[size]"] == "1"
+    assert "filter[orders][creationDate][$ge]" not in request.url.params
+    assert order is not None
+    assert order["attributes"]["code"] == "1002303844"
+
+
 def test_fetch_orders_falls_back_to_order_entries_subresource() -> None:
     requests: list[httpx.Request] = []
 
@@ -178,7 +216,7 @@ def test_fetch_orders_falls_back_to_order_entries_subresource() -> None:
     assert entry["attributes"]["productId"] == "merchant-1"
 
 
-def test_initial_request_uses_one_based_page_and_configured_lookback_window() -> None:
+def test_initial_request_uses_zero_based_page_and_configured_lookback_window() -> None:
     seen: dict = {}
     now = datetime(2026, 7, 19, 12, 0, tzinfo=UTC)
 
@@ -194,7 +232,7 @@ def test_initial_request_uses_one_based_page_and_configured_lookback_window() ->
     transport.fetch_orders(cursor=None, updated_after=None, limit=10)
 
     params = seen["request"].url.params
-    assert params["page[number]"] == "1"
+    assert params["page[number]"] == "0"
     assert params["filter[orders][creationDate][$ge]"] == str(
         int((now - timedelta(days=3)).timestamp() * 1000)
     )
