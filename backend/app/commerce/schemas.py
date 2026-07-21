@@ -26,6 +26,8 @@ class CommerceOrderRead(BaseModel):
     external_code: str | None
     marketplace: str
     status: str
+    original_status: str
+    operational_stage: str
     currency: str
     total_amount: Decimal
     ordered_at: datetime | None
