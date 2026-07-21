@@ -5,7 +5,7 @@ import secrets
 from datetime import timedelta
 
 from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
@@ -13,6 +13,12 @@ from .auth import require_service_token
 from .browser_agent_dispatch import dispatch_due_browser_targets
 from .browser_agent_failure import persist_browser_agent_failure
 from .browser_agent_ingestion import BrowserAgentResultError, persist_browser_agent_success
+from .browser_agent_job_contract import (
+    BrowserAgentJobType,
+    decode_browser_agent_job,
+    encode_kaspi_seller_order_job,
+    serialize_claim_payload,
+)
 from .browser_agent_models import BrowserAgent, BrowserAgentJob, BrowserAgentJobStatus
 from .browser_agent_presence import record_browser_agent_heartbeat
 from .db import get_db
@@ -20,9 +26,27 @@ from .lease_engine import utc_now
 
 
 class BrowserAgentJobCreate(BaseModel):
-    supplier_product_id: int = Field(gt=0)
-    url: str = Field(min_length=8, max_length=4000)
+    job_type: BrowserAgentJobType = BrowserAgentJobType.SUPPLIER_PRODUCT_OBSERVATION
+    supplier_product_id: int | None = Field(default=None, ge=0)
+    url: str | None = Field(default=None, min_length=8, max_length=4000)
     monitor_target_id: int | None = Field(default=None, gt=0)
+    payload: dict | None = None
+
+    @model_validator(mode="after")
+    def validate_job_contract(self):
+        if self.job_type == BrowserAgentJobType.SUPPLIER_PRODUCT_OBSERVATION:
+            if not self.supplier_product_id or self.supplier_product_id <= 0:
+                raise ValueError("supplier_product_id is required for supplier observation jobs")
+            if not self.url:
+                raise ValueError("url is required for supplier observation jobs")
+            return self
+
+        payload = self.payload or {}
+        merchant_id = str(payload.get("merchant_id") or "").strip()
+        order_code = str(payload.get("order_code") or "").strip()
+        if not merchant_id or not order_code:
+            raise ValueError("merchant_id and order_code are required for Kaspi Seller jobs")
+        return self
 
 
 class BrowserAgentClaim(BaseModel):
@@ -62,19 +86,25 @@ router = APIRouter(
 )
 
 
+def _job_envelope(job: BrowserAgentJob):
+    return decode_browser_agent_job(
+        supplier_product_id=job.supplier_product_id,
+        url=job.url,
+        monitor_target_id=job.monitor_target_id,
+    )
+
+
 def _normalize_known_business_outcome(
     payload: BrowserAgentResult,
     *,
     job: BrowserAgentJob,
     observed_at,
 ) -> BrowserAgentResult:
-    """Convert verified supplier business states into successful observations.
+    """Convert verified supplier business states into successful observations."""
 
-    A supplier card being out of stock is not an adapter failure. Older Browser
-    Agent builds reported the verified WB state as AdapterParseError; accept that
-    exact legacy result and persist a normal unavailable observation instead.
-    Unknown parse errors remain failures.
-    """
+    envelope = _job_envelope(job)
+    if envelope.job_type != BrowserAgentJobType.SUPPLIER_PRODUCT_OBSERVATION:
+        return payload
 
     message = (payload.error_message or "").strip()
     host_is_wildberries = "wildberries.ru" in job.url.casefold() or "wb.ru" in job.url.casefold()
@@ -207,16 +237,34 @@ def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_d
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
 def create_browser_agent_job(payload: BrowserAgentJobCreate, db: Session = Depends(get_db)):
+    if payload.job_type == BrowserAgentJobType.KASPI_SELLER_ORDER_DETAILS:
+        data = payload.payload or {}
+        stored_url = encode_kaspi_seller_order_job(
+            merchant_id=str(data["merchant_id"]),
+            order_code=str(data["order_code"]),
+        )
+        supplier_product_id = 0
+        monitor_target_id = None
+    else:
+        stored_url = payload.url or ""
+        supplier_product_id = int(payload.supplier_product_id or 0)
+        monitor_target_id = payload.monitor_target_id
+
     job = BrowserAgentJob(
-        monitor_target_id=payload.monitor_target_id,
-        supplier_product_id=payload.supplier_product_id,
-        url=payload.url,
+        monitor_target_id=monitor_target_id,
+        supplier_product_id=supplier_product_id,
+        url=stored_url,
         status=BrowserAgentJobStatus.QUEUED.value,
     )
     db.add(job)
     db.commit()
     db.refresh(job)
-    return {"id": job.id, "status": job.status}
+    envelope = _job_envelope(job)
+    return {
+        "id": job.id,
+        "status": job.status,
+        **serialize_claim_payload(envelope),
+    }
 
 
 @router.post("/claim")
@@ -265,12 +313,14 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
         version=agent.version,
         current_job_id=job.id,
     )
+    envelope = _job_envelope(job)
     return {
         "job": {
             "id": job.id,
             "monitor_target_id": job.monitor_target_id,
             "supplier_product_id": job.supplier_product_id,
             "url": job.url,
+            **serialize_claim_payload(envelope),
             "lease_token": token,
             "lease_until": job.lease_until,
         }
@@ -289,6 +339,7 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
     if job.lease_until is None or job.lease_until < now:
         raise HTTPException(status_code=409, detail="Browser agent lease expired")
 
+    envelope = _job_envelope(job)
     payload = _normalize_known_business_outcome(payload, job=job, observed_at=now)
     succeeded = payload.status == BrowserAgentJobStatus.SUCCEEDED.value
     if not succeeded and payload.status != BrowserAgentJobStatus.FAILED.value:
@@ -300,11 +351,12 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
     changed: bool | None = None
     agent_id = job.lease_owner
     try:
-        if succeeded and job.monitor_target_id is not None:
+        is_supplier_job = envelope.job_type == BrowserAgentJobType.SUPPLIER_PRODUCT_OBSERVATION
+        if succeeded and is_supplier_job and job.monitor_target_id is not None:
             attempt_id, changed = persist_browser_agent_success(
                 db, job=job, payload=payload.payload or {}, finished_at=now
             )
-        elif not succeeded:
+        elif not succeeded and is_supplier_job and job.monitor_target_id is not None:
             attempt_id = persist_browser_agent_failure(
                 db,
                 job=job,
@@ -349,6 +401,7 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
     return {
         "id": job.id,
         "status": job.status,
+        "job_type": envelope.job_type.value,
         "monitor_attempt_id": attempt_id,
         "changed": changed,
     }
@@ -359,11 +412,13 @@ def read_browser_agent_job(job_id: int, db: Session = Depends(get_db)):
     job = db.get(BrowserAgentJob, job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Browser agent job not found")
+    envelope = _job_envelope(job)
     return {
         "id": job.id,
         "monitor_target_id": job.monitor_target_id,
         "supplier_product_id": job.supplier_product_id,
         "url": job.url,
+        **serialize_claim_payload(envelope),
         "status": job.status,
         "result": json.loads(job.result_payload) if job.result_payload else None,
         "error_code": job.error_code,
