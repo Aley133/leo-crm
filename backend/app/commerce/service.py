@@ -6,7 +6,7 @@ from .domain import CommerceOrder, CommerceSummary
 from .repository import CommerceRepository
 
 
-ACTIVE_STAGES = {"new", "preorder", "assembly", "handover", "shipping"}
+ACTIVE_STAGES = {"new", "accepted", "preorder", "assembly", "handover", "shipping"}
 DIRECT_RAW_STATUS_STAGES = {"shipping", "delivered", "cancelled", "returned"}
 
 
@@ -23,9 +23,9 @@ class CommerceService:
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...], CommerceSummary]:
         if status and status not in DIRECT_RAW_STATUS_STAGES:
-            # Operational stages such as preorder and assembly depend on the
-            # procurement state of order lines and therefore belong to the
-            # Commerce domain rather than the marketplace SQL model.
+            # Operational stages such as accepted, preorder and assembly depend
+            # on Commerce facts and therefore belong to the domain rather than
+            # the marketplace SQL model.
             _raw_total, candidates = self._repository.list_orders(
                 limit=1000,
                 offset=0,
