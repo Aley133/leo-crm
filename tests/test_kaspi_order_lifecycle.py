@@ -82,12 +82,20 @@ def test_accepted_order_without_inventory_fact_remains_accepted() -> None:
     assert order.stage == CommerceOrderStage.ACCEPTED
 
 
-def test_accepted_order_moves_to_preorder_only_after_purchase_exists() -> None:
+def test_requested_purchase_moves_accepted_order_to_preorder() -> None:
+    order = _order(
+        status="accepted",
+        line=_line(purchase_request_id="pr-1", purchase_status="requested"),
+    )
+    assert order.stage == CommerceOrderStage.PREORDER
+
+
+def test_ordered_purchase_moves_accepted_order_to_in_transit() -> None:
     order = _order(
         status="accepted",
         line=_line(purchase_request_id="pr-1", purchase_status="ordered"),
     )
-    assert order.stage == CommerceOrderStage.PREORDER
+    assert order.stage == CommerceOrderStage.IN_TRANSIT
 
 
 def test_accepted_order_moves_to_assembly_after_receipt() -> None:
