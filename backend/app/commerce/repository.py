@@ -82,6 +82,7 @@ class SqlAlchemyCommerceRepository:
                 MarketplaceOrderLine,
                 PurchaseRequest.id,
                 PurchaseRequest.status,
+                PurchaseRequest.version,
             )
             .outerjoin(
                 PurchaseRequestLine,
@@ -94,7 +95,7 @@ class SqlAlchemyCommerceRepository:
             .where(MarketplaceOrderLine.marketplace_order_id.in_(order_ids))
             .order_by(MarketplaceOrderLine.id)
         ).all()
-        for line, purchase_request_id, purchase_status in line_rows:
+        for line, purchase_request_id, purchase_status, purchase_version in line_rows:
             lines_by_order[line.marketplace_order_id].append(
                 CommerceOrderLine(
                     line_id=line.id,
@@ -109,6 +110,7 @@ class SqlAlchemyCommerceRepository:
                         None if purchase_request_id is None else str(purchase_request_id)
                     ),
                     purchase_status=purchase_status,
+                    purchase_version=purchase_version,
                 )
             )
 
