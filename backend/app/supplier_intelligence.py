@@ -3,7 +3,10 @@ from __future__ import annotations
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import Iterable
+from typing import Iterable, Literal
+
+
+DecisionConfidence = Literal["none", "low", "medium", "high"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,7 +42,11 @@ class SupplierScore:
 @dataclass(frozen=True, slots=True)
 class BestOfferDecision:
     best: SupplierScore | None
+    runner_up: SupplierScore | None
     ranked: tuple[SupplierScore, ...]
+    score_gap: Decimal | None
+    confidence: DecisionConfidence
+    warnings: tuple[str, ...]
 
 
 class BestOfferEngine:
@@ -57,6 +64,9 @@ class BestOfferEngine:
     FRESHNESS_WEIGHT = Decimal("5")
     MAX_DELIVERY_DAYS = 10
     FRESH_HOURS = 24
+    HIGH_CONFIDENCE_GAP = Decimal("15")
+    MEDIUM_CONFIDENCE_GAP = Decimal("7")
+    MIN_HEALTHY_SCORE = Decimal("60")
 
     @classmethod
     def decide(
@@ -87,8 +97,59 @@ class BestOfferEngine:
                 ),
             )
         )
-        best = next((score for score in ranked if score.eligible), None)
-        return BestOfferDecision(best=best, ranked=ranked)
+        eligible_ranked = tuple(score for score in ranked if score.eligible)
+        best = eligible_ranked[0] if eligible_ranked else None
+        runner_up = eligible_ranked[1] if len(eligible_ranked) > 1 else None
+        score_gap = (
+            cls._round(best.total_score - runner_up.total_score)
+            if best is not None and runner_up is not None
+            else None
+        )
+        confidence, warnings = cls._confidence(
+            best=best,
+            runner_up=runner_up,
+            score_gap=score_gap,
+        )
+        return BestOfferDecision(
+            best=best,
+            runner_up=runner_up,
+            ranked=ranked,
+            score_gap=score_gap,
+            confidence=confidence,
+            warnings=warnings,
+        )
+
+    @classmethod
+    def _confidence(
+        cls,
+        *,
+        best: SupplierScore | None,
+        runner_up: SupplierScore | None,
+        score_gap: Decimal | None,
+    ) -> tuple[DecisionConfidence, tuple[str, ...]]:
+        warnings: list[str] = []
+        if best is None:
+            return "none", ("Нет доступных предложений с подтверждённой ценой",)
+
+        if best.total_score < cls.MIN_HEALTHY_SCORE:
+            warnings.append("Низкое качество данных или слабое предложение")
+        if best.delivery_score == 0:
+            warnings.append("У победителя не подтверждён срок доставки")
+        if best.freshness_score == 0:
+            warnings.append("Данные победителя старше 24 часов")
+
+        if runner_up is None:
+            warnings.append("Решение основано только на одном доступном предложении")
+            return "low", tuple(warnings)
+
+        gap = score_gap or Decimal("0")
+        if gap >= cls.HIGH_CONFIDENCE_GAP and not warnings:
+            return "high", ()
+        if gap >= cls.MEDIUM_CONFIDENCE_GAP:
+            return "medium", tuple(warnings)
+
+        warnings.append("Первое и второе предложения имеют близкий рейтинг")
+        return "low", tuple(warnings)
 
     @classmethod
     def _score(
@@ -154,7 +215,7 @@ class BestOfferEngine:
 
         primary_score = Decimal("10") if candidate.is_primary else Decimal("0")
         priority_value = max(0, min(int(candidate.priority), 100))
-        priority_score = cls._round(Decimal("5") * Decimal(100 - priority_value) / Decimal(100))
+        priority_score = cls._round(Decimal("5") * Decimal(100 - priority_value) / Decimal("100"))
         preference_score = min(cls.PREFERENCE_WEIGHT, primary_score + priority_score)
         if candidate.is_primary:
             reasons.append("Основная привязка")
