@@ -29,6 +29,7 @@ KASPI_STATUS_MAP: dict[str, str] = {
     "PICKUP": MarketplaceOrderStatus.ACCEPTED.value,
     "ASSEMBLE": MarketplaceOrderStatus.ASSEMBLY.value,
     "ASSEMBLY": MarketplaceOrderStatus.ASSEMBLY.value,
+    "HANDOVER": MarketplaceOrderStatus.HANDOVER.value,
     "SHIPPING": MarketplaceOrderStatus.SHIPPING.value,
     "HANDED_OVER_TO_COURIER": MarketplaceOrderStatus.SHIPPING.value,
     "DELIVERED": MarketplaceOrderStatus.DELIVERED.value,
