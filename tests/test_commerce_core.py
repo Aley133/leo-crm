@@ -74,14 +74,24 @@ def test_accepted_order_without_stock_evidence_remains_accepted() -> None:
     assert order.stage == CommerceOrderStage.ACCEPTED
 
 
-def test_purchase_in_progress_moves_accepted_order_to_preorder() -> None:
+def test_requested_purchase_moves_accepted_order_to_preorder() -> None:
+    order = _order(
+        status="accepted",
+        lines=(_line(purchase_request_id="purchase-1", purchase_status="requested"),),
+        original_status="ACCEPTED_BY_MERCHANT",
+    )
+
+    assert order.stage == CommerceOrderStage.PREORDER
+
+
+def test_ordered_purchase_moves_accepted_order_to_in_transit() -> None:
     order = _order(
         status="accepted",
         lines=(_line(purchase_request_id="purchase-1", purchase_status="ordered"),),
         original_status="ACCEPTED_BY_MERCHANT",
     )
 
-    assert order.stage == CommerceOrderStage.PREORDER
+    assert order.stage == CommerceOrderStage.IN_TRANSIT
 
 
 def test_received_procurement_moves_accepted_order_to_assembly() -> None:
@@ -101,20 +111,21 @@ def test_shipping_and_delivered_states_are_authoritative() -> None:
     assert _order(status="delivered", lines=(line,)).stage == CommerceOrderStage.DELIVERED
 
 
-def test_commerce_summary_separates_active_delivered_and_cancelled_orders() -> None:
+def test_cancelled_and_returned_orders_are_excluded_from_revenue() -> None:
     orders = (
         _order(status="new", lines=(_line(),)),
         _order(status="delivered", lines=(_line(),)),
         _order(status="cancelled", lines=(_line(product_id=None),)),
+        _order(status="returned", lines=(_line(),)),
     )
 
     summary = CommerceService.summarize(orders)
 
-    assert summary.orders_count == 3
-    assert summary.units_count == 6
-    assert summary.revenue == Decimal("30000")
+    assert summary.orders_count == 4
+    assert summary.units_count == 8
+    assert summary.revenue == Decimal("20000")
     assert summary.active_orders == 1
     assert summary.delivered_orders == 1
-    assert summary.cancelled_orders == 1
+    assert summary.cancelled_orders == 2
     assert summary.unresolved_lines == 1
     assert summary.procurement_required_lines == 1
