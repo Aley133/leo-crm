@@ -63,6 +63,16 @@ def test_unknown_kaspi_status_is_retained_and_normalized_to_unknown() -> None:
     assert normalized.original_status == "SOME_NEW_KASPI_STATE"
 
 
+def test_current_kaspi_state_wins_over_historical_status() -> None:
+    payload = _payload(status="ACCEPTED_BY_MERCHANT")
+    payload["attributes"]["state"] = "KASPI_DELIVERY"
+
+    normalized = normalize_kaspi_order(payload)
+
+    assert normalized.status == MarketplaceOrderStatus.SHIPPING.value
+    assert normalized.original_status == "KASPI_DELIVERY"
+
+
 def test_duplicate_payload_is_idempotent(db_session) -> None:
     account = _account(db_session)
     payload = _payload()
@@ -190,3 +200,4 @@ def test_rollback_keeps_checkpoint_and_order_unchanged(db_session) -> None:
     assert order.version == 1
     assert checkpoint is not None
     assert checkpoint.cursor == "cursor-1"
+    assert checkpoint.watermark_at == initial_watermark
