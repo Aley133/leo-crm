@@ -121,27 +121,30 @@ def test_fetch_orders_builds_proven_bounded_request_and_hydrates_included_entrie
 
 
 def test_fetch_order_by_code_uses_official_filter_without_date_window() -> None:
-    seen: dict = {}
+    requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
-        seen["request"] = request
-        return httpx.Response(
-            200,
-            json={
-                "data": [
-                    {
-                        "type": "orders",
-                        "id": "order-1",
-                        "attributes": {
-                            "code": "1002303844",
-                            "status": "ACCEPTED_BY_MERCHANT",
-                        },
-                        "relationships": {"entries": {"data": []}},
-                    }
-                ],
-                "included": [],
-            },
-        )
+        requests.append(request)
+        if request.url.path.endswith("/orders"):
+            return httpx.Response(
+                200,
+                json={
+                    "data": [
+                        {
+                            "type": "orders",
+                            "id": "order-1",
+                            "attributes": {
+                                "code": "1002303844",
+                                "status": "ACCEPTED_BY_MERCHANT",
+                            },
+                            "relationships": {"entries": {"data": []}},
+                        }
+                    ],
+                    "included": [],
+                },
+            )
+        assert request.url.path.endswith("/orders/order-1/entries")
+        return httpx.Response(200, json={"data": [], "included": []})
 
     transport = KaspiHttpTransport(
         KaspiHttpSettings(api_token="secret"),
@@ -149,11 +152,12 @@ def test_fetch_order_by_code_uses_official_filter_without_date_window() -> None:
     )
     order = transport.fetch_order_by_code("1002303844")
 
-    request = seen["request"]
-    assert request.url.params["filter[orders][code]"] == "1002303844"
-    assert request.url.params["page[number]"] == "0"
-    assert request.url.params["page[size]"] == "1"
-    assert "filter[orders][creationDate][$ge]" not in request.url.params
+    order_request = requests[0]
+    assert order_request.url.path.endswith("/orders")
+    assert order_request.url.params["filter[orders][code]"] == "1002303844"
+    assert order_request.url.params["page[number]"] == "0"
+    assert order_request.url.params["page[size]"] == "1"
+    assert "filter[orders][creationDate][$ge]" not in order_request.url.params
     assert order is not None
     assert order["attributes"]["code"] == "1002303844"
 
