@@ -8,6 +8,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .kaspi_order_payload import canonicalize_kaspi_order_payload
 from .marketplace_import import import_kaspi_order
 from .marketplace_transport import MarketplaceOrderTransport
 from .models import (
@@ -87,7 +88,8 @@ def sync_kaspi_order_page(
                 if execution is None:
                     raise RuntimeError("Marketplace import execution disappeared")
 
-                for payload in page.items:
+                for source_payload in page.items:
+                    payload = canonicalize_kaspi_order_payload(source_payload)
                     result = import_kaspi_order(
                         session,
                         marketplace_account_id=marketplace_account_id,
