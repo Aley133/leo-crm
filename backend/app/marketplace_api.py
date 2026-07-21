@@ -82,10 +82,15 @@ def sync_order_page(
 
 @router.post("/orders/full-sync")
 def full_sync_orders(
-    page_size: int = Query(default=50, ge=1, le=100),
-    max_pages: int = Query(default=10, ge=1, le=100),
+    page_size: int = Query(default=10, ge=1, le=100),
+    max_pages: int = Query(default=3, ge=1, le=20),
+    max_duration_seconds: int = Query(default=25, ge=5, le=60),
 ) -> dict[str, str | int | bool | None]:
-    """Resume from checkpoint and process several pages with a safety cap."""
+    """Resume from checkpoint with page and request-time safety bounds.
+
+    The endpoint may intentionally return ``completed=false``. Invoke it again
+    to resume from the persisted checkpoint until ``completed=true``.
+    """
     try:
         transport, marketplace_account_id = _bootstrap_live_import()
     except KaspiConfigurationError as exc:
@@ -101,6 +106,7 @@ def full_sync_orders(
             marketplace_account_id=marketplace_account_id,
             page_size=page_size,
             max_pages=max_pages,
+            max_duration_seconds=max_duration_seconds,
         )
     except KaspiTransportError as exc:
         raise HTTPException(
@@ -118,6 +124,7 @@ def full_sync_orders(
         "updated_count": result.updated_count,
         "next_cursor": result.next_cursor,
         "completed": result.completed,
+        "stopped_reason": result.stopped_reason,
     }
 
 
