@@ -74,6 +74,21 @@ def test_preorder_is_detected_from_explicit_preorder_flag() -> None:
     assert _order(status="accepted", line=_line()).stage == CommerceOrderStage.PREORDER
 
 
+def test_preorder_flag_wins_over_technical_transmission_date() -> None:
+    payload = _payload(
+        status="ACCEPTED_BY_MERCHANT",
+        preOrder=True,
+        assembled=True,
+        kaspiDelivery={
+            "courierTransmissionDate": 1784642859000,
+            "courierTransmissionPlanningDate": 1784642859000,
+        },
+    )
+
+    assert _normalized(payload) == "accepted"
+    assert _order(status="accepted", line=_line()).stage == CommerceOrderStage.PREORDER
+
+
 def test_normal_merchant_acceptance_is_packaging() -> None:
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
@@ -86,7 +101,7 @@ def test_normal_merchant_acceptance_is_packaging() -> None:
     assert _order(status="assembly", line=_line()).stage == CommerceOrderStage.ASSEMBLY
 
 
-def test_assembled_order_without_actual_transmission_is_handover() -> None:
+def test_assembled_flag_alone_does_not_promote_packaging_to_handover() -> None:
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=False,
@@ -97,14 +112,14 @@ def test_assembled_order_without_actual_transmission_is_handover() -> None:
         },
     )
 
-    assert _normalized(payload) == "handover"
-    assert _order(status="handover", line=_line()).stage == CommerceOrderStage.HANDOVER
+    assert _normalized(payload) == "assembly"
+    assert _order(status="assembly", line=_line()).stage == CommerceOrderStage.ASSEMBLY
 
 
-def test_actual_courier_transmission_wins_over_stale_preorder_and_assembled_flags() -> None:
+def test_actual_courier_transmission_after_preorder_means_shipping() -> None:
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
-        preOrder=True,
+        preOrder=False,
         assembled=True,
         kaspiDelivery={
             "courierTransmissionDate": 1784642859000,
@@ -119,6 +134,7 @@ def test_actual_courier_transmission_wins_over_stale_preorder_and_assembled_flag
 def test_legacy_actual_shipment_field_means_handed_to_kaspi_delivery() -> None:
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
+        preOrder=False,
         shipmentDate="2026-07-21T12:00:00Z",
         plannedShipmentDate="2026-07-21T20:00:00Z",
     )
