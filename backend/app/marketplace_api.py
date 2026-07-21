@@ -97,7 +97,7 @@ def _diagnostic_order(payload: dict[str, Any]) -> dict[str, Any]:
 
 @router.get("/orders/diagnostics/raw-page")
 def inspect_raw_order_page(
-    page_number: int = Query(default=1, ge=1, le=1000),
+    page_number: int = Query(default=0, ge=0, le=999),
     limit: int = Query(default=10, ge=1, le=50),
 ) -> dict[str, Any]:
     """Inspect one live Kaspi page without importing or advancing checkpoints."""
@@ -137,17 +137,11 @@ def inspect_raw_order_page(
 
 
 @router.get("/orders/{order_code}/diagnostics/raw")
-def inspect_raw_order_by_code(
-    order_code: str,
-    page_size: int = Query(default=50, ge=1, le=100),
-    max_pages: int = Query(default=20, ge=1, le=100),
-) -> dict[str, Any]:
-    """Find one live Kaspi order by seller-visible code without importing it.
+def inspect_raw_order_by_code(order_code: str) -> dict[str, Any]:
+    """Fetch one Kaspi order directly by seller-visible code without importing it.
 
-    This endpoint is deliberately read-only. It does not use or update the
-    marketplace checkpoint. Pages are scanned only inside the configured live
-    Kaspi lookback window so the result reflects the payload available to the
-    production Orders API.
+    The lookup uses Kaspi's documented ``filter[orders][code]`` request and does
+    not depend on the live sync lookback window, pagination, or checkpoints.
     """
     normalized_code = order_code.strip()
     if not normalized_code:
@@ -164,31 +158,8 @@ def inspect_raw_order_by_code(
             detail=str(exc),
         ) from exc
 
-    pages_scanned = 0
-    cursor: str | None = "1"
     try:
-        while cursor is not None and pages_scanned < max_pages:
-            page = transport.fetch_orders(
-                cursor=cursor,
-                updated_after=None,
-                limit=page_size,
-            )
-            pages_scanned += 1
-            for payload in page.items:
-                attributes = _diagnostic_attributes(payload)
-                payload_code = str(
-                    attributes.get("code")
-                    or attributes.get("orderCode")
-                    or ""
-                ).strip()
-                if payload_code == normalized_code:
-                    return {
-                        "marketplace_account_id": marketplace_account_id,
-                        "pages_scanned": pages_scanned,
-                        "found": True,
-                        "item": _diagnostic_order(payload),
-                    }
-            cursor = page.next_cursor
+        payload = transport.fetch_order_by_code(normalized_code)
     except KaspiTransportError as exc:
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
@@ -197,15 +168,21 @@ def inspect_raw_order_by_code(
     finally:
         transport.close()
 
-    raise HTTPException(
-        status_code=status.HTTP_404_NOT_FOUND,
-        detail={
-            "message": "Kaspi order was not found in the live API lookback window",
-            "order_code": normalized_code,
-            "pages_scanned": pages_scanned,
-            "page_size": page_size,
-        },
-    )
+    if payload is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail={
+                "message": "Kaspi order was not found by its seller-visible code",
+                "order_code": normalized_code,
+            },
+        )
+
+    return {
+        "marketplace_account_id": marketplace_account_id,
+        "lookup": "filter[orders][code]",
+        "found": True,
+        "item": _diagnostic_order(payload),
+    }
 
 
 @router.post("/orders/sync-page")
