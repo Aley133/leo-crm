@@ -4,7 +4,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Protocol
 
-from sqlalchemy import Select, func, or_, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from ..models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderLine
@@ -118,6 +118,7 @@ class SqlAlchemyCommerceRepository:
                 external_code=order.external_code,
                 marketplace=provider,
                 status=order.status,
+                original_status=order.original_status,
                 currency=order.currency,
                 total_amount=Decimal(order.total_amount),
                 ordered_at=order.ordered_at,
