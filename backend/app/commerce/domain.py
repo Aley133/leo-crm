@@ -18,6 +18,7 @@ class CommerceOrderStage(StrEnum):
     NEW = "new"
     ACCEPTED = "accepted"
     PREORDER = "preorder"
+    IN_TRANSIT = "in_transit"
     ASSEMBLY = "assembly"
     HANDOVER = "handover"
     SHIPPING = "shipping"
@@ -54,6 +55,20 @@ class CommerceOrderLine:
             return ProcurementState.CANCELLED
         return ProcurementState.IN_PROGRESS
 
+    @property
+    def is_preorder_requested(self) -> bool:
+        return self.purchase_request_id is not None and self.purchase_status in {
+            "draft",
+            "requested",
+        }
+
+    @property
+    def is_procurement_in_transit(self) -> bool:
+        return self.purchase_request_id is not None and self.purchase_status in {
+            "ordered",
+            "partially_received",
+        }
+
 
 @dataclass(frozen=True, slots=True)
 class CommerceOrder:
@@ -87,6 +102,14 @@ class CommerceOrder:
         )
 
     @property
+    def has_preorder_request(self) -> bool:
+        return any(line.is_preorder_requested for line in self.lines)
+
+    @property
+    def has_procurement_in_transit(self) -> bool:
+        return any(line.is_procurement_in_transit for line in self.lines)
+
+    @property
     def has_procurement_in_progress(self) -> bool:
         return any(
             line.procurement_state == ProcurementState.IN_PROGRESS
@@ -99,6 +122,12 @@ class CommerceOrder:
             line.procurement_state == ProcurementState.RECEIVED
             for line in self.lines
         )
+
+    @property
+    def recognized_revenue(self) -> Decimal:
+        if self.stage in {CommerceOrderStage.CANCELLED, CommerceOrderStage.RETURNED}:
+            return Decimal("0")
+        return self.total_amount
 
     @property
     def stage(self) -> CommerceOrderStage:
@@ -115,10 +144,12 @@ class CommerceOrder:
         if self.status == "new":
             return CommerceOrderStage.NEW
         if self.status == "accepted":
-            if self.has_procurement_in_progress:
-                return CommerceOrderStage.PREORDER
             if self.all_procurement_received:
                 return CommerceOrderStage.ASSEMBLY
+            if self.has_procurement_in_transit:
+                return CommerceOrderStage.IN_TRANSIT
+            if self.has_preorder_request:
+                return CommerceOrderStage.PREORDER
             # Until Warehouse/Reservations exists, an accepted Kaspi order cannot
             # be truthfully classified as either preorder or assembly. Keep the
             # operational stage explicit instead of guessing from a missing PR.
