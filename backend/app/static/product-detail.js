@@ -23,18 +23,25 @@ const setText = (id, value) => { const element = document.querySelector(`#${id}`
 const setLoading = (loading) => { detailPage.setAttribute("aria-busy", String(loading)); refreshButton.disabled = loading; refreshButton.textContent = loading ? "Обновление…" : "Обновить"; };
 const availabilityBadge = (available) => available === true ? '<span class="badge ok">В наличии</span>' : available === false ? '<span class="badge bad">Нет в наличии</span>' : '<span class="badge">Неизвестно</span>';
 const monitorBadge = (binding) => binding.consecutive_failures > 0 ? '<span class="badge bad">Ошибка</span>' : binding.monitor_status === "active" ? '<span class="badge ok">Активен</span>' : binding.monitor_status ? `<span class="badge warn">${escapeHtml(binding.monitor_status)}</span>` : '<span class="badge">Не настроен</span>';
+const scoreByBinding = (scores) => new Map((scores || []).map((score) => [Number(score.binding_id), score]));
 
-const renderBestOffer = (bindings) => {
-  const candidates = bindings.filter((item) => item.available === true && item.price != null);
-  const best = candidates.sort((left, right) => Number(left.price) - Number(right.price))[0];
+const renderBestOffer = (bestOffer, bindings) => {
   const empty = document.querySelector("#best-offer-empty");
-  if (!best) { bestOfferContainer.innerHTML = ""; empty.classList.remove("hidden"); return; }
+  if (!bestOffer) { bestOfferContainer.innerHTML = ""; empty.classList.remove("hidden"); return; }
+  const binding = bindings.find((item) => Number(item.binding_id) === Number(bestOffer.binding_id));
+  if (!binding) { bestOfferContainer.innerHTML = ""; empty.classList.remove("hidden"); return; }
   empty.classList.add("hidden");
-  bestOfferContainer.innerHTML = `<div><span>Поставщик</span><strong>${escapeHtml(best.supplier_name)}</strong><small>${escapeHtml(best.supplier_code)}</small></div><div><span>Цена</span><strong>${money(best.price, best.currency)}</strong>${best.old_price != null ? `<small>было ${money(best.old_price, best.currency)}</small>` : ""}</div><div><span>Доставка</span><strong>${best.delivery_days == null ? "—" : `${best.delivery_days} дн.`}</strong><small>${escapeHtml(best.seller || "продавец не указан")}</small></div><div><span>Проверено</span><strong>${dateTime(best.last_checked_at)}</strong><small>${best.is_primary ? "основная привязка" : "доступное предложение"}</small></div><a class="button secondary" href="${escapeHtml(best.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть поставщика</a>`;
+  const reasons = (bestOffer.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("");
+  bestOfferContainer.innerHTML = `<div><span>Поставщик</span><strong>${escapeHtml(binding.supplier_name)}</strong><small>${escapeHtml(binding.supplier_code)}</small></div><div><span>Score</span><strong>${Number(bestOffer.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})} / 100</strong><small>цена ${bestOffer.price_score} · доставка ${bestOffer.delivery_score}</small></div><div><span>Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<small>было ${money(binding.old_price, binding.currency)}</small>` : ""}</div><div><span>Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><small>${escapeHtml(binding.seller || "продавец не указан")}</small></div><div class="decision-reasons"><span>Почему выбран</span><ul>${reasons}</ul></div><a class="button secondary" href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть поставщика</a>`;
 };
 
-const renderBindings = (bindings) => {
-  bindingsContainer.innerHTML = bindings.map((binding) => `<article class="binding-card"><div class="binding-head"><h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3><a href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть карточку поставщика</a><span class="muted">${escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span></div><div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div><div><span class="label">Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "продавец не указан")}</span></div><div><span class="label">Наличие</span>${availabilityBadge(binding.available)}${binding.stock != null ? `<span class="muted">остаток ${binding.stock}</span>` : ""}</div><div><span class="label">Мониторинг</span>${monitorBadge(binding)}<span class="muted">проверено ${dateTime(binding.last_checked_at)}</span></div></article>`).join("");
+const renderBindings = (bindings, supplierScores) => {
+  const scores = scoreByBinding(supplierScores);
+  bindingsContainer.innerHTML = bindings.map((binding) => {
+    const score = scores.get(Number(binding.binding_id));
+    const scoreHtml = score ? `<span class="muted">Score ${Number(score.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}${score.eligible ? "" : " · не участвует"}</span>` : "";
+    return `<article class="binding-card"><div class="binding-head"><h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3><a href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть карточку поставщика</a><span class="muted">${escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span>${scoreHtml}</div><div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div><div><span class="label">Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "продавец не указан")}</span></div><div><span class="label">Наличие</span>${availabilityBadge(binding.available)}${binding.stock != null ? `<span class="muted">остаток ${binding.stock}</span>` : ""}</div><div><span class="label">Мониторинг</span>${monitorBadge(binding)}<span class="muted">проверено ${dateTime(binding.last_checked_at)}</span></div></article>`;
+  }).join("");
   document.querySelector("#bindings-empty").classList.toggle("hidden", bindings.length > 0);
 };
 
@@ -44,12 +51,12 @@ const renderObservations = (observations) => {
 };
 
 const render = (data) => {
-  const { product, sales, bindings, observations } = data;
+  const { product, sales, bindings, observations, best_offer: bestOffer, supplier_scores: supplierScores } = data;
   setText("product-name", product.name); setText("product-meta", `Kaspi ${product.kaspi_product_id}${product.brand ? ` · ${product.brand}` : ""}${product.merchant_sku ? ` · SKU ${product.merchant_sku}` : ""}`);
   setText("kaspi-product-id", product.kaspi_product_id); setText("merchant-sku", product.merchant_sku || "—"); setText("product-brand", product.brand || "—"); setText("product-status", statusLabel(product.status)); setText("product-updated-at", `Обновлено в CRM ${dateTime(product.updated_at)}`);
   setText("units-sold", Number(sales.units_sold || 0).toLocaleString("ru-RU")); setText("orders-count", `строк заказов: ${Number(sales.orders_count || 0).toLocaleString("ru-RU")}`); setText("revenue-kzt", money(sales.revenue_kzt)); setText("last-ordered-at", `последняя продажа: ${dateTime(sales.last_ordered_at)}`);
   setText("bindings-count", bindings.length); setText("observations-count", observations.length); setText("available-count", bindings.filter((item) => item.available === true).length); setText("failures-count", bindings.filter((item) => item.consecutive_failures > 0).length); setText("updated-at", `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`);
-  renderBestOffer(bindings); renderBindings(bindings); renderObservations(observations); authPanel.classList.add("hidden"); detailPage.classList.remove("hidden");
+  renderBestOffer(bestOffer, bindings); renderBindings(bindings, supplierScores); renderObservations(observations); authPanel.classList.add("hidden"); detailPage.classList.remove("hidden");
 };
 
 const responseError = async (response) => { if ([502,503,504].includes(response.status)) return new Error("Сервис Render временно недоступен или перезапускается. Подождите минуту и нажмите «Обновить»."); try { const body = await response.json(); if (body.detail) return new Error(String(body.detail)); } catch {} return new Error(`API вернул ошибку ${response.status}`); };
