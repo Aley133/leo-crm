@@ -57,8 +57,7 @@ def test_kaspi_delivery_bucket_never_defines_stage_by_itself() -> None:
 
 
 def test_preorder_candidate_is_detected_from_explicit_preorder_flag() -> None:
-    # Verified order 1002303844. The final preorder-vs-packaging decision belongs
-    # to Commerce Core because Kaspi exposes the same flags for 1006563363.
+    # Verified order 1002303844.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=True,
@@ -77,10 +76,9 @@ def test_preorder_candidate_is_detected_from_explicit_preorder_flag() -> None:
     assert _order(status="accepted", line=_line()).stage == CommerceOrderStage.PREORDER
 
 
-def test_packaging_candidate_can_share_same_kaspi_flags_as_preorder() -> None:
-    # Verified order 1006563363. Kaspi alone cannot distinguish it from
-    # 1002303844; warehouse availability/reservation must override this candidate
-    # to ASSEMBLY in Commerce Core.
+def test_arrived_preorder_is_packaging_in_leo_even_if_kaspi_candidate_is_unchanged() -> None:
+    # A preorder marked as arrived may still retain the coarse Kaspi candidate.
+    # LEO closes the internal waiting stage when the linked purchase is received.
     payload = _payload(
         status="ACCEPTED_BY_MERCHANT",
         preOrder=True,
@@ -93,6 +91,10 @@ def test_packaging_candidate_can_share_same_kaspi_flags_as_preorder() -> None:
     )
 
     assert _normalized(payload) == "accepted"
+    assert _order(
+        status="accepted",
+        line=_line(purchase_request_id="purchase-1", purchase_status="received"),
+    ).stage == CommerceOrderStage.ASSEMBLY
 
 
 def test_normal_merchant_acceptance_is_packaging() -> None:
@@ -180,15 +182,15 @@ def test_cancelled_completed_and_returned_are_authoritative() -> None:
     assert _normalized(_payload(status="KASPI_DELIVERY_RETURN_REQUESTED")) == "returned"
 
 
-def test_procurement_state_does_not_rewrite_customer_order_stage() -> None:
-    preorder_with_received_purchase = _order(
+def test_arrival_fact_only_advances_preorder_and_never_rewrites_physical_kaspi_stage() -> None:
+    arrived_preorder = _order(
         status="accepted",
         line=_line(purchase_request_id="pr-1", purchase_status="received"),
     )
-    assembly_with_requested_purchase = _order(
-        status="assembly",
+    shipping_with_requested_purchase = _order(
+        status="shipping",
         line=_line(purchase_request_id="pr-2", purchase_status="requested"),
     )
 
-    assert preorder_with_received_purchase.stage == CommerceOrderStage.PREORDER
-    assert assembly_with_requested_purchase.stage == CommerceOrderStage.ASSEMBLY
+    assert arrived_preorder.stage == CommerceOrderStage.ASSEMBLY
+    assert shipping_with_requested_purchase.stage == CommerceOrderStage.SHIPPING
