@@ -97,6 +97,7 @@ const render = (data, action) => {
 };
 
 const responseError = async (response) => { if ([502,503,504].includes(response.status)) return new Error("Сервис Render временно недоступен или перезапускается. Подождите минуту и нажмите «Обновить»."); try { const body = await response.json(); if (body.detail) return new Error(String(body.detail)); } catch {} return new Error(`API вернул ошибку ${response.status}`); };
+const isNotFound = (response) => response.status === 404;
 
 const loadDetail = async () => {
   const token = localStorage.getItem(storageKey); if (!token) { authPanel.classList.remove("hidden"); detailPage.classList.add("hidden"); return; }
@@ -109,7 +110,7 @@ const loadDetail = async () => {
       fetch(`/api/actions/products/${productId}`, {headers,cache:"no-store"}),
     ]);
     if (detailResponse.status === 401 || actionResponse.status === 401) { localStorage.removeItem(storageKey); authPanel.classList.remove("hidden"); detailPage.classList.add("hidden"); message.textContent = "Токен не принят. Проверьте SERVICE_API_TOKEN."; return; }
-    if (detailResponse.status === 404) throw new Error("Товар не найден.");
+    if (isNotFound(detailResponse) || isNotFound(actionResponse)) throw new Error("Товар не найден.");
     if (!detailResponse.ok) throw await responseError(detailResponse);
     if (!actionResponse.ok) throw await responseError(actionResponse);
     render(await detailResponse.json(), await actionResponse.json());
