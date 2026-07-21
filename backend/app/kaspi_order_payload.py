@@ -7,12 +7,14 @@ from typing import Any
 # derives the visible operational stage only from facts confirmed by the seller
 # cabinet/API:
 # - terminal lifecycle statuses (cancelled, returned, completed) are authoritative;
-# - a non-null kaspiDelivery.courierTransmissionDate means the parcel was
-#   physically handed to Kaspi logistics;
 # - preOrder=true means the seller is still waiting for the preorder item;
-# - assembled=true with no actual courier transmission means the parcel is ready
-#   for handover;
-# - normal merchant acceptance means packing/assembly.
+# - a non-null kaspiDelivery.courierTransmissionDate means the parcel was
+#   physically handed to Kaspi logistics, but only after preorder has ended;
+# - accepted merchant orders that are neither preorder nor shipped are packaging.
+#
+# The assembled flag is deliberately not used as a standalone stage signal. A
+# verified Kaspi packaging order may already expose assembled=true, so promoting
+# it to HANDOVER would misclassify real seller-cabinet data.
 _STATUS_TO_IMPORT_TOKEN: dict[str, str] = {
     "NEW": "NEW",
     "SIGN_REQUIRED": "NEW",
@@ -70,35 +72,37 @@ def _operational_token(attributes: dict[str, Any], source_status: str) -> str:
     ):
         return "DELIVERED"
 
-    # This is the exact seller-cabinet fact for "Передан курьеру". It must be
-    # evaluated before preOrder/assembled because Kaspi may keep both flags true
-    # after the parcel has already left the seller.
-    courier_transmission_date = _nested_value(
-        attributes,
-        "kaspiDelivery",
-        "courierTransmissionDate",
-    )
-    if courier_transmission_date not in (None, ""):
-        return "SHIPPING"
-
-    # Keep support for explicit/legacy shipment fields returned by other Kaspi
-    # payload variants, but never treat a planning date as an actual handover.
-    if source_status in {"SHIPPING", "HANDED_OVER_TO_COURIER"} or _has_value(
-        attributes,
-        "shipmentDate",
-        "shippedAt",
-        "actualShipmentDate",
-        "handoverDate",
-        "handedOverAt",
-    ):
-        return "SHIPPING"
-
     if source_status == "ACCEPTED_BY_MERCHANT":
+        # Verified seller-cabinet fact: preorder must remain preorder even when
+        # Kaspi has already populated technical transmission-related dates.
         if attributes.get("preOrder") is True:
             return "ACCEPTED_BY_MERCHANT"
-        if attributes.get("assembled") is True:
-            return "HANDOVER"
+
+        courier_transmission_date = _nested_value(
+            attributes,
+            "kaspiDelivery",
+            "courierTransmissionDate",
+        )
+        if courier_transmission_date not in (None, ""):
+            return "SHIPPING"
+
+        if _has_value(
+            attributes,
+            "shipmentDate",
+            "shippedAt",
+            "actualShipmentDate",
+            "handoverDate",
+            "handedOverAt",
+        ):
+            return "SHIPPING"
+
+        # assembled is retained in the raw payload for diagnostics but is not a
+        # safe standalone stage discriminator. Verified packaging orders may
+        # expose assembled=true.
         return "ASSEMBLY"
+
+    if source_status in {"SHIPPING", "HANDED_OVER_TO_COURIER"}:
+        return "SHIPPING"
 
     return _STATUS_TO_IMPORT_TOKEN.get(source_status, "UNKNOWN")
 
