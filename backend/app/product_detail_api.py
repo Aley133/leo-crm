@@ -12,6 +12,7 @@ from .auth import require_service_token
 from .db import get_db
 from .models import MarketplaceOrder, MarketplaceOrderLine, Product
 from .monitoring import MonitorTarget, SupplierOfferObservation, SupplierOfferState
+from .supplier_intelligence import BestOfferEngine, SupplierCandidate, SupplierScore
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
@@ -72,11 +73,27 @@ class ProductObservationRead(BaseModel):
     created_at: datetime
 
 
+class SupplierScoreRead(BaseModel):
+    binding_id: int
+    supplier_product_id: int
+    supplier_code: str
+    supplier_name: str
+    price_score: Decimal
+    delivery_score: Decimal
+    preference_score: Decimal
+    freshness_score: Decimal
+    total_score: Decimal
+    eligible: bool
+    reasons: list[str]
+
+
 class ProductDetailResponse(BaseModel):
     product: ProductDetailHeader
     sales: ProductSalesSummary
     bindings: list[ProductBindingDetail]
     observations: list[ProductObservationRead]
+    best_offer: SupplierScoreRead | None
+    supplier_scores: list[SupplierScoreRead]
 
 
 router = APIRouter(
@@ -84,6 +101,22 @@ router = APIRouter(
     tags=["product-detail"],
     dependencies=[Depends(require_service_token)],
 )
+
+
+def _score_read(score: SupplierScore) -> SupplierScoreRead:
+    return SupplierScoreRead(
+        binding_id=score.binding_id,
+        supplier_product_id=score.supplier_product_id,
+        supplier_code=score.supplier_code,
+        supplier_name=score.supplier_name,
+        price_score=score.price_score,
+        delivery_score=score.delivery_score,
+        preference_score=score.preference_score,
+        freshness_score=score.freshness_score,
+        total_score=score.total_score,
+        eligible=score.eligible,
+        reasons=list(score.reasons),
+    )
 
 
 @router.get("/{product_id}/detail", response_model=ProductDetailResponse)
@@ -156,7 +189,8 @@ def get_product_detail(
             for observation, supplier_code in observation_rows
         ]
 
-    bindings = []
+    bindings: list[ProductBindingDetail] = []
+    candidates: list[SupplierCandidate] = []
     for binding, supplier_product, supplier, monitor_target, state in binding_rows:
         bindings.append(
             ProductBindingDetail(
@@ -183,6 +217,24 @@ def get_product_detail(
                 last_checked_at=None if state is None else state.last_checked_at,
             )
         )
+        candidates.append(
+            SupplierCandidate(
+                binding_id=binding.id,
+                supplier_product_id=supplier_product.id,
+                supplier_code=supplier.code,
+                supplier_name=supplier.name,
+                price=None if state is None else state.price,
+                currency=None if state is None else state.currency,
+                available=None if state is None else state.available,
+                delivery_days=None if state is None else state.delivery_days,
+                is_primary=binding.is_primary,
+                priority=binding.priority,
+                last_checked_at=None if state is None else state.last_checked_at,
+            )
+        )
+
+    decision = BestOfferEngine.decide(candidates)
+    score_rows = [_score_read(score) for score in decision.ranked]
 
     return ProductDetailResponse(
         product=ProductDetailHeader(
@@ -203,4 +255,6 @@ def get_product_detail(
         ),
         bindings=bindings,
         observations=observations,
+        best_offer=None if decision.best is None else _score_read(decision.best),
+        supplier_scores=score_rows,
     )
