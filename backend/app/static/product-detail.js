@@ -8,6 +8,7 @@ const refreshButton = document.querySelector("#refresh");
 const bindingsContainer = document.querySelector("#bindings");
 const observationsBody = document.querySelector("#observations-body");
 const bestOfferContainer = document.querySelector("#best-offer");
+const actionCenterContainer = document.querySelector("#action-center");
 const decisionTimelineContainer = document.querySelector("#decision-timeline");
 const supplierDialog = document.querySelector("#supplier-dialog");
 const supplierForm = document.querySelector("#supplier-form");
@@ -24,6 +25,8 @@ const confidenceLabel = (value) => ({high:"Высокая",medium:"Средня�
 const confidenceClass = (value) => value === "high" ? "ok" : value === "medium" ? "warn" : "bad";
 const eventLabel = (value) => ({initial_leader:"Первый лидер",leader_changed:"Смена лидера",leader_reaffirmed:"Лидер сохранился",no_decision:"Решения нет"}[value] || value || "Событие");
 const eventClass = (value) => value === "leader_changed" ? "changed" : value === "no_decision" ? "lost" : value === "initial_leader" ? "initial" : "stable";
+const actionLabel = (value) => ({no_action:"Ничего не менять",switch_supplier:"Смена поставщика",manual_review:"Ручная проверка",collect_more_data:"Нужно больше данных",no_available_offer:"Нет предложения"}[value] || value || "Рекомендация");
+const actionClass = (value) => ({success:"success",info:"info",warning:"warning",critical:"critical"}[value] || "info");
 const productId = Number(location.pathname.split("/").filter(Boolean).at(-1));
 
 const setText = (id, value) => { const element = document.querySelector(`#${id}`); if (element) element.textContent = String(value ?? 0); };
@@ -42,6 +45,16 @@ const renderBestOffer = (bestOffer, decision, bindings) => {
   const warnings = (decision?.warnings || []).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
   const challenger = decision?.runner_up ? `${escapeHtml(decision.runner_up.supplier_name)} · ${Number(decision.runner_up.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}` : "Нет второго доступного предложения";
   bestOfferContainer.innerHTML = `<div><span>Поставщик</span><strong>${escapeHtml(binding.supplier_name)}</strong><small>${escapeHtml(binding.supplier_code)}</small></div><div><span>Рейтинг предложения</span><strong>${Number(bestOffer.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})} / 100</strong><small>цена ${bestOffer.price_score} · доставка ${bestOffer.delivery_score}</small></div><div><span>Уверенность</span><strong><span class="badge ${confidenceClass(decision?.confidence)}">${confidenceLabel(decision?.confidence)}</span></strong><small>${decision?.score_gap == null ? "разрыв не рассчитан" : `разрыв ${Number(decision.score_gap).toLocaleString("ru-RU", {maximumFractionDigits:2})} балла`}</small></div><div><span>Ближайший конкурент</span><strong>${challenger}</strong><small>доступных предложений: ${Number(decision?.eligible_count || 0)}</small></div><div><span>Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<small>было ${money(binding.old_price, binding.currency)}</small>` : ""}</div><div><span>Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><small>${escapeHtml(binding.seller || "продавец не указан")}</small></div><div class="decision-reasons"><span>Почему выбран</span><ul>${reasons}</ul></div>${warnings ? `<div class="decision-warnings"><span>Ограничения решения</span><ul>${warnings}</ul></div>` : ""}<a class="button secondary" href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть поставщика</a>`;
+};
+
+const renderActionCenter = (action) => {
+  const empty = document.querySelector("#action-center-empty");
+  if (!action) { actionCenterContainer.innerHTML = ""; empty.classList.remove("hidden"); return; }
+  empty.classList.add("hidden");
+  const reasons = (action.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("");
+  const target = action.target_supplier_name ? `<div><span>Целевой поставщик</span><strong>${escapeHtml(action.target_supplier_name)}</strong><small>${escapeHtml(action.target_supplier_code || "")}</small></div>` : "";
+  const gap = action.score_gap == null ? "—" : Number(action.score_gap).toLocaleString("ru-RU", {maximumFractionDigits:2});
+  actionCenterContainer.innerHTML = `<article class="action-card ${actionClass(action.severity)}"><div class="action-status"><span class="action-kind">${actionLabel(action.kind)}</span><h3>${escapeHtml(action.title)}</h3><p>${escapeHtml(action.summary)}</p></div>${target}<div><span>Разрыв рейтинга</span><strong>${gap}</strong><small>${action.auto_apply_allowed ? "Автоприменение разрешено" : "Только рекомендация"}</small></div><div class="action-reasons"><span>Основание</span><ul>${reasons}</ul></div><div class="action-safety"><strong>Автоматические действия отключены</strong><small>CRM пока ничего не меняет в XML и привязках без подтверждённой Pricing Policy.</small></div></article>`;
 };
 
 const renderDecisionTimeline = (entries) => {
@@ -74,13 +87,13 @@ const renderObservations = (observations) => {
   document.querySelector("#observations-empty").classList.toggle("hidden", observations.length > 0);
 };
 
-const render = (data) => {
+const render = (data, action) => {
   const { product, sales, bindings, observations, best_offer: bestOffer, supplier_scores: supplierScores, best_offer_decision: bestOfferDecision, decision_timeline: decisionTimeline } = data;
   setText("product-name", product.name); setText("product-meta", `Kaspi ${product.kaspi_product_id}${product.brand ? ` · ${product.brand}` : ""}${product.merchant_sku ? ` · SKU ${product.merchant_sku}` : ""}`);
   setText("kaspi-product-id", product.kaspi_product_id); setText("merchant-sku", product.merchant_sku || "—"); setText("product-brand", product.brand || "—"); setText("product-status", statusLabel(product.status)); setText("product-updated-at", `Обновлено в CRM ${dateTime(product.updated_at)}`);
   setText("units-sold", Number(sales.units_sold || 0).toLocaleString("ru-RU")); setText("orders-count", `строк заказов: ${Number(sales.orders_count || 0).toLocaleString("ru-RU")}`); setText("revenue-kzt", money(sales.revenue_kzt)); setText("last-ordered-at", `последняя продажа: ${dateTime(sales.last_ordered_at)}`);
   setText("bindings-count", bindings.length); setText("observations-count", observations.length); setText("available-count", bindings.filter((item) => item.available === true).length); setText("failures-count", bindings.filter((item) => item.consecutive_failures > 0).length); setText("updated-at", `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`);
-  renderBestOffer(bestOffer, bestOfferDecision, bindings); renderDecisionTimeline(decisionTimeline); renderBindings(bindings, supplierScores); renderObservations(observations); authPanel.classList.add("hidden"); detailPage.classList.remove("hidden");
+  renderBestOffer(bestOffer, bestOfferDecision, bindings); renderActionCenter(action); renderDecisionTimeline(decisionTimeline); renderBindings(bindings, supplierScores); renderObservations(observations); authPanel.classList.add("hidden"); detailPage.classList.remove("hidden");
 };
 
 const responseError = async (response) => { if ([502,503,504].includes(response.status)) return new Error("Сервис Render временно недоступен или перезапускается. Подождите минуту и нажмите «Обновить»."); try { const body = await response.json(); if (body.detail) return new Error(String(body.detail)); } catch {} return new Error(`API вернул ошибку ${response.status}`); };
@@ -89,7 +102,18 @@ const loadDetail = async () => {
   const token = localStorage.getItem(storageKey); if (!token) { authPanel.classList.remove("hidden"); detailPage.classList.add("hidden"); return; }
   if (!Number.isInteger(productId) || productId <= 0) { message.textContent = "Некорректный идентификатор товара."; return; }
   setLoading(true); message.textContent = "";
-  try { const response = await fetch(`/api/products/${productId}/detail?observation_limit=100`, {headers:{Authorization:`Bearer ${token}`},cache:"no-store"}); if (response.status === 401) { localStorage.removeItem(storageKey); authPanel.classList.remove("hidden"); detailPage.classList.add("hidden"); message.textContent = "Токен не принят. Проверьте SERVICE_API_TOKEN."; return; } if (response.status === 404) throw new Error("Товар не найден."); if (!response.ok) throw await responseError(response); render(await response.json()); } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось загрузить карточку товара."; } finally { setLoading(false); }
+  try {
+    const headers = {Authorization:`Bearer ${token}`};
+    const [detailResponse, actionResponse] = await Promise.all([
+      fetch(`/api/products/${productId}/detail?observation_limit=100`, {headers,cache:"no-store"}),
+      fetch(`/api/actions/products/${productId}`, {headers,cache:"no-store"}),
+    ]);
+    if (detailResponse.status === 401 || actionResponse.status === 401) { localStorage.removeItem(storageKey); authPanel.classList.remove("hidden"); detailPage.classList.add("hidden"); message.textContent = "Токен не принят. Проверьте SERVICE_API_TOKEN."; return; }
+    if (detailResponse.status === 404) throw new Error("Товар не найден.");
+    if (!detailResponse.ok) throw await responseError(detailResponse);
+    if (!actionResponse.ok) throw await responseError(actionResponse);
+    render(await detailResponse.json(), await actionResponse.json());
+  } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось загрузить карточку товара."; } finally { setLoading(false); }
 };
 
 const closeSupplierDialog = () => supplierDialog.close();
