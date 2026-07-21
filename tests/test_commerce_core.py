@@ -1,7 +1,12 @@
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from backend.app.commerce.domain import CommerceOrder, CommerceOrderLine, ProcurementState
+from backend.app.commerce.domain import (
+    CommerceOrder,
+    CommerceOrderLine,
+    CommerceOrderStage,
+    ProcurementState,
+)
 from backend.app.commerce.service import CommerceService
 
 
@@ -20,7 +25,7 @@ def _line(*, product_id=1, purchase_request_id=None, purchase_status=None):
     )
 
 
-def _order(*, status="new", lines=()):
+def _order(*, status="new", lines=(), original_status="NEW"):
     return CommerceOrder(
         order_id=1,
         external_code="996801988",
@@ -31,6 +36,7 @@ def _order(*, status="new", lines=()):
         ordered_at=datetime(2026, 7, 21, tzinfo=UTC),
         delivered_at=None,
         lines=tuple(lines),
+        original_status=original_status,
     )
 
 
@@ -60,6 +66,29 @@ def test_existing_purchase_is_reported_as_in_progress_or_received() -> None:
         purchase_request_id="purchase-1",
         purchase_status="received",
     ).procurement_state == ProcurementState.RECEIVED
+
+
+def test_accepted_order_with_missing_stock_becomes_preorder() -> None:
+    order = _order(status="accepted", lines=(_line(),), original_status="ACCEPTED_BY_MERCHANT")
+
+    assert order.stage == CommerceOrderStage.PREORDER
+
+
+def test_received_procurement_moves_accepted_order_to_assembly() -> None:
+    order = _order(
+        status="accepted",
+        lines=(_line(purchase_request_id="purchase-1", purchase_status="received"),),
+        original_status="ACCEPTED_BY_MERCHANT",
+    )
+
+    assert order.stage == CommerceOrderStage.ASSEMBLY
+
+
+def test_shipping_and_delivered_states_are_authoritative() -> None:
+    line = _line()
+
+    assert _order(status="shipping", lines=(line,)).stage == CommerceOrderStage.SHIPPING
+    assert _order(status="delivered", lines=(line,)).stage == CommerceOrderStage.DELIVERED
 
 
 def test_commerce_summary_separates_active_delivered_and_cancelled_orders() -> None:
