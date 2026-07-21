@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Any
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
 
@@ -12,13 +14,14 @@ from .kaspi_integration import (
     get_kaspi_integration_status,
 )
 from .marketplace_full_sync import sync_kaspi_orders
+from .marketplace_import import normalize_kaspi_order
 from .marketplace_sync import sync_kaspi_order_page
 from .models import MarketplaceImportCheckpoint
 
 
 router = APIRouter(
     prefix="/api/marketplaces/kaspi",
-    tags=["marketplaces", "kaspi"],
+    tags=["kaspi"],
     dependencies=[Depends(require_service_token)],
 )
 
@@ -40,6 +43,88 @@ def _bootstrap_live_import():
             account = ensure_kaspi_marketplace_account(session)
             marketplace_account_id = account.id
     return transport, marketplace_account_id
+
+
+def _diagnostic_attributes(payload: dict[str, Any]) -> dict[str, Any]:
+    attributes = payload.get("attributes")
+    if not isinstance(attributes, dict):
+        return {}
+    return {
+        key: value
+        for key, value in attributes.items()
+        if key != "entries"
+    }
+
+
+@router.get("/orders/diagnostics/raw-page")
+def inspect_raw_order_page(
+    page_number: int = Query(default=1, ge=1, le=1000),
+    limit: int = Query(default=10, ge=1, le=50),
+) -> dict[str, Any]:
+    """Inspect one live Kaspi page without importing or advancing checkpoints.
+
+    The endpoint deliberately exposes source attributes and the current LEO
+    normalization side by side. It is an authenticated diagnostic surface for
+    proving which seller-cabinet facts are actually present in the Orders API.
+    """
+    try:
+        transport, marketplace_account_id = _bootstrap_live_import()
+    except KaspiConfigurationError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=str(exc),
+        ) from exc
+
+    try:
+        page = transport.fetch_orders(
+            cursor=str(page_number),
+            updated_after=None,
+            limit=limit,
+        )
+    except KaspiTransportError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=str(exc),
+        ) from exc
+    finally:
+        transport.close()
+
+    items: list[dict[str, Any]] = []
+    for payload in page.items:
+        attributes = _diagnostic_attributes(payload)
+        normalized = normalize_kaspi_order(payload)
+        date_like_fields = {
+            key: value
+            for key, value in attributes.items()
+            if any(marker in key.lower() for marker in ("date", "time", "arrival", "shipment", "delivery", "reservation"))
+        }
+        items.append(
+            {
+                "id": payload.get("id"),
+                "code": attributes.get("code") or attributes.get("orderCode"),
+                "source_status": attributes.get("status") or attributes.get("orderStatus"),
+                "source_state": attributes.get("state") or attributes.get("fulfillmentState"),
+                "attribute_keys": sorted(attributes.keys()),
+                "date_like_fields": date_like_fields,
+                "source_attributes": attributes,
+                "entries_count": len(
+                    payload.get("attributes", {}).get("entries", [])
+                    if isinstance(payload.get("attributes"), dict)
+                    else []
+                ),
+                "leo_normalized_status": normalized.status,
+                "leo_original_status": normalized.original_status,
+            }
+        )
+
+    return {
+        "marketplace_account_id": marketplace_account_id,
+        "page_number": page_number,
+        "fetched_count": len(page.items),
+        "next_cursor": page.next_cursor,
+        "watermark_at": page.watermark_at,
+        "items": items,
+    }
 
 
 @router.post("/orders/sync-page")
