@@ -17,6 +17,8 @@ const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => 
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency || "KZT"}`.trim();
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "Никогда";
 const statusLabel = (status) => ({active:"Активен",draft:"Черновик",paused:"Приостановлен",archived:"Архив"}[status] || status || "—");
+const confidenceLabel = (value) => ({high:"Высокая",medium:"Средняя",low:"Низкая",none:"Нет решения"}[value] || value || "—");
+const confidenceClass = (value) => value === "high" ? "ok" : value === "medium" ? "warn" : "bad";
 const productId = Number(location.pathname.split("/").filter(Boolean).at(-1));
 
 const setText = (id, value) => { const element = document.querySelector(`#${id}`); if (element) element.textContent = String(value ?? 0); };
@@ -25,21 +27,26 @@ const availabilityBadge = (available) => available === true ? '<span class="badg
 const monitorBadge = (binding) => binding.consecutive_failures > 0 ? '<span class="badge bad">Ошибка</span>' : binding.monitor_status === "active" ? '<span class="badge ok">Активен</span>' : binding.monitor_status ? `<span class="badge warn">${escapeHtml(binding.monitor_status)}</span>` : '<span class="badge">Не настроен</span>';
 const scoreByBinding = (scores) => new Map((scores || []).map((score) => [Number(score.binding_id), score]));
 
-const renderBestOffer = (bestOffer, bindings) => {
+const renderBestOffer = (bestOffer, decision, bindings) => {
   const empty = document.querySelector("#best-offer-empty");
   if (!bestOffer) { bestOfferContainer.innerHTML = ""; empty.classList.remove("hidden"); return; }
   const binding = bindings.find((item) => Number(item.binding_id) === Number(bestOffer.binding_id));
   if (!binding) { bestOfferContainer.innerHTML = ""; empty.classList.remove("hidden"); return; }
   empty.classList.add("hidden");
   const reasons = (bestOffer.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("");
-  bestOfferContainer.innerHTML = `<div><span>Поставщик</span><strong>${escapeHtml(binding.supplier_name)}</strong><small>${escapeHtml(binding.supplier_code)}</small></div><div><span>Score</span><strong>${Number(bestOffer.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})} / 100</strong><small>цена ${bestOffer.price_score} · доставка ${bestOffer.delivery_score}</small></div><div><span>Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<small>было ${money(binding.old_price, binding.currency)}</small>` : ""}</div><div><span>Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><small>${escapeHtml(binding.seller || "продавец не указан")}</small></div><div class="decision-reasons"><span>Почему выбран</span><ul>${reasons}</ul></div><a class="button secondary" href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть поставщика</a>`;
+  const warnings = (decision?.warnings || []).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
+  const challenger = decision?.runner_up ? `${escapeHtml(decision.runner_up.supplier_name)} · ${Number(decision.runner_up.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}` : "Нет второго доступного предложения";
+  bestOfferContainer.innerHTML = `<div><span>Поставщик</span><strong>${escapeHtml(binding.supplier_name)}</strong><small>${escapeHtml(binding.supplier_code)}</small></div><div><span>Score</span><strong>${Number(bestOffer.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})} / 100</strong><small>цена ${bestOffer.price_score} · доставка ${bestOffer.delivery_score}</small></div><div><span>Уверенность</span><strong><span class="badge ${confidenceClass(decision?.confidence)}">${confidenceLabel(decision?.confidence)}</span></strong><small>${decision?.score_gap == null ? "разрыв не рассчитан" : `разрыв ${Number(decision.score_gap).toLocaleString("ru-RU", {maximumFractionDigits:2})} балла`}</small></div><div><span>Ближайший конкурент</span><strong>${challenger}</strong><small>доступных предложений: ${Number(decision?.eligible_count || 0)}</small></div><div><span>Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<small>было ${money(binding.old_price, binding.currency)}</small>` : ""}</div><div><span>Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><small>${escapeHtml(binding.seller || "продавец не указан")}</small></div><div class="decision-reasons"><span>Почему выбран</span><ul>${reasons}</ul></div>${warnings ? `<div class="decision-warnings"><span>Ограничения решения</span><ul>${warnings}</ul></div>` : ""}<a class="button secondary" href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть поставщика</a>`;
 };
 
 const renderBindings = (bindings, supplierScores) => {
   const scores = scoreByBinding(supplierScores);
+  const rankedEligible = (supplierScores || []).filter((score) => score.eligible);
+  const rankByBinding = new Map(rankedEligible.map((score, index) => [Number(score.binding_id), index + 1]));
   bindingsContainer.innerHTML = bindings.map((binding) => {
     const score = scores.get(Number(binding.binding_id));
-    const scoreHtml = score ? `<span class="muted">Score ${Number(score.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}${score.eligible ? "" : " · не участвует"}</span>` : "";
+    const rank = rankByBinding.get(Number(binding.binding_id));
+    const scoreHtml = score ? `<span class="muted">${rank ? `Место ${rank} · ` : ""}Score ${Number(score.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}${score.eligible ? "" : " · не участвует"}</span>` : "";
     return `<article class="binding-card"><div class="binding-head"><h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3><a href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть карточку поставщика</a><span class="muted">${escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span>${scoreHtml}</div><div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div><div><span class="label">Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "продавец не указан")}</span></div><div><span class="label">Наличие</span>${availabilityBadge(binding.available)}${binding.stock != null ? `<span class="muted">остаток ${binding.stock}</span>` : ""}</div><div><span class="label">Мониторинг</span>${monitorBadge(binding)}<span class="muted">проверено ${dateTime(binding.last_checked_at)}</span></div></article>`;
   }).join("");
   document.querySelector("#bindings-empty").classList.toggle("hidden", bindings.length > 0);
@@ -51,12 +58,12 @@ const renderObservations = (observations) => {
 };
 
 const render = (data) => {
-  const { product, sales, bindings, observations, best_offer: bestOffer, supplier_scores: supplierScores } = data;
+  const { product, sales, bindings, observations, best_offer: bestOffer, supplier_scores: supplierScores, best_offer_decision: bestOfferDecision } = data;
   setText("product-name", product.name); setText("product-meta", `Kaspi ${product.kaspi_product_id}${product.brand ? ` · ${product.brand}` : ""}${product.merchant_sku ? ` · SKU ${product.merchant_sku}` : ""}`);
   setText("kaspi-product-id", product.kaspi_product_id); setText("merchant-sku", product.merchant_sku || "—"); setText("product-brand", product.brand || "—"); setText("product-status", statusLabel(product.status)); setText("product-updated-at", `Обновлено в CRM ${dateTime(product.updated_at)}`);
   setText("units-sold", Number(sales.units_sold || 0).toLocaleString("ru-RU")); setText("orders-count", `строк заказов: ${Number(sales.orders_count || 0).toLocaleString("ru-RU")}`); setText("revenue-kzt", money(sales.revenue_kzt)); setText("last-ordered-at", `последняя продажа: ${dateTime(sales.last_ordered_at)}`);
   setText("bindings-count", bindings.length); setText("observations-count", observations.length); setText("available-count", bindings.filter((item) => item.available === true).length); setText("failures-count", bindings.filter((item) => item.consecutive_failures > 0).length); setText("updated-at", `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`);
-  renderBestOffer(bestOffer, bindings); renderBindings(bindings, supplierScores); renderObservations(observations); authPanel.classList.add("hidden"); detailPage.classList.remove("hidden");
+  renderBestOffer(bestOffer, bestOfferDecision, bindings); renderBindings(bindings, supplierScores); renderObservations(observations); authPanel.classList.add("hidden"); detailPage.classList.remove("hidden");
 };
 
 const responseError = async (response) => { if ([502,503,504].includes(response.status)) return new Error("Сервис Render временно недоступен или перезапускается. Подождите минуту и нажмите «Обновить»."); try { const body = await response.json(); if (body.detail) return new Error(String(body.detail)); } catch {} return new Error(`API вернул ошибку ${response.status}`); };
