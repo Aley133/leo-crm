@@ -13,10 +13,10 @@ const empty = document.querySelector("#empty");
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
-const stageLabel = (stage) => ({new:"Новый",preorder:"Предзаказ / в пути",assembly:"В сборке",handover:"Передача",shipping:"На доставке",delivered:"Доставлен",cancelled:"Отменён",returned:"Возврат",unknown:"Неизвестно"}[stage] || stage || "—");
-const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelled","returned"].includes(stage) ? "bad" : ["new","preorder","assembly","handover","shipping"].includes(stage) ? "warn" : "";
+const stageLabel = (stage) => ({new:"Новый",accepted:"Принят — ожидает решения по запасу",preorder:"Предзаказ / в пути",assembly:"В сборке",handover:"Передача",shipping:"На доставке",delivered:"Доставлен",cancelled:"Отменён",returned:"Возврат",unknown:"Статус не детализирован"}[stage] || stage || "—");
+const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelled","returned"].includes(stage) ? "bad" : ["new","accepted","preorder","assembly","handover","shipping"].includes(stage) ? "warn" : "";
 const rawStatusLabel = (status) => ({new:"new",accepted:"accepted",assembly:"assembly",shipping:"shipping",delivered:"delivered",cancelled:"cancelled",returned:"returned",unknown:"unknown"}[status] || status || "—");
-const procurementLabel = (state) => ({required:"Нужно закупить",in_progress:"Закупка в работе",received:"Получено",not_required:"Не требуется",unresolved:"Товар не распознан",cancelled:"Закупка отменена"}[state] || state || "—");
+const procurementLabel = (state) => ({required:"Нужно решить закупку/остаток",in_progress:"Закупка в работе",received:"Получено",not_required:"Не требуется",unresolved:"Товар не распознан",cancelled:"Закупка отменена"}[state] || state || "—");
 const procurementClass = (state) => state === "required" ? "procurement-required" : state === "received" ? "procurement-ready" : "";
 
 const headers = () => ({"Authorization": `Bearer ${localStorage.getItem(storageKey) || ""}`});
@@ -50,21 +50,21 @@ const renderLine = (line) => `
     <div><span class="muted">Количество</span><strong>${Number(line.quantity || 0)}</strong></div>
     <div><span class="muted">Цена</span><strong>${money(line.unit_price)}</strong></div>
     <div><span class="muted">Сумма</span><strong>${money(line.line_total)}</strong></div>
-    <div class="${procurementClass(line.procurement_state)}"><span class="muted">Закупка</span><strong>${escapeHtml(procurementLabel(line.procurement_state))}</strong>${line.purchase_status ? `<span class="muted">${escapeHtml(line.purchase_status)}</span>` : ""}</div>
+    <div class="${procurementClass(line.procurement_state)}"><span class="muted">Закупка/остаток</span><strong>${escapeHtml(procurementLabel(line.procurement_state))}</strong>${line.purchase_status ? `<span class="muted">${escapeHtml(line.purchase_status)}</span>` : ""}</div>
   </div>`;
 
 const renderOrder = (order) => {
-  const canCreatePurchase = Number(order.procurement_required_lines || 0) > 0;
+  const canCreatePurchase = Number(order.procurement_required_lines || 0) > 0 && order.operational_stage === "accepted";
   const stage = order.operational_stage || "unknown";
   return `
     <article class="order-card" data-order-id="${order.order_id}">
       <div class="order-header">
         <div><span class="order-number">Заказ №${escapeHtml(order.external_code || order.order_id)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · ${dateTime(order.ordered_at)}</span></div>
-        <div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Kaspi: ${escapeHtml(order.original_status || rawStatusLabel(order.status))}</span></div>
+        <div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Kaspi status: ${escapeHtml(order.original_status || rawStatusLabel(order.status))}</span></div>
         <div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div>
         <div class="order-stat"><span>Сумма</span><strong>${money(order.total_amount, order.currency)}</strong></div>
         <div class="order-stat"><span>Не распознано</span><strong>${Number(order.unresolved_lines || 0)}</strong></div>
-        <div class="order-stat"><span>К закупке</span><strong>${Number(order.procurement_required_lines || 0)}</strong></div>
+        <div class="order-stat"><span>К решению</span><strong>${Number(order.procurement_required_lines || 0)}</strong></div>
       </div>
       <div class="order-lines">${order.lines.map(renderLine).join("")}</div>
       ${canCreatePurchase ? `<div class="order-actions"><button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button></div>` : ""}
