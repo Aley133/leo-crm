@@ -9,7 +9,7 @@ def test_supplier_state_router_is_registered() -> None:
 
     assert "from .supplier_state_api import router as supplier_state_router" in main
     assert "app.include_router(supplier_state_router)" in main
-    assert 'APP_VERSION = "0.13.0"' in main
+    assert 'APP_VERSION = "0.14.0"' in main
     assert 'DEPLOYMENT_MARKER = "supplier-state-control-plane-v1"' in main
 
 
