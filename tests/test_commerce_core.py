@@ -68,8 +68,18 @@ def test_existing_purchase_is_reported_as_in_progress_or_received() -> None:
     ).procurement_state == ProcurementState.RECEIVED
 
 
-def test_accepted_order_with_missing_stock_becomes_preorder() -> None:
+def test_accepted_order_without_stock_evidence_remains_accepted() -> None:
     order = _order(status="accepted", lines=(_line(),), original_status="ACCEPTED_BY_MERCHANT")
+
+    assert order.stage == CommerceOrderStage.ACCEPTED
+
+
+def test_purchase_in_progress_moves_accepted_order_to_preorder() -> None:
+    order = _order(
+        status="accepted",
+        lines=(_line(purchase_request_id="purchase-1", purchase_status="ordered"),),
+        original_status="ACCEPTED_BY_MERCHANT",
+    )
 
     assert order.stage == CommerceOrderStage.PREORDER
 
