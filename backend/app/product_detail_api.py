@@ -87,6 +87,14 @@ class SupplierScoreRead(BaseModel):
     reasons: list[str]
 
 
+class BestOfferDecisionRead(BaseModel):
+    confidence: str
+    score_gap: Decimal | None
+    runner_up: SupplierScoreRead | None
+    warnings: list[str]
+    eligible_count: int
+
+
 class ProductDetailResponse(BaseModel):
     product: ProductDetailHeader
     sales: ProductSalesSummary
@@ -94,6 +102,7 @@ class ProductDetailResponse(BaseModel):
     observations: list[ProductObservationRead]
     best_offer: SupplierScoreRead | None
     supplier_scores: list[SupplierScoreRead]
+    best_offer_decision: BestOfferDecisionRead
 
 
 router = APIRouter(
@@ -257,4 +266,11 @@ def get_product_detail(
         observations=observations,
         best_offer=None if decision.best is None else _score_read(decision.best),
         supplier_scores=score_rows,
+        best_offer_decision=BestOfferDecisionRead(
+            confidence=decision.confidence,
+            score_gap=decision.score_gap,
+            runner_up=None if decision.runner_up is None else _score_read(decision.runner_up),
+            warnings=list(decision.warnings),
+            eligible_count=sum(1 for score in decision.ranked if score.eligible),
+        ),
     )
