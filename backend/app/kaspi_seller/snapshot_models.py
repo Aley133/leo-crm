@@ -22,6 +22,11 @@ class KaspiSellerOrderSnapshotRecord(Base):
         nullable=False,
         index=True,
     )
+    marketplace_account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("marketplace_accounts.id", ondelete="SET NULL"),
+        nullable=True,
+        index=True,
+    )
     previous_snapshot_id: Mapped[int | None] = mapped_column(
         ForeignKey("kaspi_seller_order_snapshots.id", ondelete="SET NULL"),
         nullable=True,
