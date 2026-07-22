@@ -20,11 +20,24 @@ GET_ORDER_DETAILS_QUERY = """
 query getOrderDetails(
   $merchantUid: String!
   $orderCode: String!
+  $skipCustomerPhone: Boolean! = false
 ) {
   merchant(id: $merchantUid) {
     id
     orderDetail(code: $orderCode) {
       code
+      customer {
+        phoneNumber @skip(if: $skipCustomerPhone)
+        lastName
+        firstName
+        __typename
+      }
+      recipient {
+        phoneNumber @skip(if: $skipCustomerPhone)
+        lastName
+        firstName
+        __typename
+      }
       state
       status
       preOrder
