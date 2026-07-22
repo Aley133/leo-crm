@@ -99,10 +99,12 @@ def classify_kaspi_order_details(
 
     if status == "CANCELLING":
         return KaspiOrderClassification("cancelling", order_type, "kaspi_status")
-    if status == "CANCELLED":
+    if status in {"CANCELLED", "CANCELED"}:
         return KaspiOrderClassification("cancelled", order_type, "kaspi_status")
-    if status == "COMPLETED":
+    if status in {"COMPLETED", "DELIVERED", "ARCHIVED"}:
         return KaspiOrderClassification("delivered", order_type, "kaspi_status")
+    if status in {"RETURNED", "KASPI_DELIVERY_RETURN_REQUESTED"}:
+        return KaspiOrderClassification("returned", order_type, "kaspi_status")
 
     delivery_cost = _number(attributes.get("deliveryCostForSeller"))
     if delivery_cost <= 0:
