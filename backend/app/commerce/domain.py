@@ -5,6 +5,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from .decision_engine import CommerceOrderStage, OrderDecisionEngine, OrderDecisionFacts
+
 
 class ProcurementState(StrEnum):
     NOT_REQUIRED = "not_required"
@@ -12,53 +14,6 @@ class ProcurementState(StrEnum):
     IN_PROGRESS = "in_progress"
     RECEIVED = "received"
     CANCELLED = "cancelled"
-
-
-class CommerceOrderStage(StrEnum):
-    NEW = "new"
-    ACCEPTED = "accepted"
-    PREORDER = "preorder"
-    IN_TRANSIT = "in_transit"
-    ASSEMBLY = "assembly"
-    HANDOVER = "handover"
-    SHIPPING = "shipping"
-    DELIVERED = "delivered"
-    CANCELLED = "cancelled"
-    RETURNED = "returned"
-    UNKNOWN = "unknown"
-
-
-SNAPSHOT_STAGE_MAP: dict[str, CommerceOrderStage] = {
-    "NEW": CommerceOrderStage.NEW,
-    "ACCEPTED": CommerceOrderStage.ACCEPTED,
-    "ACCEPTED_BY_MERCHANT": CommerceOrderStage.ACCEPTED,
-    "PREORDER": CommerceOrderStage.PREORDER,
-    "PRE_ORDER": CommerceOrderStage.PREORDER,
-    "IN_TRANSIT": CommerceOrderStage.IN_TRANSIT,
-    "ASSEMBLY": CommerceOrderStage.ASSEMBLY,
-    "PACKING": CommerceOrderStage.ASSEMBLY,
-    "PACKAGING": CommerceOrderStage.ASSEMBLY,
-    "HANDOVER": CommerceOrderStage.HANDOVER,
-    "READY_FOR_HANDOVER": CommerceOrderStage.HANDOVER,
-    "TRANSFER": CommerceOrderStage.HANDOVER,
-    "SHIPPING": CommerceOrderStage.SHIPPING,
-    "DELIVERY": CommerceOrderStage.SHIPPING,
-    "KASPI_DELIVERY": CommerceOrderStage.SHIPPING,
-    "DELIVERED": CommerceOrderStage.DELIVERED,
-    "CANCELLED": CommerceOrderStage.CANCELLED,
-    "CANCELED": CommerceOrderStage.CANCELLED,
-    "RETURNED": CommerceOrderStage.RETURNED,
-}
-
-
-NO_NEW_PROCUREMENT_STAGES = {
-    CommerceOrderStage.ASSEMBLY,
-    CommerceOrderStage.HANDOVER,
-    CommerceOrderStage.SHIPPING,
-    CommerceOrderStage.DELIVERED,
-    CommerceOrderStage.CANCELLED,
-    CommerceOrderStage.RETURNED,
-}
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,7 +68,13 @@ class CommerceOrder:
     marketplace_account_id: int | None = None
     marketplace_external_account_id: str | None = None
     snapshot_stage: str | None = None
+    snapshot_state: str | None = None
+    snapshot_status: str | None = None
     snapshot_observed_at: datetime | None = None
+    snapshot_assembled: bool | None = None
+    snapshot_transmitted_to_courier: bool | None = None
+    snapshot_arrived_at_pickup: bool | None = None
+    snapshot_returned_to_warehouse: bool | None = None
 
     @property
     def units(self) -> int:
@@ -123,27 +84,18 @@ class CommerceOrder:
     def unresolved_lines(self) -> int:
         return sum(1 for line in self.lines if not line.is_resolved)
 
-    def effective_procurement_state(self, line: CommerceOrderLine) -> ProcurementState:
-        """Return the state that must be shown in Orders Center.
-
-        A line without a purchase request is only actionable while the order can
-        still wait for procurement. Once Kaspi has moved the order to packing,
-        handover, shipping or a terminal stage, showing "required" is misleading.
-        Existing purchase facts remain visible as received/in progress/cancelled.
-        """
-
-        state = line.procurement_state
-        if state == ProcurementState.REQUIRED and self.stage in NO_NEW_PROCUREMENT_STAGES:
-            return ProcurementState.NOT_REQUIRED
-        return state
-
     @property
     def procurement_required_lines(self) -> int:
-        return sum(
-            1
-            for line in self.lines
-            if self.effective_procurement_state(line) == ProcurementState.REQUIRED
-        )
+        if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.ACCEPTED, CommerceOrderStage.PREORDER}:
+            return 0
+        return sum(1 for line in self.lines if line.procurement_state == ProcurementState.REQUIRED)
+
+    def effective_procurement_state(self, line: CommerceOrderLine) -> ProcurementState:
+        if line.procurement_state != ProcurementState.REQUIRED:
+            return line.procurement_state
+        if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.ACCEPTED, CommerceOrderStage.PREORDER}:
+            return ProcurementState.NOT_REQUIRED
+        return ProcurementState.REQUIRED
 
     @property
     def has_preorder_request(self) -> bool:
@@ -168,40 +120,28 @@ class CommerceOrder:
         return self.total_amount
 
     @property
+    def decision_facts(self) -> OrderDecisionFacts:
+        return OrderDecisionFacts(
+            marketplace_status=self.status or self.original_status,
+            snapshot_stage=self.snapshot_stage,
+            snapshot_state=self.snapshot_state,
+            snapshot_status=self.snapshot_status,
+            assembled=self.snapshot_assembled,
+            transmitted_to_courier=self.snapshot_transmitted_to_courier,
+            arrived_at_pickup=self.snapshot_arrived_at_pickup,
+            returned_to_warehouse=self.snapshot_returned_to_warehouse,
+            has_lines=bool(self.lines),
+            all_procurement_received=self.all_procurement_received,
+            has_procurement_in_progress=self.has_procurement_in_progress,
+        )
+
+    @property
     def stage_source(self) -> str:
-        if self.snapshot_stage and self.snapshot_stage.strip().upper() in SNAPSHOT_STAGE_MAP:
-            return "snapshot"
-        return "marketplace_order"
+        return OrderDecisionEngine.source(self.decision_facts)
 
     @property
     def stage(self) -> CommerceOrderStage:
-        if self.snapshot_stage:
-            snapshot_stage = SNAPSHOT_STAGE_MAP.get(self.snapshot_stage.strip().upper())
-            if snapshot_stage is not None:
-                return snapshot_stage
-
-        normalized_status = self.status.strip().lower()
-        if normalized_status in {"cancelled", "canceled"}:
-            return CommerceOrderStage.CANCELLED
-        if normalized_status == "returned":
-            return CommerceOrderStage.RETURNED
-        if normalized_status == "delivered":
-            return CommerceOrderStage.DELIVERED
-        if normalized_status in {"shipping", "delivery", "kaspi_delivery"}:
-            return CommerceOrderStage.SHIPPING
-        if normalized_status in {"handover", "ready_for_handover", "transfer"}:
-            return CommerceOrderStage.HANDOVER
-        if normalized_status in {"assembly", "packing", "packaging"}:
-            return CommerceOrderStage.ASSEMBLY
-        if normalized_status == "new":
-            return CommerceOrderStage.NEW
-        if normalized_status in {"preorder", "pre_order"}:
-            return CommerceOrderStage.PREORDER
-        if normalized_status in {"accepted", "accepted_by_merchant"}:
-            if self.all_procurement_received:
-                return CommerceOrderStage.ASSEMBLY
-            return CommerceOrderStage.PREORDER
-        return CommerceOrderStage.UNKNOWN
+        return OrderDecisionEngine.decide(self.decision_facts)
 
 
 @dataclass(frozen=True, slots=True)
