@@ -127,6 +127,10 @@ def test_browser_adapter_executes_state_and_details_graphql() -> None:
     assert result["details_response"]["data"]["merchant"]["orderDetail"]["delivery"][
         "kdAssembled"
     ] is True
+    assert result["snapshot"]["order_code"] == "1006480798"
+    assert result["snapshot"]["stage"] == "HANDOVER"
+    assert result["snapshot"]["delivery"]["assembled"] is True
+    assert result["snapshot"]["delivery"]["transmitted_to_courier"] is False
 
 
 def test_details_query_uses_live_union_and_phone_skip_contract() -> None:
