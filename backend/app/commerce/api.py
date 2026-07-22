@@ -139,6 +139,11 @@ def list_commerce_orders(
                         purchase_status=line.purchase_status,
                         purchase_version=line.purchase_version,
                         procurement_state=order.effective_procurement_state(line).value,
+                        procurement_unit_cost=line.procurement_unit_cost,
+                        procurement_total_cost=line.procurement_total_cost,
+                        procurement_source_name=line.procurement_source_name,
+                        gross_margin=line.gross_margin,
+                        gross_margin_pct=line.gross_margin_pct,
                     )
                     for line in order.lines
                 ],
