@@ -61,7 +61,14 @@ class OrderDecisionEngine:
             return CommerceOrderStage.SHIPPING
         if facts.assembled is True and facts.transmitted_to_courier is not True:
             return CommerceOrderStage.HANDOVER
-        if cls._contains(tokens, "HANDOVER", "READY_FOR_HANDOVER", "WAIT_FOR_COURIER", "ASSEMBLED"):
+        if cls._contains(
+            tokens,
+            "HANDOVER",
+            "READY_FOR_HANDOVER",
+            "WAIT_FOR_COURIER",
+            "ASSEMBLED",
+            "TRANSFER",
+        ):
             return CommerceOrderStage.HANDOVER
         if cls._contains(tokens, "ASSEMBLY", "PACKING", "PACKAGING"):
             return CommerceOrderStage.ASSEMBLY
@@ -106,9 +113,11 @@ class OrderDecisionEngine:
             "PACKING",
             "PACKAGING",
             "HANDOVER",
+            "TRANSFER",
             "WAIT_FOR_COURIER",
             "ASSEMBLED",
             "PREORDER",
+            "PRE_ORDER",
         )
         if known_snapshot or any(
             value is not None
