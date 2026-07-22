@@ -9,7 +9,6 @@ from ..browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from ..db import SessionLocal, get_db
 from ..kaspi_http_transport import KaspiConfigurationError, KaspiTransportError
 from ..kaspi_integration import build_kaspi_order_transport, ensure_kaspi_marketplace_account
-from ..kaspi_order_dispatch import dispatch_recent_kaspi_orders
 from ..marketplace_full_sync import sync_kaspi_orders
 from ..models import MarketplaceImportCheckpoint
 from .repository import SqlAlchemyCommerceRepository
@@ -20,17 +19,8 @@ router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depe
 
 
 @router.post("/orders/rebuild")
-def rebuild_kaspi_orders(
-    days: int = Query(default=7, ge=1, le=30),
-) -> dict[str, object]:
-    """Re-import a bounded Kaspi API window and queue one finite Seller scan batch.
-
-    Manual rebuild is an explicit operator action. To guarantee that the local
-    Browser Agent sees this finite Kaspi batch immediately, all *queued* jobs are
-    discarded before the batch is created. A currently leased/running supplier
-    job is never interrupted. Supplier monitoring will recreate its due jobs on
-    the next normal dispatch cycle.
-    """
+def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
+    """Reload official Kaspi Orders API data. Browser Agent is not involved."""
 
     try:
         transport = build_kaspi_order_transport()
@@ -51,32 +41,26 @@ def rebuild_kaspi_orders(
                 if checkpoint is not None:
                     session.delete(checkpoint)
 
+                # Remove only obsolete Kaspi-order jobs from the abandoned attempt.
+                session.execute(
+                    delete(BrowserAgentJob).where(
+                        BrowserAgentJob.status == BrowserAgentJobStatus.QUEUED.value,
+                        BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%"),
+                    )
+                )
+
         sync_result = sync_kaspi_orders(
             SessionLocal,
             transport,
             marketplace_account_id=marketplace_account_id,
             page_size=100,
-            max_pages=20,
-            max_duration_seconds=60,
+            max_pages=31,
+            max_duration_seconds=120,
         )
     except KaspiTransportError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
     finally:
         transport.close()
-
-    with SessionLocal() as session:
-        try:
-            purge_result = session.execute(
-                delete(BrowserAgentJob).where(
-                    BrowserAgentJob.status == BrowserAgentJobStatus.QUEUED.value,
-                )
-            )
-            cleared_queued_jobs = int(purge_result.rowcount or 0)
-            dispatch_result = dispatch_recent_kaspi_orders(session, days=days, limit=5000)
-            session.commit()
-        except Exception:
-            session.rollback()
-            raise
 
     return {
         "days": days,
@@ -87,10 +71,7 @@ def rebuild_kaspi_orders(
         "updated_count": sync_result.updated_count,
         "api_sync_completed": sync_result.completed,
         "api_sync_stopped_reason": sync_result.stopped_reason,
-        "cleared_queued_jobs": cleared_queued_jobs,
-        "seller_jobs_queued": dispatch_result.queued_count,
-        "seller_job_ids": list(dispatch_result.queued_job_ids),
-        "message": "Kaspi API orders imported; queued backlog cleared; finite Seller scan batch queued",
+        "message": "Kaspi Orders API reloaded; stages rebuilt by raw receiver rules",
     }
 
 
@@ -126,13 +107,9 @@ def list_commerce_orders(
                 marketplace_account_id=order.marketplace_account_id,
                 marketplace_external_account_id=order.marketplace_external_account_id,
                 status=order.status,
-                original_status=("Snapshot" if order.stage_source == "snapshot" else order.original_status),
+                original_status=order.original_status,
                 operational_stage=order.stage.value,
                 operational_stage_source=order.stage_source,
-                snapshot_stage=order.snapshot_stage,
-                snapshot_state=order.snapshot_state,
-                snapshot_status=order.snapshot_status,
-                snapshot_observed_at=order.snapshot_observed_at,
                 currency=order.currency,
                 total_amount=order.total_amount,
                 ordered_at=order.ordered_at,
