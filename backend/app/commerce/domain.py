@@ -41,6 +41,8 @@ class CommerceOrderLine:
     purchase_request_id: str | None
     purchase_status: str | None
     purchase_version: int | None = None
+    procurement_unit_cost: Decimal | None = None
+    procurement_source_name: str | None = None
 
     @property
     def is_resolved(self) -> bool:
@@ -55,6 +57,25 @@ class CommerceOrderLine:
         if self.purchase_status == "cancelled":
             return ProcurementState.CANCELLED
         return ProcurementState.IN_PROGRESS
+
+    @property
+    def procurement_total_cost(self) -> Decimal | None:
+        if self.procurement_unit_cost is None:
+            return None
+        return self.procurement_unit_cost * self.quantity
+
+    @property
+    def gross_margin(self) -> Decimal | None:
+        total_cost = self.procurement_total_cost
+        if total_cost is None:
+            return None
+        return self.line_total - total_cost
+
+    @property
+    def gross_margin_pct(self) -> Decimal | None:
+        if self.line_total <= 0 or self.gross_margin is None:
+            return None
+        return (self.gross_margin / self.line_total * Decimal("100")).quantize(Decimal("0.01"))
 
 
 @dataclass(frozen=True, slots=True)
