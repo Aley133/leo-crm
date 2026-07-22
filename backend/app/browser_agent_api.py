@@ -22,6 +22,10 @@ from .browser_agent_job_contract import (
 from .browser_agent_models import BrowserAgent, BrowserAgentJob, BrowserAgentJobStatus
 from .browser_agent_presence import record_browser_agent_heartbeat
 from .db import get_db
+from .kaspi_seller.snapshot_storage import (
+    KaspiSellerSnapshotError,
+    persist_kaspi_seller_snapshot,
+)
 from .lease_engine import utc_now
 
 
@@ -348,10 +352,12 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
         raise HTTPException(status_code=422, detail="successful browser agent result requires payload")
 
     attempt_id: int | None = None
+    snapshot_id: int | None = None
     changed: bool | None = None
     agent_id = job.lease_owner
     try:
         is_supplier_job = envelope.job_type == BrowserAgentJobType.SUPPLIER_PRODUCT_OBSERVATION
+        is_kaspi_seller_job = envelope.job_type == BrowserAgentJobType.KASPI_SELLER_ORDER_DETAILS
         if succeeded and is_supplier_job and job.monitor_target_id is not None:
             attempt_id, changed = persist_browser_agent_success(
                 db, job=job, payload=payload.payload or {}, finished_at=now
@@ -364,6 +370,15 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
                 error_message=payload.error_message,
                 finished_at=now,
             )
+        elif succeeded and is_kaspi_seller_job:
+            persisted = persist_kaspi_seller_snapshot(
+                db,
+                browser_agent_job_id=job.id,
+                payload=payload.payload or {},
+                observed_at=now,
+            )
+            snapshot_id = persisted.snapshot_id
+            changed = persisted.changed
 
         job.status = payload.status
         job.result_payload = (
@@ -391,7 +406,7 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
         db.commit()
         if agent_id:
             record_browser_agent_heartbeat(agent_id=agent_id, status="idle")
-    except BrowserAgentResultError as exc:
+    except (BrowserAgentResultError, KaspiSellerSnapshotError) as exc:
         db.rollback()
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     except Exception:
@@ -403,6 +418,7 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
         "status": job.status,
         "job_type": envelope.job_type.value,
         "monitor_attempt_id": attempt_id,
+        "snapshot_id": snapshot_id,
         "changed": changed,
     }
 
