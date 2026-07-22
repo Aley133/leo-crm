@@ -74,7 +74,7 @@ const render = (payload) => {
 
 const loadOrders = async () => {
   if (!localStorage.getItem(storageKey)) { authPanel.classList.remove("hidden"); ordersPage.classList.add("hidden"); return; }
-  setLoading(true); message.textContent = "";
+  setLoading(true);
   try {
     const response = await fetch(`/api/commerce/orders?${queryString()}`, {headers:headers()});
     if (response.status === 401) { localStorage.removeItem(storageKey); throw new Error("Токен не принят. Введите актуальный SERVICE_API_TOKEN."); }
@@ -84,18 +84,40 @@ const loadOrders = async () => {
   finally { setLoading(false); }
 };
 
+const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const pollRebuildJob = async (jobId) => {
+  while (true) {
+    const response = await fetch(`/api/commerce/orders/rebuild/${encodeURIComponent(jobId)}`, {headers:headers()});
+    if (!response.ok) throw await responseError(response);
+    const job = await response.json();
+    const progress = job.progress || {};
+    message.textContent = `${job.message || job.status}. Прогресс: ${Number(progress.percent || 0)}%. Заказов: ${Number(job.orders_count || 0)}. Запросов: ${Number(job.request_count || 0)}. Ошибок диапазонов: ${(job.errors || []).length}.`;
+    if (["completed", "completed_with_errors", "failed"].includes(job.status)) return job;
+    await sleep(1200);
+  }
+};
+
 const rebuildOrders = async () => {
-  rebuildButton.disabled = true; refreshButton.disabled = true; rebuildButton.textContent = "Загрузка…";
-  message.textContent = "Загружаю заказы напрямую через Kaspi Orders API и пересчитываю колонки.";
+  rebuildButton.disabled = true;
+  refreshButton.disabled = true;
+  rebuildButton.textContent = "Загрузка…";
+  message.textContent = "Создаю фоновую выгрузку Kaspi за 7 дней.";
   try {
     const response = await fetch("/api/commerce/orders/rebuild?days=7", {method:"POST", headers:headers()});
     if (!response.ok) throw await responseError(response);
-    const result = await response.json();
-    message.textContent = `Получено ${Number(result.fetched_count || 0)}, добавлено ${Number(result.imported_count || 0)}, обновлено ${Number(result.updated_count || 0)}. Browser Agent не используется.`;
+    const started = await response.json();
+    const result = await pollRebuildJob(started.job_id);
+    if (result.status === "failed") throw new Error(result.message || "Kaspi raw receiver завершился с ошибкой.");
+    message.textContent = `Готово. Уникальных заказов: ${Number(result.orders_count || 0)}, добавлено: ${Number(result.imported_count || 0)}, обновлено: ${Number(result.updated_count || 0)}, частичных ошибок: ${(result.errors || []).length}.`;
     filters.reset();
     await loadOrders();
   } catch (error) { message.textContent = error.message || "Не удалось загрузить заказы Kaspi."; }
-  finally { rebuildButton.disabled = false; refreshButton.disabled = false; rebuildButton.textContent = "Загрузить заказы Kaspi"; }
+  finally {
+    rebuildButton.disabled = false;
+    refreshButton.disabled = false;
+    rebuildButton.textContent = "Загрузить заказы Kaspi";
+  }
 };
 
 const createPurchase = async (orderId, button) => {
