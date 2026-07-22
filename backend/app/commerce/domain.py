@@ -13,6 +13,7 @@ class CommerceOrderStage(StrEnum):
     ASSEMBLY = "assembly"
     HANDOVER = "handover"
     SHIPPING = "shipping"
+    CANCELLING = "cancelling"
     DELIVERED = "delivered"
     CANCELLED = "cancelled"
     RETURNED = "returned"
@@ -73,8 +74,6 @@ class CommerceOrder:
 
     @property
     def stage(self) -> CommerceOrderStage:
-        # In the raw-receiver pipeline `accepted` is emitted only for
-        # preOrder=true. Regular accepted stock orders are normalized to assembly.
         if self.status == CommerceOrderStage.ACCEPTED.value:
             return CommerceOrderStage.PREORDER
         try:
@@ -109,7 +108,11 @@ class CommerceOrder:
 
     @property
     def recognized_revenue(self) -> Decimal:
-        if self.stage in {CommerceOrderStage.CANCELLED, CommerceOrderStage.RETURNED}:
+        if self.stage in {
+            CommerceOrderStage.CANCELLING,
+            CommerceOrderStage.CANCELLED,
+            CommerceOrderStage.RETURNED,
+        }:
             return Decimal("0")
         return self.total_amount
 
