@@ -15,6 +15,7 @@ from .catalog_api import router as catalog_router
 from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
 from .db import engine
+from .kaspi_seller.timeline_api import router as kaspi_seller_timeline_router
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
@@ -62,6 +63,7 @@ app.include_router(monitoring_center_router)
 app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
 app.include_router(browser_agent_registry_router)
+app.include_router(kaspi_seller_timeline_router)
 app.include_router(pricing_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
