@@ -26,11 +26,14 @@ class CommerceOrderRead(BaseModel):
     order_id: int
     external_code: str | None
     marketplace: str
-    marketplace_account_id: int
-    marketplace_external_account_id: str
+    marketplace_account_id: int | None
+    marketplace_external_account_id: str | None
     status: str
     original_status: str
     operational_stage: str
+    operational_stage_source: str
+    snapshot_stage: str | None
+    snapshot_observed_at: datetime | None
     currency: str
     total_amount: Decimal
     ordered_at: datetime | None
