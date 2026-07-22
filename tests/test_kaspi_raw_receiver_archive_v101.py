@@ -66,7 +66,9 @@ def test_actual_transmission_has_priority() -> None:
 
 
 def test_positive_cost_without_dates_stays_handoff() -> None:
-    assert classify_kaspi_order(order(delivery_cost=57)) == "handover"
+    zone = ZoneInfo("Asia/Almaty")
+    now = datetime(2026, 7, 22, 20, 0, tzinfo=zone)
+    assert classify_kaspi_order(order(delivery_cost=57), now=now) == "handover"
 
 
 def test_terminal_statuses_have_priority() -> None:
