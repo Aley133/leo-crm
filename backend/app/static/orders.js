@@ -5,6 +5,7 @@ const message = document.querySelector("#message");
 const tokenForm = document.querySelector("#token-form");
 const tokenInput = document.querySelector("#token");
 const refreshButton = document.querySelector("#refresh");
+const rebuildButton = document.querySelector("#rebuild-orders");
 const filters = document.querySelector("#filters");
 const resetButton = document.querySelector("#reset");
 const ordersList = document.querySelector("#orders-list");
@@ -13,7 +14,7 @@ const empty = document.querySelector("#empty");
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
-const stageLabel = (stage) => ({new:"Новый",preorder:"Предзаказ — товар в пути",assembly:"Упаковка",handover:"Передача",shipping:"Передан курьеру / на доставке",delivered:"Доставлен",cancelled:"Отменён",returned:"Возврат",unknown:"Статус не распознан",ACCEPTED_BY_MERCHANT:"Принят продавцом",ASSEMBLY:"Сборка",HANDOVER:"Собран и ждёт передачи",SHIPPING:"Передан курьеру",DELIVERED:"Доставлен",RETURNED:"Возврат",CANCELLED:"Отменён"}[stage] || stage || "—");
+const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorder:"Предзаказ",received:"Товар получен",assembly:"Упаковка",handover:"Передача",shipping:"Переданы на доставку",pickup:"Ожидает получения",delivered:"Доставлен",cancelled:"Отменён при доставке",returned:"Возврат",unknown:"Статус не распознан",ACCEPTED_BY_MERCHANT:"Принят продавцом",ASSEMBLY:"Сборка",HANDOVER:"Собран и ждёт передачи",SHIPPING:"Передан курьеру",DELIVERED:"Доставлен",RETURNED:"Возврат",CANCELLED:"Отменён"}[stage] || stage || "—");
 const stageClass = (stage) => ["delivered","DELIVERED"].includes(stage) ? "ok" : ["cancelled","returned","CANCELLED","RETURNED"].includes(stage) ? "bad" : "warn";
 const timelineLabel = (type) => ({ORDER_ACCEPTED:"Заказ принят продавцом",ORDER_ASSEMBLY_STARTED:"Начата сборка",ORDER_ASSEMBLED:"Заказ собран",ORDER_TRANSFERRED:"Передан курьеру",ORDER_DELIVERED:"Доставлен",ORDER_RETURNED:"Возврат",ORDER_CANCELLED:"Отменён",ORDER_STAGE_CHANGED:"Этап заказа изменён"}[type] || type || "Событие");
 const procurementLabel = (state) => ({required:"Нужно закупить",in_progress:"Закупка оформлена",received:"Получено",not_required:"Закупка не требуется",cancelled:"Закупка отменена"}[state] || state || "—");
@@ -24,7 +25,8 @@ const headers = () => ({"Authorization": `Bearer ${localStorage.getItem(storageK
 const setLoading = (loading) => {
   ordersPage.setAttribute("aria-busy", String(loading));
   refreshButton.disabled = loading;
-  refreshButton.textContent = loading ? "Обновление…" : "Обновить";
+  rebuildButton.disabled = loading;
+  refreshButton.textContent = loading ? "Обновление…" : "Обновить экран";
 };
 
 const queryString = () => {
@@ -94,6 +96,28 @@ const loadOrders = async () => {
   finally { setLoading(false); }
 };
 
+const rebuildOrders = async () => {
+  if (!localStorage.getItem(storageKey)) { authPanel.classList.remove("hidden"); return; }
+  rebuildButton.disabled = true;
+  refreshButton.disabled = true;
+  rebuildButton.textContent = "Пересборка…";
+  message.textContent = "Шаг 1 из 2: загружаю заказы Kaspi за 7 дней. Затем задания будут переданы Browser Agent.";
+  try {
+    const response = await fetch("/api/commerce/orders/rebuild?days=7", {method:"POST", headers:headers()});
+    if (!response.ok) throw await responseError(response);
+    const result = await response.json();
+    message.textContent = `Kaspi API: получено ${Number(result.fetched_count || 0)}, добавлено ${Number(result.imported_count || 0)}, обновлено ${Number(result.updated_count || 0)}. На проверку Seller поставлено ${Number(result.seller_jobs_queued || 0)} заказов. Запусти Browser Agent и дождись завершения пакета.`;
+    filters.reset();
+    await loadOrders();
+  } catch (error) {
+    message.textContent = error.message || "Не удалось пересобрать заказы.";
+  } finally {
+    rebuildButton.disabled = false;
+    refreshButton.disabled = false;
+    rebuildButton.textContent = "Пересобрать заказы";
+  }
+};
+
 const loadKaspiDetails = async (button) => {
   const merchantId = button.dataset.merchantId;
   const orderCode = button.dataset.orderCode;
@@ -106,7 +130,7 @@ const loadKaspiDetails = async (button) => {
       fetch(`/api/kaspi-seller/orders/${encodeURIComponent(orderCode)}/latest?${query}`, {headers:headers()}),
       fetch(`/api/kaspi-seller/orders/${encodeURIComponent(orderCode)}/timeline?${query}&limit=100`, {headers:headers()})
     ]);
-    if (latestResponse.status === 404) throw new Error("Для заказа ещё нет Kaspi Seller Snapshot. Запустите browser job.");
+    if (latestResponse.status === 404) throw new Error("Для заказа ещё нет Kaspi Seller Snapshot. Запустите Browser Agent.");
     if (!latestResponse.ok) throw await responseError(latestResponse);
     if (!timelineResponse.ok) throw await responseError(timelineResponse);
     panel.innerHTML = renderKaspiDetail(await latestResponse.json(), await timelineResponse.json());
@@ -153,6 +177,7 @@ tokenForm.addEventListener("submit", (event) => { event.preventDefault(); localS
 filters.addEventListener("submit", (event) => { event.preventDefault(); loadOrders(); });
 resetButton.addEventListener("click", () => { filters.reset(); loadOrders(); });
 refreshButton.addEventListener("click", loadOrders);
+rebuildButton.addEventListener("click", rebuildOrders);
 ordersList.addEventListener("click", (event) => {
   const detailsButton = event.target.closest(".load-kaspi-details");
   if (detailsButton) { toggleKaspiDetails(detailsButton); return; }
