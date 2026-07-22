@@ -51,6 +51,16 @@ SNAPSHOT_STAGE_MAP: dict[str, CommerceOrderStage] = {
 }
 
 
+NO_NEW_PROCUREMENT_STAGES = {
+    CommerceOrderStage.ASSEMBLY,
+    CommerceOrderStage.HANDOVER,
+    CommerceOrderStage.SHIPPING,
+    CommerceOrderStage.DELIVERED,
+    CommerceOrderStage.CANCELLED,
+    CommerceOrderStage.RETURNED,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class CommerceOrderLine:
     line_id: int
@@ -113,18 +123,27 @@ class CommerceOrder:
     def unresolved_lines(self) -> int:
         return sum(1 for line in self.lines if not line.is_resolved)
 
+    def effective_procurement_state(self, line: CommerceOrderLine) -> ProcurementState:
+        """Return the state that must be shown in Orders Center.
+
+        A line without a purchase request is only actionable while the order can
+        still wait for procurement. Once Kaspi has moved the order to packing,
+        handover, shipping or a terminal stage, showing "required" is misleading.
+        Existing purchase facts remain visible as received/in progress/cancelled.
+        """
+
+        state = line.procurement_state
+        if state == ProcurementState.REQUIRED and self.stage in NO_NEW_PROCUREMENT_STAGES:
+            return ProcurementState.NOT_REQUIRED
+        return state
+
     @property
     def procurement_required_lines(self) -> int:
-        if self.stage in {
-            CommerceOrderStage.CANCELLED,
-            CommerceOrderStage.RETURNED,
-            CommerceOrderStage.DELIVERED,
-            CommerceOrderStage.SHIPPING,
-            CommerceOrderStage.HANDOVER,
-            CommerceOrderStage.ASSEMBLY,
-        }:
-            return 0
-        return sum(1 for line in self.lines if line.procurement_state == ProcurementState.REQUIRED)
+        return sum(
+            1
+            for line in self.lines
+            if self.effective_procurement_state(line) == ProcurementState.REQUIRED
+        )
 
     @property
     def has_preorder_request(self) -> bool:
