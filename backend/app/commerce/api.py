@@ -56,6 +56,8 @@ def list_commerce_orders(
                 order_id=order.order_id,
                 external_code=order.external_code,
                 marketplace=order.marketplace,
+                marketplace_account_id=order.marketplace_account_id,
+                marketplace_external_account_id=order.marketplace_external_account_id,
                 status=order.status,
                 original_status=order.original_status,
                 operational_stage=order.stage.value,
