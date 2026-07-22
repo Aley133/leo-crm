@@ -4,10 +4,12 @@ import json
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from ..auth import require_service_token
 from ..db import get_db
+from .schema_guard import ensure_kaspi_seller_storage_schema
 from .snapshot_models import KaspiSellerOrderSnapshotRecord
 from .timeline_models import KaspiSellerOrderTimelineEvent
 
@@ -48,6 +50,17 @@ def snapshot_record_payload(snapshot: KaspiSellerOrderSnapshotRecord) -> dict[st
     }
 
 
+def _ensure_schema_or_503(db: Session) -> None:
+    try:
+        ensure_kaspi_seller_storage_schema(db)
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Kaspi Seller storage schema is unavailable",
+        ) from exc
+
+
 @router.get("/{order_code}/timeline")
 def read_order_timeline(
     order_code: str,
@@ -55,18 +68,26 @@ def read_order_timeline(
     limit: int = Query(default=100, ge=1, le=500),
     db: Session = Depends(get_db),
 ):
-    events = db.scalars(
-        select(KaspiSellerOrderTimelineEvent)
-        .where(
-            KaspiSellerOrderTimelineEvent.merchant_id == merchant_id,
-            KaspiSellerOrderTimelineEvent.order_code == order_code,
-        )
-        .order_by(
-            KaspiSellerOrderTimelineEvent.occurred_at.asc(),
-            KaspiSellerOrderTimelineEvent.id.asc(),
-        )
-        .limit(limit)
-    ).all()
+    _ensure_schema_or_503(db)
+    try:
+        events = db.scalars(
+            select(KaspiSellerOrderTimelineEvent)
+            .where(
+                KaspiSellerOrderTimelineEvent.merchant_id == merchant_id,
+                KaspiSellerOrderTimelineEvent.order_code == order_code,
+            )
+            .order_by(
+                KaspiSellerOrderTimelineEvent.occurred_at.asc(),
+                KaspiSellerOrderTimelineEvent.id.asc(),
+            )
+            .limit(limit)
+        ).all()
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Kaspi Seller timeline storage is unavailable",
+        ) from exc
     return {
         "merchant_id": merchant_id,
         "order_code": order_code,
@@ -81,18 +102,26 @@ def read_latest_order_snapshot(
     merchant_id: str = Query(min_length=1, max_length=128),
     db: Session = Depends(get_db),
 ):
-    snapshot = db.scalar(
-        select(KaspiSellerOrderSnapshotRecord)
-        .where(
-            KaspiSellerOrderSnapshotRecord.merchant_id == merchant_id,
-            KaspiSellerOrderSnapshotRecord.order_code == order_code,
+    _ensure_schema_or_503(db)
+    try:
+        snapshot = db.scalar(
+            select(KaspiSellerOrderSnapshotRecord)
+            .where(
+                KaspiSellerOrderSnapshotRecord.merchant_id == merchant_id,
+                KaspiSellerOrderSnapshotRecord.order_code == order_code,
+            )
+            .order_by(
+                KaspiSellerOrderSnapshotRecord.observed_at.desc(),
+                KaspiSellerOrderSnapshotRecord.id.desc(),
+            )
+            .limit(1)
         )
-        .order_by(
-            KaspiSellerOrderSnapshotRecord.observed_at.desc(),
-            KaspiSellerOrderSnapshotRecord.id.desc(),
-        )
-        .limit(1)
-    )
+    except SQLAlchemyError as exc:
+        db.rollback()
+        raise HTTPException(
+            status_code=503,
+            detail="Kaspi Seller snapshot storage is unavailable",
+        ) from exc
     if snapshot is None:
         raise HTTPException(status_code=404, detail="Kaspi Seller order snapshot not found")
     return snapshot_record_payload(snapshot)
