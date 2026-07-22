@@ -32,10 +32,6 @@ class CommerceOrderRead(BaseModel):
     original_status: str
     operational_stage: str
     operational_stage_source: str
-    snapshot_stage: str | None
-    snapshot_state: str | None
-    snapshot_status: str | None
-    snapshot_observed_at: datetime | None
     currency: str
     total_amount: Decimal
     ordered_at: datetime | None
