@@ -8,6 +8,7 @@ from .auth import require_service_token
 from .db import get_db
 from .kaspi_xml_import import KaspiXmlProduct, parse_kaspi_products
 from .models import Product, ProductStatus
+from .order_line_product_linking import link_all_matching_order_lines
 
 
 router = APIRouter(
@@ -65,35 +66,41 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
     created = 0
     updated = 0
     unchanged = 0
+    linked_order_lines = 0
     try:
+        stored_products: list[Product] = []
         for item in products:
             product = existing.get(item.kaspi_product_id)
             if product is None:
-                db.add(
-                    Product(
-                        kaspi_product_id=item.kaspi_product_id,
-                        merchant_sku=item.merchant_sku,
-                        name=item.name,
-                        brand=item.brand,
-                        status=ProductStatus.ACTIVE.value,
-                    )
+                product = Product(
+                    kaspi_product_id=item.kaspi_product_id,
+                    merchant_sku=item.merchant_sku,
+                    name=item.name,
+                    brand=item.brand,
+                    status=ProductStatus.ACTIVE.value,
                 )
+                db.add(product)
+                db.flush()
                 created += 1
-                continue
-
-            changed = False
-            for field, value in (
-                ("merchant_sku", item.merchant_sku),
-                ("name", item.name),
-                ("brand", item.brand),
-            ):
-                if value is not None and getattr(product, field) != value:
-                    setattr(product, field, value)
-                    changed = True
-            if changed:
-                updated += 1
             else:
-                unchanged += 1
+                changed = False
+                for field, value in (
+                    ("merchant_sku", item.merchant_sku),
+                    ("name", item.name),
+                    ("brand", item.brand),
+                ):
+                    if value is not None and getattr(product, field) != value:
+                        setattr(product, field, value)
+                        changed = True
+                if changed:
+                    updated += 1
+                else:
+                    unchanged += 1
+            stored_products.append(product)
+
+        for product in stored_products:
+            linked_order_lines += link_all_matching_order_lines(db, product=product)
+
         db.commit()
     except Exception:
         db.rollback()
@@ -104,6 +111,7 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
         "created_count": created,
         "updated_count": updated,
         "unchanged_count": unchanged,
+        "linked_order_lines": linked_order_lines,
         "warning_count": len(warnings),
         "warnings": warnings,
     }
