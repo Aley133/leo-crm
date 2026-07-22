@@ -85,7 +85,7 @@ def list_commerce_orders(
                         purchase_request_id=line.purchase_request_id,
                         purchase_status=line.purchase_status,
                         purchase_version=line.purchase_version,
-                        procurement_state=line.procurement_state.value,
+                        procurement_state=order.effective_procurement_state(line).value,
                     )
                     for line in order.lines
                 ],
