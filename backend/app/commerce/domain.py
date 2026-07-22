@@ -5,7 +5,18 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from .decision_engine import CommerceOrderStage, OrderDecisionEngine, OrderDecisionFacts
+
+class CommerceOrderStage(StrEnum):
+    NEW = "new"
+    ACCEPTED = "accepted"
+    PREORDER = "preorder"
+    ASSEMBLY = "assembly"
+    HANDOVER = "handover"
+    SHIPPING = "shipping"
+    DELIVERED = "delivered"
+    CANCELLED = "cancelled"
+    RETURNED = "returned"
+    UNKNOWN = "unknown"
 
 
 class ProcurementState(StrEnum):
@@ -44,14 +55,6 @@ class CommerceOrderLine:
             return ProcurementState.CANCELLED
         return ProcurementState.IN_PROGRESS
 
-    @property
-    def is_preorder_requested(self) -> bool:
-        return self.purchase_request_id is not None and self.purchase_status in {"draft", "requested"}
-
-    @property
-    def is_procurement_in_transit(self) -> bool:
-        return self.purchase_request_id is not None and self.purchase_status in {"ordered", "partially_received"}
-
 
 @dataclass(frozen=True, slots=True)
 class CommerceOrder:
@@ -67,14 +70,17 @@ class CommerceOrder:
     original_status: str = "UNKNOWN"
     marketplace_account_id: int | None = None
     marketplace_external_account_id: str | None = None
-    snapshot_stage: str | None = None
-    snapshot_state: str | None = None
-    snapshot_status: str | None = None
-    snapshot_observed_at: datetime | None = None
-    snapshot_assembled: bool | None = None
-    snapshot_transmitted_to_courier: bool | None = None
-    snapshot_arrived_at_pickup: bool | None = None
-    snapshot_returned_to_warehouse: bool | None = None
+
+    @property
+    def stage(self) -> CommerceOrderStage:
+        try:
+            return CommerceOrderStage(self.status)
+        except ValueError:
+            return CommerceOrderStage.UNKNOWN
+
+    @property
+    def stage_source(self) -> str:
+        return "kaspi_orders_api"
 
     @property
     def units(self) -> int:
@@ -98,50 +104,10 @@ class CommerceOrder:
         return ProcurementState.REQUIRED
 
     @property
-    def has_preorder_request(self) -> bool:
-        return any(line.is_preorder_requested for line in self.lines)
-
-    @property
-    def has_procurement_in_transit(self) -> bool:
-        return any(line.is_procurement_in_transit for line in self.lines)
-
-    @property
-    def has_procurement_in_progress(self) -> bool:
-        return any(line.procurement_state == ProcurementState.IN_PROGRESS for line in self.lines)
-
-    @property
-    def all_procurement_received(self) -> bool:
-        return bool(self.lines) and all(line.procurement_state == ProcurementState.RECEIVED for line in self.lines)
-
-    @property
     def recognized_revenue(self) -> Decimal:
         if self.stage in {CommerceOrderStage.CANCELLED, CommerceOrderStage.RETURNED}:
             return Decimal("0")
         return self.total_amount
-
-    @property
-    def decision_facts(self) -> OrderDecisionFacts:
-        return OrderDecisionFacts(
-            marketplace_status=self.status or self.original_status,
-            snapshot_stage=self.snapshot_stage,
-            snapshot_state=self.snapshot_state,
-            snapshot_status=self.snapshot_status,
-            assembled=self.snapshot_assembled,
-            transmitted_to_courier=self.snapshot_transmitted_to_courier,
-            arrived_at_pickup=self.snapshot_arrived_at_pickup,
-            returned_to_warehouse=self.snapshot_returned_to_warehouse,
-            has_lines=bool(self.lines),
-            all_procurement_received=self.all_procurement_received,
-            has_procurement_in_progress=self.has_procurement_in_progress,
-        )
-
-    @property
-    def stage_source(self) -> str:
-        return OrderDecisionEngine.source(self.decision_facts)
-
-    @property
-    def stage(self) -> CommerceOrderStage:
-        return OrderDecisionEngine.decide(self.decision_facts)
 
 
 @dataclass(frozen=True, slots=True)
