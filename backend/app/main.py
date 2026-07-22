@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import asyncio
-import contextlib
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -18,8 +16,7 @@ from .browser_agent_registry_api import router as browser_agent_registry_router
 from .catalog_api import router as catalog_router
 from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
-from .db import SessionLocal, engine
-from .kaspi_order_dispatch import dispatch_stale_kaspi_orders
+from .db import engine
 from .kaspi_seller.timeline_api import router as kaspi_seller_timeline_router
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
@@ -39,11 +36,9 @@ from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 from .ui import router as ui_router
 
-APP_VERSION = "0.15.0"
-DEPLOYMENT_MARKER = "continuous-kaspi-order-snapshots-v1"
+APP_VERSION = "0.16.0"
+DEPLOYMENT_MARKER = "manual-kaspi-order-rebuild-v1"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
-KASPI_ORDER_DISPATCH_INTERVAL_SECONDS = 60
-KASPI_ORDER_SNAPSHOT_REFRESH_SECONDS = 180
 
 app = FastAPI(
     title="LEO CRM API",
@@ -78,45 +73,6 @@ app.include_router(commerce_router)
 app.include_router(product_identity_router)
 app.include_router(purchase_router)
 
-_kaspi_dispatch_task: asyncio.Task | None = None
-
-
-async def _continuous_kaspi_order_dispatch() -> None:
-    while True:
-        try:
-            with SessionLocal() as db:
-                dispatch_stale_kaspi_orders(
-                    db,
-                    limit=200,
-                    refresh_seconds=KASPI_ORDER_SNAPSHOT_REFRESH_SECONDS,
-                )
-                db.commit()
-        except asyncio.CancelledError:
-            raise
-        except Exception:
-            # A temporary database or schema failure must not stop the web service.
-            # The next cycle retries automatically.
-            pass
-        await asyncio.sleep(KASPI_ORDER_DISPATCH_INTERVAL_SECONDS)
-
-
-@app.on_event("startup")
-async def start_continuous_kaspi_dispatch() -> None:
-    global _kaspi_dispatch_task
-    if _kaspi_dispatch_task is None or _kaspi_dispatch_task.done():
-        _kaspi_dispatch_task = asyncio.create_task(_continuous_kaspi_order_dispatch())
-
-
-@app.on_event("shutdown")
-async def stop_continuous_kaspi_dispatch() -> None:
-    global _kaspi_dispatch_task
-    if _kaspi_dispatch_task is None:
-        return
-    _kaspi_dispatch_task.cancel()
-    with contextlib.suppress(asyncio.CancelledError):
-        await _kaspi_dispatch_task
-    _kaspi_dispatch_task = None
-
 
 @app.get("/")
 async def root() -> dict[str, str]:
@@ -132,12 +88,6 @@ async def root() -> dict[str, str]:
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    """Cheap liveness probe used by Render.
-
-    This endpoint intentionally does not acquire a database connection. A busy
-    database pool must not make Render restart an otherwise healthy web process.
-    """
-
     return {
         "status": "ok",
         "database": "not_checked",
@@ -149,8 +99,6 @@ async def health() -> dict[str, str]:
 
 @app.get("/ready")
 async def ready():
-    """Readiness probe that verifies PostgreSQL without crashing the service."""
-
     try:
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
