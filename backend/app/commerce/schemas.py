@@ -26,6 +26,8 @@ class CommerceOrderRead(BaseModel):
     order_id: int
     external_code: str | None
     marketplace: str
+    marketplace_account_id: int
+    marketplace_external_account_id: str
     status: str
     original_status: str
     operational_stage: str
