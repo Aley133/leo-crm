@@ -70,8 +70,6 @@ class CommerceOrder:
     order_id: int
     external_code: str | None
     marketplace: str
-    marketplace_account_id: int
-    marketplace_external_account_id: str
     status: str
     currency: str
     total_amount: Decimal
@@ -79,6 +77,8 @@ class CommerceOrder:
     delivered_at: datetime | None
     lines: tuple[CommerceOrderLine, ...]
     original_status: str = "UNKNOWN"
+    marketplace_account_id: int | None = None
+    marketplace_external_account_id: str | None = None
 
     @property
     def units(self) -> int:
