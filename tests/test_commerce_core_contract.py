@@ -24,9 +24,9 @@ def test_commerce_core_reuses_normalized_orders_and_purchases() -> None:
     assert "MarketplaceOrderLine" in repository
     assert "PurchaseRequest" in repository
     assert "PurchaseRequestLine" in repository
-    # Kaspi Seller snapshots are an intentional supplemental observation source:
-    # Kaspi's public seller API does not expose all operational order stages.
-    assert "KaspiSellerOrderSnapshotRecord" in repository
+    # Kaspi operational stages are normalized before Commerce Core. The repository
+    # must not read the removed Browser Agent Snapshot subsystem.
+    assert "KaspiSellerOrderSnapshotRecord" not in repository
     assert "requests." not in repository
 
 
