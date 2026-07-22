@@ -24,7 +24,9 @@ def test_commerce_core_reuses_normalized_orders_and_purchases() -> None:
     assert "MarketplaceOrderLine" in repository
     assert "PurchaseRequest" in repository
     assert "PurchaseRequestLine" in repository
-    assert "Kaspi" not in repository
+    # Kaspi Seller snapshots are an intentional supplemental observation source:
+    # Kaspi's public seller API does not expose all operational order stages.
+    assert "KaspiSellerOrderSnapshotRecord" in repository
     assert "requests." not in repository
 
 
