@@ -100,6 +100,27 @@ const pollRebuildJob = async (jobId) => {
   }
 };
 
+const pollProductEnrichmentJob = async (jobId) => {
+  while (true) {
+    const response = await fetch(`/api/commerce/orders/enrich-products/${encodeURIComponent(jobId)}`, {headers:headers()});
+    if (!response.ok) throw await responseError(response);
+    const job = await response.json();
+    const total = Number(job.total || 0);
+    const processed = Number(job.processed || 0);
+    const percent = total ? Math.round(processed * 1000 / total) / 10 : 0;
+    message.textContent = `${job.message || job.status}. Товары: ${processed}/${total}. Прогресс: ${percent}%. Запросов: ${Number(job.request_count || 0)}.`;
+    if (["completed", "completed_with_errors", "failed"].includes(job.status)) return job;
+    await sleep(1000);
+  }
+};
+
+const enrichProducts = async (days) => {
+  const response = await fetch(`/api/commerce/orders/enrich-products?days=${days}`, {method:"POST", headers:headers()});
+  if (!response.ok) throw await responseError(response);
+  const started = await response.json();
+  return pollProductEnrichmentJob(started.job_id);
+};
+
 const rebuildOrders = async () => {
   const days = Number(rebuildDays?.value || 7);
   rebuildButton.disabled = true;
@@ -113,7 +134,12 @@ const rebuildOrders = async () => {
     const started = await response.json();
     const result = await pollRebuildJob(started.job_id);
     if (result.status === "failed") throw new Error(result.message || "Kaspi raw receiver завершился с ошибкой.");
-    message.textContent = `Готово. Уникальных заказов: ${Number(result.orders_count || 0)}, добавлено: ${Number(result.imported_count || 0)}, обновлено: ${Number(result.updated_count || 0)}, частичных ошибок: ${(result.errors || []).length}.`;
+
+    message.textContent = "Заказы загружены. Получаю точные названия товаров из Kaspi…";
+    const enrichment = await enrichProducts(days);
+    if (enrichment.status === "failed") throw new Error(enrichment.message || "Не удалось загрузить названия товаров.");
+
+    message.textContent = `Готово. Заказов: ${Number(result.orders_count || 0)}, товаров обновлено: ${Number(enrichment.updated || 0)}, ошибок товаров: ${(enrichment.errors || []).length}.`;
     filters.reset();
     await loadOrders();
   } catch (error) { message.textContent = error.message || "Не удалось загрузить заказы Kaspi."; }
