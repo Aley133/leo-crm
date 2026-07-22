@@ -35,12 +35,7 @@ class OrderDecisionFacts:
 
 
 class OrderDecisionEngine:
-    """Resolve one authoritative CRM business stage from all available facts.
-
-    Snapshot delivery facts are stronger than labels from either Kaspi source.
-    Procurement only controls the pre-order/received part before warehouse work
-    starts; it must never pull an assembled or transmitted order back to preorder.
-    """
+    """Resolve one authoritative CRM business stage from all available facts."""
 
     @classmethod
     def decide(cls, facts: OrderDecisionFacts) -> CommerceOrderStage:
@@ -57,6 +52,7 @@ class OrderDecisionEngine:
             return CommerceOrderStage.PICKUP
         if facts.transmitted_to_courier is True or cls._contains(
             tokens,
+            "SHIPPING",
             "TRANSIT",
             "TRANSMITTED",
             "KASPI_DELIVERY",
@@ -71,7 +67,7 @@ class OrderDecisionEngine:
             return CommerceOrderStage.ASSEMBLY
 
         if facts.has_lines and facts.all_procurement_received:
-            return CommerceOrderStage.RECEIVED
+            return CommerceOrderStage.ASSEMBLY
         if facts.has_procurement_in_progress:
             return CommerceOrderStage.PREORDER
         if cls._contains(tokens, "PREORDER", "PRE_ORDER"):
@@ -86,24 +82,47 @@ class OrderDecisionEngine:
             return CommerceOrderStage.ACCEPTED
         return CommerceOrderStage.UNKNOWN
 
-    @staticmethod
-    def source(facts: OrderDecisionFacts) -> str:
-        if any(
-            value not in (None, "")
+    @classmethod
+    def source(cls, facts: OrderDecisionFacts) -> str:
+        snapshot_tokens = {
+            cls._token(facts.snapshot_stage),
+            cls._token(facts.snapshot_state),
+            cls._token(facts.snapshot_status),
+        }
+        snapshot_tokens.discard("")
+        known_snapshot = cls._contains(
+            snapshot_tokens,
+            "CANCELLED",
+            "CANCELED",
+            "RETURN",
+            "DELIVERED",
+            "COMPLETED",
+            "PICKUP",
+            "SHIPPING",
+            "TRANSIT",
+            "TRANSMITTED",
+            "KASPI_DELIVERY",
+            "ASSEMBLY",
+            "PACKING",
+            "PACKAGING",
+            "HANDOVER",
+            "WAIT_FOR_COURIER",
+            "ASSEMBLED",
+            "PREORDER",
+        )
+        if known_snapshot or any(
+            value is not None
             for value in (
-                facts.snapshot_stage,
-                facts.snapshot_state,
-                facts.snapshot_status,
                 facts.assembled,
                 facts.transmitted_to_courier,
                 facts.arrived_at_pickup,
                 facts.returned_to_warehouse,
             )
         ):
-            return "decision_engine:snapshot"
+            return "snapshot"
         if facts.has_procurement_in_progress or facts.all_procurement_received:
-            return "decision_engine:procurement"
-        return "decision_engine:marketplace_order"
+            return "procurement"
+        return "marketplace_order"
 
     @classmethod
     def _tokens(cls, facts: OrderDecisionFacts) -> set[str]:
