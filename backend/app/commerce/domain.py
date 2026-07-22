@@ -58,17 +58,11 @@ class CommerceOrderLine:
 
     @property
     def is_preorder_requested(self) -> bool:
-        return self.purchase_request_id is not None and self.purchase_status in {
-            "draft",
-            "requested",
-        }
+        return self.purchase_request_id is not None and self.purchase_status in {"draft", "requested"}
 
     @property
     def is_procurement_in_transit(self) -> bool:
-        return self.purchase_request_id is not None and self.purchase_status in {
-            "ordered",
-            "partially_received",
-        }
+        return self.purchase_request_id is not None and self.purchase_status in {"ordered", "partially_received"}
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +70,8 @@ class CommerceOrder:
     order_id: int
     external_code: str | None
     marketplace: str
+    marketplace_account_id: int
+    marketplace_external_account_id: str
     status: str
     currency: str
     total_amount: Decimal
@@ -94,20 +90,9 @@ class CommerceOrder:
 
     @property
     def procurement_required_lines(self) -> int:
-        if self.status in {
-            "cancelled",
-            "returned",
-            "delivered",
-            "shipping",
-            "handover",
-            "assembly",
-        }:
+        if self.status in {"cancelled", "returned", "delivered", "shipping", "handover", "assembly"}:
             return 0
-        return sum(
-            1
-            for line in self.lines
-            if line.procurement_state == ProcurementState.REQUIRED
-        )
+        return sum(1 for line in self.lines if line.procurement_state == ProcurementState.REQUIRED)
 
     @property
     def has_preorder_request(self) -> bool:
@@ -119,17 +104,11 @@ class CommerceOrder:
 
     @property
     def has_procurement_in_progress(self) -> bool:
-        return any(
-            line.procurement_state == ProcurementState.IN_PROGRESS
-            for line in self.lines
-        )
+        return any(line.procurement_state == ProcurementState.IN_PROGRESS for line in self.lines)
 
     @property
     def all_procurement_received(self) -> bool:
-        return bool(self.lines) and all(
-            line.procurement_state == ProcurementState.RECEIVED
-            for line in self.lines
-        )
+        return bool(self.lines) and all(line.procurement_state == ProcurementState.RECEIVED for line in self.lines)
 
     @property
     def recognized_revenue(self) -> Decimal:
@@ -139,7 +118,6 @@ class CommerceOrder:
 
     @property
     def stage(self) -> CommerceOrderStage:
-        # Terminal and physical Kaspi lifecycle facts are authoritative.
         if self.status == "cancelled":
             return CommerceOrderStage.CANCELLED
         if self.status == "returned":
@@ -155,10 +133,6 @@ class CommerceOrder:
         if self.status == "new":
             return CommerceOrderStage.NEW
         if self.status == "accepted":
-            # Kaspi exposes accepted/preOrder while the item is awaited. LEO owns
-            # the internal arrival transition: once every linked purchase line is
-            # received or closed, the order is ready for packaging even if the
-            # marketplace payload still retains its historical preOrder marker.
             if self.all_procurement_received:
                 return CommerceOrderStage.ASSEMBLY
             return CommerceOrderStage.PREORDER
