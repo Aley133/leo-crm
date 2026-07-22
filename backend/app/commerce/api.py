@@ -6,20 +6,10 @@ from sqlalchemy.orm import Session
 from ..auth import require_service_token
 from ..db import get_db
 from .repository import SqlAlchemyCommerceRepository
-from .schemas import (
-    CommerceOrderLineRead,
-    CommerceOrderRead,
-    CommerceOrdersResponse,
-    CommerceSummaryRead,
-)
+from .schemas import CommerceOrderLineRead, CommerceOrderRead, CommerceOrdersResponse, CommerceSummaryRead
 from .service import CommerceService
 
-
-router = APIRouter(
-    prefix="/api/commerce",
-    tags=["commerce"],
-    dependencies=[Depends(require_service_token)],
-)
+router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depends(require_service_token)])
 
 
 @router.get("/orders", response_model=CommerceOrdersResponse)
@@ -31,12 +21,7 @@ def list_commerce_orders(
     db: Session = Depends(get_db),
 ) -> CommerceOrdersResponse:
     service = CommerceService(SqlAlchemyCommerceRepository(db))
-    total, orders, summary = service.list_orders(
-        limit=limit,
-        offset=offset,
-        status=order_status,
-        query=query,
-    )
+    total, orders, summary = service.list_orders(limit=limit, offset=offset, status=order_status, query=query)
     return CommerceOrdersResponse(
         total=total,
         limit=limit,
@@ -63,6 +48,8 @@ def list_commerce_orders(
                 operational_stage=order.stage.value,
                 operational_stage_source=order.stage_source,
                 snapshot_stage=order.snapshot_stage,
+                snapshot_state=order.snapshot_state,
+                snapshot_status=order.snapshot_status,
                 snapshot_observed_at=order.snapshot_observed_at,
                 currency=order.currency,
                 total_amount=order.total_amount,
