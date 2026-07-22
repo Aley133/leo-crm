@@ -49,9 +49,30 @@ def test_commerce_order_exposes_procurement_state_separately() -> None:
     order = _order(lines=(line,))
 
     assert line.procurement_state == ProcurementState.REQUIRED
+    assert order.effective_procurement_state(line) == ProcurementState.REQUIRED
     assert order.units == 2
     assert order.unresolved_lines == 0
     assert order.procurement_required_lines == 1
+
+
+def test_post_preorder_stages_do_not_show_required_procurement() -> None:
+    line = _line()
+
+    for stage in ("ASSEMBLY", "HANDOVER", "SHIPPING", "DELIVERED", "CANCELLED", "RETURNED"):
+        order = _order(status="accepted", lines=(line,), snapshot_stage=stage)
+        assert order.effective_procurement_state(line) == ProcurementState.NOT_REQUIRED
+        assert order.procurement_required_lines == 0
+
+
+def test_existing_purchase_fact_remains_visible_after_stage_changes() -> None:
+    in_progress = _line(purchase_request_id="purchase-1", purchase_status="ordered")
+    received = _line(purchase_request_id="purchase-2", purchase_status="received")
+    cancelled = _line(purchase_request_id="purchase-3", purchase_status="cancelled")
+    order = _order(status="accepted", lines=(in_progress, received, cancelled), snapshot_stage="HANDOVER")
+
+    assert order.effective_procurement_state(in_progress) == ProcurementState.IN_PROGRESS
+    assert order.effective_procurement_state(received) == ProcurementState.RECEIVED
+    assert order.effective_procurement_state(cancelled) == ProcurementState.CANCELLED
 
 
 def test_cancelled_delivered_shipping_and_assembly_do_not_request_procurement() -> None:
