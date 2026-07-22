@@ -28,6 +28,21 @@ class CommerceOrderStage(StrEnum):
     UNKNOWN = "unknown"
 
 
+SNAPSHOT_STAGE_MAP: dict[str, CommerceOrderStage] = {
+    "NEW": CommerceOrderStage.NEW,
+    "ACCEPTED": CommerceOrderStage.ACCEPTED,
+    "ACCEPTED_BY_MERCHANT": CommerceOrderStage.ACCEPTED,
+    "PREORDER": CommerceOrderStage.PREORDER,
+    "IN_TRANSIT": CommerceOrderStage.IN_TRANSIT,
+    "ASSEMBLY": CommerceOrderStage.ASSEMBLY,
+    "HANDOVER": CommerceOrderStage.HANDOVER,
+    "SHIPPING": CommerceOrderStage.SHIPPING,
+    "DELIVERED": CommerceOrderStage.DELIVERED,
+    "CANCELLED": CommerceOrderStage.CANCELLED,
+    "RETURNED": CommerceOrderStage.RETURNED,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class CommerceOrderLine:
     line_id: int
@@ -79,6 +94,8 @@ class CommerceOrder:
     original_status: str = "UNKNOWN"
     marketplace_account_id: int | None = None
     marketplace_external_account_id: str | None = None
+    snapshot_stage: str | None = None
+    snapshot_observed_at: datetime | None = None
 
     @property
     def units(self) -> int:
@@ -90,7 +107,14 @@ class CommerceOrder:
 
     @property
     def procurement_required_lines(self) -> int:
-        if self.status in {"cancelled", "returned", "delivered", "shipping", "handover", "assembly"}:
+        if self.stage in {
+            CommerceOrderStage.CANCELLED,
+            CommerceOrderStage.RETURNED,
+            CommerceOrderStage.DELIVERED,
+            CommerceOrderStage.SHIPPING,
+            CommerceOrderStage.HANDOVER,
+            CommerceOrderStage.ASSEMBLY,
+        }:
             return 0
         return sum(1 for line in self.lines if line.procurement_state == ProcurementState.REQUIRED)
 
@@ -117,7 +141,18 @@ class CommerceOrder:
         return self.total_amount
 
     @property
+    def stage_source(self) -> str:
+        if self.snapshot_stage and self.snapshot_stage.upper() in SNAPSHOT_STAGE_MAP:
+            return "snapshot"
+        return "marketplace_order"
+
+    @property
     def stage(self) -> CommerceOrderStage:
+        if self.snapshot_stage:
+            snapshot_stage = SNAPSHOT_STAGE_MAP.get(self.snapshot_stage.upper())
+            if snapshot_stage is not None:
+                return snapshot_stage
+
         if self.status == "cancelled":
             return CommerceOrderStage.CANCELLED
         if self.status == "returned":
