@@ -20,6 +20,11 @@ class CommerceOrderLineRead(BaseModel):
     purchase_status: str | None
     purchase_version: int | None
     procurement_state: str
+    procurement_unit_cost: Decimal | None
+    procurement_total_cost: Decimal | None
+    procurement_source_name: str | None
+    gross_margin: Decimal | None
+    gross_margin_pct: Decimal | None
 
 
 class CommerceOrderRead(BaseModel):
