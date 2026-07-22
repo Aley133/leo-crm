@@ -89,7 +89,7 @@ def _account_id(factory: sessionmaker[Session]) -> int:
             return account.id
 
 
-def test_accepted_list_payload_is_replaced_by_seller_detail_before_import(
+def test_accepted_list_payload_is_replaced_by_detailed_raw_order_before_import(
     session_factory,
 ) -> None:
     account_id = _account_id(session_factory)
@@ -106,5 +106,8 @@ def test_accepted_list_payload_is_replaced_by_seller_detail_before_import(
     with session_factory() as session:
         order = session.scalar(select(MarketplaceOrder))
         assert order is not None
-        assert order.status == "handover"
-        assert order.original_status == "HANDOVER"
+        # In the archived raw-board model deliveryCostForSeller <= 0 and
+        # preOrder=false means the order is still in the packing column. The old
+        # Browser Agent `assembled=true` flag is deliberately not authoritative.
+        assert order.status == "assembly"
+        assert order.original_status == "ASSEMBLY"
