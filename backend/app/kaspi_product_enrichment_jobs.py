@@ -78,7 +78,8 @@ def normalize_entry(
             entry_attrs.get("name"),
             entry_attrs.get("title"),
             entry_attrs.get("productName"),
-        ) or "Название не получено",
+        )
+        or "Название не получено",
         "sku": _text(
             merchant_attrs.get("code"),
             merchant_attrs.get("sku"),
@@ -119,6 +120,33 @@ def public_job(job_id: str) -> dict[str, Any] | None:
     return dict(job) if job is not None else None
 
 
+def _match_line(
+    lines: list[MarketplaceOrderLine],
+    normalized: dict[str, Any],
+    *,
+    single_item: bool,
+) -> MarketplaceOrderLine | None:
+    entry_id = str(normalized.get("entry_id") or "").strip()
+    sku = str(normalized.get("sku") or "").strip()
+    external_product_id = str(normalized.get("external_product_id") or "").strip()
+
+    if entry_id:
+        for line in lines:
+            if str(line.external_line_id or "").strip() == entry_id:
+                return line
+    if sku:
+        for line in lines:
+            if str(line.merchant_sku or "").strip() == sku:
+                return line
+    if external_product_id:
+        for line in lines:
+            if str(line.external_product_id or "").strip() == external_product_id:
+                return line
+    if single_item and len(lines) == 1:
+        return lines[0]
+    return None
+
+
 async def run_job(job_id: str) -> None:
     job = JOBS[job_id]
     job["status"] = "running"
@@ -129,16 +157,17 @@ async def run_job(job_id: str) -> None:
         settings = KaspiHttpSettings.from_environment()
         since = datetime.now(UTC) - timedelta(days=int(job["days"]))
         with SessionLocal() as session:
-            rows = session.execute(
-                select(MarketplaceOrder, MarketplaceOrderLine)
-                .join(
-                    MarketplaceOrderLine,
-                    MarketplaceOrderLine.marketplace_order_id == MarketplaceOrder.id,
+            orders = session.execute(
+                select(
+                    MarketplaceOrder.id,
+                    MarketplaceOrder.external_order_id,
+                    MarketplaceOrder.external_code,
+                    MarketplaceOrder.marketplace_account_id,
                 )
                 .where(MarketplaceOrder.ordered_at >= since)
-                .order_by(MarketplaceOrder.id, MarketplaceOrderLine.id)
+                .order_by(MarketplaceOrder.id)
             ).all()
-        job["total"] = len(rows)
+        job["total"] = len(orders)
 
         headers = {
             "Accept": "application/vnd.api+json",
@@ -146,92 +175,153 @@ async def run_job(job_id: str) -> None:
             "X-Auth-Token": settings.api_token,
             "User-Agent": "leo-crm-product-enrichment/1.1.0",
         }
-        merchant_cache: dict[str, dict[str, Any] | None] = {}
         semaphore = asyncio.Semaphore(3)
+        cache_lock = asyncio.Lock()
+        merchant_cache: dict[str, dict[str, Any] | None] = {}
 
         async with httpx.AsyncClient(
             base_url=settings.base_url,
             timeout=httpx.Timeout(connect=10, read=15, write=10, pool=15),
             limits=httpx.Limits(max_connections=6, max_keepalive_connections=4),
         ) as client:
-            async def get(path: str) -> dict[str, Any] | None:
+            async def get_data(path: str) -> list[dict[str, Any]]:
                 async with semaphore:
                     response = await client.get(path, headers=headers)
                 job["request_count"] += 1
                 response.raise_for_status()
-                body = response.json()
-                items = _data(body)
-                return items[0] if items else None
+                return _data(response.json())
 
-            async def enrich(order: MarketplaceOrder, line: MarketplaceOrderLine) -> None:
+            async def merchant_for(master_id: str) -> dict[str, Any] | None:
+                async with cache_lock:
+                    if master_id in merchant_cache:
+                        return merchant_cache[master_id]
+                resources = await get_data(
+                    f"/masterproducts/{master_id}/merchantProduct"
+                )
+                merchant = resources[0] if resources else None
+                async with cache_lock:
+                    merchant_cache[master_id] = merchant
+                return merchant
+
+            async def enrich_one(order_row) -> None:
+                order_id, external_order_id, external_code, account_id = order_row
+                order_key = str(external_order_id or external_code or order_id)
                 try:
-                    entry_id = str(line.external_line_id or "").strip()
-                    if not entry_id:
-                        return
-                    product = await get(f"/orderentries/{entry_id}/product")
-                    master_id = (
-                        str((product or {}).get("id") or "")
-                        or _relationship_id({"relationships": {}}, "product", "masterProduct")
-                    )
-                    merchant = None
-                    if master_id:
-                        if master_id not in merchant_cache:
-                            merchant_cache[master_id] = await get(
-                                f"/masterproducts/{master_id}/merchantProduct"
+                    entries = await get_data(f"/orders/{order_key}/entries")
+                    normalized_items: list[dict[str, Any]] = []
+                    for entry in entries:
+                        entry_id = str(entry.get("id") or "").strip()
+                        product = None
+                        merchant = None
+                        if entry_id:
+                            products = await get_data(
+                                f"/orderentries/{entry_id}/product"
                             )
-                        merchant = merchant_cache[master_id]
-                    normalized = normalize_entry(
-                        {"id": entry_id, "attributes": {}},
-                        product=product,
-                        merchant_product=merchant,
-                    )
+                            product = products[0] if products else None
+                        master_id = (
+                            str((product or {}).get("id") or "")
+                            or _relationship_id(entry, "product", "masterProduct")
+                        )
+                        if master_id:
+                            merchant = await merchant_for(master_id)
+                        normalized_items.append(
+                            normalize_entry(
+                                entry,
+                                product=product,
+                                merchant_product=merchant,
+                            )
+                        )
+
                     with SessionLocal() as session:
                         with session.begin():
-                            stored = session.get(MarketplaceOrderLine, line.id)
-                            if stored is None:
+                            stored_order = session.get(MarketplaceOrder, order_id)
+                            if stored_order is None:
                                 return
-                            changed = False
-                            title = str(normalized["name"])
-                            if title != "Название не получено" and stored.title != title:
-                                stored.title = title
-                                changed = True
-                            sku = normalized.get("sku")
-                            if sku and stored.merchant_sku != sku:
-                                stored.merchant_sku = str(sku)
-                                changed = True
-                            product_id = normalized.get("external_product_id")
-                            if product_id and stored.external_product_id != product_id:
-                                stored.external_product_id = str(product_id)
-                                changed = True
-                            ensure_marketplace_listing_for_order_line(
-                                session,
-                                marketplace_account_id=order.marketplace_account_id,
-                                order_line=stored,
+                            lines = list(
+                                session.scalars(
+                                    select(MarketplaceOrderLine)
+                                    .where(
+                                        MarketplaceOrderLine.marketplace_order_id
+                                        == order_id
+                                    )
+                                    .order_by(MarketplaceOrderLine.id)
+                                ).all()
                             )
-                            if changed:
-                                job["updated"] += 1
+                            single_item = len(normalized_items) == 1
+                            for normalized in normalized_items:
+                                stored = _match_line(
+                                    lines,
+                                    normalized,
+                                    single_item=single_item,
+                                )
+                                if stored is None:
+                                    job["errors"].append(
+                                        {
+                                            "order": order_key,
+                                            "entry": normalized.get("entry_id"),
+                                            "error": "matching_order_line_not_found",
+                                        }
+                                    )
+                                    continue
+
+                                changed = False
+                                title = str(normalized["name"])
+                                if (
+                                    title != "Название не получено"
+                                    and stored.title != title
+                                ):
+                                    stored.title = title
+                                    changed = True
+                                sku = normalized.get("sku")
+                                if sku and stored.merchant_sku != str(sku):
+                                    stored.merchant_sku = str(sku)
+                                    changed = True
+                                product_id = normalized.get("external_product_id")
+                                if (
+                                    product_id
+                                    and stored.external_product_id != str(product_id)
+                                ):
+                                    stored.external_product_id = str(product_id)
+                                    changed = True
+                                entry_id = normalized.get("entry_id")
+                                if entry_id and stored.external_line_id != str(entry_id):
+                                    stored.external_line_id = str(entry_id)
+                                    changed = True
+
+                                ensure_marketplace_listing_for_order_line(
+                                    session,
+                                    marketplace_account_id=account_id,
+                                    order_line=stored,
+                                )
+                                if changed:
+                                    job["updated"] += 1
                 except (httpx.HTTPError, ValueError) as exc:
                     job["errors"].append(
                         {
-                            "order": order.external_code or order.external_order_id,
-                            "line": line.id,
+                            "order": order_key,
                             "error": f"{type(exc).__name__}: {exc}",
                         }
                     )
                 finally:
                     job["processed"] += 1
                     total = int(job["total"] or 0)
-                    percent = round(job["processed"] * 100 / total, 1) if total else 100
+                    percent = (
+                        round(job["processed"] * 100 / total, 1)
+                        if total
+                        else 100
+                    )
                     job["message"] = (
-                        f"Товары: {job['processed']}/{total}; обновлено: {job['updated']}; "
-                        f"прогресс: {percent}%"
+                        f"Заказы с товарами: {job['processed']}/{total}; "
+                        f"обновлено строк: {job['updated']}; прогресс: {percent}%"
                     )
 
-            await asyncio.gather(*(enrich(order, line) for order, line in rows))
+            await asyncio.gather(*(enrich_one(order_row) for order_row in orders))
 
-        job["status"] = "completed" if not job["errors"] else "completed_with_errors"
+        job["status"] = (
+            "completed" if not job["errors"] else "completed_with_errors"
+        )
         job["message"] = (
-            f"Названия товаров загружены: обновлено {job['updated']}, "
+            f"Названия товаров загружены: обновлено строк {job['updated']}, "
             f"ошибок {len(job['errors'])}"
         )
     except Exception as exc:
