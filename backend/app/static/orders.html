@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Orders Center</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260722-4">
-  <link rel="stylesheet" href="/static/orders.css?v=20260722-4">
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260722-5">
+  <link rel="stylesheet" href="/static/orders.css?v=20260722-5">
 </head>
 <body>
   <div class="shell">
@@ -28,7 +28,10 @@
           <h1>Заказы</h1>
           <p class="subtitle">Фактические этапы Kaspi, закупка и состояние товара в одном рабочем центре</p>
         </div>
-        <button id="refresh" class="button secondary" type="button">Обновить</button>
+        <div class="order-actions">
+          <button id="rebuild-orders" class="button" type="button">Пересобрать заказы</button>
+          <button id="refresh" class="button secondary" type="button">Обновить экран</button>
+        </div>
       </header>
 
       <section id="auth-panel" class="auth-panel">
@@ -47,17 +50,17 @@
 
         <form id="filters" class="filters">
           <label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Номер заказа, товар, Kaspi ID или SKU"></label>
-          <label><span>Этап Kaspi</span><select id="status"><option value="">Все</option><option value="new">Новые</option><option value="preorder">Предзаказ / В пути</option><option value="assembly">Упаковка</option><option value="handover">Передача</option><option value="shipping">Передан курьеру / На доставке</option><option value="delivered">Доставленные</option><option value="cancelled">Отменённые</option><option value="returned">Возвраты</option><option value="unknown">Не распознано</option></select></label>
+          <label><span>Этап LEO</span><select id="status"><option value="">Все</option><option value="preorder">Предзаказ</option><option value="assembly">Упаковка</option><option value="handover">Передача</option><option value="shipping">Переданы на доставку</option><option value="delivered">Доставленные</option><option value="cancelled">Отменены при доставке</option><option value="returned">Возвраты</option><option value="unknown">Не распознано</option></select></label>
           <button class="button" type="submit">Применить</button>
           <button id="reset" class="button secondary" type="button">Сбросить</button>
         </form>
 
         <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div>
         <div id="orders-list" class="orders-list"></div>
-        <div id="empty" class="empty hidden">Заказы не найдены. Запустите синхронизацию Kaspi или измените фильтры.</div>
+        <div id="empty" class="empty hidden">Заказы не найдены. Нажмите «Пересобрать заказы» или измените фильтры.</div>
       </section>
     </main>
   </div>
-  <script src="/static/orders.js?v=20260722-4" defer></script>
+  <script src="/static/orders.js?v=20260722-5" defer></script>
 </body>
 </html>
