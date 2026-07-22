@@ -55,43 +55,24 @@ class SqlAlchemyCommerceRepository:
                 )
             )
 
-        total = self._session.scalar(
-            select(func.count(MarketplaceOrder.id)).where(*filters)
-        ) or 0
+        total = self._session.scalar(select(func.count(MarketplaceOrder.id)).where(*filters)) or 0
         order_rows = self._session.execute(
-            select(MarketplaceOrder, MarketplaceAccount.provider)
-            .join(
-                MarketplaceAccount,
-                MarketplaceAccount.id == MarketplaceOrder.marketplace_account_id,
-            )
+            select(MarketplaceOrder, MarketplaceAccount)
+            .join(MarketplaceAccount, MarketplaceAccount.id == MarketplaceOrder.marketplace_account_id)
             .where(*filters)
-            .order_by(
-                MarketplaceOrder.ordered_at.desc().nullslast(),
-                MarketplaceOrder.id.desc(),
-            )
+            .order_by(MarketplaceOrder.ordered_at.desc().nullslast(), MarketplaceOrder.id.desc())
             .offset(offset)
             .limit(limit)
         ).all()
         if not order_rows:
             return total, ()
 
-        order_ids = [order.id for order, _provider in order_rows]
+        order_ids = [order.id for order, _account in order_rows]
         lines_by_order: dict[int, list[CommerceOrderLine]] = defaultdict(list)
         line_rows = self._session.execute(
-            select(
-                MarketplaceOrderLine,
-                PurchaseRequest.id,
-                PurchaseRequest.status,
-                PurchaseRequest.version,
-            )
-            .outerjoin(
-                PurchaseRequestLine,
-                PurchaseRequestLine.marketplace_order_line_id == MarketplaceOrderLine.id,
-            )
-            .outerjoin(
-                PurchaseRequest,
-                PurchaseRequest.id == PurchaseRequestLine.purchase_request_id,
-            )
+            select(MarketplaceOrderLine, PurchaseRequest.id, PurchaseRequest.status, PurchaseRequest.version)
+            .outerjoin(PurchaseRequestLine, PurchaseRequestLine.marketplace_order_line_id == MarketplaceOrderLine.id)
+            .outerjoin(PurchaseRequest, PurchaseRequest.id == PurchaseRequestLine.purchase_request_id)
             .where(MarketplaceOrderLine.marketplace_order_id.in_(order_ids))
             .order_by(MarketplaceOrderLine.id)
         ).all()
@@ -106,9 +87,7 @@ class SqlAlchemyCommerceRepository:
                     quantity=line.quantity,
                     unit_price=Decimal(line.unit_price),
                     line_total=Decimal(line.line_total),
-                    purchase_request_id=(
-                        None if purchase_request_id is None else str(purchase_request_id)
-                    ),
+                    purchase_request_id=None if purchase_request_id is None else str(purchase_request_id),
                     purchase_status=purchase_status,
                     purchase_version=purchase_version,
                 )
@@ -118,7 +97,9 @@ class SqlAlchemyCommerceRepository:
             CommerceOrder(
                 order_id=order.id,
                 external_code=order.external_code,
-                marketplace=provider,
+                marketplace=account.provider,
+                marketplace_account_id=account.id,
+                marketplace_external_account_id=account.external_account_id,
                 status=order.status,
                 original_status=order.original_status,
                 currency=order.currency,
@@ -127,5 +108,5 @@ class SqlAlchemyCommerceRepository:
                 delivered_at=order.delivered_at,
                 lines=tuple(lines_by_order.get(order.id, ())),
             )
-            for order, provider in order_rows
+            for order, account in order_rows
         )
