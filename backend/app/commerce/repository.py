@@ -13,8 +13,11 @@ from ..models import (
     MarketplaceOrder,
     MarketplaceOrderLine,
     MarketplaceRawPayload,
+    Product,
 )
+from ..monitoring import SupplierOfferState
 from ..purchase_models import PurchaseRequest, PurchaseRequestLine
+from ..suppliers import ProductBinding, Supplier, SupplierProduct
 from .domain import CommerceOrder, CommerceOrderLine
 
 
@@ -99,7 +102,6 @@ class SqlAlchemyCommerceRepository:
         order_external_by_id = {
             order.id: order.external_order_id for order, _account in order_rows
         }
-        lines_by_order: dict[int, list[CommerceOrderLine]] = defaultdict(list)
         line_rows = self._session.execute(
             select(MarketplaceOrderLine, PurchaseRequest.id, PurchaseRequest.status, PurchaseRequest.version)
             .outerjoin(PurchaseRequestLine, PurchaseRequestLine.marketplace_order_line_id == MarketplaceOrderLine.id)
@@ -107,8 +109,77 @@ class SqlAlchemyCommerceRepository:
             .where(MarketplaceOrderLine.marketplace_order_id.in_(order_ids))
             .order_by(MarketplaceOrderLine.id)
         ).all()
+
+        identities: set[str] = set()
+        explicit_product_ids: set[int] = set()
+        for line, *_purchase in line_rows:
+            if line.product_id is not None:
+                explicit_product_ids.add(line.product_id)
+            if line.merchant_sku:
+                identities.add(line.merchant_sku.strip())
+            if line.external_product_id:
+                identities.add(line.external_product_id.strip())
+
+        product_rows = self._session.scalars(
+            select(Product).where(
+                or_(
+                    Product.id.in_(explicit_product_ids) if explicit_product_ids else False,
+                    Product.merchant_sku.in_(identities) if identities else False,
+                    Product.kaspi_product_id.in_(identities) if identities else False,
+                )
+            )
+        ).all()
+        product_by_id = {product.id: product for product in product_rows}
+        product_by_identity: dict[str, Product] = {}
+        for product in product_rows:
+            if product.merchant_sku:
+                product_by_identity.setdefault(product.merchant_sku.strip(), product)
+            if product.kaspi_product_id:
+                product_by_identity.setdefault(product.kaspi_product_id.strip(), product)
+
+        product_ids = set(product_by_id)
+        source_by_product: dict[int, tuple[Decimal | None, str | None]] = {}
+        if product_ids:
+            source_rows = self._session.execute(
+                select(ProductBinding, SupplierProduct, Supplier, SupplierOfferState)
+                .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
+                .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+                .outerjoin(
+                    SupplierOfferState,
+                    SupplierOfferState.supplier_product_id == SupplierProduct.id,
+                )
+                .where(
+                    ProductBinding.product_id.in_(product_ids),
+                    ProductBinding.status.in_(("active", "confirmed")),
+                )
+                .order_by(
+                    ProductBinding.product_id,
+                    ProductBinding.is_primary.desc(),
+                    ProductBinding.priority,
+                    ProductBinding.id,
+                )
+            ).all()
+            for binding, supplier_product, supplier, state in source_rows:
+                if binding.product_id in source_by_product:
+                    continue
+                price = None
+                if state is not None and state.price is not None and state.available is not False:
+                    price = Decimal(state.price)
+                elif supplier_product.current_price is not None and supplier_product.in_stock is not False:
+                    price = Decimal(supplier_product.current_price)
+                if price is not None:
+                    source_by_product[binding.product_id] = (price, supplier.name)
+
+        lines_by_order: dict[int, list[CommerceOrderLine]] = defaultdict(list)
         for line, purchase_request_id, purchase_status, purchase_version in line_rows:
-            title = line.title
+            product = product_by_id.get(line.product_id) if line.product_id is not None else None
+            if product is None:
+                for identity in (line.merchant_sku, line.external_product_id):
+                    if identity and identity.strip() in product_by_identity:
+                        product = product_by_identity[identity.strip()]
+                        break
+
+            title = product.name if product is not None else line.title
             if not title or title.strip().lower() == "unknown product":
                 payload = raw_payload_by_external_id.get(
                     order_external_by_id[line.marketplace_order_id]
@@ -124,10 +195,18 @@ class SqlAlchemyCommerceRepository:
                 if recovered:
                     title = recovered
 
+            effective_product_id = product.id if product is not None else line.product_id
+            procurement_unit_cost = None
+            procurement_source_name = None
+            if effective_product_id is not None:
+                procurement_unit_cost, procurement_source_name = source_by_product.get(
+                    effective_product_id, (None, None)
+                )
+
             lines_by_order[line.marketplace_order_id].append(
                 CommerceOrderLine(
                     line_id=line.id,
-                    product_id=line.product_id,
+                    product_id=effective_product_id,
                     external_product_id=line.external_product_id,
                     merchant_sku=line.merchant_sku,
                     title=title,
@@ -137,6 +216,8 @@ class SqlAlchemyCommerceRepository:
                     purchase_request_id=None if purchase_request_id is None else str(purchase_request_id),
                     purchase_status=purchase_status,
                     purchase_version=purchase_version,
+                    procurement_unit_cost=procurement_unit_cost,
+                    procurement_source_name=procurement_source_name,
                 )
             )
 
