@@ -16,14 +16,8 @@ from backend.app.supplier_adapters.base import AdapterRequest
 from backend.app.supplier_adapters.ozon_browser_access import OzonBrowserAccessAdapter
 from backend.app.supplier_adapters.playwright_pool import PlaywrightBrowserPool
 from backend.app.supplier_adapters.wildberries_browser_access import WildberriesBrowserAccessAdapter
-from tools.kaspi_seller_browser import (
-    KaspiSellerBrowserAdapter,
-    KaspiSellerOrderRequest,
-)
-
 
 SUPPLIER_JOB_TYPE = "supplier_product_observation"
-KASPI_SELLER_JOB_TYPE = "kaspi_seller_order_details"
 DEFAULT_JOB_TIMEOUT_SECONDS = 120.0
 
 
@@ -38,10 +32,7 @@ def _post_json(url: str, token: str, payload: dict) -> dict:
     request = Request(
         url,
         data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json"},
         method="POST",
     )
     try:
@@ -63,18 +54,19 @@ def _adapter_code_for_url(url: str) -> str:
     raise ValueError(f"Unsupported supplier URL host: {host or '-'}")
 
 
-def _job_type(job: dict) -> str:
-    return str(job.get("job_type") or SUPPLIER_JOB_TYPE).strip()
+async def _run_job(job: dict, adapters: dict[str, Any]) -> dict:
+    job_type = str(job.get("job_type") or SUPPLIER_JOB_TYPE).strip()
+    if job_type != SUPPLIER_JOB_TYPE:
+        raise ValueError(f"Unsupported supplier Browser Agent job_type: {job_type}")
 
-
-async def _run_supplier_job(job: dict, adapters: dict[str, Any]) -> dict:
     supplier_product_id = int(job["supplier_product_id"])
-    adapter_code = _adapter_code_for_url(str(job["url"]))
+    url = str(job["url"])
+    adapter_code = _adapter_code_for_url(url)
     adapter = adapters[adapter_code]
     offer = await adapter.fetch(
         AdapterRequest(
             supplier_product_id=supplier_product_id,
-            url=str(job["url"]),
+            url=url,
             external_id=f"browser-agent-{supplier_product_id}",
         )
     )
@@ -92,64 +84,12 @@ async def _run_supplier_job(job: dict, adapters: dict[str, Any]) -> dict:
     }
 
 
-async def _run_kaspi_seller_job(job: dict, adapters: dict[str, Any]) -> dict:
-    payload = job.get("payload")
-    if not isinstance(payload, dict):
-        raise ValueError("Kaspi Seller browser job payload is required")
-    merchant_id = str(payload.get("merchant_id") or "").strip()
-    order_code = str(payload.get("order_code") or "").strip()
-    if not merchant_id or not order_code:
-        raise ValueError("Kaspi Seller job requires merchant_id and order_code")
-
-    adapter = adapters.get("kaspi_seller")
-    if adapter is None:
-        raise RuntimeError("Kaspi Seller browser adapter is not configured")
-    return await adapter.fetch_order(
-        KaspiSellerOrderRequest(
-            merchant_id=merchant_id,
-            order_code=order_code,
-        )
-    )
-
-
-async def _run_job(job: dict, adapters: dict[str, Any]) -> dict:
-    job_type = _job_type(job)
-    if job_type == KASPI_SELLER_JOB_TYPE:
-        return await _run_kaspi_seller_job(job, adapters)
-    if job_type == SUPPLIER_JOB_TYPE:
-        return await _run_supplier_job(job, adapters)
-    raise ValueError(f"Unsupported browser agent job_type: {job_type}")
-
-
-def _job_description(job: dict) -> str:
-    if _job_type(job) == KASPI_SELLER_JOB_TYPE:
-        payload = job.get("payload") or {}
-        return f"Kaspi Seller order {payload.get('order_code') or '-'}"
-    return str(job.get("url") or "-")
-
-
-async def _complete_job(
-    *,
-    api_url: str,
-    token: str,
-    job: dict,
-    adapters: dict[str, Any],
-) -> str:
-    print(f"Claimed browser job #{job['id']}: {_job_description(job)}")
-    timeout_seconds = max(
-        10.0,
-        float(os.getenv("BROWSER_AGENT_JOB_TIMEOUT_SECONDS") or DEFAULT_JOB_TIMEOUT_SECONDS),
-    )
+async def _complete_job(*, api_url: str, token: str, job: dict, adapters: dict[str, Any]) -> str:
+    print(f"Claimed browser job #{job['id']}: {job.get('url') or '-'}")
+    timeout_seconds = max(10.0, float(os.getenv("BROWSER_AGENT_JOB_TIMEOUT_SECONDS") or DEFAULT_JOB_TIMEOUT_SECONDS))
     try:
-        result = await asyncio.wait_for(
-            _run_job(job, adapters),
-            timeout=timeout_seconds,
-        )
-        completion = {
-            "lease_token": job["lease_token"],
-            "status": "succeeded",
-            "payload": result,
-        }
+        result = await asyncio.wait_for(_run_job(job, adapters), timeout=timeout_seconds)
+        completion = {"lease_token": job["lease_token"], "status": "succeeded", "payload": result}
     except TimeoutError:
         completion = {
             "lease_token": job["lease_token"],
@@ -172,20 +112,10 @@ async def _complete_job(
         completion,
     )
     print(f"Completed browser job #{job['id']}: {completion['status']}")
-    if completion["status"] == "succeeded":
-        print(json.dumps(completion["payload"], ensure_ascii=False, indent=2))
-    else:
-        print(completion["error_message"])
     return str(response.get("status") or completion["status"])
 
 
-async def _claim_one(
-    *,
-    api_url: str,
-    token: str,
-    agent_id: str,
-    lease_seconds: int = 180,
-) -> dict | None:
+async def _claim_one(*, api_url: str, token: str, agent_id: str, lease_seconds: int = 180) -> dict | None:
     claim = await asyncio.to_thread(
         _post_json,
         f"{api_url}/api/browser-agent/claim",
@@ -225,95 +155,46 @@ async def _dispatch_once(*, api_url: str, token: str, dispatch_limit: int) -> in
     return queued
 
 
-async def _dispatch_loop(
-    *,
-    api_url: str,
-    token: str,
-    poll_seconds: float,
-    dispatch_limit: int,
-) -> None:
+async def _dispatch_loop(*, api_url: str, token: str, poll_seconds: float, dispatch_limit: int) -> None:
     while True:
         try:
-            await _dispatch_once(
-                api_url=api_url,
-                token=token,
-                dispatch_limit=dispatch_limit,
-            )
+            await _dispatch_once(api_url=api_url, token=token, dispatch_limit=dispatch_limit)
         except Exception as exc:
             print(f"Dispatcher error: {exc}")
         await asyncio.sleep(poll_seconds)
 
 
-async def _worker_loop(
-    *,
-    worker_number: int,
-    api_url: str,
-    token: str,
-    agent_id: str,
-    adapters: dict[str, Any],
-    poll_seconds: float,
-) -> None:
+async def _worker_loop(*, worker_number: int, api_url: str, token: str, agent_id: str, adapters: dict[str, Any], poll_seconds: float) -> None:
     worker_id = f"{agent_id}-w{worker_number}"
     while True:
         try:
-            job = await _claim_one(
-                api_url=api_url,
-                token=token,
-                agent_id=worker_id,
-            )
+            job = await _claim_one(api_url=api_url, token=token, agent_id=worker_id)
         except Exception as exc:
             print(f"Worker {worker_number} claim error: {exc}")
             await asyncio.sleep(poll_seconds)
             continue
-
         if not job:
             await asyncio.sleep(poll_seconds)
             continue
-
         try:
-            await _complete_job(
-                api_url=api_url,
-                token=token,
-                job=job,
-                adapters=adapters,
-            )
+            await _complete_job(api_url=api_url, token=token, job=job, adapters=adapters)
         except Exception as exc:
             print(f"Worker {worker_number} completion error for job #{job['id']}: {exc}")
 
 
-async def _run_once(
-    *,
-    api_url: str,
-    token: str,
-    agent_id: str,
-    adapters: dict[str, Any],
-    dispatch_limit: int,
-) -> int:
+async def _run_once(*, api_url: str, token: str, agent_id: str, adapters: dict[str, Any], dispatch_limit: int) -> int:
     await _dispatch_once(api_url=api_url, token=token, dispatch_limit=dispatch_limit)
-    job = await _claim_one(
-        api_url=api_url,
-        token=token,
-        agent_id=f"{agent_id}-once",
-    )
+    job = await _claim_one(api_url=api_url, token=token, agent_id=f"{agent_id}-once")
     if not job:
-        print("No queued browser jobs. Queue one MonitorTarget or Kaspi Seller job in CRM and run again.")
+        print("No queued supplier browser jobs.")
         return 2
-    status = await _complete_job(
-        api_url=api_url,
-        token=token,
-        job=job,
-        adapters=adapters,
-    )
+    status = await _complete_job(api_url=api_url, token=token, job=job, adapters=adapters)
     return 0 if status == "succeeded" else 1
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="LEO CRM local Chrome browser agent")
-    parser.add_argument(
-        "--once",
-        action="store_true",
-        help="dispatch and process exactly one job, then exit",
-    )
+    parser = argparse.ArgumentParser(description="LEO CRM local supplier browser agent")
+    parser.add_argument("--once", action="store_true", help="dispatch and process exactly one supplier job, then exit")
     return parser.parse_args()
 
 
@@ -334,13 +215,11 @@ async def main(*, once: bool = False) -> int:
     adapters: dict[str, Any] = {
         "ozon": OzonBrowserAccessAdapter(pool),
         "wb": WildberriesBrowserAccessAdapter(pool),
-        "kaspi_seller": KaspiSellerBrowserAdapter(pool),
     }
     print(f"Browser agent {agent_id} connected to CRM {api_url}")
     print(f"Chrome CDP endpoint: {cdp_endpoint}")
     print(f"Parallel browser workers: {1 if once else concurrency}")
-    print(f"Browser job timeout: {max(10.0, float(os.getenv('BROWSER_AGENT_JOB_TIMEOUT_SECONDS') or DEFAULT_JOB_TIMEOUT_SECONDS)):g}s")
-    print("Enabled adapters: ozon, wb, kaspi_seller")
+    print("Enabled adapters: ozon, wb")
 
     if once:
         try:
@@ -379,7 +258,6 @@ async def main(*, once: bool = False) -> int:
         )
         for number in range(1, concurrency + 1)
     )
-
     try:
         await asyncio.gather(*tasks)
     finally:
