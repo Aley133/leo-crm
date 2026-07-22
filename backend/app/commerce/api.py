@@ -1,16 +1,14 @@
 from __future__ import annotations
 
+import asyncio
+
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..auth import require_service_token
-from ..browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
-from ..db import SessionLocal, get_db
-from ..kaspi_http_transport import KaspiConfigurationError, KaspiTransportError
-from ..kaspi_integration import build_kaspi_order_transport, ensure_kaspi_marketplace_account
-from ..marketplace_full_sync import sync_kaspi_orders
-from ..models import MarketplaceImportCheckpoint
+from ..db import get_db
+from ..kaspi_http_transport import KaspiConfigurationError
+from ..kaspi_raw_receiver_jobs import create_job, public_job, run_job
 from .repository import SqlAlchemyCommerceRepository
 from .schemas import CommerceOrderLineRead, CommerceOrderRead, CommerceOrdersResponse, CommerceSummaryRead
 from .service import CommerceService
@@ -18,61 +16,28 @@ from .service import CommerceService
 router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depends(require_service_token)])
 
 
-@router.post("/orders/rebuild")
-def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
-    """Reload official Kaspi Orders API data. Browser Agent is not involved."""
-
+@router.post("/orders/rebuild", status_code=status.HTTP_202_ACCEPTED)
+async def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
+    """Start the archive-derived background raw receiver. Browser Agent is not involved."""
     try:
-        transport = build_kaspi_order_transport()
-    except KaspiConfigurationError as exc:
+        job_id = create_job(days=days)
+    except (ValueError, KaspiConfigurationError) as exc:
         raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
-
-    try:
-        with SessionLocal() as session:
-            with session.begin():
-                account = ensure_kaspi_marketplace_account(session)
-                marketplace_account_id = account.id
-                checkpoint = session.scalar(
-                    select(MarketplaceImportCheckpoint).where(
-                        MarketplaceImportCheckpoint.marketplace_account_id == marketplace_account_id,
-                        MarketplaceImportCheckpoint.stream_name == "orders",
-                    )
-                )
-                if checkpoint is not None:
-                    session.delete(checkpoint)
-
-                # Remove only obsolete Kaspi-order jobs from the abandoned attempt.
-                session.execute(
-                    delete(BrowserAgentJob).where(
-                        BrowserAgentJob.status == BrowserAgentJobStatus.QUEUED.value,
-                        BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%"),
-                    )
-                )
-
-        sync_result = sync_kaspi_orders(
-            SessionLocal,
-            transport,
-            marketplace_account_id=marketplace_account_id,
-            page_size=100,
-            max_pages=31,
-            max_duration_seconds=120,
-        )
-    except KaspiTransportError as exc:
-        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
-    finally:
-        transport.close()
-
+    asyncio.create_task(run_job(job_id))
     return {
+        "job_id": job_id,
+        "status": "queued",
         "days": days,
-        "marketplace_account_id": marketplace_account_id,
-        "pages_processed": sync_result.pages_processed,
-        "fetched_count": sync_result.fetched_count,
-        "imported_count": sync_result.imported_count,
-        "updated_count": sync_result.updated_count,
-        "api_sync_completed": sync_result.completed,
-        "api_sync_stopped_reason": sync_result.stopped_reason,
-        "message": "Kaspi Orders API reloaded; stages rebuilt by raw receiver rules",
+        "message": "Kaspi raw receiver job queued",
     }
+
+
+@router.get("/orders/rebuild/{job_id}")
+def read_rebuild_job(job_id: str) -> dict[str, object]:
+    job = public_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Kaspi raw receiver job not found")
+    return job
 
 
 @router.get("/orders", response_model=CommerceOrdersResponse)
