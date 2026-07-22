@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from sqlalchemy import inspect
+from sqlalchemy import inspect, text
 from sqlalchemy.engine import Engine
 from sqlalchemy.orm import Session
 
@@ -15,22 +15,41 @@ _REQUIRED_TABLES = {
 
 
 def ensure_kaspi_seller_storage_schema(db: Session) -> bool:
-    """Ensure Snapshot/Timeline tables exist in the database used by this request.
+    """Repair the physical Kaspi Snapshot schema when production drifted.
 
-    Alembic remains the authoritative migration mechanism. This guard exists for
-    production environments where the migration revision was stamped previously
-    while one or both physical tables were absent. It performs no work once the
-    schema is healthy.
+    Alembic remains authoritative. This guard covers databases that were stamped
+    past a revision while the nullable marketplace_account_id column was never
+    physically created. It is safe to call before every Snapshot write because
+    healthy schemas return without executing DDL.
     """
 
     bind = db.get_bind()
     engine = bind if isinstance(bind, Engine) else bind.engine
-    existing = set(inspect(engine).get_table_names())
+    inspector = inspect(engine)
+    existing = set(inspector.get_table_names())
     missing = _REQUIRED_TABLES - existing
-    if not missing:
-        return False
+    changed = False
 
-    # Create in dependency order because timeline rows reference snapshots.
-    KaspiSellerOrderSnapshotRecord.__table__.create(bind=engine, checkfirst=True)
-    KaspiSellerOrderTimelineEvent.__table__.create(bind=engine, checkfirst=True)
-    return True
+    if missing:
+        KaspiSellerOrderSnapshotRecord.__table__.create(bind=engine, checkfirst=True)
+        KaspiSellerOrderTimelineEvent.__table__.create(bind=engine, checkfirst=True)
+        changed = True
+        inspector = inspect(engine)
+
+    snapshot_table = KaspiSellerOrderSnapshotRecord.__tablename__
+    if snapshot_table in set(inspector.get_table_names()):
+        columns = {column["name"] for column in inspector.get_columns(snapshot_table)}
+        if "marketplace_account_id" not in columns:
+            # Nullable by design: legacy snapshots may not be linked to a CRM
+            # marketplace account. PostgreSQL and SQLite use compatible syntax
+            # for adding this nullable integer column.
+            db.execute(
+                text(
+                    "ALTER TABLE kaspi_seller_order_snapshots "
+                    "ADD COLUMN marketplace_account_id INTEGER NULL"
+                )
+            )
+            db.flush()
+            changed = True
+
+    return changed
