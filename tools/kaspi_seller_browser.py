@@ -69,14 +69,15 @@ class KaspiSellerBrowserAdapter:
         return detail
 
     @staticmethod
-    def _variables(operation_name: str, request: KaspiSellerOrderRequest) -> dict[str, Any]:
-        variables: dict[str, Any] = {
+    def _variables(
+        operation_name: str,
+        request: KaspiSellerOrderRequest,
+    ) -> dict[str, Any]:
+        del operation_name
+        return {
             "merchantUid": request.merchant_id,
             "orderCode": request.order_code,
         }
-        if operation_name == GET_ORDER_DETAILS_OPERATION:
-            variables["skipCustomerPhone"] = True
-        return variables
 
     async def _execute_graphql(
         self,
