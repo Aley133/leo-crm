@@ -15,15 +15,18 @@ _REQUIRED_TABLES = {
 
 
 def ensure_kaspi_seller_storage_schema(db: Session) -> bool:
-    """Repair the physical Kaspi Snapshot schema when production drifted.
+    """Repair production schema drift before Snapshot writes.
 
-    Alembic remains authoritative. This guard covers databases that were stamped
-    past a revision while the nullable marketplace_account_id column was never
-    physically created. It is safe to call before every Snapshot write because
-    healthy schemas return without executing DDL.
+    Unit tests intentionally use lightweight fake sessions without a SQLAlchemy
+    bind. Such sessions do not represent a physical database and therefore need
+    no schema repair.
     """
 
-    bind = db.get_bind()
+    get_bind = getattr(db, "get_bind", None)
+    if not callable(get_bind):
+        return False
+
+    bind = get_bind()
     engine = bind if isinstance(bind, Engine) else bind.engine
     inspector = inspect(engine)
     existing = set(inspector.get_table_names())
@@ -40,9 +43,6 @@ def ensure_kaspi_seller_storage_schema(db: Session) -> bool:
     if snapshot_table in set(inspector.get_table_names()):
         columns = {column["name"] for column in inspector.get_columns(snapshot_table)}
         if "marketplace_account_id" not in columns:
-            # Nullable by design: legacy snapshots may not be linked to a CRM
-            # marketplace account. PostgreSQL and SQLite use compatible syntax
-            # for adding this nullable integer column.
             db.execute(
                 text(
                     "ALTER TABLE kaspi_seller_order_snapshots "
