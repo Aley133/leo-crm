@@ -31,8 +31,6 @@ class CommerceService:
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...], CommerceSummary]:
         if status:
-            # Every UI status is a CRM business stage. Marketplace API status is
-            # only one fact and must never bypass the Decision Engine.
             _raw_total, candidates = self._repository.list_orders(
                 limit=1000,
                 offset=0,
@@ -60,10 +58,10 @@ class CommerceService:
             active_orders=sum(1 for order in orders if order.stage.value in ACTIVE_STAGES),
             delivered_orders=sum(1 for order in orders if order.stage.value == "delivered"),
             cancelled_orders=sum(
-                1 for order in orders if order.stage.value in {"cancelled", "returned"}
+                1
+                for order in orders
+                if order.stage.value in {"cancelling", "cancelled", "returned"}
             ),
             unresolved_lines=sum(order.unresolved_lines for order in orders),
-            procurement_required_lines=sum(
-                order.procurement_required_lines for order in orders
-            ),
+            procurement_required_lines=sum(order.procurement_required_lines for order in orders),
         )
