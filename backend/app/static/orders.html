@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Заказы Kaspi</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260723-3">
-  <link rel="stylesheet" href="/static/orders.css?v=20260723-3">
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260723-4">
+  <link rel="stylesheet" href="/static/orders.css?v=20260723-4">
 </head>
 <body>
   <div class="shell">
@@ -18,7 +18,7 @@
     </aside>
     <main>
       <header class="topbar">
-        <div><p class="eyebrow">KASPI RAW RECEIVER</p><h1>Заказы</h1><p class="subtitle">Жизненный цикл строится по проверенной модели архива v1.0.1 на официальном Kaspi Orders API.</p></div>
+        <div><p class="eyebrow">KASPI RAW RECEIVER</p><h1>Заказы</h1><p class="subtitle">Жизненный цикл строится по проверенной модели архива v1.0.1, а названия товаров — по точному обогащению архива v1.1.0.</p></div>
         <div class="order-actions"><select id="rebuild-days" class="button secondary" aria-label="Период загрузки"><option value="7">7 дней</option><option value="14">14 дней</option><option value="30">30 дней</option><option value="31">31 день</option></select><button id="rebuild-orders" class="button" type="button">Загрузить заказы Kaspi</button><button id="refresh" class="button secondary" type="button">Обновить экран</button></div>
       </header>
       <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
@@ -30,6 +30,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/orders.js?v=20260723-3" defer></script>
+  <script src="/static/orders.js?v=20260723-4" defer></script>
 </body>
 </html>
