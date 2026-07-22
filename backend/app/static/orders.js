@@ -6,6 +6,7 @@ const tokenForm = document.querySelector("#token-form");
 const tokenInput = document.querySelector("#token");
 const refreshButton = document.querySelector("#refresh");
 const rebuildButton = document.querySelector("#rebuild-orders");
+const rebuildDays = document.querySelector("#rebuild-days");
 const filters = document.querySelector("#filters");
 const resetButton = document.querySelector("#reset");
 const ordersList = document.querySelector("#orders-list");
@@ -14,8 +15,8 @@ const empty = document.querySelector("#empty");
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
-const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorder:"Предзаказ",assembly:"Упаковка",handover:"Передача",shipping:"Переданы на доставку",delivered:"Завершён",cancelled:"Отменён при доставке",returned:"Возврат",unknown:"Прочее"}[stage] || stage || "—");
-const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelled","returned"].includes(stage) ? "bad" : "warn";
+const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorder:"Предзаказ",assembly:"Упаковка",handover:"Передача",shipping:"Передан в доставку",cancelling:"Отмена в процессе",delivered:"Завершён",cancelled:"Отменён",returned:"Возврат",unknown:"Прочее"}[stage] || stage || "—");
+const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelling","cancelled","returned"].includes(stage) ? "bad" : "warn";
 const procurementLabel = (state) => ({required:"Нужно закупить",in_progress:"Закупка оформлена",received:"Получено",not_required:"Закупка не требуется",cancelled:"Закупка отменена"}[state] || state || "—");
 const purchaseStatusLabel = (status) => ({draft:"Черновик",requested:"Заявка отправлена",ordered:"Заказано",partially_received:"Получено частично",received:"Получено",closed:"Закрыто",cancelled:"Отменено"}[status] || status || "—");
 const nextPurchaseAction = (status) => ({draft:{target:"requested",label:"Отправить заявку"},requested:{target:"ordered",label:"Отметить заказанным"},ordered:{target:"received",label:"Отметить полученным"},partially_received:{target:"received",label:"Отметить полученным"},received:{target:"closed",label:"Закрыть закупку"}}[status] || null);
@@ -25,6 +26,7 @@ const setLoading = (loading) => {
   ordersPage.setAttribute("aria-busy", String(loading));
   refreshButton.disabled = loading;
   rebuildButton.disabled = loading;
+  if (rebuildDays) rebuildDays.disabled = loading;
   refreshButton.textContent = loading ? "Обновление…" : "Обновить экран";
 };
 
@@ -99,12 +101,14 @@ const pollRebuildJob = async (jobId) => {
 };
 
 const rebuildOrders = async () => {
+  const days = Number(rebuildDays?.value || 7);
   rebuildButton.disabled = true;
   refreshButton.disabled = true;
+  if (rebuildDays) rebuildDays.disabled = true;
   rebuildButton.textContent = "Загрузка…";
-  message.textContent = "Создаю фоновую выгрузку Kaspi за 7 дней.";
+  message.textContent = `Создаю фоновую выгрузку Kaspi за ${days} дней.`;
   try {
-    const response = await fetch("/api/commerce/orders/rebuild?days=7", {method:"POST", headers:headers()});
+    const response = await fetch(`/api/commerce/orders/rebuild?days=${days}`, {method:"POST", headers:headers()});
     if (!response.ok) throw await responseError(response);
     const started = await response.json();
     const result = await pollRebuildJob(started.job_id);
@@ -116,6 +120,7 @@ const rebuildOrders = async () => {
   finally {
     rebuildButton.disabled = false;
     refreshButton.disabled = false;
+    if (rebuildDays) rebuildDays.disabled = false;
     rebuildButton.textContent = "Загрузить заказы Kaspi";
   }
 };
