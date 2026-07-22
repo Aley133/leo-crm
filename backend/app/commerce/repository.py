@@ -58,27 +58,9 @@ class SqlAlchemyCommerceRepository:
 
         total = self._session.scalar(select(func.count(MarketplaceOrder.id)).where(*filters)) or 0
 
-        latest_snapshot_id = (
-            select(func.max(KaspiSellerOrderSnapshotRecord.id))
-            .where(
-                KaspiSellerOrderSnapshotRecord.order_code == MarketplaceOrder.external_code,
-                or_(
-                    KaspiSellerOrderSnapshotRecord.marketplace_account_id
-                    == MarketplaceOrder.marketplace_account_id,
-                    KaspiSellerOrderSnapshotRecord.merchant_id
-                    == MarketplaceAccount.external_account_id,
-                ),
-            )
-            .correlate(MarketplaceOrder, MarketplaceAccount)
-            .scalar_subquery()
-        )
         order_rows = self._session.execute(
-            select(MarketplaceOrder, MarketplaceAccount, KaspiSellerOrderSnapshotRecord)
+            select(MarketplaceOrder, MarketplaceAccount)
             .join(MarketplaceAccount, MarketplaceAccount.id == MarketplaceOrder.marketplace_account_id)
-            .outerjoin(
-                KaspiSellerOrderSnapshotRecord,
-                KaspiSellerOrderSnapshotRecord.id == latest_snapshot_id,
-            )
             .where(*filters)
             .order_by(MarketplaceOrder.ordered_at.desc().nullslast(), MarketplaceOrder.id.desc())
             .offset(offset)
@@ -87,7 +69,7 @@ class SqlAlchemyCommerceRepository:
         if not order_rows:
             return total, ()
 
-        order_ids = [order.id for order, _account, _snapshot in order_rows]
+        order_ids = [order.id for order, _account in order_rows]
         lines_by_order: dict[int, list[CommerceOrderLine]] = defaultdict(list)
         line_rows = self._session.execute(
             select(MarketplaceOrderLine, PurchaseRequest.id, PurchaseRequest.status, PurchaseRequest.version)
@@ -113,6 +95,31 @@ class SqlAlchemyCommerceRepository:
                 )
             )
 
+        snapshot_by_order: dict[tuple[str, str], KaspiSellerOrderSnapshotRecord] = {}
+        kaspi_keys = {
+            (account.external_account_id, order.external_code)
+            for order, account in order_rows
+            if account.provider == "kaspi" and account.external_account_id and order.external_code
+        }
+        if kaspi_keys:
+            merchant_ids = {merchant_id for merchant_id, _order_code in kaspi_keys}
+            order_codes = {order_code for _merchant_id, order_code in kaspi_keys}
+            snapshots = self._session.scalars(
+                select(KaspiSellerOrderSnapshotRecord)
+                .where(
+                    KaspiSellerOrderSnapshotRecord.merchant_id.in_(merchant_ids),
+                    KaspiSellerOrderSnapshotRecord.order_code.in_(order_codes),
+                )
+                .order_by(
+                    KaspiSellerOrderSnapshotRecord.observed_at.desc(),
+                    KaspiSellerOrderSnapshotRecord.id.desc(),
+                )
+            ).all()
+            for snapshot in snapshots:
+                key = (snapshot.merchant_id, snapshot.order_code)
+                if key in kaspi_keys and key not in snapshot_by_order:
+                    snapshot_by_order[key] = snapshot
+
         return total, tuple(
             CommerceOrder(
                 order_id=order.id,
@@ -127,8 +134,22 @@ class SqlAlchemyCommerceRepository:
                 ordered_at=order.ordered_at,
                 delivered_at=order.delivered_at,
                 lines=tuple(lines_by_order.get(order.id, ())),
-                snapshot_stage=snapshot.stage if snapshot is not None else None,
-                snapshot_observed_at=snapshot.observed_at if snapshot is not None else None,
+                snapshot_stage=(
+                    snapshot_by_order.get((account.external_account_id, order.external_code)).stage
+                    if account.provider == "kaspi"
+                    and account.external_account_id
+                    and order.external_code
+                    and snapshot_by_order.get((account.external_account_id, order.external_code)) is not None
+                    else None
+                ),
+                snapshot_observed_at=(
+                    snapshot_by_order.get((account.external_account_id, order.external_code)).observed_at
+                    if account.provider == "kaspi"
+                    and account.external_account_id
+                    and order.external_code
+                    and snapshot_by_order.get((account.external_account_id, order.external_code)) is not None
+                    else None
+                ),
             )
-            for order, account, snapshot in order_rows
+            for order, account in order_rows
         )
