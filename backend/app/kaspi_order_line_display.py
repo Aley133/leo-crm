@@ -3,35 +3,6 @@ from __future__ import annotations
 from typing import Any, Iterable
 
 
-_TITLE_KEYS = (
-    "name",
-    "title",
-    "productName",
-    "productTitle",
-    "offerName",
-    "displayName",
-)
-_IDENTITY_KEYS = (
-    "productId",
-    "externalProductId",
-    "offerCode",
-    "merchantSku",
-    "sku",
-    "code",
-    "id",
-)
-
-
-def _walk(value: Any) -> Iterable[dict[str, Any]]:
-    if isinstance(value, dict):
-        yield value
-        for child in value.values():
-            yield from _walk(child)
-    elif isinstance(value, list):
-        for child in value:
-            yield from _walk(child)
-
-
 def _clean(value: Any) -> str | None:
     if value in (None, ""):
         return None
@@ -39,44 +10,64 @@ def _clean(value: Any) -> str | None:
     return text or None
 
 
+def _attrs(resource: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(resource, dict):
+        return {}
+    value = resource.get("attributes")
+    return value if isinstance(value, dict) else resource
+
+
+def _identity_values(resource: dict[str, Any]) -> set[str]:
+    attrs = _attrs(resource)
+    values = {
+        _clean(resource.get("id")),
+        _clean(attrs.get("productId")),
+        _clean(attrs.get("externalProductId")),
+        _clean(attrs.get("offerCode")),
+        _clean(attrs.get("merchantSku")),
+        _clean(attrs.get("sku")),
+        _clean(attrs.get("code")),
+    }
+    values.discard(None)
+    return {value for value in values if value is not None}
+
+
+def _product_title(resource: dict[str, Any]) -> str | None:
+    attrs = _attrs(resource)
+    for key in ("name", "title", "productName"):
+        value = _clean(attrs.get(key))
+        if value and value.lower() not in {"unknown product", "название не получено"}:
+            return value
+    return None
+
+
 def recover_order_line_title(
     payload: dict[str, Any] | None,
     *,
     identities: Iterable[str | None],
 ) -> str | None:
-    """Recover a human product title from immutable Kaspi raw evidence.
+    """Safe fallback for product titles from explicit order-entry resources only.
 
-    Kaspi can return the title in an entry, offer, merchantProduct, product or
-    masterProduct object. We first prefer objects matching the line identity and
-    then fall back to the first credible product title in the order payload.
+    Customer, delivery point and other order-level objects are intentionally ignored.
+    Exact enrichment is performed through the archive v1.1.0 endpoint chain.
     """
 
     if not isinstance(payload, dict):
         return None
+    attrs = _attrs(payload)
+    entries = attrs.get("entries")
+    if not isinstance(entries, list):
+        return None
 
     wanted = {_clean(value) for value in identities}
     wanted.discard(None)
-    fallback: str | None = None
 
-    for node in _walk(payload):
-        titles = [_clean(node.get(key)) for key in _TITLE_KEYS]
-        title = next(
-            (
-                value
-                for value in titles
-                if value is not None and value.lower() != "unknown product"
-            ),
-            None,
-        )
-        if title is None:
+    for entry in entries:
+        if not isinstance(entry, dict):
             continue
-
-        if fallback is None:
-            fallback = title
-
-        node_identities = {_clean(node.get(key)) for key in _IDENTITY_KEYS}
-        node_identities.discard(None)
-        if wanted and wanted.intersection(node_identities):
+        if wanted and not wanted.intersection(_identity_values(entry)):
+            continue
+        title = _product_title(entry)
+        if title:
             return title
-
-    return fallback
+    return None
