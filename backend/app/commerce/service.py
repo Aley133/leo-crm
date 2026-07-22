@@ -10,12 +10,12 @@ ACTIVE_STAGES = {
     "new",
     "accepted",
     "preorder",
-    "in_transit",
+    "received",
     "assembly",
     "handover",
     "shipping",
+    "pickup",
 }
-DIRECT_RAW_STATUS_STAGES = {"shipping", "delivered", "cancelled", "returned"}
 
 
 class CommerceService:
@@ -30,9 +30,9 @@ class CommerceService:
         status: str | None = None,
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...], CommerceSummary]:
-        if status and status not in DIRECT_RAW_STATUS_STAGES:
-            # Operational stages depend on Commerce facts and therefore belong
-            # to the domain rather than the marketplace SQL model.
+        if status:
+            # Every UI status is a CRM business stage. Marketplace API status is
+            # only one fact and must never bypass the Decision Engine.
             _raw_total, candidates = self._repository.list_orders(
                 limit=1000,
                 offset=0,
@@ -46,7 +46,7 @@ class CommerceService:
             total, orders = self._repository.list_orders(
                 limit=limit,
                 offset=offset,
-                status=status,
+                status=None,
                 query=query,
             )
         return total, orders, self.summarize(orders)
