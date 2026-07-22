@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from contextlib import asynccontextmanager
 
+from backend.app.kaspi_seller.graphql import GET_ORDER_DETAILS_QUERY
 from tools.browser_agent import _run_job
 from tools.kaspi_seller_browser import (
     KaspiSellerBrowserAdapter,
@@ -44,15 +45,12 @@ def test_agent_routes_kaspi_seller_job_by_job_type() -> None:
 
 class FakePage:
     def __init__(self) -> None:
-        self.url = "about:blank"
+        self.url = "https://kaspi.kz/mc/#/orders"
         self.operations: list[dict] = []
-        self.navigations: list[str] = []
 
     async def goto(self, url: str, **kwargs) -> None:
         assert url == "https://kaspi.kz/mc/#/orders"
         assert kwargs["wait_until"] == "domcontentloaded"
-        self.navigations.append(url)
-        self.url = url
 
     async def evaluate(self, script: str, args: dict):
         assert 'credentials: "include"' in script
@@ -71,10 +69,7 @@ class FakePage:
             "orderSteps": [],
         }
         if args["operationName"] == "getOrderState":
-            detail = {
-                "state": detail["state"],
-                "status": detail["status"],
-            }
+            detail = {"state": detail["state"]}
         return {
             "ok": True,
             "status": 200,
@@ -114,18 +109,27 @@ def test_browser_adapter_executes_state_and_details_graphql() -> None:
         )
     )
 
-    assert pool.page.navigations == ["https://kaspi.kz/mc/#/orders"]
     assert [item["operationName"] for item in pool.page.operations] == [
         "getOrderState",
         "getOrderDetails",
     ]
-    assert all(
-        item["variables"]
-        == {"merchantId": "11843018", "orderCode": "1006480798"}
-        for item in pool.page.operations
-    )
+    assert pool.page.operations[0]["variables"] == {
+        "merchantUid": "11843018",
+        "orderCode": "1006480798",
+    }
+    assert pool.page.operations[1]["variables"] == {
+        "merchantUid": "11843018",
+        "orderCode": "1006480798",
+        "skipCustomerPhone": True,
+    }
     assert result["state"] == "KASPI_DELIVERY_WAIT_FOR_COURIER"
     assert result["status"] == "ASSEMBLED"
     assert result["details_response"]["data"]["merchant"]["orderDetail"]["delivery"][
         "kdAssembled"
     ] is True
+
+
+def test_details_query_uses_union_inline_fragments() -> None:
+    assert "... on SimpleOrderStep" in GET_ORDER_DETAILS_QUERY
+    assert "... on RangeOrderStep" in GET_ORDER_DETAILS_QUERY
+    assert "orderSteps {\n        step" not in GET_ORDER_DETAILS_QUERY
