@@ -16,6 +16,7 @@ from .purchase_service import (
     transition_purchase,
 )
 
+
 router = APIRouter(
     prefix="/api/purchases",
     tags=["purchases"],
@@ -45,9 +46,14 @@ class PurchaseResponse(BaseModel):
     expected_total: float | None
     version: int
     line_count: int
+    first_product_id: int | None = None
 
 
 def _response(purchase) -> PurchaseResponse:
+    first_product_id = next(
+        (line.product_id for line in purchase.lines if line.product_id is not None),
+        None,
+    )
     return PurchaseResponse(
         id=purchase.id,
         marketplace_order_id=purchase.marketplace_order_id,
@@ -57,6 +63,7 @@ def _response(purchase) -> PurchaseResponse:
         expected_total=float(purchase.expected_total) if purchase.expected_total is not None else None,
         version=purchase.version,
         line_count=len(purchase.lines),
+        first_product_id=first_product_id,
     )
 
 
