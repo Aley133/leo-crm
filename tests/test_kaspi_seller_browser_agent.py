@@ -129,7 +129,9 @@ def test_browser_adapter_executes_state_and_details_graphql() -> None:
     ] is True
 
 
-def test_details_query_uses_union_inline_fragments() -> None:
+def test_details_query_uses_live_union_and_phone_skip_contract() -> None:
+    assert "$skipCustomerPhone: Boolean! = false" in GET_ORDER_DETAILS_QUERY
+    assert "phoneNumber @skip(if: $skipCustomerPhone)" in GET_ORDER_DETAILS_QUERY
     assert "... on SimpleOrderStep" in GET_ORDER_DETAILS_QUERY
     assert "... on RangeOrderStep" in GET_ORDER_DETAILS_QUERY
     assert "orderSteps {\n        step" not in GET_ORDER_DETAILS_QUERY
