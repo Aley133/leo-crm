@@ -44,7 +44,7 @@ def list_commerce_orders(
                 marketplace_account_id=order.marketplace_account_id,
                 marketplace_external_account_id=order.marketplace_external_account_id,
                 status=order.status,
-                original_status=order.original_status,
+                original_status=("Snapshot" if order.stage_source == "snapshot" else order.original_status),
                 operational_stage=order.stage.value,
                 operational_stage_source=order.stage_source,
                 snapshot_stage=order.snapshot_stage,
