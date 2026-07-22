@@ -61,11 +61,15 @@ class SqlAlchemyCommerceRepository:
         latest_snapshot_id = (
             select(func.max(KaspiSellerOrderSnapshotRecord.id))
             .where(
-                KaspiSellerOrderSnapshotRecord.marketplace_account_id
-                == MarketplaceOrder.marketplace_account_id,
                 KaspiSellerOrderSnapshotRecord.order_code == MarketplaceOrder.external_code,
+                or_(
+                    KaspiSellerOrderSnapshotRecord.marketplace_account_id
+                    == MarketplaceOrder.marketplace_account_id,
+                    KaspiSellerOrderSnapshotRecord.merchant_id
+                    == MarketplaceAccount.external_account_id,
+                ),
             )
-            .correlate(MarketplaceOrder)
+            .correlate(MarketplaceOrder, MarketplaceAccount)
             .scalar_subquery()
         )
         order_rows = self._session.execute(
