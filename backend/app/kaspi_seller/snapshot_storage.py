@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .snapshot_models import KaspiSellerOrderSnapshotRecord
+from .timeline import persist_timeline_for_snapshot
 
 
 class KaspiSellerSnapshotError(ValueError):
@@ -21,6 +22,7 @@ class PersistedKaspiSellerSnapshot:
     snapshot_id: int
     changed: bool
     previous_snapshot_id: int | None
+    timeline_event_ids: tuple[int, ...] = ()
 
 
 def persist_kaspi_seller_snapshot(
@@ -30,13 +32,7 @@ def persist_kaspi_seller_snapshot(
     payload: dict[str, Any],
     observed_at: datetime,
 ) -> PersistedKaspiSellerSnapshot:
-    """Append one immutable normalized order observation.
-
-    Every successful Browser Agent job gets one row. `changed` compares the
-    canonical normalized snapshot with the latest earlier observation for the
-    same merchant/order pair, allowing Timeline generation without depending on
-    raw GraphQL envelopes.
-    """
+    """Append one immutable observation and derive its business timeline event."""
 
     snapshot = payload.get("snapshot")
     if not isinstance(snapshot, dict):
@@ -58,10 +54,12 @@ def persist_kaspi_seller_snapshot(
         )
     )
     if existing_for_job is not None:
+        event_ids = persist_timeline_for_snapshot(db, snapshot_id=existing_for_job.id)
         return PersistedKaspiSellerSnapshot(
             snapshot_id=existing_for_job.id,
             changed=existing_for_job.changed,
             previous_snapshot_id=existing_for_job.previous_snapshot_id,
+            timeline_event_ids=event_ids,
         )
 
     previous = db.scalar(
@@ -94,10 +92,12 @@ def persist_kaspi_seller_snapshot(
     )
     db.add(record)
     db.flush()
+    event_ids = persist_timeline_for_snapshot(db, snapshot_id=record.id)
     return PersistedKaspiSellerSnapshot(
         snapshot_id=record.id,
         changed=record.changed,
         previous_snapshot_id=record.previous_snapshot_id,
+        timeline_event_ids=event_ids,
     )
 
 
