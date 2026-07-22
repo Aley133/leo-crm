@@ -45,13 +45,16 @@ class KaspiSellerOrderRequest:
 
 
 class KaspiSellerBrowserAdapter:
-    """Read verified order facts from an already authenticated Kaspi Seller tab.
+    """Read verified order facts through an authenticated Kaspi Seller session.
 
-    The adapter attaches through the existing CDP browser pool. It does not own
-    credentials or cookies and never parses DOM. GraphQL is executed inside the
-    authenticated mc.shop.kaspi.kz browser context with credentials included.
+    The adapter attaches through the existing CDP browser pool. It opens the real
+    Seller Cabinet application in the already authenticated Chrome context, then
+    executes GraphQL against mc.shop.kaspi.kz with browser credentials included.
+    The API host itself is never used as a navigation target because it responds
+    with an error page when opened as a normal document.
     """
 
+    seller_app_url = "https://kaspi.kz/mc/#/orders"
     seller_origin = "https://mc.shop.kaspi.kz"
     graphql_url = f"{seller_origin}/mc/facade/graphql"
 
@@ -149,13 +152,14 @@ class KaspiSellerBrowserAdapter:
     async def fetch_order(self, request: KaspiSellerOrderRequest) -> dict[str, Any]:
         async with self._pool.isolated_page() as page:
             await page.goto(
-                self.seller_origin,
+                self.seller_app_url,
                 wait_until="domcontentloaded",
                 timeout=self._timeout_ms,
             )
-            if "errorpage" in str(page.url).casefold():
+            current_url = str(page.url)
+            if "errorpage" in current_url.casefold() or "/mc/" not in current_url.casefold():
                 raise KaspiSellerNotAuthorized(
-                    "Kaspi Seller session redirected to error page; authenticate in the agent Chrome"
+                    "Kaspi Seller session is not authorized; open Seller Cabinet in the agent Chrome"
                 )
 
             state_payload = await self._execute_graphql(
