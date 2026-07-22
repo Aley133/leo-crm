@@ -62,15 +62,16 @@ def _parse_iso(value: Any, timezone_name: str) -> datetime | None:
     if not value:
         return None
     try:
-        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(str(value))
     except (TypeError, ValueError):
         return None
     zone = _zone(timezone_name)
-    return parsed.replace(tzinfo=zone) if parsed.tzinfo is None else parsed.astimezone(zone)
+    if parsed.tzinfo is None:
+        return parsed.replace(tzinfo=zone)
+    return parsed.astimezone(zone)
 
 
 def _handoff_deadline(started_at: datetime, cutoff_hour: int) -> datetime:
-    """Archive rule: before 21:00 -> today 21:00, after 21:00 -> next day 21:00."""
     candidate = started_at.replace(
         hour=cutoff_hour,
         minute=0,
@@ -90,63 +91,51 @@ def classify_kaspi_order_details(
     handoff_cutoff_hour: int = 21,
     history_record: dict[str, Any] | None = None,
 ) -> KaspiOrderClassification:
-    """Exact business lifecycle proven by the diagnostic archive.
+    """Archive v1.0.1 rules adapted only at the Commerce Core boundary."""
 
-    `preOrder` is an immutable order type, not a lifecycle stage. It is used to
-    distinguish the two preparation columns only while logistics cost is zero.
-
-    Priority for logistics stages is exactly:
-    1. actual courier transmission date from Kaspi;
-    2. observed deliveryCostForSeller transition 0 -> >0;
-    3. planned courier transmission date;
-    4. creation date as first-import fallback.
-    """
-
-    status = str(attributes.get("status") or "").strip().upper()
-    state = str(attributes.get("state") or "").strip().upper()
+    status = str(attributes.get("status") or "").upper()
+    state = str(attributes.get("state") or "").upper()
     order_type = "preorder" if attributes.get("preOrder") is True else "stock"
 
     if status == "CANCELLING":
         return KaspiOrderClassification("cancelling", order_type, "kaspi_status")
-    if status in {"CANCELLED", "CANCELED"}:
+    if status == "CANCELLED":
         return KaspiOrderClassification("cancelled", order_type, "kaspi_status")
-    if status in {"COMPLETED", "DELIVERED", "ARCHIVED"}:
+    if status == "COMPLETED":
         return KaspiOrderClassification("delivered", order_type, "kaspi_status")
 
     delivery_cost = _number(attributes.get("deliveryCostForSeller"))
     if delivery_cost <= 0:
         if state in {"NEW", "SIGN_REQUIRED", "PICKUP", "DELIVERY", "KASPI_DELIVERY"}:
-            stage = "preorder" if order_type == "preorder" else "assembly"
+            stage = "preorder" if attributes.get("preOrder") is True else "assembly"
             return KaspiOrderClassification(stage, order_type, "preorder_flag")
         return KaspiOrderClassification("unknown", order_type, "unsupported_state")
 
-    actual = _datetime_ms(attributes.get("courierTransmissionDate"), timezone_name)
-    if actual is not None:
-        return KaspiOrderClassification("shipping", order_type, "courier_transmission_date")
+    if _datetime_ms(attributes.get("courierTransmissionDate"), timezone_name):
+        return KaspiOrderClassification(
+            "shipping",
+            order_type,
+            "courier_transmission_date",
+        )
 
     local_now = _local_now(timezone_name, now)
-
-    transition = _parse_iso(
-        (history_record or {}).get("transfer_started_at"),
-        timezone_name,
-    )
-    if transition is not None:
-        stage = (
-            "shipping"
-            if local_now >= _handoff_deadline(transition, handoff_cutoff_hour)
-            else "handover"
-        )
-        return KaspiOrderClassification(stage, order_type, "delivery_cost_transition")
-
     planned = _datetime_ms(
         attributes.get("courierTransmissionPlanningDate"),
         timezone_name,
     )
     if planned is not None:
         if planned.date() < local_now.date():
-            return KaspiOrderClassification("shipping", order_type, "planned_transmission_date")
+            return KaspiOrderClassification(
+                "shipping",
+                order_type,
+                "planned_transmission_date",
+            )
         if planned.date() > local_now.date():
-            return KaspiOrderClassification("handover", order_type, "planned_transmission_date")
+            return KaspiOrderClassification(
+                "handover",
+                order_type,
+                "planned_transmission_date",
+            )
         cutoff = planned.replace(
             hour=handoff_cutoff_hour,
             minute=0,
@@ -154,12 +143,40 @@ def classify_kaspi_order_details(
             microsecond=0,
         )
         stage = "shipping" if local_now >= cutoff else "handover"
-        return KaspiOrderClassification(stage, order_type, "planned_transmission_date")
+        return KaspiOrderClassification(
+            stage,
+            order_type,
+            "planned_transmission_date",
+        )
+
+    transfer_started = _parse_iso(
+        (history_record or {}).get("transfer_started_at"),
+        timezone_name,
+    )
+    if transfer_started is not None:
+        stage = (
+            "shipping"
+            if local_now >= _handoff_deadline(transfer_started, handoff_cutoff_hour)
+            else "handover"
+        )
+        return KaspiOrderClassification(
+            stage,
+            order_type,
+            "delivery_cost_transition",
+        )
 
     created = _datetime_ms(attributes.get("creationDate"), timezone_name)
     if created is not None and created.date() < local_now.date():
-        return KaspiOrderClassification("shipping", order_type, "first_import_old_order")
-    return KaspiOrderClassification("handover", order_type, "first_import_today")
+        return KaspiOrderClassification(
+            "shipping",
+            order_type,
+            "first_import_old_order",
+        )
+    return KaspiOrderClassification(
+        "handover",
+        order_type,
+        "first_import_today",
+    )
 
 
 def classify_kaspi_order(
