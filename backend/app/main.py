@@ -17,6 +17,7 @@ from .catalog_api import router as catalog_router
 from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
 from .db import engine
+from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
@@ -49,6 +50,7 @@ app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
+app.include_router(fixed_procurement_source_router)
 app.include_router(product_commerce_router)
 app.include_router(action_router)
 app.include_router(product_registry_router)
