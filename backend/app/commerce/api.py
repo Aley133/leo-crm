@@ -9,6 +9,11 @@ from sqlalchemy.orm import Session
 from ..auth import require_service_token
 from ..browser_agent_models import BrowserAgentJob
 from ..db import SessionLocal, get_db
+from ..kaspi_product_enrichment_jobs import (
+    create_job as create_product_enrichment_job,
+    public_job as public_product_enrichment_job,
+    run_job as run_product_enrichment_job,
+)
 from ..kaspi_raw_receiver_jobs import create_job, public_job, run_job
 from .repository import SqlAlchemyCommerceRepository
 from .schemas import CommerceOrderLineRead, CommerceOrderRead, CommerceOrdersResponse, CommerceSummaryRead
@@ -21,7 +26,6 @@ router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depe
 async def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
     """Start the archive-derived background raw receiver. Browser Agent is not involved."""
 
-    # One-time physical cleanup of jobs left by the abandoned Seller/GraphQL attempt.
     with SessionLocal() as session:
         session.execute(
             delete(BrowserAgentJob).where(
@@ -48,6 +52,33 @@ def read_rebuild_job(job_id: str) -> dict[str, object]:
     job = public_job(job_id)
     if job is None:
         raise HTTPException(status_code=404, detail="Kaspi raw receiver job not found")
+    return job
+
+
+@router.post("/orders/enrich-products", status_code=status.HTTP_202_ACCEPTED)
+async def enrich_kaspi_order_products(
+    days: int = Query(default=7, ge=1, le=31),
+) -> dict[str, object]:
+    """Run archive v1.1.0 product enrichment without Browser Agent."""
+
+    try:
+        job_id = create_product_enrichment_job(days=days)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
+    asyncio.create_task(run_product_enrichment_job(job_id))
+    return {
+        "job_id": job_id,
+        "status": "queued",
+        "days": days,
+        "message": "Kaspi product enrichment job queued",
+    }
+
+
+@router.get("/orders/enrich-products/{job_id}")
+def read_product_enrichment_job(job_id: str) -> dict[str, object]:
+    job = public_product_enrichment_job(job_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Kaspi product enrichment job not found")
     return job
 
 
