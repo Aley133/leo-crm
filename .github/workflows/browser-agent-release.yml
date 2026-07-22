@@ -8,8 +8,10 @@ on:
       - "tools/__init__.py"
       - "tools/browser_agent.py"
       - "tools/browser_agent_desktop.py"
+      - "tools/kaspi_seller_browser.py"
       - "tools/windows/LEO-Browser-Agent.iss"
       - "backend/app/supplier_adapters/**"
+      - "backend/app/kaspi_seller/**"
       - ".github/workflows/browser-agent-release.yml"
       - "requirements.txt"
   workflow_dispatch:
