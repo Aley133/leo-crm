@@ -13,7 +13,7 @@ from .kaspi_http_transport import KaspiHttpSettings
 from .kaspi_integration import ensure_kaspi_marketplace_account
 from .kaspi_order_payload import canonicalize_kaspi_order_payload
 from .marketplace_import import import_kaspi_order
-from .models import MarketplaceRawPayload
+from .models import MarketplaceOrder, MarketplaceRawPayload
 from .product_identity_service import ensure_marketplace_listing_for_order_line
 
 
@@ -85,14 +85,18 @@ def _included_index(body: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any
         return {}
     result: dict[tuple[str, str], dict[str, Any]] = {}
     for item in included:
-        if isinstance(item, dict):
-            key = (str(item.get("type") or ""), str(item.get("id") or ""))
-            if all(key):
-                result[key] = item
+        if not isinstance(item, dict):
+            continue
+        key = (str(item.get("type") or ""), str(item.get("id") or ""))
+        if all(key):
+            result[key] = item
     return result
 
 
-def _flatten_entry(entry: dict[str, Any], included: dict[tuple[str, str], dict[str, Any]]) -> dict[str, Any]:
+def _flatten_entry(
+    entry: dict[str, Any],
+    included: dict[tuple[str, str], dict[str, Any]],
+) -> dict[str, Any]:
     result = dict(entry)
     attrs = dict(entry.get("attributes") or {})
     relationships = entry.get("relationships") if isinstance(entry.get("relationships"), dict) else {}
@@ -112,11 +116,18 @@ def _flatten_entry(entry: dict[str, Any], included: dict[tuple[str, str], dict[s
         resource_attrs = resource.get("attributes") if isinstance(resource, dict) else None
         if isinstance(resource_attrs, dict):
             title_candidates.extend([resource_attrs.get("name"), resource_attrs.get("title")])
-            sku_candidates.extend([resource_attrs.get("code"), resource_attrs.get("sku"), resource_attrs.get("offerCode")])
+            sku_candidates.extend(
+                [resource_attrs.get("code"), resource_attrs.get("sku"), resource_attrs.get("offerCode")]
+            )
 
-    title = next((str(value).strip() for value in title_candidates if value not in (None, "") and str(value).strip()), "Unknown product")
-    sku = next((str(value).strip() for value in sku_candidates if value not in (None, "") and str(value).strip()), None)
-    attrs["name"] = title
+    attrs["name"] = next(
+        (str(value).strip() for value in title_candidates if value not in (None, "") and str(value).strip()),
+        "Unknown product",
+    )
+    sku = next(
+        (str(value).strip() for value in sku_candidates if value not in (None, "") and str(value).strip()),
+        None,
+    )
     if sku is not None:
         attrs["offerCode"] = sku
     if external_product_id is not None:
@@ -125,24 +136,68 @@ def _flatten_entry(entry: dict[str, Any], included: dict[tuple[str, str], dict[s
     return result
 
 
-def _hydrate_page(body: dict[str, Any]) -> list[dict[str, Any]]:
+def _entries_from_relationship(
+    order: dict[str, Any],
+    included: dict[tuple[str, str], dict[str, Any]],
+) -> list[dict[str, Any]]:
+    relationships = order.get("relationships") if isinstance(order.get("relationships"), dict) else {}
+    relation = relationships.get("entries")
+    refs = relation.get("data") if isinstance(relation, dict) else None
+    if not isinstance(refs, list):
+        return []
+    entries: list[dict[str, Any]] = []
+    for ref in refs:
+        if not isinstance(ref, dict):
+            continue
+        resource = included.get((str(ref.get("type") or ""), str(ref.get("id") or "")))
+        if resource is not None:
+            entries.append(_flatten_entry(resource, included))
+    return entries
+
+
+async def _fetch_entries(
+    client: httpx.AsyncClient,
+    *,
+    order_id: str,
+    headers: dict[str, str],
+) -> list[dict[str, Any]]:
+    response = await client.get(
+        f"/orders/{order_id}/entries",
+        params={"page[size]": 200, "include": "product,merchantProduct,masterProduct"},
+        headers=headers,
+    )
+    response.raise_for_status()
+    body = response.json()
+    if not isinstance(body, dict):
+        return []
+    included = _included_index(body)
+    return [_flatten_entry(entry, included) for entry in _items(body)]
+
+
+async def _hydrate_page(
+    client: httpx.AsyncClient,
+    body: dict[str, Any],
+    *,
+    headers: dict[str, str],
+) -> list[dict[str, Any]]:
     included = _included_index(body)
     hydrated: list[dict[str, Any]] = []
     for order in _items(body):
         resource = dict(order)
         attrs = dict(order.get("attributes") or {})
-        relationships = order.get("relationships") if isinstance(order.get("relationships"), dict) else {}
-        entries_relation = relationships.get("entries")
-        refs = entries_relation.get("data") if isinstance(entries_relation, dict) else None
-        entries: list[dict[str, Any]] = []
-        if isinstance(refs, list):
-            for ref in refs:
-                if not isinstance(ref, dict):
-                    continue
-                included_entry = included.get((str(ref.get("type") or ""), str(ref.get("id") or "")))
-                if included_entry is not None:
-                    entries.append(_flatten_entry(included_entry, included))
-        attrs["entries"] = entries
+        entries = _entries_from_relationship(order, included)
+        order_id = str(order.get("id") or "").strip()
+        if not entries and order_id:
+            try:
+                entries = await _fetch_entries(client, order_id=order_id, headers=headers)
+            except (httpx.HTTPError, ValueError):
+                # Preserve existing CRM lines by omitting the field when Kaspi's
+                # secondary entries endpoint is temporarily unavailable.
+                entries = []
+        if entries:
+            attrs["entries"] = entries
+        else:
+            attrs.pop("entries", None)
         resource["attributes"] = attrs
         hydrated.append(resource)
     return hydrated
@@ -155,7 +210,12 @@ def _delivery_cost(payload: dict[str, Any]) -> float:
         return 0.0
 
 
-def _history_record(session, *, marketplace_account_id: int, external_order_id: str) -> dict[str, Any] | None:
+def _history_record(
+    session,
+    *,
+    marketplace_account_id: int,
+    external_order_id: str,
+) -> dict[str, Any] | None:
     rows = session.execute(
         select(MarketplaceRawPayload.payload_json, MarketplaceRawPayload.received_at)
         .where(
@@ -185,7 +245,9 @@ def _persist_orders(orders: list[dict[str, Any]], *, timezone_name: str) -> tupl
         with session.begin():
             account = ensure_kaspi_marketplace_account(session)
             for source_payload in orders:
-                external_order_id = str(source_payload.get("id") or _attrs(source_payload).get("code") or "").strip()
+                external_order_id = str(
+                    source_payload.get("id") or _attrs(source_payload).get("code") or ""
+                ).strip()
                 if not external_order_id:
                     continue
                 history = _history_record(
@@ -193,26 +255,6 @@ def _persist_orders(orders: list[dict[str, Any]], *, timezone_name: str) -> tupl
                     marketplace_account_id=account.id,
                     external_order_id=external_order_id,
                 )
-                current_cost = _delivery_cost(source_payload)
-                if current_cost > 0 and history is None:
-                    previous_rows = session.execute(
-                        select(MarketplaceRawPayload.payload_json)
-                        .where(
-                            MarketplaceRawPayload.marketplace_account_id == account.id,
-                            MarketplaceRawPayload.payload_type == "order",
-                            MarketplaceRawPayload.external_object_id == external_order_id,
-                        )
-                        .order_by(MarketplaceRawPayload.received_at.desc(), MarketplaceRawPayload.id.desc())
-                        .limit(1)
-                    ).all()
-                    if previous_rows:
-                        previous_payload = previous_rows[0][0] if isinstance(previous_rows[0][0], dict) else {}
-                        if _delivery_cost(previous_payload) <= 0:
-                            history = {
-                                "transfer_started_at": observed_at.isoformat(),
-                                "transfer_started_source": "delivery_cost_transition",
-                            }
-
                 payload = canonicalize_kaspi_order_payload(
                     source_payload,
                     now=observed_at,
@@ -230,7 +272,7 @@ def _persist_orders(orders: list[dict[str, Any]], *, timezone_name: str) -> tupl
                     imported += 1
                 elif result.changed:
                     updated += 1
-                order = session.get(__import__("backend.app.models", fromlist=["MarketplaceOrder"]).MarketplaceOrder, result.order_id)
+                order = session.get(MarketplaceOrder, result.order_id)
                 if order is not None:
                     for line in order.lines:
                         ensure_marketplace_listing_for_order_line(
@@ -247,124 +289,163 @@ async def run_job(job_id: str) -> None:
     job["started_at"] = datetime.now(UTC).isoformat()
     job["message"] = "Загрузка заказов из Kaspi"
 
-    settings = KaspiHttpSettings.from_environment()
-    day_ms = 24 * 60 * 60 * 1000
-    min_split_ms = 60 * 60 * 1000
-    base_chunks: list[tuple[str, int, int]] = []
-    cursor = int(job["from_ms"])
-    while cursor <= int(job["to_ms"]):
-        end = min(cursor + day_ms - 1, int(job["to_ms"]))
-        for state in KASPI_STATES:
-            base_chunks.append((state, cursor, end))
-        cursor = end + 1
+    try:
+        settings = KaspiHttpSettings.from_environment()
+        day_ms = 24 * 60 * 60 * 1000
+        min_split_ms = 60 * 60 * 1000
+        base_chunks: list[tuple[str, int, int]] = []
+        cursor = int(job["from_ms"])
+        while cursor <= int(job["to_ms"]):
+            end = min(cursor + day_ms - 1, int(job["to_ms"]))
+            for state in KASPI_STATES:
+                base_chunks.append((state, cursor, end))
+            cursor = end + 1
 
-    unique: dict[str, dict[str, Any]] = {}
-    errors: list[dict[str, Any]] = []
-    completed = 0
-    lock = asyncio.Lock()
-    queue: asyncio.Queue[tuple[str, int, int]] = asyncio.Queue()
-    for chunk in base_chunks:
-        queue.put_nowait(chunk)
+        unique: dict[str, dict[str, Any]] = {}
+        errors: list[dict[str, Any]] = []
+        completed = 0
+        lock = asyncio.Lock()
+        queue: asyncio.Queue[tuple[str, int, int]] = asyncio.Queue()
+        for chunk in base_chunks:
+            queue.put_nowait(chunk)
 
-    headers = {
-        "Accept": "application/vnd.api+json",
-        "Content-Type": "application/vnd.api+json",
-        "X-Auth-Token": settings.api_token,
-        "User-Agent": "leo-crm-raw-receiver/1.0.1",
-    }
+        headers = {
+            "Accept": "application/vnd.api+json",
+            "Content-Type": "application/vnd.api+json",
+            "X-Auth-Token": settings.api_token,
+            "User-Agent": "leo-crm-raw-receiver/1.0.1",
+        }
 
-    async with httpx.AsyncClient(
-        base_url=settings.base_url,
-        timeout=httpx.Timeout(connect=10, read=15, write=10, pool=15),
-        limits=httpx.Limits(max_connections=8, max_keepalive_connections=5),
-    ) as client:
-        async def fetch_range(state: str, start_ms: int, end_ms: int) -> None:
-            page_number = 0
-            page_size = 50
-            while True:
-                params = {
-                    "page[number]": page_number,
-                    "page[size]": page_size,
-                    "sort": "-creationDate",
-                    "include": "entries",
-                    "filter[orders][state]": state,
-                    "filter[orders][creationDate][$ge]": start_ms,
-                    "filter[orders][creationDate][$le]": end_ms,
-                }
-                try:
-                    response = await asyncio.wait_for(client.get("/orders", params=params, headers=headers), timeout=15)
-                    async with lock:
-                        job["request_count"] += 1
-                    response.raise_for_status()
-                    body = response.json()
-                    page_items = _hydrate_page(body if isinstance(body, dict) else {})
-                    async with lock:
-                        for item in page_items:
-                            key = str(item.get("id") or _attrs(item).get("code") or "")
-                            if key:
-                                unique[key] = item
-                        job["orders_count"] = len(unique)
-                        job["message"] = f"Получено {len(unique)} заказов; состояние {state}; страница {page_number + 1}"
-                    meta = _meta(body)
-                    page_count = meta.get("pageCount")
-                    if not page_items:
+        async with httpx.AsyncClient(
+            base_url=settings.base_url,
+            timeout=httpx.Timeout(connect=10, read=15, write=10, pool=15),
+            limits=httpx.Limits(max_connections=8, max_keepalive_connections=5),
+        ) as client:
+            async def fetch_range(state: str, start_ms: int, end_ms: int) -> None:
+                page_number = 0
+                page_size = 50
+                while True:
+                    params = {
+                        "page[number]": page_number,
+                        "page[size]": page_size,
+                        "sort": "-creationDate",
+                        "include": "entries",
+                        "filter[orders][state]": state,
+                        "filter[orders][creationDate][$ge]": start_ms,
+                        "filter[orders][creationDate][$le]": end_ms,
+                    }
+                    try:
+                        response = await asyncio.wait_for(
+                            client.get("/orders", params=params, headers=headers), timeout=15
+                        )
+                        async with lock:
+                            job["request_count"] += 1
+                        response.raise_for_status()
+                        body = response.json()
+                        page_items = await _hydrate_page(
+                            client,
+                            body if isinstance(body, dict) else {},
+                            headers=headers,
+                        )
+                        async with lock:
+                            for item in page_items:
+                                key = str(item.get("id") or _attrs(item).get("code") or "")
+                                if key:
+                                    unique[key] = item
+                            job["orders_count"] = len(unique)
+                            job["message"] = (
+                                f"Получено {len(unique)} заказов; состояние {state}; "
+                                f"страница {page_number + 1}"
+                            )
+                        meta = _meta(body)
+                        page_count = meta.get("pageCount")
+                        if not page_items:
+                            return
+                        if isinstance(page_count, int) and page_number + 1 >= page_count:
+                            return
+                        if not isinstance(page_count, int) and len(page_items) < page_size:
+                            return
+                        page_number += 1
+                    except (TimeoutError, httpx.TimeoutException, httpx.RequestError) as exc:
+                        async with lock:
+                            job["request_count"] += 1
+                        span = end_ms - start_ms + 1
+                        if page_number == 0 and span > min_split_ms:
+                            middle = start_ms + span // 2
+                            await fetch_range(state, start_ms, middle - 1)
+                            await fetch_range(state, middle, end_ms)
+                            return
+                        async with lock:
+                            errors.append(
+                                {
+                                    "kind": "timeout",
+                                    "state": state,
+                                    "from_ms": start_ms,
+                                    "to_ms": end_ms,
+                                    "page": page_number,
+                                    "error": type(exc).__name__,
+                                }
+                            )
                         return
-                    if isinstance(page_count, int) and page_number + 1 >= page_count:
+                    except (httpx.HTTPStatusError, ValueError) as exc:
+                        async with lock:
+                            errors.append(
+                                {
+                                    "kind": "http_or_json_error",
+                                    "state": state,
+                                    "from_ms": start_ms,
+                                    "to_ms": end_ms,
+                                    "page": page_number,
+                                    "error": str(exc)[:500],
+                                }
+                            )
                         return
-                    if not isinstance(page_count, int) and len(page_items) < page_size:
-                        return
-                    page_number += 1
-                except (TimeoutError, httpx.TimeoutException, httpx.RequestError) as exc:
-                    async with lock:
-                        job["request_count"] += 1
-                    span = end_ms - start_ms + 1
-                    if page_number == 0 and span > min_split_ms:
-                        middle = start_ms + span // 2
-                        await fetch_range(state, start_ms, middle - 1)
-                        await fetch_range(state, middle, end_ms)
-                        return
-                    async with lock:
-                        errors.append({"kind": "timeout", "state": state, "from_ms": start_ms, "to_ms": end_ms, "page": page_number, "error": type(exc).__name__})
-                    return
-                except (httpx.HTTPStatusError, ValueError) as exc:
-                    async with lock:
-                        errors.append({"kind": "http_or_json_error", "state": state, "from_ms": start_ms, "to_ms": end_ms, "page": page_number, "error": str(exc)[:500]})
-                    return
 
-        async def worker() -> None:
-            nonlocal completed
-            while True:
-                try:
-                    state, start_ms, end_ms = queue.get_nowait()
-                except asyncio.QueueEmpty:
-                    return
-                try:
-                    await fetch_range(state, start_ms, end_ms)
-                finally:
-                    async with lock:
-                        completed += 1
-                        total = len(base_chunks)
-                        job["progress"] = {
-                            "completed": completed,
-                            "total": total,
-                            "percent": round(completed * 100 / total, 1) if total else 100,
-                        }
-                        job["errors"] = list(errors)
-                    queue.task_done()
+            async def worker() -> None:
+                nonlocal completed
+                while True:
+                    try:
+                        state, start_ms, end_ms = queue.get_nowait()
+                    except asyncio.QueueEmpty:
+                        return
+                    try:
+                        await fetch_range(state, start_ms, end_ms)
+                    finally:
+                        async with lock:
+                            completed += 1
+                            total = len(base_chunks)
+                            job["progress"] = {
+                                "completed": completed,
+                                "total": total,
+                                "percent": round(completed * 100 / total, 1) if total else 100,
+                            }
+                            job["errors"] = list(errors)
+                        queue.task_done()
 
-        try:
             await asyncio.gather(*(worker() for _ in range(3)))
-            orders = sorted(unique.values(), key=lambda item: int(_attrs(item).get("creationDate") or 0), reverse=True)
-            imported, updated = await asyncio.to_thread(_persist_orders, orders, timezone_name=str(job["timezone"]))
-            job["orders_count"] = len(orders)
-            job["imported_count"] = imported
-            job["updated_count"] = updated
-            job["errors"] = errors
-            job["status"] = "completed" if not errors else "completed_with_errors"
-            job["message"] = f"Готово: {len(orders)} уникальных заказов, ошибок отдельных диапазонов: {len(errors)}"
-        except Exception as exc:
-            job["status"] = "failed"
-            job["message"] = f"Загрузка остановлена: {type(exc).__name__}: {exc}"
-            job["errors"].append({"kind": "internal", "error": repr(exc)})
-        finally:
-            job["finished_at"] = datetime.now(UTC).isoformat()
+
+        orders = sorted(
+            unique.values(),
+            key=lambda item: int(_attrs(item).get("creationDate") or 0),
+            reverse=True,
+        )
+        imported, updated = await asyncio.to_thread(
+            _persist_orders,
+            orders,
+            timezone_name=str(job["timezone"]),
+        )
+        job["orders_count"] = len(orders)
+        job["imported_count"] = imported
+        job["updated_count"] = updated
+        job["errors"] = errors
+        job["status"] = "completed" if not errors else "completed_with_errors"
+        job["message"] = (
+            f"Готово: {len(orders)} уникальных заказов, "
+            f"ошибок отдельных диапазонов: {len(errors)}"
+        )
+    except Exception as exc:
+        job["status"] = "failed"
+        job["message"] = f"Загрузка остановлена: {type(exc).__name__}: {exc}"
+        job["errors"].append({"kind": "internal", "error": repr(exc)})
+    finally:
+        job["finished_at"] = datetime.now(UTC).isoformat()
