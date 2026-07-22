@@ -73,6 +73,10 @@ class CommerceOrder:
 
     @property
     def stage(self) -> CommerceOrderStage:
+        # In the raw-receiver pipeline `accepted` is emitted only for
+        # preOrder=true. Regular accepted stock orders are normalized to assembly.
+        if self.status == CommerceOrderStage.ACCEPTED.value:
+            return CommerceOrderStage.PREORDER
         try:
             return CommerceOrderStage(self.status)
         except ValueError:
@@ -92,14 +96,14 @@ class CommerceOrder:
 
     @property
     def procurement_required_lines(self) -> int:
-        if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.ACCEPTED, CommerceOrderStage.PREORDER}:
+        if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.PREORDER}:
             return 0
         return sum(1 for line in self.lines if line.procurement_state == ProcurementState.REQUIRED)
 
     def effective_procurement_state(self, line: CommerceOrderLine) -> ProcurementState:
         if line.procurement_state != ProcurementState.REQUIRED:
             return line.procurement_state
-        if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.ACCEPTED, CommerceOrderStage.PREORDER}:
+        if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.PREORDER}:
             return ProcurementState.NOT_REQUIRED
         return ProcurementState.REQUIRED
 
