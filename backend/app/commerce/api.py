@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..auth import require_service_token
+from ..browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from ..db import SessionLocal, get_db
 from ..kaspi_http_transport import KaspiConfigurationError, KaspiTransportError
 from ..kaspi_integration import build_kaspi_order_transport, ensure_kaspi_marketplace_account
@@ -58,6 +59,13 @@ def rebuild_kaspi_orders(
 
     with SessionLocal() as session:
         try:
+            purge_result = session.execute(
+                delete(BrowserAgentJob).where(
+                    BrowserAgentJob.status == BrowserAgentJobStatus.QUEUED.value,
+                    BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%"),
+                )
+            )
+            cleared_queued_jobs = int(purge_result.rowcount or 0)
             dispatch_result = dispatch_recent_kaspi_orders(session, days=days, limit=5000)
             session.commit()
         except Exception:
@@ -73,9 +81,10 @@ def rebuild_kaspi_orders(
         "updated_count": sync_result.updated_count,
         "api_sync_completed": sync_result.completed,
         "api_sync_stopped_reason": sync_result.stopped_reason,
+        "cleared_stale_seller_jobs": cleared_queued_jobs,
         "seller_jobs_queued": dispatch_result.queued_count,
         "seller_job_ids": list(dispatch_result.queued_job_ids),
-        "message": "Kaspi API orders imported; Seller status scan batch queued",
+        "message": "Kaspi API orders imported; finite Seller status scan batch queued",
     }
 
 
