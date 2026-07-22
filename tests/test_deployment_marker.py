@@ -2,7 +2,7 @@ from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app
 
 
 EXPECTED_APP_VERSION = "0.15.0"
-EXPECTED_DEPLOYMENT_MARKER = "product-commerce-analytics-v1"
+EXPECTED_DEPLOYMENT_MARKER = "continuous-kaspi-order-snapshots-v1"
 
 
 def test_application_metadata_contract() -> None:
