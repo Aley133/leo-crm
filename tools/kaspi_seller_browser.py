@@ -45,14 +45,7 @@ class KaspiSellerOrderRequest:
 
 
 class KaspiSellerBrowserAdapter:
-    """Read verified order facts through an authenticated Kaspi Seller session.
-
-    The adapter attaches through the existing CDP browser pool. It opens the real
-    Seller Cabinet application in the already authenticated Chrome context, then
-    executes GraphQL against mc.shop.kaspi.kz with browser credentials included.
-    The API host itself is never used as a navigation target because it responds
-    with an error page when opened as a normal document.
-    """
+    """Read verified order facts through an authenticated Kaspi Seller session."""
 
     seller_app_url = "https://kaspi.kz/mc/#/orders"
     seller_origin = "https://mc.shop.kaspi.kz"
@@ -74,6 +67,16 @@ class KaspiSellerBrowserAdapter:
         if not isinstance(detail, dict):
             raise KaspiSellerUnexpectedSchema("Kaspi Seller orderDetail has unexpected shape")
         return detail
+
+    @staticmethod
+    def _variables(operation_name: str, request: KaspiSellerOrderRequest) -> dict[str, Any]:
+        variables: dict[str, Any] = {
+            "merchantUid": request.merchant_id,
+            "orderCode": request.order_code,
+        }
+        if operation_name == GET_ORDER_DETAILS_OPERATION:
+            variables["skipCustomerPhone"] = True
+        return variables
 
     async def _execute_graphql(
         self,
@@ -119,10 +122,7 @@ class KaspiSellerBrowserAdapter:
                 "url": self.graphql_url,
                 "operationName": operation_name,
                 "query": query,
-                "variables": {
-                    "merchantId": request.merchant_id,
-                    "orderCode": request.order_code,
-                },
+                "variables": self._variables(operation_name, request),
                 "timeoutMs": self._timeout_ms,
             },
         )
