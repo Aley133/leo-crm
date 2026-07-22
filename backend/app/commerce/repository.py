@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import json
 from collections import defaultdict
-from datetime import datetime
 from decimal import Decimal
 from typing import Any, Protocol
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..kaspi_seller.snapshot_models import KaspiSellerOrderSnapshotRecord
@@ -39,8 +38,6 @@ class SqlAlchemyCommerceRepository:
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...]]:
         filters = []
-        if status:
-            filters.append(MarketplaceOrder.status == status)
         if query:
             pattern = f"%{query.strip()}%"
             matching_order_ids = select(MarketplaceOrderLine.marketplace_order_id).where(
@@ -58,17 +55,17 @@ class SqlAlchemyCommerceRepository:
                 )
             )
 
-        total = self._session.scalar(select(func.count(MarketplaceOrder.id)).where(*filters)) or 0
+        # Stage filtering cannot happen in SQL against MarketplaceOrder.status.
+        # The authoritative stage is resolved only after Snapshot and procurement
+        # facts are loaded by the Decision Engine.
         order_rows = self._session.execute(
             select(MarketplaceOrder, MarketplaceAccount)
             .join(MarketplaceAccount, MarketplaceAccount.id == MarketplaceOrder.marketplace_account_id)
             .where(*filters)
             .order_by(MarketplaceOrder.ordered_at.desc().nullslast(), MarketplaceOrder.id.desc())
-            .offset(offset)
-            .limit(limit)
         ).all()
         if not order_rows:
-            return total, ()
+            return 0, ()
 
         order_ids = [order.id for order, _account in order_rows]
         lines_by_order: dict[int, list[CommerceOrderLine]] = defaultdict(list)
@@ -156,10 +153,10 @@ class SqlAlchemyCommerceRepository:
                 return {}
             return snapshot_by_order.get((account.external_account_id, order.external_code), {})
 
-        result: list[CommerceOrder] = []
+        resolved: list[CommerceOrder] = []
         for order, account in order_rows:
             snapshot = snapshot_for(account, order)
-            result.append(
+            resolved.append(
                 CommerceOrder(
                     order_id=order.id,
                     external_code=order.external_code,
@@ -183,7 +180,13 @@ class SqlAlchemyCommerceRepository:
                     snapshot_returned_to_warehouse=snapshot.get("returned"),
                 )
             )
-        return total, tuple(result)
+
+        if status:
+            normalized_status = status.strip().lower()
+            resolved = [order for order in resolved if order.stage.value == normalized_status]
+
+        total = len(resolved)
+        return total, tuple(resolved[offset : offset + limit])
 
 
 def _optional_bool(value: Any) -> bool | None:
