@@ -3,11 +3,12 @@ from __future__ import annotations
 import asyncio
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
+from sqlalchemy import delete
 from sqlalchemy.orm import Session
 
 from ..auth import require_service_token
-from ..db import get_db
-from ..kaspi_http_transport import KaspiConfigurationError
+from ..browser_agent_models import BrowserAgentJob
+from ..db import SessionLocal, get_db
 from ..kaspi_raw_receiver_jobs import create_job, public_job, run_job
 from .repository import SqlAlchemyCommerceRepository
 from .schemas import CommerceOrderLineRead, CommerceOrderRead, CommerceOrdersResponse, CommerceSummaryRead
@@ -19,10 +20,20 @@ router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depe
 @router.post("/orders/rebuild", status_code=status.HTTP_202_ACCEPTED)
 async def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
     """Start the archive-derived background raw receiver. Browser Agent is not involved."""
+
+    # One-time physical cleanup of jobs left by the abandoned Seller/GraphQL attempt.
+    with SessionLocal() as session:
+        session.execute(
+            delete(BrowserAgentJob).where(
+                BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%")
+            )
+        )
+        session.commit()
+
     try:
         job_id = create_job(days=days)
-    except (ValueError, KaspiConfigurationError) as exc:
-        raise HTTPException(status_code=status.HTTP_503_SERVICE_UNAVAILABLE, detail=str(exc)) from exc
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     asyncio.create_task(run_job(job_id))
     return {
         "job_id": job_id,
