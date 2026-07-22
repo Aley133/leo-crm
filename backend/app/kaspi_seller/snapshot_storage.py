@@ -1,0 +1,114 @@
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import datetime
+from typing import Any
+
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .snapshot_models import KaspiSellerOrderSnapshotRecord
+
+
+class KaspiSellerSnapshotError(ValueError):
+    pass
+
+
+@dataclass(frozen=True, slots=True)
+class PersistedKaspiSellerSnapshot:
+    snapshot_id: int
+    changed: bool
+    previous_snapshot_id: int | None
+
+
+def persist_kaspi_seller_snapshot(
+    db: Session,
+    *,
+    browser_agent_job_id: int,
+    payload: dict[str, Any],
+    observed_at: datetime,
+) -> PersistedKaspiSellerSnapshot:
+    """Append one immutable normalized order observation.
+
+    Every successful Browser Agent job gets one row. `changed` compares the
+    canonical normalized snapshot with the latest earlier observation for the
+    same merchant/order pair, allowing Timeline generation without depending on
+    raw GraphQL envelopes.
+    """
+
+    snapshot = payload.get("snapshot")
+    if not isinstance(snapshot, dict):
+        raise KaspiSellerSnapshotError("Kaspi Seller result requires normalized snapshot")
+
+    merchant_id = _required_text(snapshot.get("merchant_id") or payload.get("merchant_id"), "merchant_id")
+    order_code = _required_text(snapshot.get("order_code") or payload.get("order_code"), "order_code")
+    state = _required_text(snapshot.get("state"), "state")
+    status = _required_text(snapshot.get("status"), "status")
+    stage = _optional_text(snapshot.get("stage"))
+    schema_version = _optional_text(snapshot.get("schema_version") or payload.get("schema_version"))
+
+    serialized = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    fingerprint = hashlib.sha256(serialized.encode("utf-8")).hexdigest()
+
+    existing_for_job = db.scalar(
+        select(KaspiSellerOrderSnapshotRecord).where(
+            KaspiSellerOrderSnapshotRecord.browser_agent_job_id == browser_agent_job_id
+        )
+    )
+    if existing_for_job is not None:
+        return PersistedKaspiSellerSnapshot(
+            snapshot_id=existing_for_job.id,
+            changed=existing_for_job.changed,
+            previous_snapshot_id=existing_for_job.previous_snapshot_id,
+        )
+
+    previous = db.scalar(
+        select(KaspiSellerOrderSnapshotRecord)
+        .where(
+            KaspiSellerOrderSnapshotRecord.merchant_id == merchant_id,
+            KaspiSellerOrderSnapshotRecord.order_code == order_code,
+        )
+        .order_by(
+            KaspiSellerOrderSnapshotRecord.observed_at.desc(),
+            KaspiSellerOrderSnapshotRecord.id.desc(),
+        )
+        .limit(1)
+    )
+    changed = previous is None or previous.snapshot_fingerprint != fingerprint
+
+    record = KaspiSellerOrderSnapshotRecord(
+        browser_agent_job_id=browser_agent_job_id,
+        previous_snapshot_id=previous.id if previous is not None else None,
+        merchant_id=merchant_id,
+        order_code=order_code,
+        state=state,
+        status=status,
+        stage=stage,
+        schema_version=schema_version,
+        snapshot_fingerprint=fingerprint,
+        changed=changed,
+        snapshot_payload=serialized,
+        observed_at=observed_at,
+    )
+    db.add(record)
+    db.flush()
+    return PersistedKaspiSellerSnapshot(
+        snapshot_id=record.id,
+        changed=record.changed,
+        previous_snapshot_id=record.previous_snapshot_id,
+    )
+
+
+def _required_text(value: Any, field_name: str) -> str:
+    text = _optional_text(value)
+    if text is None:
+        raise KaspiSellerSnapshotError(f"Kaspi Seller snapshot requires {field_name}")
+    return text
+
+
+def _optional_text(value: Any) -> str | None:
+    if value in (None, ""):
+        return None
+    return str(value).strip() or None
