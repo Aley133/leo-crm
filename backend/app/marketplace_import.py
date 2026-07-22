@@ -32,18 +32,17 @@ KASPI_STATUS_MAP: dict[str, str] = {
     "HANDOVER": MarketplaceOrderStatus.HANDOVER.value,
     "SHIPPING": MarketplaceOrderStatus.SHIPPING.value,
     "HANDED_OVER_TO_COURIER": MarketplaceOrderStatus.SHIPPING.value,
+    "CANCELLING": MarketplaceOrderStatus.CANCELLING.value,
     "DELIVERED": MarketplaceOrderStatus.DELIVERED.value,
     "COMPLETED": MarketplaceOrderStatus.DELIVERED.value,
     "ARCHIVE": MarketplaceOrderStatus.DELIVERED.value,
     "ARCHIVED": MarketplaceOrderStatus.DELIVERED.value,
     "CANCELLED": MarketplaceOrderStatus.CANCELLED.value,
     "CANCELED": MarketplaceOrderStatus.CANCELLED.value,
-    "CANCELLING": MarketplaceOrderStatus.RETURNED.value,
     "KASPI_DELIVERY_RETURN_REQUESTED": MarketplaceOrderStatus.RETURNED.value,
     "RETURNED": MarketplaceOrderStatus.RETURNED.value,
 }
 
-# These are fulfilment channels/sections, not authoritative lifecycle statuses.
 KASPI_STATE_FALLBACK_MAP: dict[str, str] = {
     "NEW": MarketplaceOrderStatus.NEW.value,
     "PICKUP": MarketplaceOrderStatus.ACCEPTED.value,
@@ -124,28 +123,16 @@ def _canonical_hash(payload: dict[str, Any]) -> str:
 
 
 def _normalize_kaspi_status(attributes: dict[str, Any]) -> tuple[str, str]:
-    """Return normalized lifecycle status and its raw authoritative value.
-
-    Kaspi `status` describes the lifecycle. `state` describes the seller-cabinet
-    section/fulfilment channel and is used only when a payload genuinely omits
-    the lifecycle status.
-    """
     raw_status = _first(attributes, "status", "orderStatus")
     if raw_status not in (None, ""):
         original = str(raw_status).strip()
-        normalized = KASPI_STATUS_MAP.get(
-            original.upper(),
-            MarketplaceOrderStatus.UNKNOWN.value,
-        )
+        normalized = KASPI_STATUS_MAP.get(original.upper(), MarketplaceOrderStatus.UNKNOWN.value)
         return normalized, original
 
     raw_state = _first(attributes, "state", "fulfillmentState", "deliveryStatus")
     if raw_state not in (None, ""):
         original = str(raw_state).strip()
-        normalized = KASPI_STATE_FALLBACK_MAP.get(
-            original.upper(),
-            MarketplaceOrderStatus.UNKNOWN.value,
-        )
+        normalized = KASPI_STATE_FALLBACK_MAP.get(original.upper(), MarketplaceOrderStatus.UNKNOWN.value)
         return normalized, original
 
     return MarketplaceOrderStatus.UNKNOWN.value, "UNKNOWN"
@@ -153,44 +140,28 @@ def _normalize_kaspi_status(attributes: dict[str, Any]) -> tuple[str, str]:
 
 def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
     attributes = payload.get("attributes") if isinstance(payload.get("attributes"), dict) else payload
-    external_order_id = str(
-        _first(payload, "id") or _first(attributes, "id", "orderId", "code") or ""
-    ).strip()
+    external_order_id = str(_first(payload, "id") or _first(attributes, "id", "orderId", "code") or "").strip()
     if not external_order_id:
         raise ValueError("Kaspi order payload has no external order identity")
 
     normalized_status, original_status = _normalize_kaspi_status(attributes)
-
     raw_lines = _first(attributes, "entries", "orderEntries", "lines") or []
     lines: list[NormalizedOrderLine] = []
     for index, raw_line in enumerate(raw_lines):
         if not isinstance(raw_line, dict):
             raise ValueError("Kaspi order line must be an object")
-        line_attributes = (
-            raw_line.get("attributes")
-            if isinstance(raw_line.get("attributes"), dict)
-            else raw_line
-        )
+        line_attributes = raw_line.get("attributes") if isinstance(raw_line.get("attributes"), dict) else raw_line
         quantity = int(_first(line_attributes, "quantity", "qty") or 1)
         unit_price = _as_decimal(_first(line_attributes, "basePrice", "unitPrice", "price"))
-        line_total = _as_decimal(
-            _first(line_attributes, "totalPrice", "lineTotal"),
-            default=str(unit_price * quantity),
-        )
-        external_line_id = str(
-            _first(raw_line, "id")
-            or _first(line_attributes, "id", "entryId")
-            or f"{external_order_id}:{index}"
-        )
+        line_total = _as_decimal(_first(line_attributes, "totalPrice", "lineTotal"), default=str(unit_price * quantity))
+        external_line_id = str(_first(raw_line, "id") or _first(line_attributes, "id", "entryId") or f"{external_order_id}:{index}")
         external_product_value = _first(line_attributes, "productId", "externalProductId")
         merchant_sku_value = _first(line_attributes, "offerCode", "merchantSku", "sku")
         lines.append(
             NormalizedOrderLine(
                 external_line_id=external_line_id,
-                external_product_id=(
-                    str(external_product_value) if external_product_value is not None else None
-                ),
-                merchant_sku=(str(merchant_sku_value) if merchant_sku_value is not None else None),
+                external_product_id=str(external_product_value) if external_product_value is not None else None,
+                merchant_sku=str(merchant_sku_value) if merchant_sku_value is not None else None,
                 title=str(_first(line_attributes, "name", "title") or "Unknown product"),
                 quantity=quantity,
                 unit_price=unit_price,
@@ -207,18 +178,14 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
 
     return NormalizedOrder(
         external_order_id=external_order_id,
-        external_code=(str(external_code_value) if external_code_value is not None else None),
+        external_code=str(external_code_value) if external_code_value is not None else None,
         status=normalized_status,
         original_status=original_status,
-        source_revision=(
-            str(source_revision_value) if source_revision_value is not None else None
-        ),
+        source_revision=str(source_revision_value) if source_revision_value is not None else None,
         currency=str(_first(attributes, "currency") or "KZT"),
         total_amount=total_amount,
         ordered_at=_as_datetime(_first(attributes, "creationDate", "orderedAt", "createdAt")),
-        planned_delivery_at=_as_datetime(
-            _first(attributes, "plannedDeliveryDate", "plannedDeliveryAt")
-        ),
+        planned_delivery_at=_as_datetime(_first(attributes, "plannedDeliveryDate", "plannedDeliveryAt")),
         delivered_at=_as_datetime(_first(attributes, "deliveryDate", "deliveredAt")),
         source_updated_at=_as_datetime(_first(attributes, "updatedAt", "modifiedAt")),
         lines=tuple(lines),
@@ -235,7 +202,6 @@ def import_kaspi_order(
     checkpoint_cursor: str | None = None,
     checkpoint_watermark_at: datetime | None = None,
 ) -> ImportResult:
-    """Persist one Kaspi order inside the caller-owned transaction."""
     normalized = normalize_kaspi_order(payload)
     content_hash = _canonical_hash(payload)
 
