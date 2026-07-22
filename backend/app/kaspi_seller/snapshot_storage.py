@@ -9,6 +9,7 @@ from typing import Any
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..models import MarketplaceAccount
 from .snapshot_models import KaspiSellerOrderSnapshotRecord
 from .timeline import persist_timeline_for_snapshot
 
@@ -74,10 +75,17 @@ def persist_kaspi_seller_snapshot(
         )
         .limit(1)
     )
+    account = db.scalar(
+        select(MarketplaceAccount).where(
+            MarketplaceAccount.provider == "kaspi",
+            MarketplaceAccount.external_account_id == merchant_id,
+        )
+    )
     changed = previous is None or previous.snapshot_fingerprint != fingerprint
 
     record = KaspiSellerOrderSnapshotRecord(
         browser_agent_job_id=browser_agent_job_id,
+        marketplace_account_id=account.id if account is not None else None,
         previous_snapshot_id=previous.id if previous is not None else None,
         merchant_id=merchant_id,
         order_code=order_code,
