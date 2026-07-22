@@ -23,7 +23,14 @@ router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depe
 def rebuild_kaspi_orders(
     days: int = Query(default=7, ge=1, le=30),
 ) -> dict[str, object]:
-    """Re-import a bounded Kaspi API window and queue one finite Seller scan batch."""
+    """Re-import a bounded Kaspi API window and queue one finite Seller scan batch.
+
+    Manual rebuild is an explicit operator action. To guarantee that the local
+    Browser Agent sees this finite Kaspi batch immediately, all *queued* jobs are
+    discarded before the batch is created. A currently leased/running supplier
+    job is never interrupted. Supplier monitoring will recreate its due jobs on
+    the next normal dispatch cycle.
+    """
 
     try:
         transport = build_kaspi_order_transport()
@@ -62,7 +69,6 @@ def rebuild_kaspi_orders(
             purge_result = session.execute(
                 delete(BrowserAgentJob).where(
                     BrowserAgentJob.status == BrowserAgentJobStatus.QUEUED.value,
-                    BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%"),
                 )
             )
             cleared_queued_jobs = int(purge_result.rowcount or 0)
@@ -81,10 +87,10 @@ def rebuild_kaspi_orders(
         "updated_count": sync_result.updated_count,
         "api_sync_completed": sync_result.completed,
         "api_sync_stopped_reason": sync_result.stopped_reason,
-        "cleared_stale_seller_jobs": cleared_queued_jobs,
+        "cleared_queued_jobs": cleared_queued_jobs,
         "seller_jobs_queued": dispatch_result.queued_count,
         "seller_job_ids": list(dispatch_result.queued_job_ids),
-        "message": "Kaspi API orders imported; finite Seller status scan batch queued",
+        "message": "Kaspi API orders imported; queued backlog cleared; finite Seller scan batch queued",
     }
 
 
