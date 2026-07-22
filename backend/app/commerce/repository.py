@@ -7,6 +7,7 @@ from typing import Protocol
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..kaspi_seller.snapshot_models import KaspiSellerOrderSnapshotRecord
 from ..models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderLine
 from ..purchase_models import PurchaseRequest, PurchaseRequestLine
 from .domain import CommerceOrder, CommerceOrderLine
@@ -56,9 +57,24 @@ class SqlAlchemyCommerceRepository:
             )
 
         total = self._session.scalar(select(func.count(MarketplaceOrder.id)).where(*filters)) or 0
+
+        latest_snapshot_id = (
+            select(func.max(KaspiSellerOrderSnapshotRecord.id))
+            .where(
+                KaspiSellerOrderSnapshotRecord.marketplace_account_id
+                == MarketplaceOrder.marketplace_account_id,
+                KaspiSellerOrderSnapshotRecord.order_code == MarketplaceOrder.external_code,
+            )
+            .correlate(MarketplaceOrder)
+            .scalar_subquery()
+        )
         order_rows = self._session.execute(
-            select(MarketplaceOrder, MarketplaceAccount)
+            select(MarketplaceOrder, MarketplaceAccount, KaspiSellerOrderSnapshotRecord)
             .join(MarketplaceAccount, MarketplaceAccount.id == MarketplaceOrder.marketplace_account_id)
+            .outerjoin(
+                KaspiSellerOrderSnapshotRecord,
+                KaspiSellerOrderSnapshotRecord.id == latest_snapshot_id,
+            )
             .where(*filters)
             .order_by(MarketplaceOrder.ordered_at.desc().nullslast(), MarketplaceOrder.id.desc())
             .offset(offset)
@@ -67,7 +83,7 @@ class SqlAlchemyCommerceRepository:
         if not order_rows:
             return total, ()
 
-        order_ids = [order.id for order, _account in order_rows]
+        order_ids = [order.id for order, _account, _snapshot in order_rows]
         lines_by_order: dict[int, list[CommerceOrderLine]] = defaultdict(list)
         line_rows = self._session.execute(
             select(MarketplaceOrderLine, PurchaseRequest.id, PurchaseRequest.status, PurchaseRequest.version)
@@ -107,6 +123,8 @@ class SqlAlchemyCommerceRepository:
                 ordered_at=order.ordered_at,
                 delivered_at=order.delivered_at,
                 lines=tuple(lines_by_order.get(order.id, ())),
+                snapshot_stage=snapshot.stage if snapshot is not None else None,
+                snapshot_observed_at=snapshot.observed_at if snapshot is not None else None,
             )
-            for order, account in order_rows
+            for order, account, snapshot in order_rows
         )
