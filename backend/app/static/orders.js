@@ -130,6 +130,12 @@ const createPurchase = async (orderId, button) => {
   try {
     const response = await fetch("/api/purchases/from-marketplace-order", {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({marketplace_order_id:Number(orderId),idempotency_key:`orders-center:${orderId}`,note:"Создано из Orders Center"})});
     if (!response.ok && response.status !== 409) throw await responseError(response);
+    const purchase = await response.json();
+    if (purchase.first_product_id) {
+      window.location.assign(`/crm/products/${encodeURIComponent(purchase.first_product_id)}`);
+      return;
+    }
+    message.textContent = "Заявка создана, но товар ещё не удалось связать с карточкой.";
     await loadOrders();
   } catch (error) { message.textContent = error.message || "Не удалось создать заявку на закупку."; button.disabled = false; }
 };
