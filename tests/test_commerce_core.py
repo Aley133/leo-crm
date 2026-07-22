@@ -25,7 +25,7 @@ def _line(*, product_id=1, purchase_request_id=None, purchase_status=None):
     )
 
 
-def _order(*, status="new", lines=(), original_status="NEW"):
+def _order(*, status="new", lines=(), original_status="NEW", snapshot_stage=None):
     return CommerceOrder(
         order_id=1,
         external_code="996801988",
@@ -37,6 +37,10 @@ def _order(*, status="new", lines=(), original_status="NEW"):
         delivered_at=None,
         lines=tuple(lines),
         original_status=original_status,
+        snapshot_stage=snapshot_stage,
+        snapshot_observed_at=(
+            datetime(2026, 7, 22, tzinfo=UTC) if snapshot_stage is not None else None
+        ),
     )
 
 
@@ -112,6 +116,32 @@ def test_mixed_received_and_unreceived_lines_remain_preorder() -> None:
     )
 
     assert order.stage == CommerceOrderStage.PREORDER
+
+
+def test_snapshot_stage_overrides_stale_marketplace_order_status() -> None:
+    order = _order(
+        status="accepted",
+        lines=(_line(),),
+        snapshot_stage="HANDOVER",
+    )
+
+    assert order.stage == CommerceOrderStage.HANDOVER
+    assert order.stage_source == "snapshot"
+    assert order.procurement_required_lines == 0
+
+
+def test_unknown_snapshot_stage_falls_back_to_marketplace_order() -> None:
+    order = _order(status="shipping", snapshot_stage="UNSUPPORTED_STAGE")
+
+    assert order.stage == CommerceOrderStage.SHIPPING
+    assert order.stage_source == "marketplace_order"
+
+
+def test_snapshot_terminal_stage_controls_revenue() -> None:
+    cancelled = _order(status="accepted", snapshot_stage="CANCELLED")
+
+    assert cancelled.stage == CommerceOrderStage.CANCELLED
+    assert cancelled.recognized_revenue == Decimal("0")
 
 
 def test_new_shipping_delivered_and_cancelled_states_are_exact() -> None:
