@@ -44,12 +44,15 @@ def test_agent_routes_kaspi_seller_job_by_job_type() -> None:
 
 class FakePage:
     def __init__(self) -> None:
-        self.url = "https://mc.shop.kaspi.kz/merchantcabinet/"
+        self.url = "about:blank"
         self.operations: list[dict] = []
+        self.navigations: list[str] = []
 
     async def goto(self, url: str, **kwargs) -> None:
-        assert url == "https://mc.shop.kaspi.kz"
+        assert url == "https://kaspi.kz/mc/#/orders"
         assert kwargs["wait_until"] == "domcontentloaded"
+        self.navigations.append(url)
+        self.url = url
 
     async def evaluate(self, script: str, args: dict):
         assert 'credentials: "include"' in script
@@ -111,6 +114,7 @@ def test_browser_adapter_executes_state_and_details_graphql() -> None:
         )
     )
 
+    assert pool.page.navigations == ["https://kaspi.kz/mc/#/orders"]
     assert [item["operationName"] for item in pool.page.operations] == [
         "getOrderState",
         "getOrderDetails",
