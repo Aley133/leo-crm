@@ -14,6 +14,7 @@ const empty = document.querySelector("#empty");
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
+const percent = (value) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})}%`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
 const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorder:"Предзаказ",assembly:"Упаковка",handover:"Передача",shipping:"Передан в доставку",cancelling:"Отмена в процессе",delivered:"Завершён",cancelled:"Отменён",returned:"Возврат",unknown:"Прочее"}[stage] || stage || "—");
 const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelling","cancelled","returned"].includes(stage) ? "bad" : "warn";
@@ -51,13 +52,21 @@ const renderPurchaseAction = (line) => {
   return `<button class="button purchase-transition" type="button" data-purchase-id="${escapeHtml(line.purchase_request_id)}" data-version="${Number(line.purchase_version)}" data-target-status="${action.target}">${escapeHtml(action.label)}</button>`;
 };
 
-const renderLine = (line) => `<div class="order-line"><div>${line.product_id ? `<a class="line-title" href="/crm/products/${line.product_id}">${escapeHtml(line.title)}</a>` : `<strong>${escapeHtml(line.title)}</strong>`}<span class="muted">${line.external_product_id ? `Kaspi ${escapeHtml(line.external_product_id)}` : "Без Kaspi ID"}${line.merchant_sku ? ` · SKU ${escapeHtml(line.merchant_sku)}` : ""}</span></div><div><span class="muted">Количество</span><strong>${Number(line.quantity || 0)}</strong></div><div><span class="muted">Цена</span><strong>${money(line.unit_price)}</strong></div><div><span class="muted">Сумма</span><strong>${money(line.line_total)}</strong></div><div><span class="muted">Закупка</span><strong>${escapeHtml(procurementLabel(line.procurement_state))}</strong>${line.purchase_status ? `<span class="muted">${escapeHtml(purchaseStatusLabel(line.purchase_status))}</span>` : ""}${renderPurchaseAction(line)}</div></div>`;
+const renderLine = (line) => {
+  const identity = [line.merchant_sku ? `Артикул ${escapeHtml(line.merchant_sku)}` : null, line.external_product_id ? `Kaspi ID ${escapeHtml(line.external_product_id)}` : null].filter(Boolean).join(" · ") || "Идентификатор не получен";
+  const title = line.product_id ? `<a class="line-title" href="/crm/products/${line.product_id}">${escapeHtml(line.title)}</a>` : `<strong>${escapeHtml(line.title)}</strong>`;
+  const cost = line.procurement_unit_cost == null ? "—" : money(line.procurement_unit_cost);
+  const source = line.procurement_source_name ? escapeHtml(line.procurement_source_name) : "Источник не выбран";
+  const margin = line.gross_margin == null ? "—" : `${money(line.gross_margin)} · ${percent(line.gross_margin_pct)}`;
+  return `<div class="order-line"><div>${title}<span class="muted">${identity}</span></div><div><span class="muted">Количество</span><strong>${Number(line.quantity || 0)}</strong></div><div><span class="muted">Цена продажи</span><strong>${money(line.unit_price)}</strong></div><div><span class="muted">Закупочная цена</span><strong>${cost}</strong><span class="muted">${source}</span></div><div><span class="muted">Маржа</span><strong>${margin}</strong><span class="muted">${escapeHtml(procurementLabel(line.procurement_state))}</span>${line.purchase_status ? `<span class="muted">${escapeHtml(purchaseStatusLabel(line.purchase_status))}</span>` : ""}${renderPurchaseAction(line)}</div></div>`;
+};
 
 const renderOrder = (order) => {
   const stage = order.operational_stage || "unknown";
   const externalCode = order.external_code || order.order_id;
   const canCreatePurchase = Number(order.procurement_required_lines || 0) > 0 && stage === "preorder";
-  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Источник: Kaspi Orders API</span></div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Не привязано к товару</span><strong>${Number(order.unresolved_lines || 0)}</strong></div><div class="order-stat"><span>К закупке</span><strong>${Number(order.procurement_required_lines || 0)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${canCreatePurchase ? `<div class="order-actions"><button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button></div>` : ""}</article>`;
+  const bindingText = Number(order.unresolved_lines || 0) === 0 ? "Товары привязаны" : `Не привязано: ${Number(order.unresolved_lines || 0)}`;
+  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Kaspi Orders API</span></div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${canCreatePurchase ? `<div class="order-actions"><button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button></div>` : ""}</article>`;
 };
 
 const render = (payload) => {
@@ -78,7 +87,7 @@ const loadOrders = async () => {
   if (!localStorage.getItem(storageKey)) { authPanel.classList.remove("hidden"); ordersPage.classList.add("hidden"); return; }
   setLoading(true);
   try {
-    const response = await fetch(`/api/commerce/orders?${queryString()}`, {headers:headers()});
+    const response = await fetch(`/api/commerce/orders?${queryString()}`, {headers:headers(), cache:"no-store"});
     if (response.status === 401) { localStorage.removeItem(storageKey); throw new Error("Токен не принят. Введите актуальный SERVICE_API_TOKEN."); }
     if (!response.ok) throw await responseError(response);
     render(await response.json());
@@ -87,106 +96,35 @@ const loadOrders = async () => {
 };
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
-const pollRebuildJob = async (jobId) => {
-  while (true) {
-    const response = await fetch(`/api/commerce/orders/rebuild/${encodeURIComponent(jobId)}`, {headers:headers()});
-    if (!response.ok) throw await responseError(response);
-    const job = await response.json();
-    const progress = job.progress || {};
-    message.textContent = `${job.message || job.status}. Прогресс: ${Number(progress.percent || 0)}%. Заказов: ${Number(job.orders_count || 0)}. Запросов: ${Number(job.request_count || 0)}. Ошибок диапазонов: ${(job.errors || []).length}.`;
-    if (["completed", "completed_with_errors", "failed"].includes(job.status)) return job;
-    await sleep(1200);
-  }
-};
-
-const pollProductEnrichmentJob = async (jobId) => {
-  while (true) {
-    const response = await fetch(`/api/commerce/orders/enrich-products/${encodeURIComponent(jobId)}`, {headers:headers()});
-    if (!response.ok) throw await responseError(response);
-    const job = await response.json();
-    const total = Number(job.total || 0);
-    const processed = Number(job.processed || 0);
-    const percent = total ? Math.round(processed * 1000 / total) / 10 : 0;
-    message.textContent = `${job.message || job.status}. Товары: ${processed}/${total}. Прогресс: ${percent}%. Запросов: ${Number(job.request_count || 0)}.`;
-    if (["completed", "completed_with_errors", "failed"].includes(job.status)) return job;
-    await sleep(1000);
-  }
-};
-
-const enrichProducts = async (days) => {
-  const response = await fetch(`/api/commerce/orders/enrich-products?days=${days}`, {method:"POST", headers:headers()});
-  if (!response.ok) throw await responseError(response);
-  const started = await response.json();
-  return pollProductEnrichmentJob(started.job_id);
-};
+const pollRebuildJob = async (jobId) => { while (true) { const response = await fetch(`/api/commerce/orders/rebuild/${encodeURIComponent(jobId)}`, {headers:headers()}); if (!response.ok) throw await responseError(response); const job = await response.json(); const progress = job.progress || {}; message.textContent = `${job.message || job.status}. Прогресс: ${Number(progress.percent || 0)}%. Заказов: ${Number(job.orders_count || 0)}. Запросов: ${Number(job.request_count || 0)}. Ошибок диапазонов: ${(job.errors || []).length}.`; if (["completed", "completed_with_errors", "failed"].includes(job.status)) return job; await sleep(1200); } };
+const pollProductEnrichmentJob = async (jobId) => { while (true) { const response = await fetch(`/api/commerce/orders/enrich-products/${encodeURIComponent(jobId)}`, {headers:headers()}); if (!response.ok) throw await responseError(response); const job = await response.json(); const total = Number(job.total || 0); const processed = Number(job.processed || 0); const value = total ? Math.round(processed * 1000 / total) / 10 : 0; message.textContent = `${job.message || job.status}. Товары: ${processed}/${total}. Прогресс: ${value}%. Запросов: ${Number(job.request_count || 0)}.`; if (["completed", "completed_with_errors", "failed"].includes(job.status)) return job; await sleep(1000); } };
+const enrichProducts = async (days) => { const response = await fetch(`/api/commerce/orders/enrich-products?days=${days}`, {method:"POST", headers:headers()}); if (!response.ok) throw await responseError(response); const started = await response.json(); return pollProductEnrichmentJob(started.job_id); };
 
 const rebuildOrders = async () => {
   const days = Number(rebuildDays?.value || 7);
-  rebuildButton.disabled = true;
-  refreshButton.disabled = true;
-  if (rebuildDays) rebuildDays.disabled = true;
-  rebuildButton.textContent = "Загрузка…";
-  message.textContent = `Создаю фоновую выгрузку Kaspi за ${days} дней.`;
+  rebuildButton.disabled = true; refreshButton.disabled = true; if (rebuildDays) rebuildDays.disabled = true; rebuildButton.textContent = "Загрузка…"; message.textContent = `Создаю фоновую выгрузку Kaspi за ${days} дней.`;
   try {
     const response = await fetch(`/api/commerce/orders/rebuild?days=${days}`, {method:"POST", headers:headers()});
     if (!response.ok) throw await responseError(response);
     const started = await response.json();
     const result = await pollRebuildJob(started.job_id);
     if (result.status === "failed") throw new Error(result.message || "Kaspi raw receiver завершился с ошибкой.");
-
-    message.textContent = "Заказы загружены. Получаю точные названия товаров из Kaspi…";
+    message.textContent = "Заказы загружены. Получаю точные названия и артикулы товаров…";
     const enrichment = await enrichProducts(days);
     if (enrichment.status === "failed") throw new Error(enrichment.message || "Не удалось загрузить названия товаров.");
-
-    message.textContent = `Готово. Заказов: ${Number(result.orders_count || 0)}, товаров обновлено: ${Number(enrichment.updated || 0)}, ошибок товаров: ${(enrichment.errors || []).length}.`;
-    filters.reset();
-    await loadOrders();
+    message.textContent = `Готово. Заказов: ${Number(result.orders_count || 0)}, строк обновлено: ${Number(enrichment.updated || 0)}, ошибок товаров: ${(enrichment.errors || []).length}.`;
+    filters.reset(); await loadOrders();
   } catch (error) { message.textContent = error.message || "Не удалось загрузить заказы Kaspi."; }
-  finally {
-    rebuildButton.disabled = false;
-    refreshButton.disabled = false;
-    if (rebuildDays) rebuildDays.disabled = false;
-    rebuildButton.textContent = "Загрузить заказы Kaspi";
-  }
+  finally { rebuildButton.disabled = false; refreshButton.disabled = false; if (rebuildDays) rebuildDays.disabled = false; rebuildButton.textContent = "Загрузить заказы Kaspi"; }
 };
 
-const createPurchase = async (orderId, button) => {
-  button.disabled = true;
-  try {
-    const response = await fetch("/api/purchases/from-marketplace-order", {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({marketplace_order_id:Number(orderId),idempotency_key:`orders-center:${orderId}`,note:"Создано из Orders Center"})});
-    if (!response.ok && response.status !== 409) throw await responseError(response);
-    const purchase = await response.json();
-    if (purchase.first_product_id) {
-      window.location.assign(`/crm/products/${encodeURIComponent(purchase.first_product_id)}`);
-      return;
-    }
-    message.textContent = "Заявка создана, но товар ещё не удалось связать с карточкой.";
-    await loadOrders();
-  } catch (error) { message.textContent = error.message || "Не удалось создать заявку на закупку."; button.disabled = false; }
-};
-
-const transitionPurchase = async (button) => {
-  const purchaseId = button.dataset.purchaseId;
-  const targetStatus = button.dataset.targetStatus;
-  const version = Number(button.dataset.version);
-  button.disabled = true;
-  try {
-    const response = await fetch(`/api/purchases/${encodeURIComponent(purchaseId)}/transition`, {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({target_status:targetStatus,expected_version:version,idempotency_key:`orders-center:${purchaseId}:${version}:${targetStatus}`,metadata:{source:"orders-center"}})});
-    if (!response.ok) throw await responseError(response);
-    await loadOrders();
-  } catch (error) { message.textContent = error.message || "Не удалось обновить статус закупки."; button.disabled = false; }
-};
+const createPurchase = async (orderId, button) => { button.disabled = true; try { const response = await fetch("/api/purchases/from-marketplace-order", {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({marketplace_order_id:Number(orderId),idempotency_key:`orders-center:${orderId}`,note:"Создано из Orders Center"})}); if (!response.ok && response.status !== 409) throw await responseError(response); const purchase = await response.json(); if (purchase.first_product_id) { window.location.assign(`/crm/products/${encodeURIComponent(purchase.first_product_id)}`); return; } message.textContent = "Заявка создана, но товар ещё не удалось связать с карточкой."; await loadOrders(); } catch (error) { message.textContent = error.message || "Не удалось создать заявку на закупку."; button.disabled = false; } };
+const transitionPurchase = async (button) => { const purchaseId = button.dataset.purchaseId; const targetStatus = button.dataset.targetStatus; const version = Number(button.dataset.version); button.disabled = true; try { const response = await fetch(`/api/purchases/${encodeURIComponent(purchaseId)}/transition`, {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({target_status:targetStatus,expected_version:version,idempotency_key:`orders-center:${purchaseId}:${version}:${targetStatus}`,metadata:{source:"orders-center"}})}); if (!response.ok) throw await responseError(response); await loadOrders(); } catch (error) { message.textContent = error.message || "Не удалось обновить статус закупки."; button.disabled = false; } };
 
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, tokenInput.value.trim()); tokenInput.value = ""; loadOrders(); });
 filters.addEventListener("submit", (event) => { event.preventDefault(); loadOrders(); });
 resetButton.addEventListener("click", () => { filters.reset(); loadOrders(); });
 refreshButton.addEventListener("click", loadOrders);
 rebuildButton.addEventListener("click", rebuildOrders);
-ordersList.addEventListener("click", (event) => {
-  const createButton = event.target.closest(".create-purchase");
-  if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; }
-  const transitionButton = event.target.closest(".purchase-transition");
-  if (transitionButton) transitionPurchase(transitionButton);
-});
+ordersList.addEventListener("click", (event) => { const createButton = event.target.closest(".create-purchase"); if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; } const transitionButton = event.target.closest(".purchase-transition"); if (transitionButton) transitionPurchase(transitionButton); });
 loadOrders();
