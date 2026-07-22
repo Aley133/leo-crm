@@ -65,10 +65,13 @@ def test_actual_transmission_has_priority() -> None:
     assert classify_kaspi_order(order(delivery_cost=57, actual=ms(actual)), now=now) == "shipping"
 
 
-def test_positive_cost_without_dates_stays_handoff() -> None:
+def test_positive_cost_without_dates_stays_handoff_on_observation_day() -> None:
     zone = ZoneInfo("Asia/Almaty")
-    now = datetime(2026, 7, 22, 20, 0, tzinfo=zone)
-    assert classify_kaspi_order(order(delivery_cost=57), now=now) == "handover"
+    observed_same_day = datetime(2026, 7, 22, 20, 0, tzinfo=zone)
+    assert (
+        classify_kaspi_order(order(delivery_cost=57), now=observed_same_day)
+        == "handover"
+    )
 
 
 def test_terminal_statuses_have_priority() -> None:
