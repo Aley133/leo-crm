@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import MarketplaceAccount
+from .schema_guard import ensure_kaspi_seller_storage_schema
 from .snapshot_models import KaspiSellerOrderSnapshotRecord
 from .timeline import persist_timeline_for_snapshot
 
@@ -34,6 +35,12 @@ def persist_kaspi_seller_snapshot(
     observed_at: datetime,
 ) -> PersistedKaspiSellerSnapshot:
     """Append one immutable observation and derive its business timeline event."""
+
+    # Production may contain a database stamped past the migration while the
+    # nullable account link column is physically absent. Repair that drift before
+    # any ORM entity query, otherwise SQLAlchemy selects the missing column and
+    # the Browser Agent completion request fails with HTTP 500.
+    ensure_kaspi_seller_storage_schema(db)
 
     snapshot = payload.get("snapshot")
     if not isinstance(snapshot, dict):
