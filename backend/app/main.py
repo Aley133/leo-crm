@@ -17,7 +17,6 @@ from .catalog_api import router as catalog_router
 from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
 from .db import engine
-from .kaspi_seller.timeline_api import router as kaspi_seller_timeline_router
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
@@ -36,8 +35,8 @@ from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 from .ui import router as ui_router
 
-APP_VERSION = "0.16.0"
-DEPLOYMENT_MARKER = "manual-kaspi-order-rebuild-v1"
+APP_VERSION = "0.17.0"
+DEPLOYMENT_MARKER = "kaspi-raw-receiver-orders-v1"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -65,7 +64,6 @@ app.include_router(monitoring_center_router)
 app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
 app.include_router(browser_agent_registry_router)
-app.include_router(kaspi_seller_timeline_router)
 app.include_router(pricing_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
@@ -76,25 +74,12 @@ app.include_router(purchase_router)
 
 @app.get("/")
 async def root() -> dict[str, str]:
-    return {
-        "service": "leo-crm",
-        "status": "running",
-        "version": APP_VERSION,
-        "deployment_marker": DEPLOYMENT_MARKER,
-        "docs": "/docs",
-        "crm": "/crm",
-    }
+    return {"service": "leo-crm", "status": "running", "version": APP_VERSION, "deployment_marker": DEPLOYMENT_MARKER, "docs": "/docs", "crm": "/crm"}
 
 
 @app.get("/health")
 async def health() -> dict[str, str]:
-    return {
-        "status": "ok",
-        "database": "not_checked",
-        "version": APP_VERSION,
-        "deployment_marker": DEPLOYMENT_MARKER,
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
+    return {"status": "ok", "database": "not_checked", "version": APP_VERSION, "deployment_marker": DEPLOYMENT_MARKER, "timestamp": datetime.now(UTC).isoformat()}
 
 
 @app.get("/ready")
@@ -103,21 +88,5 @@ async def ready():
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except SQLAlchemyError:
-        return JSONResponse(
-            status_code=503,
-            content={
-                "status": "not_ready",
-                "database": "unavailable",
-                "version": APP_VERSION,
-                "deployment_marker": DEPLOYMENT_MARKER,
-                "timestamp": datetime.now(UTC).isoformat(),
-            },
-        )
-
-    return {
-        "status": "ready",
-        "database": "ok",
-        "version": APP_VERSION,
-        "deployment_marker": DEPLOYMENT_MARKER,
-        "timestamp": datetime.now(UTC).isoformat(),
-    }
+        return JSONResponse(status_code=503, content={"status": "not_ready", "database": "unavailable", "version": APP_VERSION, "deployment_marker": DEPLOYMENT_MARKER, "timestamp": datetime.now(UTC).isoformat()})
+    return {"status": "ready", "database": "ok", "version": APP_VERSION, "deployment_marker": DEPLOYMENT_MARKER, "timestamp": datetime.now(UTC).isoformat()}
