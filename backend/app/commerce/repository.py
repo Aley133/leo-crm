@@ -7,6 +7,7 @@ from typing import Protocol
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..kaspi_seller.snapshot_models import KaspiSellerOrderSnapshotRecord
 from ..models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderLine
 from ..purchase_models import PurchaseRequest, PurchaseRequestLine
 from .domain import CommerceOrder, CommerceOrderLine
@@ -93,20 +94,66 @@ class SqlAlchemyCommerceRepository:
                 )
             )
 
+        snapshot_keys = {
+            (account.id, order.external_code)
+            for order, account in order_rows
+            if account.provider == "kaspi" and order.external_code
+        }
+        latest_snapshots: dict[tuple[int, str], KaspiSellerOrderSnapshotRecord] = {}
+        if snapshot_keys:
+            account_ids = {account_id for account_id, _order_code in snapshot_keys}
+            order_codes = {order_code for _account_id, order_code in snapshot_keys}
+            snapshot_rows = self._session.scalars(
+                select(KaspiSellerOrderSnapshotRecord)
+                .where(
+                    KaspiSellerOrderSnapshotRecord.marketplace_account_id.in_(account_ids),
+                    KaspiSellerOrderSnapshotRecord.order_code.in_(order_codes),
+                )
+                .order_by(
+                    KaspiSellerOrderSnapshotRecord.observed_at.desc(),
+                    KaspiSellerOrderSnapshotRecord.id.desc(),
+                )
+            ).all()
+            for snapshot in snapshot_rows:
+                if snapshot.marketplace_account_id is None:
+                    continue
+                key = (snapshot.marketplace_account_id, snapshot.order_code)
+                if key in snapshot_keys and key not in latest_snapshots:
+                    latest_snapshots[key] = snapshot
+
         return total, tuple(
-            CommerceOrder(
-                order_id=order.id,
-                external_code=order.external_code,
-                marketplace=account.provider,
-                marketplace_account_id=account.id,
-                marketplace_external_account_id=account.external_account_id,
-                status=order.status,
-                original_status=order.original_status,
-                currency=order.currency,
-                total_amount=Decimal(order.total_amount),
-                ordered_at=order.ordered_at,
-                delivered_at=order.delivered_at,
+            self._to_commerce_order(
+                order=order,
+                account=account,
                 lines=tuple(lines_by_order.get(order.id, ())),
+                snapshot=latest_snapshots.get((account.id, order.external_code))
+                if order.external_code
+                else None,
             )
             for order, account in order_rows
+        )
+
+    @staticmethod
+    def _to_commerce_order(
+        *,
+        order: MarketplaceOrder,
+        account: MarketplaceAccount,
+        lines: tuple[CommerceOrderLine, ...],
+        snapshot: KaspiSellerOrderSnapshotRecord | None,
+    ) -> CommerceOrder:
+        return CommerceOrder(
+            order_id=order.id,
+            external_code=order.external_code,
+            marketplace=account.provider,
+            marketplace_account_id=account.id,
+            marketplace_external_account_id=account.external_account_id,
+            status=order.status,
+            original_status=order.original_status,
+            currency=order.currency,
+            total_amount=Decimal(order.total_amount),
+            ordered_at=order.ordered_at,
+            delivered_at=order.delivered_at,
+            lines=lines,
+            observed_stage=snapshot.stage if snapshot is not None else None,
+            observed_at=snapshot.observed_at if snapshot is not None else None,
         )
