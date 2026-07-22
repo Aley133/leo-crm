@@ -16,6 +16,14 @@ from backend.app.supplier_adapters.base import AdapterRequest
 from backend.app.supplier_adapters.ozon_browser_access import OzonBrowserAccessAdapter
 from backend.app.supplier_adapters.playwright_pool import PlaywrightBrowserPool
 from backend.app.supplier_adapters.wildberries_browser_access import WildberriesBrowserAccessAdapter
+from tools.kaspi_seller_browser import (
+    KaspiSellerBrowserAdapter,
+    KaspiSellerOrderRequest,
+)
+
+
+SUPPLIER_JOB_TYPE = "supplier_product_observation"
+KASPI_SELLER_JOB_TYPE = "kaspi_seller_order_details"
 
 
 def _required_env(name: str) -> str:
@@ -54,7 +62,11 @@ def _adapter_code_for_url(url: str) -> str:
     raise ValueError(f"Unsupported supplier URL host: {host or '-'}")
 
 
-async def _run_job(job: dict, adapters: dict[str, Any]) -> dict:
+def _job_type(job: dict) -> str:
+    return str(job.get("job_type") or SUPPLIER_JOB_TYPE).strip()
+
+
+async def _run_supplier_job(job: dict, adapters: dict[str, Any]) -> dict:
     supplier_product_id = int(job["supplier_product_id"])
     adapter_code = _adapter_code_for_url(str(job["url"]))
     adapter = adapters[adapter_code]
@@ -79,6 +91,42 @@ async def _run_job(job: dict, adapters: dict[str, Any]) -> dict:
     }
 
 
+async def _run_kaspi_seller_job(job: dict, adapters: dict[str, Any]) -> dict:
+    payload = job.get("payload")
+    if not isinstance(payload, dict):
+        raise ValueError("Kaspi Seller browser job payload is required")
+    merchant_id = str(payload.get("merchant_id") or "").strip()
+    order_code = str(payload.get("order_code") or "").strip()
+    if not merchant_id or not order_code:
+        raise ValueError("Kaspi Seller job requires merchant_id and order_code")
+
+    adapter = adapters.get("kaspi_seller")
+    if adapter is None:
+        raise RuntimeError("Kaspi Seller browser adapter is not configured")
+    return await adapter.fetch_order(
+        KaspiSellerOrderRequest(
+            merchant_id=merchant_id,
+            order_code=order_code,
+        )
+    )
+
+
+async def _run_job(job: dict, adapters: dict[str, Any]) -> dict:
+    job_type = _job_type(job)
+    if job_type == KASPI_SELLER_JOB_TYPE:
+        return await _run_kaspi_seller_job(job, adapters)
+    if job_type == SUPPLIER_JOB_TYPE:
+        return await _run_supplier_job(job, adapters)
+    raise ValueError(f"Unsupported browser agent job_type: {job_type}")
+
+
+def _job_description(job: dict) -> str:
+    if _job_type(job) == KASPI_SELLER_JOB_TYPE:
+        payload = job.get("payload") or {}
+        return f"Kaspi Seller order {payload.get('order_code') or '-'}"
+    return str(job.get("url") or "-")
+
+
 async def _complete_job(
     *,
     api_url: str,
@@ -86,7 +134,7 @@ async def _complete_job(
     job: dict,
     adapters: dict[str, Any],
 ) -> str:
-    print(f"Claimed browser job #{job['id']}: {job['url']}")
+    print(f"Claimed browser job #{job['id']}: {_job_description(job)}")
     try:
         result = await _run_job(job, adapters)
         completion = {
@@ -233,7 +281,7 @@ async def _run_once(
         agent_id=f"{agent_id}-once",
     )
     if not job:
-        print("No queued browser jobs. Queue one MonitorTarget in CRM and run again.")
+        print("No queued browser jobs. Queue one MonitorTarget or Kaspi Seller job in CRM and run again.")
         return 2
     status = await _complete_job(
         api_url=api_url,
@@ -271,11 +319,12 @@ async def main(*, once: bool = False) -> int:
     adapters: dict[str, Any] = {
         "ozon": OzonBrowserAccessAdapter(pool),
         "wb": WildberriesBrowserAccessAdapter(pool),
+        "kaspi_seller": KaspiSellerBrowserAdapter(pool),
     }
     print(f"Browser agent {agent_id} connected to CRM {api_url}")
     print(f"Chrome CDP endpoint: {cdp_endpoint}")
     print(f"Parallel browser workers: {1 if once else concurrency}")
-    print("Enabled suppliers: ozon, wb")
+    print("Enabled adapters: ozon, wb, kaspi_seller")
 
     if once:
         try:
