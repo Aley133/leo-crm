@@ -4,19 +4,44 @@ from backend.app.kaspi_seller.snapshot_models import KaspiSellerOrderSnapshotRec
 from backend.app.kaspi_seller.snapshot_storage import persist_kaspi_seller_snapshot
 
 
+class _ScalarList:
+    def __init__(self, values):
+        self._values = list(values)
+
+    def all(self):
+        return self._values
+
+
 class FakeSession:
     def __init__(self, scalar_results):
         self.scalar_results = list(scalar_results)
         self.added = []
+        self.records = {
+            item.id: item
+            for item in self.scalar_results
+            if isinstance(item, KaspiSellerOrderSnapshotRecord) and item.id is not None
+        }
 
     def scalar(self, statement):
-        return self.scalar_results.pop(0)
+        result = self.scalar_results.pop(0)
+        if isinstance(result, KaspiSellerOrderSnapshotRecord) and result.id is not None:
+            self.records[result.id] = result
+        return result
+
+    def scalars(self, statement):
+        return _ScalarList([])
+
+    def get(self, model, record_id):
+        return self.records.get(record_id)
 
     def add(self, record):
         self.added.append(record)
 
     def flush(self):
-        self.added[-1].id = 101
+        record = self.added[-1]
+        record.id = 101 + len(self.added) - 1
+        if isinstance(record, KaspiSellerOrderSnapshotRecord):
+            self.records[record.id] = record
 
 
 def _payload(stage: str = "HANDOVER") -> dict:
@@ -59,6 +84,7 @@ def test_first_snapshot_is_persisted_as_changed() -> None:
     assert record.stage == "HANDOVER"
     assert record.observed_at == observed_at
     assert len(record.snapshot_fingerprint) == 64
+    assert len(result.timeline_event_ids) == 1
 
 
 def test_unchanged_snapshot_links_to_previous_observation() -> None:
@@ -98,6 +124,7 @@ def test_unchanged_snapshot_links_to_previous_observation() -> None:
     assert result.changed is False
     assert result.previous_snapshot_id == 55
     assert db.added[0].previous_snapshot_id == 55
+    assert result.timeline_event_ids == ()
 
 
 def test_same_browser_job_completion_is_idempotent() -> None:
@@ -128,4 +155,5 @@ def test_same_browser_job_completion_is_idempotent() -> None:
     assert result.snapshot_id == 88
     assert result.changed is False
     assert result.previous_snapshot_id == 55
+    assert result.timeline_event_ids == ()
     assert db.added == []
