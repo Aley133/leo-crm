@@ -9,6 +9,7 @@ from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
 from .models import MarketplaceOrderLine
+from .order_line_product_linking import find_product_for_order_line
 from .product_identity_models import (
     MarketplaceListing,
     MarketplaceListingIdentityKind,
@@ -124,10 +125,11 @@ def ensure_marketplace_listing_for_order_line(
     marketplace_account_id: int,
     order_line: MarketplaceOrderLine,
 ) -> ListingEnsureResult:
-    """Ensure listing identity inside the caller-owned transaction.
+    """Ensure listing identity and resolve it against the XML product registry.
 
-    No commit or rollback occurs here. First creation is implemented with
-    INSERT .. ON CONFLICT DO NOTHING followed by a re-select.
+    Merchant SKU is shared by Kaspi order entries and the seller XML. When the
+    matching Product already exists, the listing and order line are resolved in
+    the same caller-owned transaction.
     """
 
     if order_line.id is None:
@@ -176,6 +178,18 @@ def ensure_marketplace_listing_for_order_line(
         listing.merchant_sku = _clean(order_line.merchant_sku)
     if listing.external_product_id is None:
         listing.external_product_id = _clean(order_line.external_product_id)
+
+    product = find_product_for_order_line(session, order_line)
+    if product is not None:
+        order_line.product_id = product.id
+        listing.product_id = product.id
+        listing.status = MarketplaceListingStatus.RESOLVED.value
+        listing.resolved_at = listing.resolved_at or datetime.now(UTC)
+        if not order_line.title or order_line.title.strip().casefold() in {
+            "unknown product",
+            "название не получено",
+        }:
+            order_line.title = product.name
 
     _resolve_open_issue(session, order_line_id=order_line.id)
     return ListingEnsureResult(
