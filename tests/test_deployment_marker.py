@@ -1,8 +1,8 @@
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app
 
 
-EXPECTED_APP_VERSION = "0.16.0"
-EXPECTED_DEPLOYMENT_MARKER = "manual-kaspi-order-rebuild-v1"
+EXPECTED_APP_VERSION = "0.17.0"
+EXPECTED_DEPLOYMENT_MARKER = "kaspi-raw-receiver-orders-v1"
 
 
 def test_application_metadata_contract() -> None:
