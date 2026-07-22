@@ -14,9 +14,8 @@ const empty = document.querySelector("#empty");
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
-const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorder:"Предзаказ",received:"Товар получен",assembly:"Упаковка",handover:"Передача",shipping:"Переданы на доставку",pickup:"Ожидает получения",delivered:"Доставлен",cancelled:"Отменён при доставке",returned:"Возврат",unknown:"Статус не распознан",ACCEPTED_BY_MERCHANT:"Принят продавцом",ASSEMBLY:"Сборка",HANDOVER:"Собран и ждёт передачи",SHIPPING:"Передан курьеру",DELIVERED:"Доставлен",RETURNED:"Возврат",CANCELLED:"Отменён"}[stage] || stage || "—");
-const stageClass = (stage) => ["delivered","DELIVERED"].includes(stage) ? "ok" : ["cancelled","returned","CANCELLED","RETURNED"].includes(stage) ? "bad" : "warn";
-const timelineLabel = (type) => ({ORDER_ACCEPTED:"Заказ принят продавцом",ORDER_ASSEMBLY_STARTED:"Начата сборка",ORDER_ASSEMBLED:"Заказ собран",ORDER_TRANSFERRED:"Передан курьеру",ORDER_DELIVERED:"Доставлен",ORDER_RETURNED:"Возврат",ORDER_CANCELLED:"Отменён",ORDER_STAGE_CHANGED:"Этап заказа изменён"}[type] || type || "Событие");
+const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorder:"Предзаказ",assembly:"Упаковка",handover:"Передача",shipping:"Переданы на доставку",delivered:"Завершён",cancelled:"Отменён при доставке",returned:"Возврат",unknown:"Прочее"}[stage] || stage || "—");
+const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelled","returned"].includes(stage) ? "bad" : "warn";
 const procurementLabel = (state) => ({required:"Нужно закупить",in_progress:"Закупка оформлена",received:"Получено",not_required:"Закупка не требуется",cancelled:"Закупка отменена"}[state] || state || "—");
 const purchaseStatusLabel = (status) => ({draft:"Черновик",requested:"Заявка отправлена",ordered:"Заказано",partially_received:"Получено частично",received:"Получено",closed:"Закрыто",cancelled:"Отменено"}[status] || status || "—");
 const nextPurchaseAction = (status) => ({draft:{target:"requested",label:"Отправить заявку"},requested:{target:"ordered",label:"Отметить заказанным"},ordered:{target:"received",label:"Отметить полученным"},partially_received:{target:"received",label:"Отметить полученным"},received:{target:"closed",label:"Закрыть закупку"}}[status] || null);
@@ -38,6 +37,12 @@ const queryString = () => {
   return params.toString();
 };
 
+const responseError = async (response) => {
+  let detail = `HTTP ${response.status}`;
+  try { const payload = await response.json(); detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail || detail); } catch (_) {}
+  return new Error(detail);
+};
+
 const renderPurchaseAction = (line) => {
   const action = nextPurchaseAction(line.purchase_status);
   if (!action || !line.purchase_request_id || !line.purchase_version) return "";
@@ -49,25 +54,8 @@ const renderLine = (line) => `<div class="order-line"><div>${line.product_id ? `
 const renderOrder = (order) => {
   const stage = order.operational_stage || "unknown";
   const externalCode = order.external_code || order.order_id;
-  const isKaspi = String(order.marketplace || "").toLowerCase().includes("kaspi");
-  const kaspiButton = isKaspi ? `<button class="button secondary load-kaspi-details" type="button" data-order-code="${escapeHtml(externalCode)}" data-merchant-id="${escapeHtml(order.marketplace_external_account_id)}">Фактический статус Kaspi</button>` : "";
   const canCreatePurchase = Number(order.procurement_required_lines || 0) > 0 && stage === "preorder";
-  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Источник: ${escapeHtml(order.original_status || order.status)}</span></div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Не привязано к товару</span><strong>${Number(order.unresolved_lines || 0)}</strong></div><div class="order-stat"><span>К закупке</span><strong>${Number(order.procurement_required_lines || 0)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div><div class="kaspi-detail hidden" data-kaspi-detail="${escapeHtml(externalCode)}"></div>${(kaspiButton || canCreatePurchase) ? `<div class="order-actions">${kaspiButton}${canCreatePurchase ? `<button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button>` : ""}</div>` : ""}</article>`;
-};
-
-const renderTimeline = (events) => events.length ? `<ol class="timeline">${events.map((event) => `<li><span class="timeline-dot"></span><div><strong>${escapeHtml(timelineLabel(event.event_type))}</strong><span>${dateTime(event.occurred_at)}</span><small>${escapeHtml(stageLabel(event.from_stage))} → ${escapeHtml(stageLabel(event.to_stage))}</small></div></li>`).join("")}</ol>` : `<div class="timeline-empty">История изменений пока пуста.</div>`;
-
-const renderKaspiDetail = (latest, timeline) => {
-  const snapshot = latest.snapshot || {};
-  const delivery = snapshot.delivery || {};
-  const warehouse = snapshot.warehouse || {};
-  return `<div class="kaspi-detail-grid"><section><p class="eyebrow">Kaspi Seller Runtime</p><h3>Фактический этап: <span class="badge ${stageClass(latest.stage)}">${escapeHtml(stageLabel(latest.stage))}</span></h3><dl class="fact-grid"><div><dt>State</dt><dd>${escapeHtml(latest.state)}</dd></div><div><dt>Status</dt><dd>${escapeHtml(latest.status)}</dd></div><div><dt>Клиент</dt><dd>${escapeHtml(snapshot.customer_name || snapshot.recipient_name || "—")}</dd></div><div><dt>Склад</dt><dd>${escapeHtml([warehouse.name, warehouse.city_name].filter(Boolean).join(", ") || "—")}</dd></div><div><dt>Собран</dt><dd>${delivery.assembled ? "Да" : "Нет"}</dd></div><div><dt>Передан курьеру</dt><dd>${delivery.transmitted_to_courier ? "Да" : "Нет"}</dd></div><div><dt>План передачи</dt><dd>${dateTime(delivery.transmission_planned_at)}</dd></div><div><dt>План доставки</dt><dd>${dateTime(delivery.planned_delivery_at)}</dd></div></dl></section><section><p class="eyebrow">Decision Timeline</p>${renderTimeline(timeline.events || [])}</section></div>`;
-};
-
-const responseError = async (response) => {
-  let detail = `HTTP ${response.status}`;
-  try { const payload = await response.json(); detail = typeof payload.detail === "string" ? payload.detail : JSON.stringify(payload.detail || detail); } catch (_) {}
-  return new Error(detail);
+  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Источник: Kaspi Orders API</span></div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Не привязано к товару</span><strong>${Number(order.unresolved_lines || 0)}</strong></div><div class="order-stat"><span>К закупке</span><strong>${Number(order.procurement_required_lines || 0)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${canCreatePurchase ? `<div class="order-actions"><button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button></div>` : ""}</article>`;
 };
 
 const render = (payload) => {
@@ -97,58 +85,17 @@ const loadOrders = async () => {
 };
 
 const rebuildOrders = async () => {
-  if (!localStorage.getItem(storageKey)) { authPanel.classList.remove("hidden"); return; }
-  rebuildButton.disabled = true;
-  refreshButton.disabled = true;
-  rebuildButton.textContent = "Пересборка…";
-  message.textContent = "Шаг 1 из 2: загружаю заказы Kaspi за 7 дней. Затем задания будут переданы Browser Agent.";
+  rebuildButton.disabled = true; refreshButton.disabled = true; rebuildButton.textContent = "Загрузка…";
+  message.textContent = "Загружаю заказы напрямую через Kaspi Orders API и пересчитываю колонки.";
   try {
     const response = await fetch("/api/commerce/orders/rebuild?days=7", {method:"POST", headers:headers()});
     if (!response.ok) throw await responseError(response);
     const result = await response.json();
-    message.textContent = `Kaspi API: получено ${Number(result.fetched_count || 0)}, добавлено ${Number(result.imported_count || 0)}, обновлено ${Number(result.updated_count || 0)}. На проверку Seller поставлено ${Number(result.seller_jobs_queued || 0)} заказов. Запусти Browser Agent и дождись завершения пакета.`;
+    message.textContent = `Получено ${Number(result.fetched_count || 0)}, добавлено ${Number(result.imported_count || 0)}, обновлено ${Number(result.updated_count || 0)}. Browser Agent не используется.`;
     filters.reset();
     await loadOrders();
-  } catch (error) {
-    message.textContent = error.message || "Не удалось пересобрать заказы.";
-  } finally {
-    rebuildButton.disabled = false;
-    refreshButton.disabled = false;
-    rebuildButton.textContent = "Пересобрать заказы";
-  }
-};
-
-const loadKaspiDetails = async (button) => {
-  const merchantId = button.dataset.merchantId;
-  const orderCode = button.dataset.orderCode;
-  if (!merchantId) { message.textContent = "У заказа не определён Kaspi Merchant ID."; return; }
-  const panel = document.querySelector(`[data-kaspi-detail="${CSS.escape(orderCode)}"]`);
-  button.disabled = true; const oldText = button.textContent; button.textContent = "Загрузка…"; message.textContent = "";
-  try {
-    const query = `merchant_id=${encodeURIComponent(merchantId)}`;
-    const [latestResponse, timelineResponse] = await Promise.all([
-      fetch(`/api/kaspi-seller/orders/${encodeURIComponent(orderCode)}/latest?${query}`, {headers:headers()}),
-      fetch(`/api/kaspi-seller/orders/${encodeURIComponent(orderCode)}/timeline?${query}&limit=100`, {headers:headers()})
-    ]);
-    if (latestResponse.status === 404) throw new Error("Для заказа ещё нет Kaspi Seller Snapshot. Запустите Browser Agent.");
-    if (!latestResponse.ok) throw await responseError(latestResponse);
-    if (!timelineResponse.ok) throw await responseError(timelineResponse);
-    panel.innerHTML = renderKaspiDetail(await latestResponse.json(), await timelineResponse.json());
-    panel.classList.remove("hidden");
-    button.textContent = "Скрыть фактический статус";
-    button.dataset.loaded = "true";
-  } catch (error) { message.textContent = error.message || "Не удалось загрузить Kaspi Seller данные."; button.textContent = oldText; }
-  finally { button.disabled = false; }
-};
-
-const toggleKaspiDetails = (button) => {
-  const panel = document.querySelector(`[data-kaspi-detail="${CSS.escape(button.dataset.orderCode)}"]`);
-  if (button.dataset.loaded === "true") {
-    const hidden = panel.classList.toggle("hidden");
-    button.textContent = hidden ? "Фактический статус Kaspi" : "Скрыть фактический статус";
-    return;
-  }
-  loadKaspiDetails(button);
+  } catch (error) { message.textContent = error.message || "Не удалось загрузить заказы Kaspi."; }
+  finally { rebuildButton.disabled = false; refreshButton.disabled = false; rebuildButton.textContent = "Загрузить заказы Kaspi"; }
 };
 
 const createPurchase = async (orderId, button) => {
@@ -156,7 +103,6 @@ const createPurchase = async (orderId, button) => {
   try {
     const response = await fetch("/api/purchases/from-marketplace-order", {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({marketplace_order_id:Number(orderId),idempotency_key:`orders-center:${orderId}`,note:"Создано из Orders Center"})});
     if (!response.ok && response.status !== 409) throw await responseError(response);
-    message.textContent = "Заявка на закупку создана.";
     await loadOrders();
   } catch (error) { message.textContent = error.message || "Не удалось создать заявку на закупку."; button.disabled = false; }
 };
@@ -179,8 +125,6 @@ resetButton.addEventListener("click", () => { filters.reset(); loadOrders(); });
 refreshButton.addEventListener("click", loadOrders);
 rebuildButton.addEventListener("click", rebuildOrders);
 ordersList.addEventListener("click", (event) => {
-  const detailsButton = event.target.closest(".load-kaspi-details");
-  if (detailsButton) { toggleKaspiDetails(detailsButton); return; }
   const createButton = event.target.closest(".create-purchase");
   if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; }
   const transitionButton = event.target.closest(".purchase-transition");
