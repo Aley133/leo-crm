@@ -20,7 +20,6 @@ GET_ORDER_DETAILS_QUERY = """
 query getOrderDetails(
   $merchantUid: String!
   $orderCode: String!
-  $skipCustomerPhone: Boolean! = false
 ) {
   merchant(id: $merchantUid) {
     id
