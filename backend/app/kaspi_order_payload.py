@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from typing import Any
 
-from .kaspi_order_board import classify_kaspi_order, classify_kaspi_order_details
+from .kaspi_order_board import classify_kaspi_order_details
 
 
 _IMPORT_TOKEN_BY_STAGE = {
@@ -14,6 +14,7 @@ _IMPORT_TOKEN_BY_STAGE = {
     "cancelling": "CANCELLING",
     "cancelled": "CANCELLED",
     "delivered": "DELIVERED",
+    "returned": "RETURNED",
     "unknown": "UNKNOWN",
 }
 
