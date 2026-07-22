@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
+from datetime import datetime
 from decimal import Decimal
 from typing import Protocol
 
@@ -95,7 +96,7 @@ class SqlAlchemyCommerceRepository:
                 )
             )
 
-        snapshot_by_order: dict[tuple[str, str], KaspiSellerOrderSnapshotRecord] = {}
+        snapshot_by_order: dict[tuple[str, str], tuple[str | None, datetime]] = {}
         kaspi_keys = {
             (account.external_account_id, order.external_code)
             for order, account in order_rows
@@ -104,8 +105,18 @@ class SqlAlchemyCommerceRepository:
         if kaspi_keys:
             merchant_ids = {merchant_id for merchant_id, _order_code in kaspi_keys}
             order_codes = {order_code for _merchant_id, order_code in kaspi_keys}
-            snapshots = self._session.scalars(
-                select(KaspiSellerOrderSnapshotRecord)
+
+            # Select only columns that exist in both the legacy Render schema and
+            # the migrated schema. Selecting the ORM entity would also request
+            # marketplace_account_id and crash before migration 0021 is applied.
+            snapshot_rows = self._session.execute(
+                select(
+                    KaspiSellerOrderSnapshotRecord.merchant_id,
+                    KaspiSellerOrderSnapshotRecord.order_code,
+                    KaspiSellerOrderSnapshotRecord.stage,
+                    KaspiSellerOrderSnapshotRecord.observed_at,
+                    KaspiSellerOrderSnapshotRecord.id,
+                )
                 .where(
                     KaspiSellerOrderSnapshotRecord.merchant_id.in_(merchant_ids),
                     KaspiSellerOrderSnapshotRecord.order_code.in_(order_codes),
@@ -115,10 +126,15 @@ class SqlAlchemyCommerceRepository:
                     KaspiSellerOrderSnapshotRecord.id.desc(),
                 )
             ).all()
-            for snapshot in snapshots:
-                key = (snapshot.merchant_id, snapshot.order_code)
+            for merchant_id, order_code, stage, observed_at, _snapshot_id in snapshot_rows:
+                key = (merchant_id, order_code)
                 if key in kaspi_keys and key not in snapshot_by_order:
-                    snapshot_by_order[key] = snapshot
+                    snapshot_by_order[key] = (stage, observed_at)
+
+        def snapshot_for(account: MarketplaceAccount, order: MarketplaceOrder) -> tuple[str | None, datetime] | None:
+            if account.provider != "kaspi" or not account.external_account_id or not order.external_code:
+                return None
+            return snapshot_by_order.get((account.external_account_id, order.external_code))
 
         return total, tuple(
             CommerceOrder(
@@ -134,22 +150,8 @@ class SqlAlchemyCommerceRepository:
                 ordered_at=order.ordered_at,
                 delivered_at=order.delivered_at,
                 lines=tuple(lines_by_order.get(order.id, ())),
-                snapshot_stage=(
-                    snapshot_by_order.get((account.external_account_id, order.external_code)).stage
-                    if account.provider == "kaspi"
-                    and account.external_account_id
-                    and order.external_code
-                    and snapshot_by_order.get((account.external_account_id, order.external_code)) is not None
-                    else None
-                ),
-                snapshot_observed_at=(
-                    snapshot_by_order.get((account.external_account_id, order.external_code)).observed_at
-                    if account.provider == "kaspi"
-                    and account.external_account_id
-                    and order.external_code
-                    and snapshot_by_order.get((account.external_account_id, order.external_code)) is not None
-                    else None
-                ),
+                snapshot_stage=(snapshot_for(account, order)[0] if snapshot_for(account, order) else None),
+                snapshot_observed_at=(snapshot_for(account, order)[1] if snapshot_for(account, order) else None),
             )
             for order, account in order_rows
         )
