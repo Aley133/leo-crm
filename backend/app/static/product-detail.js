@@ -14,6 +14,9 @@ const supplierDialog = document.querySelector("#supplier-dialog");
 const supplierForm = document.querySelector("#supplier-form");
 const supplierResult = document.querySelector("#supplier-result");
 const addSupplierButton = document.querySelector("#add-supplier");
+const sourceTypeInput = document.querySelector("#supplier-source-type");
+const onlineFields = document.querySelector("#online-source-fields");
+const fixedFields = document.querySelector("#fixed-source-fields");
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency || "KZT"}`.trim();
@@ -28,12 +31,15 @@ const eventClass = (value) => value === "leader_changed" ? "changed" : value ===
 const actionLabel = (value) => ({no_action:"Ничего не менять",switch_supplier:"Смена поставщика",manual_review:"Ручная проверка",collect_more_data:"Нужно больше данных",no_available_offer:"Нет предложения"}[value] || value || "Рекомендация");
 const actionClass = (value) => ({success:"success",info:"info",warning:"warning",critical:"critical"}[value] || "info");
 const productId = Number(location.pathname.split("/").filter(Boolean).at(-1));
+const isFixedSource = (binding) => String(binding.supplier_code || "").startsWith("offline-") || String(binding.supplier_code || "").startsWith("production-");
+const fixedSourceLabel = (binding) => String(binding.supplier_code || "").startsWith("production-") ? "Собственное производство" : "Офлайн-поставщик";
 
 const setText = (id, value) => { const element = document.querySelector(`#${id}`); if (element) element.textContent = String(value ?? 0); };
 const setLoading = (loading) => { detailPage.setAttribute("aria-busy", String(loading)); refreshButton.disabled = loading; refreshButton.textContent = loading ? "Обновление…" : "Обновить"; };
 const availabilityBadge = (available) => available === true ? '<span class="badge ok">В наличии</span>' : available === false ? '<span class="badge bad">Нет в наличии</span>' : '<span class="badge">Неизвестно</span>';
-const monitorBadge = (binding) => binding.consecutive_failures > 0 ? '<span class="badge bad">Ошибка</span>' : binding.monitor_status === "active" ? '<span class="badge ok">Активен</span>' : binding.monitor_status ? `<span class="badge warn">${escapeHtml(binding.monitor_status)}</span>` : '<span class="badge">Не настроен</span>';
+const monitorBadge = (binding) => isFixedSource(binding) ? '<span class="badge">Без мониторинга</span>' : binding.consecutive_failures > 0 ? '<span class="badge bad">Ошибка</span>' : binding.monitor_status === "active" ? '<span class="badge ok">Активен</span>' : binding.monitor_status ? `<span class="badge warn">${escapeHtml(binding.monitor_status)}</span>` : '<span class="badge">Не настроен</span>';
 const scoreByBinding = (scores) => new Map((scores || []).map((score) => [Number(score.binding_id), score]));
+const supplierLink = (binding, label = "Открыть поставщика") => isFixedSource(binding) ? `<span class="muted">${fixedSourceLabel(binding)}</span>` : `<a href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">${label}</a>`;
 
 const renderBestOffer = (bestOffer, decision, bindings) => {
   const empty = document.querySelector("#best-offer-empty");
@@ -44,7 +50,7 @@ const renderBestOffer = (bestOffer, decision, bindings) => {
   const reasons = (bestOffer.reasons || []).map((reason) => `<li>${escapeHtml(reason)}</li>`).join("");
   const warnings = (decision?.warnings || []).map((warning) => `<li>${escapeHtml(warning)}</li>`).join("");
   const challenger = decision?.runner_up ? `${escapeHtml(decision.runner_up.supplier_name)} · ${Number(decision.runner_up.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}` : "Нет второго доступного предложения";
-  bestOfferContainer.innerHTML = `<div><span>Поставщик</span><strong>${escapeHtml(binding.supplier_name)}</strong><small>${escapeHtml(binding.supplier_code)}</small></div><div><span>Рейтинг предложения</span><strong>${Number(bestOffer.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})} / 100</strong><small>цена ${bestOffer.price_score} · доставка ${bestOffer.delivery_score}</small></div><div><span>Уверенность</span><strong><span class="badge ${confidenceClass(decision?.confidence)}">${confidenceLabel(decision?.confidence)}</span></strong><small>${decision?.score_gap == null ? "разрыв не рассчитан" : `разрыв ${Number(decision.score_gap).toLocaleString("ru-RU", {maximumFractionDigits:2})} балла`}</small></div><div><span>Ближайший конкурент</span><strong>${challenger}</strong><small>доступных предложений: ${Number(decision?.eligible_count || 0)}</small></div><div><span>Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<small>было ${money(binding.old_price, binding.currency)}</small>` : ""}</div><div><span>Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><small>${escapeHtml(binding.seller || "продавец не указан")}</small></div><div class="decision-reasons"><span>Почему выбран</span><ul>${reasons}</ul></div>${warnings ? `<div class="decision-warnings"><span>Ограничения решения</span><ul>${warnings}</ul></div>` : ""}<a class="button secondary" href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть поставщика</a>`;
+  bestOfferContainer.innerHTML = `<div><span>Источник закупки</span><strong>${escapeHtml(binding.supplier_name)}</strong><small>${isFixedSource(binding) ? fixedSourceLabel(binding) : escapeHtml(binding.supplier_code)}</small></div><div><span>Рейтинг предложения</span><strong>${Number(bestOffer.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})} / 100</strong><small>цена ${bestOffer.price_score} · доставка ${bestOffer.delivery_score}</small></div><div><span>Уверенность</span><strong><span class="badge ${confidenceClass(decision?.confidence)}">${confidenceLabel(decision?.confidence)}</span></strong><small>${decision?.score_gap == null ? "разрыв не рассчитан" : `разрыв ${Number(decision.score_gap).toLocaleString("ru-RU", {maximumFractionDigits:2})} балла`}</small></div><div><span>Ближайший конкурент</span><strong>${challenger}</strong><small>доступных предложений: ${Number(decision?.eligible_count || 0)}</small></div><div><span>Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<small>было ${money(binding.old_price, binding.currency)}</small>` : ""}</div><div><span>Получение</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><small>${escapeHtml(binding.seller || "источник не указан")}</small></div><div class="decision-reasons"><span>Почему выбран</span><ul>${reasons}</ul></div>${warnings ? `<div class="decision-warnings"><span>Ограничения решения</span><ul>${warnings}</ul></div>` : ""}${supplierLink(binding, "Открыть поставщика")}`;
 };
 
 const renderActionCenter = (action) => {
@@ -77,7 +83,7 @@ const renderBindings = (bindings, supplierScores) => {
     const score = scores.get(Number(binding.binding_id));
     const rank = rankByBinding.get(Number(binding.binding_id));
     const scoreHtml = score ? `<span class="muted">${rank ? `Место ${rank} · ` : ""}Рейтинг ${Number(score.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}${score.eligible ? "" : " · не участвует"}</span>` : "";
-    return `<article class="binding-card"><div class="binding-head"><h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3><a href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">Открыть карточку поставщика</a><span class="muted">${escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span>${scoreHtml}</div><div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div><div><span class="label">Доставка</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "продавец не указан")}</span></div><div><span class="label">Наличие</span>${availabilityBadge(binding.available)}${binding.stock != null ? `<span class="muted">остаток ${binding.stock}</span>` : ""}</div><div><span class="label">Мониторинг</span>${monitorBadge(binding)}<span class="muted">проверено ${dateTime(binding.last_checked_at)}</span></div></article>`;
+    return `<article class="binding-card"><div class="binding-head"><h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3>${supplierLink(binding, "Открыть карточку поставщика")}<span class="muted">${isFixedSource(binding) ? fixedSourceLabel(binding) : escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span>${scoreHtml}</div><div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div><div><span class="label">Получение</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "источник не указан")}</span></div><div><span class="label">Наличие</span>${availabilityBadge(binding.available)}${binding.stock != null ? `<span class="muted">остаток ${binding.stock}</span>` : ""}</div><div><span class="label">Мониторинг</span>${monitorBadge(binding)}<span class="muted">${isFixedSource(binding) ? "цена изменяется вручную" : `проверено ${dateTime(binding.last_checked_at)}`}</span></div></article>`;
   }).join("");
   document.querySelector("#bindings-empty").classList.toggle("hidden", bindings.length > 0);
 };
@@ -117,20 +123,38 @@ const loadDetail = async () => {
   } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось загрузить карточку товара."; } finally { setLoading(false); }
 };
 
+const toggleSourceFields = () => {
+  const online = sourceTypeInput.value === "online";
+  onlineFields.classList.toggle("hidden", !online);
+  fixedFields.classList.toggle("hidden", online);
+  document.querySelector("#supplier-url").required = online;
+  document.querySelector("#fixed-source-name").required = !online;
+  document.querySelector("#fixed-source-price").required = !online;
+};
+
 const closeSupplierDialog = () => supplierDialog.close();
-addSupplierButton.addEventListener("click", () => { supplierResult.textContent = ""; supplierForm.reset(); document.querySelector("#supplier-run-check").checked = true; supplierDialog.showModal(); });
+addSupplierButton.addEventListener("click", () => { supplierResult.textContent = ""; supplierForm.reset(); sourceTypeInput.value = "online"; document.querySelector("#supplier-run-check").checked = true; document.querySelector("#supplier-primary").checked = true; toggleSourceFields(); supplierDialog.showModal(); });
+sourceTypeInput.addEventListener("change", toggleSourceFields);
 document.querySelector("#close-supplier-dialog").addEventListener("click", closeSupplierDialog);
 document.querySelector("#cancel-supplier").addEventListener("click", closeSupplierDialog);
 supplierForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const token = localStorage.getItem(storageKey); const saveButton = document.querySelector("#save-supplier"); saveButton.disabled = true; supplierResult.textContent = "Создаю привязку и ставлю проверку в очередь…";
+  const token = localStorage.getItem(storageKey); const saveButton = document.querySelector("#save-supplier"); saveButton.disabled = true;
+  const sourceType = sourceTypeInput.value;
+  supplierResult.textContent = sourceType === "online" ? "Создаю привязку и ставлю проверку в очередь…" : "Сохраняю фиксированный источник закупки…";
   try {
-    const response = await fetch(`/api/product-registry/products/${productId}/supplier-bindings/manual`, {method:"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({url:document.querySelector("#supplier-url").value.trim(),title:document.querySelector("#supplier-title").value.trim() || null,is_primary:document.querySelector("#supplier-primary").checked,run_initial_check:document.querySelector("#supplier-run-check").checked})});
+    let response;
+    if (sourceType === "online") {
+      response = await fetch(`/api/product-registry/products/${productId}/supplier-bindings/manual`, {method:"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({url:document.querySelector("#supplier-url").value.trim(),title:document.querySelector("#supplier-title").value.trim() || null,is_primary:document.querySelector("#supplier-primary").checked,run_initial_check:document.querySelector("#supplier-run-check").checked})});
+    } else {
+      response = await fetch(`/api/products/${productId}/fixed-procurement-source`, {method:"POST",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({source_type:sourceType,source_name:document.querySelector("#fixed-source-name").value.trim(),price:Number(document.querySelector("#fixed-source-price").value),delivery_days:Number(document.querySelector("#fixed-source-delivery-days").value || 0),is_primary:document.querySelector("#supplier-primary").checked})});
+    }
     if (!response.ok) throw await responseError(response);
-    const result = await response.json(); supplierResult.textContent = result.job_id ? `Поставщик привязан. Job #${result.job_id} уже в очереди.` : "Поставщик привязан."; await loadDetail(); setTimeout(closeSupplierDialog, 1200);
-  } catch (error) { supplierResult.textContent = error instanceof Error ? error.message : "Не удалось привязать поставщика."; } finally { saveButton.disabled = false; }
+    const result = await response.json(); supplierResult.textContent = sourceType === "online" && result.job_id ? `Поставщик привязан. Job #${result.job_id} уже в очереди.` : "Источник закупки сохранён."; await loadDetail(); setTimeout(closeSupplierDialog, 1200);
+  } catch (error) { supplierResult.textContent = error instanceof Error ? error.message : "Не удалось сохранить источник закупки."; } finally { saveButton.disabled = false; }
 });
 
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); const token = tokenInput.value.trim(); if (!token) return; localStorage.setItem(storageKey, token); tokenInput.value = ""; loadDetail(); });
 refreshButton.addEventListener("click", loadDetail);
+toggleSourceFields();
 loadDetail();
