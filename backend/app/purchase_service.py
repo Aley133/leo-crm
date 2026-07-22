@@ -6,7 +6,8 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from .models import MarketplaceOrder, OutboxEvent
+from .kaspi_order_line_display import recover_order_line_title
+from .models import MarketplaceOrder, MarketplaceRawPayload, OutboxEvent, Product
 from .purchase_models import (
     PurchaseEvent,
     PurchaseOrigin,
@@ -52,6 +53,78 @@ _ALLOWED_TRANSITIONS: dict[str, set[str]] = {
 }
 
 
+def _latest_order_payload(session: Session, order: MarketplaceOrder) -> dict | None:
+    return session.scalar(
+        select(MarketplaceRawPayload.payload_json)
+        .where(
+            MarketplaceRawPayload.marketplace_account_id == order.marketplace_account_id,
+            MarketplaceRawPayload.payload_type == "order",
+            MarketplaceRawPayload.external_object_id == order.external_order_id,
+        )
+        .order_by(
+            MarketplaceRawPayload.received_at.desc(),
+            MarketplaceRawPayload.id.desc(),
+        )
+        .limit(1)
+    )
+
+
+def _ensure_product_card_for_line(
+    session: Session,
+    *,
+    order: MarketplaceOrder,
+    order_line,
+    raw_payload: dict | None,
+) -> int | None:
+    if order_line.product_id is not None:
+        return order_line.product_id
+
+    kaspi_product_id = (
+        (order_line.external_product_id or "").strip()
+        or (order_line.merchant_sku or "").strip()
+    )
+    if not kaspi_product_id:
+        return None
+
+    title = (order_line.title or "").strip()
+    if not title or title.lower() == "unknown product":
+        recovered = recover_order_line_title(
+            raw_payload,
+            identities=(
+                order_line.external_line_id,
+                order_line.external_product_id,
+                order_line.merchant_sku,
+            ),
+        )
+        if recovered:
+            title = recovered
+            order_line.title = recovered
+
+    if not title or title.lower() == "unknown product":
+        title = f"Товар Kaspi {kaspi_product_id}"
+        order_line.title = title
+
+    product = session.scalar(
+        select(Product).where(Product.kaspi_product_id == kaspi_product_id)
+    )
+    if product is None:
+        product = Product(
+            kaspi_product_id=kaspi_product_id,
+            merchant_sku=order_line.merchant_sku,
+            name=title,
+        )
+        session.add(product)
+        session.flush()
+    else:
+        if product.name.strip().lower() == "unknown product" and title:
+            product.name = title
+        if product.merchant_sku is None and order_line.merchant_sku:
+            product.merchant_sku = order_line.merchant_sku
+
+    order_line.product_id = product.id
+    return product.id
+
+
 def create_purchase_from_marketplace_order(
     session: Session,
     *,
@@ -79,6 +152,7 @@ def create_purchase_from_marketplace_order(
     if existing_purchase is not None:
         return existing_purchase
 
+    raw_payload = _latest_order_payload(session, order)
     purchase = PurchaseRequest(
         marketplace_order_id=order.id,
         origin=PurchaseOrigin.MARKETPLACE_ORDER.value,
@@ -89,10 +163,16 @@ def create_purchase_from_marketplace_order(
         version=1,
     )
     for order_line in order.lines:
+        product_id = _ensure_product_card_for_line(
+            session,
+            order=order,
+            order_line=order_line,
+            raw_payload=raw_payload,
+        )
         purchase.lines.append(
             PurchaseRequestLine(
                 marketplace_order_line_id=order_line.id,
-                product_id=order_line.product_id,
+                product_id=product_id,
                 title=order_line.title,
                 quantity=order_line.quantity,
                 received_quantity=0,
