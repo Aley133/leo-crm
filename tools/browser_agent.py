@@ -24,6 +24,7 @@ from tools.kaspi_seller_browser import (
 
 SUPPLIER_JOB_TYPE = "supplier_product_observation"
 KASPI_SELLER_JOB_TYPE = "kaspi_seller_order_details"
+DEFAULT_JOB_TIMEOUT_SECONDS = 120.0
 
 
 def _required_env(name: str) -> str:
@@ -135,12 +136,26 @@ async def _complete_job(
     adapters: dict[str, Any],
 ) -> str:
     print(f"Claimed browser job #{job['id']}: {_job_description(job)}")
+    timeout_seconds = max(
+        10.0,
+        float(os.getenv("BROWSER_AGENT_JOB_TIMEOUT_SECONDS") or DEFAULT_JOB_TIMEOUT_SECONDS),
+    )
     try:
-        result = await _run_job(job, adapters)
+        result = await asyncio.wait_for(
+            _run_job(job, adapters),
+            timeout=timeout_seconds,
+        )
         completion = {
             "lease_token": job["lease_token"],
             "status": "succeeded",
             "payload": result,
+        }
+    except TimeoutError:
+        completion = {
+            "lease_token": job["lease_token"],
+            "status": "failed",
+            "error_code": "BrowserAgentJobTimeout",
+            "error_message": f"Browser job exceeded {timeout_seconds:g} seconds",
         }
     except Exception as exc:
         completion = {
@@ -324,6 +339,7 @@ async def main(*, once: bool = False) -> int:
     print(f"Browser agent {agent_id} connected to CRM {api_url}")
     print(f"Chrome CDP endpoint: {cdp_endpoint}")
     print(f"Parallel browser workers: {1 if once else concurrency}")
+    print(f"Browser job timeout: {max(10.0, float(os.getenv('BROWSER_AGENT_JOB_TIMEOUT_SECONDS') or DEFAULT_JOB_TIMEOUT_SECONDS)):g}s")
     print("Enabled adapters: ozon, wb, kaspi_seller")
 
     if once:
