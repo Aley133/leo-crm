@@ -28,6 +28,17 @@ class CommerceOrderStage(StrEnum):
     UNKNOWN = "unknown"
 
 
+SNAPSHOT_STAGE_MAP = {
+    "ACCEPTED_BY_MERCHANT": CommerceOrderStage.ACCEPTED,
+    "ASSEMBLY": CommerceOrderStage.ASSEMBLY,
+    "HANDOVER": CommerceOrderStage.HANDOVER,
+    "SHIPPING": CommerceOrderStage.SHIPPING,
+    "DELIVERED": CommerceOrderStage.DELIVERED,
+    "CANCELLED": CommerceOrderStage.CANCELLED,
+    "RETURNED": CommerceOrderStage.RETURNED,
+}
+
+
 @dataclass(frozen=True, slots=True)
 class CommerceOrderLine:
     line_id: int
@@ -79,6 +90,8 @@ class CommerceOrder:
     original_status: str = "UNKNOWN"
     marketplace_account_id: int | None = None
     marketplace_external_account_id: str | None = None
+    observed_stage: str | None = None
+    observed_at: datetime | None = None
 
     @property
     def units(self) -> int:
@@ -90,7 +103,14 @@ class CommerceOrder:
 
     @property
     def procurement_required_lines(self) -> int:
-        if self.status in {"cancelled", "returned", "delivered", "shipping", "handover", "assembly"}:
+        if self.stage in {
+            CommerceOrderStage.CANCELLED,
+            CommerceOrderStage.RETURNED,
+            CommerceOrderStage.DELIVERED,
+            CommerceOrderStage.SHIPPING,
+            CommerceOrderStage.HANDOVER,
+            CommerceOrderStage.ASSEMBLY,
+        }:
             return 0
         return sum(1 for line in self.lines if line.procurement_state == ProcurementState.REQUIRED)
 
@@ -118,6 +138,17 @@ class CommerceOrder:
 
     @property
     def stage(self) -> CommerceOrderStage:
+        if self.observed_stage:
+            snapshot_stage = SNAPSHOT_STAGE_MAP.get(self.observed_stage.upper())
+            if snapshot_stage is not None:
+                if snapshot_stage == CommerceOrderStage.ACCEPTED:
+                    if self.all_procurement_received:
+                        return CommerceOrderStage.ASSEMBLY
+                    if self.has_procurement_in_transit:
+                        return CommerceOrderStage.IN_TRANSIT
+                    return CommerceOrderStage.PREORDER
+                return snapshot_stage
+
         if self.status == "cancelled":
             return CommerceOrderStage.CANCELLED
         if self.status == "returned":
@@ -135,6 +166,8 @@ class CommerceOrder:
         if self.status == "accepted":
             if self.all_procurement_received:
                 return CommerceOrderStage.ASSEMBLY
+            if self.has_procurement_in_transit:
+                return CommerceOrderStage.IN_TRANSIT
             return CommerceOrderStage.PREORDER
         return CommerceOrderStage.UNKNOWN
 
