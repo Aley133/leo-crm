@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from typing import Any
 
 from backend.app.kaspi_seller.graphql import (
@@ -9,6 +9,7 @@ from backend.app.kaspi_seller.graphql import (
     GET_ORDER_STATE_OPERATION,
     GET_ORDER_STATE_QUERY,
 )
+from backend.app.kaspi_seller.mapper import map_seller_order_snapshot
 from backend.app.supplier_adapters.playwright_pool import PlaywrightBrowserPool
 
 
@@ -179,7 +180,7 @@ class KaspiSellerBrowserAdapter:
             )
 
         detail = self._order_detail(details_payload)
-        return {
+        result: dict[str, Any] = {
             "schema_version": "kaspi-seller-graphql-v1",
             "merchant_id": request.merchant_id,
             "order_code": request.order_code,
@@ -188,3 +189,5 @@ class KaspiSellerBrowserAdapter:
             "state_response": state_payload,
             "details_response": details_payload,
         }
+        result["snapshot"] = asdict(map_seller_order_snapshot(result))
+        return result
