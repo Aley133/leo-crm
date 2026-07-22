@@ -33,12 +33,20 @@ SNAPSHOT_STAGE_MAP: dict[str, CommerceOrderStage] = {
     "ACCEPTED": CommerceOrderStage.ACCEPTED,
     "ACCEPTED_BY_MERCHANT": CommerceOrderStage.ACCEPTED,
     "PREORDER": CommerceOrderStage.PREORDER,
+    "PRE_ORDER": CommerceOrderStage.PREORDER,
     "IN_TRANSIT": CommerceOrderStage.IN_TRANSIT,
     "ASSEMBLY": CommerceOrderStage.ASSEMBLY,
+    "PACKING": CommerceOrderStage.ASSEMBLY,
+    "PACKAGING": CommerceOrderStage.ASSEMBLY,
     "HANDOVER": CommerceOrderStage.HANDOVER,
+    "READY_FOR_HANDOVER": CommerceOrderStage.HANDOVER,
+    "TRANSFER": CommerceOrderStage.HANDOVER,
     "SHIPPING": CommerceOrderStage.SHIPPING,
+    "DELIVERY": CommerceOrderStage.SHIPPING,
+    "KASPI_DELIVERY": CommerceOrderStage.SHIPPING,
     "DELIVERED": CommerceOrderStage.DELIVERED,
     "CANCELLED": CommerceOrderStage.CANCELLED,
+    "CANCELED": CommerceOrderStage.CANCELLED,
     "RETURNED": CommerceOrderStage.RETURNED,
 }
 
@@ -142,32 +150,35 @@ class CommerceOrder:
 
     @property
     def stage_source(self) -> str:
-        if self.snapshot_stage and self.snapshot_stage.upper() in SNAPSHOT_STAGE_MAP:
+        if self.snapshot_stage and self.snapshot_stage.strip().upper() in SNAPSHOT_STAGE_MAP:
             return "snapshot"
         return "marketplace_order"
 
     @property
     def stage(self) -> CommerceOrderStage:
         if self.snapshot_stage:
-            snapshot_stage = SNAPSHOT_STAGE_MAP.get(self.snapshot_stage.upper())
+            snapshot_stage = SNAPSHOT_STAGE_MAP.get(self.snapshot_stage.strip().upper())
             if snapshot_stage is not None:
                 return snapshot_stage
 
-        if self.status == "cancelled":
+        normalized_status = self.status.strip().lower()
+        if normalized_status in {"cancelled", "canceled"}:
             return CommerceOrderStage.CANCELLED
-        if self.status == "returned":
+        if normalized_status == "returned":
             return CommerceOrderStage.RETURNED
-        if self.status == "delivered":
+        if normalized_status == "delivered":
             return CommerceOrderStage.DELIVERED
-        if self.status == "shipping":
+        if normalized_status in {"shipping", "delivery", "kaspi_delivery"}:
             return CommerceOrderStage.SHIPPING
-        if self.status == "handover":
+        if normalized_status in {"handover", "ready_for_handover", "transfer"}:
             return CommerceOrderStage.HANDOVER
-        if self.status == "assembly":
+        if normalized_status in {"assembly", "packing", "packaging"}:
             return CommerceOrderStage.ASSEMBLY
-        if self.status == "new":
+        if normalized_status == "new":
             return CommerceOrderStage.NEW
-        if self.status == "accepted":
+        if normalized_status in {"preorder", "pre_order"}:
+            return CommerceOrderStage.PREORDER
+        if normalized_status in {"accepted", "accepted_by_merchant"}:
             if self.all_procurement_received:
                 return CommerceOrderStage.ASSEMBLY
             return CommerceOrderStage.PREORDER
