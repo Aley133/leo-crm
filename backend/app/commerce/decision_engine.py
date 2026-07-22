@@ -35,11 +35,12 @@ class OrderDecisionFacts:
 
 
 class OrderDecisionEngine:
-    """Resolve one authoritative CRM business stage from explicit facts.
+    """Resolve one authoritative CRM stage through a strict source cascade.
 
-    Kaspi state names often share the ``KASPI_DELIVERY`` prefix. Prefix matching
-    is therefore unsafe: ``KASPI_DELIVERY_CARGO_ASSEMBLY`` is packaging, not
-    delivery. Boolean delivery facts and exact normalized aliases have priority.
+    Recognized Kaspi Seller facts override the Marketplace API. When Snapshot is
+    absent or unknown, the normalized Marketplace status remains authoritative.
+    Procurement can only refine an early accepted order into PREORDER or ASSEMBLY;
+    it can never rewrite physical, terminal, or delivery stages.
     """
 
     _CANCELLED = {"CANCELLED", "CANCELED", "KASPI_DELIVERY_CANCELED", "KASPI_DELIVERY_CANCELLED"}
@@ -71,63 +72,101 @@ class OrderDecisionEngine:
     }
     _PREORDER = {"PREORDER", "PRE_ORDER"}
 
+    _MARKETPLACE_STAGES = {
+        "new": CommerceOrderStage.NEW,
+        "accepted": CommerceOrderStage.PREORDER,
+        "accepted_by_merchant": CommerceOrderStage.PREORDER,
+        "preorder": CommerceOrderStage.PREORDER,
+        "pre_order": CommerceOrderStage.PREORDER,
+        "received": CommerceOrderStage.RECEIVED,
+        "assembly": CommerceOrderStage.ASSEMBLY,
+        "packing": CommerceOrderStage.ASSEMBLY,
+        "packaging": CommerceOrderStage.ASSEMBLY,
+        "handover": CommerceOrderStage.HANDOVER,
+        "transfer": CommerceOrderStage.HANDOVER,
+        "shipping": CommerceOrderStage.SHIPPING,
+        "transit": CommerceOrderStage.SHIPPING,
+        "pickup": CommerceOrderStage.PICKUP,
+        "delivered": CommerceOrderStage.DELIVERED,
+        "completed": CommerceOrderStage.DELIVERED,
+        "cancelled": CommerceOrderStage.CANCELLED,
+        "canceled": CommerceOrderStage.CANCELLED,
+        "returned": CommerceOrderStage.RETURNED,
+        "return": CommerceOrderStage.RETURNED,
+        "unknown": CommerceOrderStage.UNKNOWN,
+    }
+
     @classmethod
     def decide(cls, facts: OrderDecisionFacts) -> CommerceOrderStage:
-        snapshot_tokens = cls._snapshot_tokens(facts)
+        snapshot_stage = cls._snapshot_stage(facts)
+        if snapshot_stage is not None:
+            return snapshot_stage
 
-        if snapshot_tokens & cls._CANCELLED:
-            return CommerceOrderStage.CANCELLED
-        if facts.returned_to_warehouse is True or snapshot_tokens & cls._RETURNED:
-            return CommerceOrderStage.RETURNED
-        if snapshot_tokens & cls._DELIVERED:
-            return CommerceOrderStage.DELIVERED
-        if facts.arrived_at_pickup is True or snapshot_tokens & cls._PICKUP:
-            return CommerceOrderStage.PICKUP
+        marketplace_stage = cls._marketplace_stage(facts.marketplace_status)
 
-        # Explicit courier handover is the strongest live-delivery signal.
-        if facts.transmitted_to_courier is True or snapshot_tokens & cls._SHIPPING:
-            return CommerceOrderStage.SHIPPING
+        # Physical and terminal Marketplace stages are never downgraded by an
+        # unfinished or stale purchase request.
+        if marketplace_stage in {
+            CommerceOrderStage.ASSEMBLY,
+            CommerceOrderStage.HANDOVER,
+            CommerceOrderStage.SHIPPING,
+            CommerceOrderStage.PICKUP,
+            CommerceOrderStage.DELIVERED,
+            CommerceOrderStage.CANCELLED,
+            CommerceOrderStage.RETURNED,
+        }:
+            return marketplace_stage
 
-        # A packed order that has not yet been transmitted waits for Kaspi logistics.
-        if facts.assembled is True and facts.transmitted_to_courier is not True:
-            return CommerceOrderStage.HANDOVER
-        if snapshot_tokens & cls._HANDOVER:
-            return CommerceOrderStage.HANDOVER
-
-        if snapshot_tokens & cls._ASSEMBLY:
-            return CommerceOrderStage.ASSEMBLY
-
+        # Procurement only refines early lifecycle stages.
         if facts.has_lines and facts.all_procurement_received:
             return CommerceOrderStage.ASSEMBLY
         if facts.has_procurement_in_progress:
             return CommerceOrderStage.PREORDER
-        if snapshot_tokens & cls._PREORDER:
-            return CommerceOrderStage.PREORDER
 
-        raw = cls._normalize(facts.marketplace_status)
-        if raw in {"accepted", "accepted_by_merchant"}:
-            return CommerceOrderStage.PREORDER
-        if raw == "new":
-            return CommerceOrderStage.NEW
-        if raw:
-            return CommerceOrderStage.ACCEPTED
+        if marketplace_stage is not None:
+            return marketplace_stage
         return CommerceOrderStage.UNKNOWN
 
     @classmethod
     def source(cls, facts: OrderDecisionFacts) -> str:
-        if cls._snapshot_tokens(facts) or any(
-            value is not None
-            for value in (
-                facts.assembled,
-                facts.transmitted_to_courier,
-                facts.arrived_at_pickup,
-                facts.returned_to_warehouse,
-            )
-        ):
+        if cls._snapshot_stage(facts) is not None:
             return "snapshot"
+        if cls._marketplace_stage(facts.marketplace_status) is not None:
+            return "marketplace_order"
         if facts.has_procurement_in_progress or facts.all_procurement_received:
             return "procurement"
         return "marketplace_order"
+
+    @classmethod
+    def _snapshot_stage(cls, facts: OrderDecisionFacts) -> CommerceOrderStage | None:
+        tokens = cls._snapshot_tokens(facts)
+
+        if tokens & cls._CANCELLED:
+            return CommerceOrderStage.CANCELLED
+        if facts.returned_to_warehouse is True or tokens & cls._RETURNED:
+            return CommerceOrderStage.RETURNED
+        if tokens & cls._DELIVERED:
+            return CommerceOrderStage.DELIVERED
+        if facts.arrived_at_pickup is True or tokens & cls._PICKUP:
+            return CommerceOrderStage.PICKUP
+        if facts.transmitted_to_courier is True or tokens & cls._SHIPPING:
+            return CommerceOrderStage.SHIPPING
+        if facts.assembled is True and facts.transmitted_to_courier is not True:
+            return CommerceOrderStage.HANDOVER
+        if tokens & cls._HANDOVER:
+            return CommerceOrderStage.HANDOVER
+        if tokens & cls._ASSEMBLY:
+            return CommerceOrderStage.ASSEMBLY
+        if tokens & cls._PREORDER:
+            return CommerceOrderStage.PREORDER
+        return None
+
+    @classmethod
+    def _marketplace_stage(cls, value: str | None) -> CommerceOrderStage | None:
+        raw = cls._normalize(value)
+        if not raw:
+            return None
+        return cls._MARKETPLACE_STAGES.get(raw, CommerceOrderStage.ACCEPTED)
 
     @classmethod
     def _snapshot_tokens(cls, facts: OrderDecisionFacts) -> set[str]:
