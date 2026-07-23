@@ -250,17 +250,26 @@ def transition_purchase(
 
     received_now = 0
     if target_status == PurchaseStatus.RECEIVED.value:
-        # The Orders Center action means that the complete purchase has arrived.
-        # Record the physical quantity before changing the lifecycle status so a
-        # subsequent close is valid and the related order can leave PREORDER.
         for line in purchase.lines:
             outstanding = line.quantity - line.received_quantity
             if outstanding > 0:
                 line.received_quantity = line.quantity
                 received_now += outstanding
 
+    legacy_receipt_repaired = False
     if target_status == PurchaseStatus.CLOSED.value:
         incomplete = any(line.received_quantity != line.quantity for line in purchase.lines)
+        if incomplete and purchase.status == PurchaseStatus.RECEIVED.value:
+            # Releases before this fix could mark a purchase RECEIVED without
+            # persisting received quantities. RECEIVED is authoritative evidence
+            # that the complete purchase arrived, so repair those legacy rows.
+            for line in purchase.lines:
+                outstanding = line.quantity - line.received_quantity
+                if outstanding > 0:
+                    line.received_quantity = line.quantity
+                    received_now += outstanding
+            legacy_receipt_repaired = True
+            incomplete = False
         if incomplete:
             raise InvalidPurchaseTransition("Cannot close purchase with unreceived quantity")
 
@@ -272,6 +281,9 @@ def transition_purchase(
     if target_status == PurchaseStatus.RECEIVED.value:
         event_metadata["received_quantity"] = received_now
         event_metadata["receipt_mode"] = "complete_purchase"
+    if legacy_receipt_repaired:
+        event_metadata["received_quantity"] = received_now
+        event_metadata["legacy_receipt_repaired"] = True
 
     session.add(
         PurchaseEvent(
@@ -296,6 +308,7 @@ def transition_purchase(
                 "status": purchase.status,
                 "version": purchase.version,
                 "received_quantity": received_now,
+                "legacy_receipt_repaired": legacy_receipt_repaired,
             },
         )
     )
