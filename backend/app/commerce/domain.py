@@ -5,6 +5,8 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
+from .profit_calculator import calculate_line_economics, kaspi_logistics_per_unit
+
 
 class CommerceOrderStage(StrEnum):
     NEW = "new"
@@ -76,6 +78,36 @@ class CommerceOrderLine:
         if self.line_total <= 0 or self.gross_margin is None:
             return None
         return (self.gross_margin / self.line_total * Decimal("100")).quantize(Decimal("0.01"))
+
+    @property
+    def kaspi_commission(self) -> Decimal | None:
+        return None if self.procurement_unit_cost is None else self._economics.kaspi_commission
+
+    @property
+    def tax(self) -> Decimal | None:
+        return None if self.procurement_unit_cost is None else self._economics.tax
+
+    @property
+    def logistics(self) -> Decimal:
+        return kaspi_logistics_per_unit(self.unit_price) * self.quantity
+
+    @property
+    def net_profit(self) -> Decimal | None:
+        return None if self.procurement_unit_cost is None else self._economics.net_profit
+
+    @property
+    def net_margin_pct(self) -> Decimal | None:
+        return None if self.procurement_unit_cost is None else self._economics.net_margin_pct
+
+    @property
+    def _economics(self):
+        if self.procurement_unit_cost is None:
+            raise RuntimeError("procurement cost is required for order economics")
+        return calculate_line_economics(
+            unit_sale_price=self.unit_price,
+            quantity=self.quantity,
+            procurement_unit_cost=self.procurement_unit_cost,
+        )
 
 
 @dataclass(frozen=True, slots=True)
