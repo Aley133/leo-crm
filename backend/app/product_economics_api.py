@@ -30,6 +30,9 @@ class ProductEconomicsRead(BaseModel):
     logistics: Decimal | None
     net_profit: Decimal | None
     net_margin_pct: Decimal | None
+    total_net_profit: Decimal | None
+    total_net_margin_pct: Decimal | None
+    profit_units_count: int
 
 
 router = APIRouter(
@@ -48,13 +51,22 @@ def get_product_economics(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
-    latest_line = db.scalar(
-        select(MarketplaceOrderLine)
-        .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
-        .where(MarketplaceOrderLine.product_id == product_id)
-        .order_by(MarketplaceOrder.ordered_at.desc().nullslast(), MarketplaceOrderLine.id.desc())
-        .limit(1)
-    )
+    sale_lines = db.execute(
+        select(MarketplaceOrderLine, MarketplaceOrder.status)
+        .join(
+            MarketplaceOrder,
+            MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id,
+        )
+        .where(
+            MarketplaceOrderLine.product_id == product_id,
+            MarketplaceOrder.status.notin_(("cancelling", "cancelled", "returned")),
+        )
+        .order_by(
+            MarketplaceOrder.ordered_at.desc().nullslast(),
+            MarketplaceOrderLine.id.desc(),
+        )
+    ).all()
+    latest_line = sale_lines[0][0] if sale_lines else None
     sale_price = None if latest_line is None else Decimal(latest_line.unit_price)
 
     source_rows = db.execute(
@@ -91,6 +103,27 @@ def get_product_economics(
 
     commission_rate_pct = KASPI_COMMISSION_RATE * Decimal("100")
     tax_rate_pct = TAX_RATE * Decimal("100")
+    profit_units_count = sum(int(line.quantity or 0) for line, _status in sale_lines)
+
+    total_net_profit: Decimal | None = None
+    total_net_margin_pct: Decimal | None = None
+    if procurement_cost is not None:
+        total_profit = Decimal("0")
+        total_revenue = Decimal("0")
+        for line, _status in sale_lines:
+            economics = calculate_line_economics(
+                unit_sale_price=Decimal(line.unit_price),
+                quantity=int(line.quantity),
+                procurement_unit_cost=procurement_cost,
+            )
+            total_profit += economics.net_profit
+            total_revenue += economics.revenue
+        total_net_profit = total_profit.quantize(Decimal("0.01"))
+        if total_revenue > 0:
+            total_net_margin_pct = (
+                total_profit / total_revenue * Decimal("100")
+            ).quantize(Decimal("0.01"))
+
     if sale_price is None:
         return ProductEconomicsRead(
             sale_unit_price=None,
@@ -103,6 +136,9 @@ def get_product_economics(
             logistics=None,
             net_profit=None,
             net_margin_pct=None,
+            total_net_profit=total_net_profit,
+            total_net_margin_pct=total_net_margin_pct,
+            profit_units_count=profit_units_count,
         )
 
     fees = calculate_line_economics(
@@ -122,6 +158,9 @@ def get_product_economics(
             logistics=fees.logistics,
             net_profit=None,
             net_margin_pct=None,
+            total_net_profit=None,
+            total_net_margin_pct=None,
+            profit_units_count=profit_units_count,
         )
 
     economics = calculate_line_economics(
@@ -140,4 +179,7 @@ def get_product_economics(
         logistics=economics.logistics,
         net_profit=economics.net_profit,
         net_margin_pct=economics.net_margin_pct,
+        total_net_profit=total_net_profit,
+        total_net_margin_pct=total_net_margin_pct,
+        profit_units_count=profit_units_count,
     )
