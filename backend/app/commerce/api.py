@@ -145,6 +145,8 @@ def list_commerce_orders(
             orders_count=summary.orders_count,
             units_count=summary.units_count,
             revenue=summary.revenue,
+            confirmed_net_profit=summary.confirmed_net_profit,
+            confirmed_profit_units=summary.confirmed_profit_units,
             active_orders=summary.active_orders,
             delivered_orders=summary.delivered_orders,
             cancelled_orders=summary.cancelled_orders,
