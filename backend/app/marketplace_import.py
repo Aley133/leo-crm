@@ -52,6 +52,8 @@ KASPI_STATE_FALLBACK_MAP: dict[str, str] = {
     "ARCHIVED": MarketplaceOrderStatus.DELIVERED.value,
 }
 
+_PLACEHOLDER_TITLES = {"", "unknown product", "название не получено"}
+
 
 @dataclass(frozen=True, slots=True)
 class NormalizedOrderLine:
@@ -95,6 +97,17 @@ def _first(data: dict[str, Any], *keys: str) -> Any:
     return None
 
 
+def _clean_text(value: Any) -> str | None:
+    if value is None:
+        return None
+    cleaned = str(value).strip()
+    return cleaned or None
+
+
+def _is_placeholder_title(value: str | None) -> bool:
+    return (value or "").strip().casefold() in _PLACEHOLDER_TITLES
+
+
 def _as_datetime(value: Any) -> datetime | None:
     if value is None or value == "":
         return None
@@ -126,14 +139,12 @@ def _normalize_kaspi_status(attributes: dict[str, Any]) -> tuple[str, str]:
     raw_status = _first(attributes, "status", "orderStatus")
     if raw_status not in (None, ""):
         original = str(raw_status).strip()
-        normalized = KASPI_STATUS_MAP.get(original.upper(), MarketplaceOrderStatus.UNKNOWN.value)
-        return normalized, original
+        return KASPI_STATUS_MAP.get(original.upper(), MarketplaceOrderStatus.UNKNOWN.value), original
 
     raw_state = _first(attributes, "state", "fulfillmentState", "deliveryStatus")
     if raw_state not in (None, ""):
         original = str(raw_state).strip()
-        normalized = KASPI_STATE_FALLBACK_MAP.get(original.upper(), MarketplaceOrderStatus.UNKNOWN.value)
-        return normalized, original
+        return KASPI_STATE_FALLBACK_MAP.get(original.upper(), MarketplaceOrderStatus.UNKNOWN.value), original
 
     return MarketplaceOrderStatus.UNKNOWN.value, "UNKNOWN"
 
@@ -153,16 +164,21 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
         line_attributes = raw_line.get("attributes") if isinstance(raw_line.get("attributes"), dict) else raw_line
         quantity = int(_first(line_attributes, "quantity", "qty") or 1)
         unit_price = _as_decimal(_first(line_attributes, "basePrice", "unitPrice", "price"))
-        line_total = _as_decimal(_first(line_attributes, "totalPrice", "lineTotal"), default=str(unit_price * quantity))
-        external_line_id = str(_first(raw_line, "id") or _first(line_attributes, "id", "entryId") or f"{external_order_id}:{index}")
-        external_product_value = _first(line_attributes, "productId", "externalProductId")
-        merchant_sku_value = _first(line_attributes, "offerCode", "merchantSku", "sku")
+        line_total = _as_decimal(
+            _first(line_attributes, "totalPrice", "lineTotal"),
+            default=str(unit_price * quantity),
+        )
+        external_line_id = str(
+            _first(raw_line, "id")
+            or _first(line_attributes, "id", "entryId")
+            or f"{external_order_id}:{index}"
+        )
         lines.append(
             NormalizedOrderLine(
                 external_line_id=external_line_id,
-                external_product_id=str(external_product_value) if external_product_value is not None else None,
-                merchant_sku=str(merchant_sku_value) if merchant_sku_value is not None else None,
-                title=str(_first(line_attributes, "name", "title") or "Unknown product"),
+                external_product_id=_clean_text(_first(line_attributes, "productId", "externalProductId")),
+                merchant_sku=_clean_text(_first(line_attributes, "offerCode", "merchantSku", "sku", "code")),
+                title=_clean_text(_first(line_attributes, "name", "title", "productName")) or "Unknown product",
                 quantity=quantity,
                 unit_price=unit_price,
                 line_total=line_total,
@@ -178,10 +194,10 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
 
     return NormalizedOrder(
         external_order_id=external_order_id,
-        external_code=str(external_code_value) if external_code_value is not None else None,
+        external_code=_clean_text(external_code_value),
         status=normalized_status,
         original_status=original_status,
-        source_revision=str(source_revision_value) if source_revision_value is not None else None,
+        source_revision=_clean_text(source_revision_value),
         currency=str(_first(attributes, "currency") or "KZT"),
         total_amount=total_amount,
         ordered_at=_as_datetime(_first(attributes, "creationDate", "orderedAt", "createdAt")),
@@ -190,6 +206,54 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
         source_updated_at=_as_datetime(_first(attributes, "updatedAt", "modifiedAt")),
         lines=tuple(lines),
     )
+
+
+def _find_existing_line(
+    existing_lines: list[MarketplaceOrderLine],
+    normalized: NormalizedOrderLine,
+    *,
+    single_incoming: bool,
+) -> MarketplaceOrderLine | None:
+    for line in existing_lines:
+        if str(line.external_line_id or "") == normalized.external_line_id:
+            return line
+    if normalized.merchant_sku:
+        for line in existing_lines:
+            if _clean_text(line.merchant_sku) == normalized.merchant_sku:
+                return line
+    if normalized.external_product_id:
+        for line in existing_lines:
+            if _clean_text(line.external_product_id) == normalized.external_product_id:
+                return line
+    if single_incoming and len(existing_lines) == 1:
+        return existing_lines[0]
+    return None
+
+
+def _merge_line(line: MarketplaceOrderLine, incoming: NormalizedOrderLine) -> bool:
+    changed = False
+    if incoming.external_line_id and line.external_line_id != incoming.external_line_id:
+        line.external_line_id = incoming.external_line_id
+        changed = True
+    if incoming.external_product_id and line.external_product_id != incoming.external_product_id:
+        line.external_product_id = incoming.external_product_id
+        changed = True
+    if incoming.merchant_sku and line.merchant_sku != incoming.merchant_sku:
+        line.merchant_sku = incoming.merchant_sku
+        changed = True
+    if not _is_placeholder_title(incoming.title) and line.title != incoming.title:
+        line.title = incoming.title
+        changed = True
+    if line.quantity != incoming.quantity:
+        line.quantity = incoming.quantity
+        changed = True
+    if Decimal(line.unit_price) != incoming.unit_price:
+        line.unit_price = incoming.unit_price
+        changed = True
+    if Decimal(line.line_total) != incoming.line_total:
+        line.line_total = incoming.line_total
+        changed = True
+    return changed
 
 
 def import_kaspi_order(
@@ -256,7 +320,7 @@ def import_kaspi_order(
         changed = True
     else:
         previous_status = order.status
-        comparable_before = (
+        before = (
             order.external_code,
             order.status,
             order.original_status,
@@ -268,7 +332,7 @@ def import_kaspi_order(
             order.delivered_at,
             order.source_updated_at,
         )
-        comparable_after = (
+        after = (
             normalized.external_code,
             normalized.status,
             normalized.original_status,
@@ -280,7 +344,7 @@ def import_kaspi_order(
             normalized.delivered_at,
             normalized.source_updated_at,
         )
-        changed = comparable_before != comparable_after
+        changed = before != after
         if changed:
             order.external_code = normalized.external_code
             order.status = normalized.status
@@ -294,36 +358,29 @@ def import_kaspi_order(
             order.source_updated_at = normalized.source_updated_at
             order.version += 1
 
-    existing_lines = {line.external_line_id: line for line in order.lines}
-    incoming_line_ids: set[str] = set()
-    for normalized_line in normalized.lines:
-        incoming_line_ids.add(normalized_line.external_line_id)
-        line = existing_lines.get(normalized_line.external_line_id)
+    existing_lines = list(order.lines)
+    single_incoming = len(normalized.lines) == 1
+    for incoming in normalized.lines:
+        line = _find_existing_line(existing_lines, incoming, single_incoming=single_incoming)
         if line is None:
-            order.lines.append(
-                MarketplaceOrderLine(
-                    external_line_id=normalized_line.external_line_id,
-                    external_product_id=normalized_line.external_product_id,
-                    merchant_sku=normalized_line.merchant_sku,
-                    title=normalized_line.title,
-                    quantity=normalized_line.quantity,
-                    unit_price=normalized_line.unit_price,
-                    line_total=normalized_line.line_total,
-                )
+            line = MarketplaceOrderLine(
+                external_line_id=incoming.external_line_id,
+                external_product_id=incoming.external_product_id,
+                merchant_sku=incoming.merchant_sku,
+                title=incoming.title,
+                quantity=incoming.quantity,
+                unit_price=incoming.unit_price,
+                line_total=incoming.line_total,
             )
+            order.lines.append(line)
+            existing_lines.append(line)
             changed = True
-        else:
-            line.external_product_id = normalized_line.external_product_id
-            line.merchant_sku = normalized_line.merchant_sku
-            line.title = normalized_line.title
-            line.quantity = normalized_line.quantity
-            line.unit_price = normalized_line.unit_price
-            line.line_total = normalized_line.line_total
+        elif _merge_line(line, incoming):
+            changed = True
 
-    for external_line_id, line in existing_lines.items():
-        if external_line_id not in incoming_line_ids:
-            session.delete(line)
-            changed = True
+    # Kaspi may temporarily return an order without included entries. Existing
+    # enriched lines are intentionally retained; incomplete observations must not
+    # destroy title, SKU, catalogue link or procurement history.
 
     if created or previous_status != normalized.status:
         event_key = f"status:{normalized.source_revision or content_hash}:{normalized.status}"
