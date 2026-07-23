@@ -168,3 +168,45 @@ def test_invalid_transition_and_incomplete_close_are_rejected(session_factory) -
                     expected_version=1,
                     idempotency_key="invalid-close",
                 )
+
+
+def test_mark_received_fills_quantities_and_allows_close(session_factory) -> None:
+    order_id = _order_id(session_factory)
+    with session_factory() as session:
+        with session.begin():
+            purchase = create_purchase_from_marketplace_order(
+                session,
+                marketplace_order_id=order_id,
+                idempotency_key="create-receipt",
+            )
+            purchase_id = purchase.id
+
+    transitions = (
+        (PurchaseStatus.REQUESTED.value, 1),
+        (PurchaseStatus.ORDERED.value, 2),
+        (PurchaseStatus.RECEIVED.value, 3),
+    )
+    for target, version in transitions:
+        with session_factory() as session:
+            with session.begin():
+                purchase = transition_purchase(
+                    session,
+                    purchase_request_id=purchase_id,
+                    target_status=target,
+                    expected_version=version,
+                    idempotency_key=f"receive-flow:{target}",
+                )
+
+    assert purchase.status == PurchaseStatus.RECEIVED.value
+    assert all(line.received_quantity == line.quantity for line in purchase.lines)
+
+    with session_factory() as session:
+        with session.begin():
+            closed = transition_purchase(
+                session,
+                purchase_request_id=purchase_id,
+                target_status=PurchaseStatus.CLOSED.value,
+                expected_version=4,
+                idempotency_key="receive-flow:closed",
+            )
+            assert closed.status == PurchaseStatus.CLOSED.value
