@@ -102,12 +102,6 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
         LAST_RUN["message"] = "Kaspi polling disabled or KASPI_API_TOKEN is missing"
         return
 
-    try:
-        await asyncio.wait_for(stop_event.wait(), timeout=20)
-        return
-    except TimeoutError:
-        pass
-
     cycle = 0
     while not stop_event.is_set():
         cycle += 1
