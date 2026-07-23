@@ -55,6 +55,11 @@ class CommerceService:
             orders_count=len(orders),
             units_count=sum(order.units for order in orders),
             revenue=sum((order.recognized_revenue for order in orders), Decimal("0")),
+            confirmed_net_profit=sum(
+                (order.confirmed_net_profit for order in orders),
+                Decimal("0"),
+            ),
+            confirmed_profit_units=sum(order.confirmed_profit_units for order in orders),
             active_orders=sum(1 for order in orders if order.stage.value in ACTIVE_STAGES),
             delivered_orders=sum(1 for order in orders if order.stage.value == "delivered"),
             cancelled_orders=sum(
