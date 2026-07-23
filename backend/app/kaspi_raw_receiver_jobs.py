@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
+from collections import Counter
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -9,6 +10,7 @@ import httpx
 from sqlalchemy import select
 
 from .db import SessionLocal
+from .inventory_service import allocate_order_line_fifo
 from .kaspi_http_transport import KaspiHttpSettings
 from .kaspi_integration import ensure_kaspi_marketplace_account
 from .kaspi_order_payload import canonicalize_kaspi_order_payload
@@ -26,6 +28,11 @@ KASPI_STATES: tuple[str, ...] = (
     "ARCHIVE",
 )
 
+# Kaspi occasionally exposes a newly created order before it appears in one of
+# the documented state-filtered collections. Every manual rebuild therefore
+# performs one additional unfiltered request per time slice and merges it with
+# the state matrix. The state-filtered requests remain the compatibility path.
+_ALL_STATES = "__ALL__"
 JOBS: dict[str, dict[str, Any]] = {}
 
 
@@ -35,6 +42,7 @@ def create_job(*, days: int, timezone_name: str = "Asia/Almaty") -> str:
     job_id = uuid.uuid4().hex
     now = datetime.now(UTC)
     start = now - timedelta(days=days)
+    ranges_per_day = len(KASPI_STATES) + 1
     JOBS[job_id] = {
         "id": job_id,
         "status": "queued",
@@ -44,11 +52,13 @@ def create_job(*, days: int, timezone_name: str = "Asia/Almaty") -> str:
         "to_ms": int(now.timestamp() * 1000),
         "started_at": None,
         "finished_at": None,
-        "progress": {"completed": 0, "total": days * len(KASPI_STATES), "percent": 0},
+        "progress": {"completed": 0, "total": days * ranges_per_day, "percent": 0},
         "request_count": 0,
         "orders_count": 0,
         "imported_count": 0,
         "updated_count": 0,
+        "latest_order_at": None,
+        "state_counts": {},
         "errors": [],
         "message": "Задание поставлено в очередь",
     }
@@ -280,7 +290,28 @@ def _persist_orders(orders: list[dict[str, Any]], *, timezone_name: str) -> tupl
                             marketplace_account_id=account.id,
                             order_line=line,
                         )
+                        # Product identity can be backfilled even for an unchanged
+                        # order. Allocate after identity resolution on every manual
+                        # rebuild; the FIFO service is idempotent per order line.
+                        allocate_order_line_fifo(
+                            session,
+                            order_line=line,
+                            order=order,
+                            allocated_at=observed_at,
+                        )
     return imported, updated
+
+
+def _creation_ms(item: dict[str, Any]) -> int:
+    value = _attrs(item).get("creationDate")
+    try:
+        return int(value or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def _state_name(item: dict[str, Any]) -> str:
+    return str(_attrs(item).get("state") or "UNKNOWN").strip().upper() or "UNKNOWN"
 
 
 async def run_job(job_id: str) -> None:
@@ -297,6 +328,7 @@ async def run_job(job_id: str) -> None:
         cursor = int(job["from_ms"])
         while cursor <= int(job["to_ms"]):
             end = min(cursor + day_ms - 1, int(job["to_ms"]))
+            base_chunks.append((_ALL_STATES, cursor, end))
             for state in KASPI_STATES:
                 base_chunks.append((state, cursor, end))
             cursor = end + 1
@@ -313,7 +345,7 @@ async def run_job(job_id: str) -> None:
             "Accept": "application/vnd.api+json",
             "Content-Type": "application/vnd.api+json",
             "X-Auth-Token": settings.api_token,
-            "User-Agent": "leo-crm-raw-receiver/1.0.1",
+            "User-Agent": "leo-crm-raw-receiver/1.0.2",
         }
 
         async with httpx.AsyncClient(
@@ -325,15 +357,16 @@ async def run_job(job_id: str) -> None:
                 page_number = 0
                 page_size = 50
                 while True:
-                    params = {
+                    params: dict[str, Any] = {
                         "page[number]": page_number,
                         "page[size]": page_size,
                         "sort": "-creationDate",
                         "include": "entries",
-                        "filter[orders][state]": state,
                         "filter[orders][creationDate][$ge]": start_ms,
                         "filter[orders][creationDate][$le]": end_ms,
                     }
+                    if state != _ALL_STATES:
+                        params["filter[orders][state]"] = state
                     try:
                         response = await asyncio.wait_for(
                             client.get("/orders", params=params, headers=headers), timeout=15
@@ -353,8 +386,9 @@ async def run_job(job_id: str) -> None:
                                 if key:
                                     unique[key] = item
                             job["orders_count"] = len(unique)
+                            label = "ALL" if state == _ALL_STATES else state
                             job["message"] = (
-                                f"Получено {len(unique)} заказов; состояние {state}; "
+                                f"Получено {len(unique)} заказов; состояние {label}; "
                                 f"страница {page_number + 1}"
                             )
                         meta = _meta(body)
@@ -375,6 +409,11 @@ async def run_job(job_id: str) -> None:
                             await fetch_range(state, start_ms, middle - 1)
                             await fetch_range(state, middle, end_ms)
                             return
+                        # The unfiltered request is an additional completeness probe.
+                        # A deployment whose Kaspi endpoint requires state filters
+                        # still succeeds through the documented state matrix.
+                        if state == _ALL_STATES:
+                            return
                         async with lock:
                             errors.append(
                                 {
@@ -388,6 +427,8 @@ async def run_job(job_id: str) -> None:
                             )
                         return
                     except (httpx.HTTPStatusError, ValueError) as exc:
+                        if state == _ALL_STATES:
+                            return
                         async with lock:
                             errors.append(
                                 {
@@ -424,11 +465,9 @@ async def run_job(job_id: str) -> None:
 
             await asyncio.gather(*(worker() for _ in range(3)))
 
-        orders = sorted(
-            unique.values(),
-            key=lambda item: int(_attrs(item).get("creationDate") or 0),
-            reverse=True,
-        )
+        orders = sorted(unique.values(), key=_creation_ms, reverse=True)
+        state_counts = Counter(_state_name(item) for item in orders)
+        latest_ms = max((_creation_ms(item) for item in orders), default=0)
         imported, updated = await asyncio.to_thread(
             _persist_orders,
             orders,
@@ -437,10 +476,15 @@ async def run_job(job_id: str) -> None:
         job["orders_count"] = len(orders)
         job["imported_count"] = imported
         job["updated_count"] = updated
+        job["latest_order_at"] = (
+            datetime.fromtimestamp(latest_ms / 1000, tz=UTC).isoformat() if latest_ms else None
+        )
+        job["state_counts"] = dict(sorted(state_counts.items()))
         job["errors"] = errors
         job["status"] = "completed" if not errors else "completed_with_errors"
+        freshness = f", самый свежий: {job['latest_order_at']}" if job["latest_order_at"] else ""
         job["message"] = (
-            f"Готово: {len(orders)} уникальных заказов, "
+            f"Готово: {len(orders)} уникальных заказов{freshness}, "
             f"ошибок отдельных диапазонов: {len(errors)}"
         )
     except Exception as exc:
