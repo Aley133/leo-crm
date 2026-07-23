@@ -18,6 +18,7 @@ from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
 from .db import engine
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
+from .inventory_api import router as inventory_router
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
@@ -37,8 +38,8 @@ from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 from .ui import router as ui_router
 
-APP_VERSION = "0.17.0"
-DEPLOYMENT_MARKER = "kaspi-raw-receiver-orders-v1"
+APP_VERSION = "0.18.0"
+DEPLOYMENT_MARKER = "fifo-inventory-batches-v1"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -52,6 +53,7 @@ app.include_router(ui_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
 app.include_router(product_economics_router)
+app.include_router(inventory_router)
 app.include_router(fixed_procurement_source_router)
 app.include_router(product_commerce_router)
 app.include_router(action_router)
