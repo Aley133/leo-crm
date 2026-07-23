@@ -34,6 +34,7 @@
         <td>${Number(batch.quantity_received).toLocaleString("ru-RU")}</td>
         <td>${Number(batch.quantity_allocated).toLocaleString("ru-RU")}</td>
         <td><strong>${Number(batch.quantity_remaining).toLocaleString("ru-RU")}</strong></td>
+        <td>${batch.can_delete ? `<button class="button secondary delete-inventory-batch" type="button" data-batch-id="${Number(batch.id)}">Удалить</button>` : `<span class="muted">Есть списания</span>`}</td>
       </tr>
     `).join("");
     empty.classList.toggle("hidden", batches.length > 0);
@@ -63,6 +64,31 @@
   });
   document.querySelector("#close-inventory-dialog")?.addEventListener("click", () => dialog.close());
   document.querySelector("#cancel-inventory")?.addEventListener("click", () => dialog.close());
+
+  body?.addEventListener("click", async (event) => {
+    const button = event.target.closest(".delete-inventory-batch");
+    if (!button) return;
+    const batchId = Number(button.dataset.batchId);
+    if (!Number.isInteger(batchId) || !confirm("Удалить эту неиспользованную партию?")) return;
+    button.disabled = true;
+    try {
+      const token = localStorage.getItem(storageKey);
+      const response = await fetch(`/api/products/${productId}/inventory/batches/${batchId}`, {
+        method: "DELETE",
+        headers: {Authorization: `Bearer ${token}`},
+      });
+      if (!response.ok) {
+        let detail = `API вернул ошибку ${response.status}`;
+        try { const payload = await response.json(); if (payload.detail) detail = String(payload.detail); } catch {}
+        throw new Error(detail);
+      }
+      await loadInventory();
+      document.querySelector("#refresh")?.click();
+    } catch (error) {
+      alert(error instanceof Error ? error.message : "Не удалось удалить партию.");
+      button.disabled = false;
+    }
+  });
 
   form?.addEventListener("submit", async (event) => {
     event.preventDefault();
