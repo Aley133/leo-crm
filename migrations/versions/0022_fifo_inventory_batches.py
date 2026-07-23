@@ -1,16 +1,16 @@
 """add FIFO inventory batches
 
-Revision ID: 0022
-Revises: 0021
+Revision ID: 20260723_0013
+Revises: 20260719_0012
 """
 
 from alembic import op
 import sqlalchemy as sa
 
-revision = "0022"
-down_revision = "0021"
-branch_labels = None
-depends_on = None
+revision: str = "20260723_0013"
+down_revision: str | None = "20260719_0012"
+branch_labels: str | None = None
+depends_on: str | None = None
 
 
 def upgrade() -> None:
