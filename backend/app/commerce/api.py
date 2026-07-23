@@ -144,6 +144,11 @@ def list_commerce_orders(
                         procurement_source_name=line.procurement_source_name,
                         gross_margin=line.gross_margin,
                         gross_margin_pct=line.gross_margin_pct,
+                        kaspi_commission=line.kaspi_commission,
+                        tax=line.tax,
+                        logistics=line.logistics,
+                        net_profit=line.net_profit,
+                        net_margin_pct=line.net_margin_pct,
                     )
                     for line in order.lines
                 ],
