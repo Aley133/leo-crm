@@ -5,7 +5,7 @@ from backend.app.commerce.domain import CommerceOrder, CommerceOrderLine, Commer
 from backend.app.commerce.service import CommerceService
 
 
-def _line(*, product_id=1, purchase_request_id=None, purchase_status=None):
+def _line(*, product_id=1, purchase_request_id=None, purchase_status=None, inventory_allocated_quantity=0):
     return CommerceOrderLine(
         line_id=1,
         product_id=product_id,
@@ -17,6 +17,7 @@ def _line(*, product_id=1, purchase_request_id=None, purchase_status=None):
         line_total=Decimal("10000"),
         purchase_request_id=purchase_request_id,
         purchase_status=purchase_status,
+        inventory_allocated_quantity=inventory_allocated_quantity,
     )
 
 
@@ -43,6 +44,22 @@ def test_order_stage_is_already_normalized_by_kaspi_raw_receiver() -> None:
     assert _order(status="cancelled").stage == CommerceOrderStage.CANCELLED
     assert _order(status="delivered").stage == CommerceOrderStage.DELIVERED
     assert _order(status="returned").stage == CommerceOrderStage.RETURNED
+
+
+def test_received_preorder_moves_to_packaging() -> None:
+    received = _line(purchase_request_id="purchase-1", purchase_status="received")
+    closed = _line(purchase_request_id="purchase-2", purchase_status="closed")
+    from_stock = _line(inventory_allocated_quantity=2)
+    assert _order(status="preorder", lines=(received,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(closed,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(from_stock,)).stage == CommerceOrderStage.ASSEMBLY
+
+
+def test_incomplete_preorder_stays_preorder() -> None:
+    ordered = _line(purchase_request_id="purchase-1", purchase_status="ordered")
+    received = _line(purchase_request_id="purchase-2", purchase_status="received")
+    assert _order(status="preorder", lines=(ordered,)).stage == CommerceOrderStage.PREORDER
+    assert _order(status="preorder", lines=(received, ordered)).stage == CommerceOrderStage.PREORDER
 
 
 def test_order_stage_source_is_official_kaspi_orders_api() -> None:
