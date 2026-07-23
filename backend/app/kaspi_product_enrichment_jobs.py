@@ -62,12 +62,11 @@ def normalize_entry(
     product: dict[str, Any] | None = None,
     merchant_product: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Exact product-name priority from diagnostic archive v1.1.0."""
+    """Exact name/SKU priority from diagnostic archive v1.1.0."""
 
     entry_attrs = _attrs(entry)
     product_attrs = _attrs(product)
     merchant_attrs = _attrs(merchant_product)
-
     return {
         "entry_id": str(entry.get("id") or ""),
         "name": _text(
@@ -106,6 +105,7 @@ def create_job(*, days: int = 31) -> str:
         "processed": 0,
         "total": 0,
         "updated": 0,
+        "linked": 0,
         "request_count": 0,
         "errors": [],
         "message": "Обогащение товаров поставлено в очередь",
@@ -128,20 +128,17 @@ def _match_line(
 ) -> MarketplaceOrderLine | None:
     entry_id = str(normalized.get("entry_id") or "").strip()
     sku = str(normalized.get("sku") or "").strip()
-    external_product_id = str(normalized.get("external_product_id") or "").strip()
+    product_id = str(normalized.get("external_product_id") or "").strip()
 
-    if entry_id:
-        for line in lines:
-            if str(line.external_line_id or "").strip() == entry_id:
-                return line
-    if sku:
-        for line in lines:
-            if str(line.merchant_sku or "").strip() == sku:
-                return line
-    if external_product_id:
-        for line in lines:
-            if str(line.external_product_id or "").strip() == external_product_id:
-                return line
+    for line in lines:
+        if entry_id and str(line.external_line_id or "").strip() == entry_id:
+            return line
+    for line in lines:
+        if sku and str(line.merchant_sku or "").strip() == sku:
+            return line
+    for line in lines:
+        if product_id and str(line.external_product_id or "").strip() == product_id:
+            return line
     if single_item and len(lines) == 1:
         return lines[0]
     return None
@@ -151,7 +148,7 @@ async def run_job(job_id: str) -> None:
     job = JOBS[job_id]
     job["status"] = "running"
     job["started_at"] = datetime.now(UTC).isoformat()
-    job["message"] = "Загружаем точные названия товаров из Kaspi"
+    job["message"] = "Загружаем позиции, названия и артикулы из Kaspi"
 
     try:
         settings = KaspiHttpSettings.from_environment()
@@ -181,33 +178,84 @@ async def run_job(job_id: str) -> None:
 
         async with httpx.AsyncClient(
             base_url=settings.base_url,
-            timeout=httpx.Timeout(connect=10, read=15, write=10, pool=15),
+            timeout=httpx.Timeout(connect=10, read=20, write=10, pool=20),
             limits=httpx.Limits(max_connections=6, max_keepalive_connections=4),
         ) as client:
-            async def get_data(path: str) -> list[dict[str, Any]]:
-                async with semaphore:
-                    response = await client.get(path, headers=headers)
-                job["request_count"] += 1
-                response.raise_for_status()
-                return _data(response.json())
+            async def get_data(path: str, *, order: str, step: str, entry: str | None = None) -> list[dict[str, Any]]:
+                last_error: Exception | None = None
+                for attempt in range(1, 4):
+                    try:
+                        async with semaphore:
+                            response = await client.get(path, headers=headers)
+                        job["request_count"] += 1
+                        response.raise_for_status()
+                        return _data(response.json())
+                    except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError, ValueError) as exc:
+                        last_error = exc
+                        if attempt < 3:
+                            await asyncio.sleep(0.4 * attempt)
+                error: dict[str, Any] = {
+                    "order": order,
+                    "step": step,
+                    "path": path,
+                    "error": f"{type(last_error).__name__}: {last_error}",
+                }
+                if entry:
+                    error["entry"] = entry
+                if isinstance(last_error, httpx.HTTPStatusError):
+                    error["http_status"] = last_error.response.status_code
+                job["errors"].append(error)
+                return []
 
-            async def merchant_for(master_id: str) -> dict[str, Any] | None:
+            async def merchant_for(master_id: str, *, order: str, entry: str) -> dict[str, Any] | None:
                 async with cache_lock:
                     if master_id in merchant_cache:
                         return merchant_cache[master_id]
                 resources = await get_data(
-                    f"/masterproducts/{master_id}/merchantProduct"
+                    f"/masterproducts/{master_id}/merchantProduct",
+                    order=order,
+                    step="merchant_product",
+                    entry=entry,
                 )
                 merchant = resources[0] if resources else None
                 async with cache_lock:
                     merchant_cache[master_id] = merchant
                 return merchant
 
+            async def entries_for(external_id: str | None, code: str | None, order_id: int) -> tuple[str, list[dict[str, Any]]]:
+                keys: list[str] = []
+                for candidate in (external_id, code):
+                    value = str(candidate or "").strip()
+                    if value and value not in keys:
+                        keys.append(value)
+                if not keys:
+                    keys.append(str(order_id))
+
+                for key in keys:
+                    entries = await get_data(
+                        f"/orders/{key}/entries",
+                        order=key,
+                        step="entries",
+                    )
+                    if entries:
+                        return key, entries
+                return keys[0], []
+
             async def enrich_one(order_row) -> None:
                 order_id, external_order_id, external_code, account_id = order_row
                 order_key = str(external_order_id or external_code or order_id)
                 try:
-                    entries = await get_data(f"/orders/{order_key}/entries")
+                    order_key, entries = await entries_for(external_order_id, external_code, order_id)
+                    if not entries:
+                        job["errors"].append(
+                            {
+                                "order": order_key,
+                                "step": "entries",
+                                "error": "Kaspi returned no order entries",
+                            }
+                        )
+                        return
+
                     normalized_items: list[dict[str, Any]] = []
                     for entry in entries:
                         entry_id = str(entry.get("id") or "").strip()
@@ -215,7 +263,10 @@ async def run_job(job_id: str) -> None:
                         merchant = None
                         if entry_id:
                             products = await get_data(
-                                f"/orderentries/{entry_id}/product"
+                                f"/orderentries/{entry_id}/product",
+                                order=order_key,
+                                step="entry_product",
+                                entry=entry_id,
                             )
                             product = products[0] if products else None
                         master_id = (
@@ -223,13 +274,9 @@ async def run_job(job_id: str) -> None:
                             or _relationship_id(entry, "product", "masterProduct")
                         )
                         if master_id:
-                            merchant = await merchant_for(master_id)
+                            merchant = await merchant_for(master_id, order=order_key, entry=entry_id)
                         normalized_items.append(
-                            normalize_entry(
-                                entry,
-                                product=product,
-                                merchant_product=merchant,
-                            )
+                            normalize_entry(entry, product=product, merchant_product=merchant)
                         )
 
                     with SessionLocal() as session:
@@ -240,36 +287,27 @@ async def run_job(job_id: str) -> None:
                             lines = list(
                                 session.scalars(
                                     select(MarketplaceOrderLine)
-                                    .where(
-                                        MarketplaceOrderLine.marketplace_order_id
-                                        == order_id
-                                    )
+                                    .where(MarketplaceOrderLine.marketplace_order_id == order_id)
                                     .order_by(MarketplaceOrderLine.id)
                                 ).all()
                             )
                             single_item = len(normalized_items) == 1
                             for normalized in normalized_items:
-                                stored = _match_line(
-                                    lines,
-                                    normalized,
-                                    single_item=single_item,
-                                )
+                                stored = _match_line(lines, normalized, single_item=single_item)
                                 if stored is None:
                                     job["errors"].append(
                                         {
                                             "order": order_key,
                                             "entry": normalized.get("entry_id"),
+                                            "step": "persist",
                                             "error": "matching_order_line_not_found",
                                         }
                                     )
                                     continue
 
                                 changed = False
-                                title = str(normalized["name"])
-                                if (
-                                    title != "Название не получено"
-                                    and stored.title != title
-                                ):
+                                title = str(normalized.get("name") or "")
+                                if title not in {"", "Название не получено", "Unknown product"} and stored.title != title:
                                     stored.title = title
                                     changed = True
                                 sku = normalized.get("sku")
@@ -277,10 +315,7 @@ async def run_job(job_id: str) -> None:
                                     stored.merchant_sku = str(sku)
                                     changed = True
                                 product_id = normalized.get("external_product_id")
-                                if (
-                                    product_id
-                                    and stored.external_product_id != str(product_id)
-                                ):
+                                if product_id and stored.external_product_id != str(product_id):
                                     stored.external_product_id = str(product_id)
                                     changed = True
                                 entry_id = normalized.get("entry_id")
@@ -288,45 +323,44 @@ async def run_job(job_id: str) -> None:
                                     stored.external_line_id = str(entry_id)
                                     changed = True
 
+                                before_product_id = stored.product_id
                                 ensure_marketplace_listing_for_order_line(
                                     session,
                                     marketplace_account_id=account_id,
                                     order_line=stored,
                                 )
+                                if before_product_id is None and stored.product_id is not None:
+                                    job["linked"] += 1
                                 if changed:
                                     job["updated"] += 1
-                except (httpx.HTTPError, ValueError) as exc:
+                except Exception as exc:
                     job["errors"].append(
                         {
                             "order": order_key,
+                            "step": "unexpected",
                             "error": f"{type(exc).__name__}: {exc}",
                         }
                     )
                 finally:
                     job["processed"] += 1
                     total = int(job["total"] or 0)
-                    percent = (
-                        round(job["processed"] * 100 / total, 1)
-                        if total
-                        else 100
-                    )
+                    percent = round(job["processed"] * 100 / total, 1) if total else 100
                     job["message"] = (
                         f"Заказы с товарами: {job['processed']}/{total}; "
-                        f"обновлено строк: {job['updated']}; прогресс: {percent}%"
+                        f"обновлено строк: {job['updated']}; привязано: {job['linked']}; "
+                        f"прогресс: {percent}%"
                     )
 
-            await asyncio.gather(*(enrich_one(order_row) for order_row in orders))
+            await asyncio.gather(*(enrich_one(row) for row in orders))
 
-        job["status"] = (
-            "completed" if not job["errors"] else "completed_with_errors"
-        )
+        job["status"] = "completed" if not job["errors"] else "completed_with_errors"
         job["message"] = (
-            f"Названия товаров загружены: обновлено строк {job['updated']}, "
-            f"ошибок {len(job['errors'])}"
+            f"Товары загружены: обновлено строк {job['updated']}, "
+            f"привязано к каталогу {job['linked']}, ошибок {len(job['errors'])}"
         )
     except Exception as exc:
         job["status"] = "failed"
         job["message"] = f"Обогащение остановлено: {type(exc).__name__}: {exc}"
-        job["errors"].append({"error": repr(exc)})
+        job["errors"].append({"step": "job", "error": repr(exc)})
     finally:
         job["finished_at"] = datetime.now(UTC).isoformat()
