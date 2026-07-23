@@ -5,12 +5,12 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .db import get_db
-from .inventory_models import InventoryBatch
+from .inventory_models import InventoryAllocation, InventoryBatch
 from .inventory_service import create_inventory_batch, rebuild_product_fifo
 from .models import Product
 
@@ -195,13 +195,9 @@ def update_product_inventory_batch(
     batch.reference = (payload.reference or "").strip() or None
     batch.note = (payload.note or "").strip() or None
 
-    try:
-        reallocated = rebuild_product_fifo(db, product_id=product_id)
-        db.commit()
-        db.refresh(batch)
-    except Exception:
-        db.rollback()
-        raise
+    reallocated = rebuild_product_fifo(db, product_id=product_id)
+    db.commit()
+    db.refresh(batch)
 
     return InventoryBatchUpdated(
         batch=_batch_read(batch),
@@ -230,9 +226,15 @@ def delete_product_inventory_batch(
     if batch is None:
         raise HTTPException(status_code=404, detail="Inventory batch not found")
 
-    # Remove all existing allocations before deleting the source batch, then
-    # rebuild FIFO from the remaining batches. This preserves correct costs.
-    rebuild_product_fifo(db, product_id=product_id)
+    product_batch_ids = select(InventoryBatch.id).where(
+        InventoryBatch.product_id == product_id
+    )
+    db.execute(
+        delete(InventoryAllocation).where(
+            InventoryAllocation.inventory_batch_id.in_(product_batch_ids)
+        )
+    )
+    db.flush()
     db.delete(batch)
     db.flush()
     rebuild_product_fifo(db, product_id=product_id)
