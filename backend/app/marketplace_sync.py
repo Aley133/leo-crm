@@ -9,6 +9,7 @@ from uuid import UUID
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .inventory_service import allocate_order_line_fifo
 from .kaspi_order_payload import canonicalize_kaspi_order_payload
 from .marketplace_import import import_kaspi_order
 from .marketplace_transport import MarketplaceOrderTransport
@@ -103,10 +104,10 @@ def sync_kaspi_order_page(
     """Fetch one bounded page, then persist it in one business transaction.
 
     The external request happens with no SQLAlchemy session open. The page's raw
-    evidence, normalized orders, listing identities or resolution issues, events,
-    outbox records, execution result and checkpoint are committed atomically. A
-    failed persistence transaction cannot advance the checkpoint or publish a
-    downstream business event.
+    evidence, normalized orders, listing identities or resolution issues, FIFO
+    allocations, events, outbox records, execution result and checkpoint are
+    committed atomically. A failed persistence transaction cannot advance the
+    checkpoint or publish a downstream business event.
     """
 
     if limit < 1 or limit > 1000:
@@ -166,14 +167,21 @@ def sync_kaspi_order_page(
                     if order is None:
                         raise RuntimeError("Imported marketplace order disappeared")
 
-                    # Identity discovery is part of the same caller-owned import
-                    # transaction. Running it for unchanged orders also backfills
-                    # listings for orders imported before Product Identity Sprint 1.
+                    # Identity discovery and stock allocation are part of the same
+                    # caller-owned import transaction. Running both for unchanged
+                    # orders also backfills old orders and makes repeated syncs
+                    # idempotent: allocate_order_line_fifo subtracts only the still
+                    # unallocated quantity of each order line.
                     for order_line in order.lines:
                         ensure_marketplace_listing_for_order_line(
                             session,
                             marketplace_account_id=marketplace_account_id,
                             order_line=order_line,
+                        )
+                        allocate_order_line_fifo(
+                            session,
+                            order_line=order_line,
+                            order=order,
                         )
 
                     if result.created or result.changed:
