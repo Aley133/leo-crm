@@ -44,6 +44,20 @@ def _text(*values: Any) -> str | None:
     return None
 
 
+def _relationship_id(resource: dict[str, Any] | None, *names: str) -> str | None:
+    if not isinstance(resource, dict):
+        return None
+    relationships = resource.get("relationships")
+    if not isinstance(relationships, dict):
+        return None
+    for name in names:
+        relation = relationships.get(name)
+        data = relation.get("data") if isinstance(relation, dict) else None
+        if isinstance(data, dict) and data.get("id") is not None:
+            return str(data["id"])
+    return None
+
+
 def _included_index(body: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
     included = body.get("included")
     if not isinstance(included, list):
@@ -85,15 +99,32 @@ def _entries_from_order(body: dict[str, Any], order: dict[str, Any]) -> list[dic
     return entries
 
 
-def normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
-    """Read the exact product identity already returned by Kaspi order entries."""
+def normalize_entry(
+    entry: dict[str, Any],
+    *,
+    product: dict[str, Any] | None = None,
+    merchant_product: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Normalize product identity with archive v1.1.0 priority.
+
+    The fast path passes only ``entry`` because documented Kaspi order detail
+    payloads already contain exact product fields. Older archive callers may
+    still supply ``product`` and ``merchant_product``; those remain authoritative.
+    """
 
     attributes = _attrs(entry)
+    product_attributes = _attrs(product)
+    merchant_attributes = _attrs(merchant_product)
     offer = attributes.get("offer")
     offer = offer if isinstance(offer, dict) else {}
+
     return {
         "entry_id": str(entry.get("id") or "").strip(),
         "name": _text(
+            merchant_attributes.get("name"),
+            merchant_attributes.get("title"),
+            product_attributes.get("name"),
+            product_attributes.get("title"),
             attributes.get("name"),
             offer.get("name"),
             attributes.get("title"),
@@ -101,6 +132,10 @@ def normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
         )
         or "Название не получено",
         "sku": _text(
+            merchant_attributes.get("code"),
+            merchant_attributes.get("sku"),
+            product_attributes.get("code"),
+            product_attributes.get("sku"),
             attributes.get("offerCode"),
             offer.get("code"),
             attributes.get("merchantSku"),
@@ -108,8 +143,10 @@ def normalize_entry(entry: dict[str, Any]) -> dict[str, Any]:
             attributes.get("code"),
         ),
         "external_product_id": _text(
+            (product or {}).get("id"),
             attributes.get("productId"),
             attributes.get("externalProductId"),
+            _relationship_id(entry, "product", "masterProduct"),
         ),
     }
 
