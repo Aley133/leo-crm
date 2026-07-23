@@ -142,16 +142,28 @@ class CommerceOrder:
 
     @property
     def stage(self) -> CommerceOrderStage:
-        if self.status == CommerceOrderStage.ACCEPTED.value:
-            return CommerceOrderStage.PREORDER
+        normalized = (
+            CommerceOrderStage.PREORDER.value
+            if self.status == CommerceOrderStage.ACCEPTED.value
+            else self.status
+        )
+        if normalized == CommerceOrderStage.PREORDER.value and self._ready_for_packaging:
+            return CommerceOrderStage.ASSEMBLY
         try:
-            return CommerceOrderStage(self.status)
+            return CommerceOrderStage(normalized)
         except ValueError:
             return CommerceOrderStage.UNKNOWN
 
     @property
+    def _ready_for_packaging(self) -> bool:
+        if not self.lines:
+            return False
+        ready_states = {ProcurementState.RECEIVED, ProcurementState.NOT_REQUIRED}
+        return all(line.procurement_state in ready_states for line in self.lines)
+
+    @property
     def stage_source(self) -> str:
-        return "kaspi_orders_api"
+        return "kaspi_orders_api+procurement" if self._ready_for_packaging else "kaspi_orders_api"
 
     @property
     def units(self) -> int:
