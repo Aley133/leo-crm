@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Карточка товара</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260723-9">
-  <link rel="stylesheet" href="/static/product-detail.css?v=20260723-9">
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260723-10">
+  <link rel="stylesheet" href="/static/product-detail.css?v=20260723-10">
 </head>
 <body>
   <div class="shell">
@@ -42,8 +42,8 @@
   </div>
   <dialog id="inventory-dialog" class="supplier-dialog"><form id="inventory-form"><div class="dialog-head"><div><p class="eyebrow">Склад</p><h2>Добавить партию товара</h2></div><button id="close-inventory-dialog" class="icon-button" type="button">×</button></div><label><span>Количество, шт.</span><input id="inventory-quantity" type="number" min="1" step="1" required></label><label><span>Закупочная цена за единицу, ₸</span><input id="inventory-unit-cost" type="number" min="0" step="0.01" required></label><label><span>Дата и время поступления</span><input id="inventory-received-at" type="datetime-local" required></label><label><span>Источник</span><input id="inventory-source-name" type="text" maxlength="255" placeholder="Например: Аптека, производство или Ozon"></label><label><span>Документ / номер поставки</span><input id="inventory-reference" type="text" maxlength="255" placeholder="Необязательно"></label><label><span>Комментарий</span><textarea id="inventory-note" maxlength="2000" rows="3"></textarea></label><label class="check"><input id="inventory-reconcile" type="checkbox" checked><span>Сразу списать на активные заказы с даты поступления</span></label><div id="inventory-result" class="message"></div><div class="dialog-actions"><button id="cancel-inventory" class="button secondary" type="button">Отмена</button><button id="save-inventory" class="button" type="submit">Сохранить партию</button></div></form></dialog>
   <dialog id="supplier-dialog" class="supplier-dialog"><form id="supplier-form"><div class="dialog-head"><div><p class="eyebrow">Источник закупки</p><h2>Добавить или обновить источник</h2></div><button id="close-supplier-dialog" class="icon-button" type="button">×</button></div><label><span>Тип источника</span><select id="supplier-source-type"><option value="online">Онлайн-поставщик</option><option value="offline">Офлайн-поставщик / аптека</option><option value="production">Собственное производство</option></select></label><div id="online-source-fields"><p class="muted">Онлайн-источник будет проверяться Browser Agent.</p><label><span>Ссылка поставщика</span><input id="supplier-url" type="url" placeholder="https://www.ozon.ru/product/..."></label><label><span>Название у поставщика</span><input id="supplier-title" type="text" maxlength="1000" placeholder="Необязательно"></label><label class="check"><input id="supplier-run-check" type="checkbox" checked><span>Сразу запустить первую проверку</span></label></div><div id="fixed-source-fields" class="hidden"><p class="muted">Фиксированная цена хранится в CRM и не подлежит автоматическому мониторингу.</p><label><span>Название источника</span><input id="fixed-source-name" type="text" maxlength="255" placeholder="Например: Аптека 24/7 или Собственное производство"></label><label><span>Закупочная цена, ₸</span><input id="fixed-source-price" type="number" min="0" step="0.01" placeholder="0"></label><label><span>Срок получения, дней</span><input id="fixed-source-delivery-days" type="number" min="0" max="365" value="0"></label></div><label class="check"><input id="supplier-primary" type="checkbox" checked><span>Сделать основным источником закупки</span></label><div id="supplier-result" class="message"></div><div class="dialog-actions"><button id="cancel-supplier" class="button secondary" type="button">Отмена</button><button id="save-supplier" class="button" type="submit">Сохранить источник</button></div></form></dialog>
-  <script src="/static/product-detail.js?v=20260723-9" defer></script>
-  <script src="/static/product-economics.js?v=20260723-4" defer></script>
-  <script src="/static/product-inventory.js?v=20260723-2" defer></script>
+  <script src="/static/product-detail.js?v=20260723-10" defer></script>
+  <script src="/static/product-economics.js?v=20260723-5" defer></script>
+  <script src="/static/product-inventory.js?v=20260723-3" defer></script>
 </body>
 </html>
