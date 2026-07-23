@@ -56,6 +56,8 @@ class CommerceSummaryRead(BaseModel):
     orders_count: int
     units_count: int
     revenue: Decimal
+    confirmed_net_profit: Decimal
+    confirmed_profit_units: int
     active_orders: int
     delivered_orders: int
     cancelled_orders: int
