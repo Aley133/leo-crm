@@ -26,6 +26,13 @@
       setText("economics-logistics", money(data.logistics));
       setText("economics-profit", money(data.net_profit));
       setText("economics-margin", data.net_margin_pct == null ? "После выбора источника закупки" : `Маржа ${percent(data.net_margin_pct)}`);
+      setText("total-net-profit", money(data.total_net_profit));
+      setText(
+        "total-net-margin",
+        data.total_net_profit == null
+          ? "После выбора источника закупки"
+          : `по ${Number(data.profit_units_count || 0).toLocaleString("ru-RU")} ед. · маржа ${percent(data.total_net_margin_pct)}`,
+      );
     } catch (_) {
       // The main product card remains usable even when economics is temporarily unavailable.
     }
