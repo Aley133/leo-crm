@@ -123,38 +123,52 @@ def get_product_economics(
     source_name = current_source_name
     if latest_line is not None:
         allocated_quantity, allocated_cost = inventory_by_line.get(latest_line.id, (0, Decimal("0")))
-        if latest_line.quantity > 0 and allocated_quantity >= latest_line.quantity:
-            procurement_cost = (allocated_cost / Decimal(latest_line.quantity)).quantize(Decimal("0.01"))
+        if allocated_quantity > 0:
+            procurement_cost = (allocated_cost / Decimal(allocated_quantity)).quantize(Decimal("0.01"))
             source_name = "Склад FIFO"
 
     commission_rate_pct = KASPI_COMMISSION_RATE * Decimal("100")
     tax_rate_pct = TAX_RATE * Decimal("100")
-    profit_units_count = sum(int(line.quantity or 0) for line, _status in sale_lines)
 
+    # Realized aggregate: count only units with a known, defensible cost.
+    # FIFO allocations are authoritative. A configured procurement source may
+    # cost the remaining units, but unknown units never suppress known profit.
     total_profit = Decimal("0")
     total_revenue = Decimal("0")
-    fully_costed = True
+    profit_units_count = 0
     for line, _status in sale_lines:
-        allocated_quantity, allocated_cost = inventory_by_line.get(line.id, (0, Decimal("0")))
-        line_cost: Decimal | None = None
-        if line.quantity > 0 and allocated_quantity >= line.quantity:
-            line_cost = (allocated_cost / Decimal(line.quantity)).quantize(Decimal("0.01"))
-        elif current_source_cost is not None:
-            line_cost = current_source_cost
-        if line_cost is None:
-            fully_costed = False
+        line_quantity = max(int(line.quantity or 0), 0)
+        if line_quantity <= 0:
             continue
-        economics = calculate_line_economics(
-            unit_sale_price=Decimal(line.unit_price),
-            quantity=int(line.quantity),
-            procurement_unit_cost=line_cost,
-        )
-        total_profit += economics.net_profit
-        total_revenue += economics.revenue
+
+        allocated_quantity, allocated_cost = inventory_by_line.get(line.id, (0, Decimal("0")))
+        allocated_quantity = min(max(allocated_quantity, 0), line_quantity)
+
+        if allocated_quantity > 0:
+            fifo_unit_cost = (allocated_cost / Decimal(allocated_quantity)).quantize(Decimal("0.01"))
+            economics = calculate_line_economics(
+                unit_sale_price=Decimal(line.unit_price),
+                quantity=allocated_quantity,
+                procurement_unit_cost=fifo_unit_cost,
+            )
+            total_profit += economics.net_profit
+            total_revenue += economics.revenue
+            profit_units_count += allocated_quantity
+
+        remaining_quantity = line_quantity - allocated_quantity
+        if remaining_quantity > 0 and current_source_cost is not None:
+            economics = calculate_line_economics(
+                unit_sale_price=Decimal(line.unit_price),
+                quantity=remaining_quantity,
+                procurement_unit_cost=current_source_cost,
+            )
+            total_profit += economics.net_profit
+            total_revenue += economics.revenue
+            profit_units_count += remaining_quantity
 
     total_net_profit: Decimal | None = None
     total_net_margin_pct: Decimal | None = None
-    if fully_costed and sale_lines:
+    if profit_units_count > 0:
         total_net_profit = total_profit.quantize(Decimal("0.01"))
         if total_revenue > 0:
             total_net_margin_pct = (
@@ -195,8 +209,8 @@ def get_product_economics(
             logistics=fees.logistics,
             net_profit=None,
             net_margin_pct=None,
-            total_net_profit=None,
-            total_net_margin_pct=None,
+            total_net_profit=total_net_profit,
+            total_net_margin_pct=total_net_margin_pct,
             profit_units_count=profit_units_count,
         )
 
