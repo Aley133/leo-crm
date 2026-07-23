@@ -248,6 +248,17 @@ def transition_purchase(
             f"Transition {purchase.status} -> {target_status} is not allowed"
         )
 
+    received_now = 0
+    if target_status == PurchaseStatus.RECEIVED.value:
+        # The Orders Center action means that the complete purchase has arrived.
+        # Record the physical quantity before changing the lifecycle status so a
+        # subsequent close is valid and the related order can leave PREORDER.
+        for line in purchase.lines:
+            outstanding = line.quantity - line.received_quantity
+            if outstanding > 0:
+                line.received_quantity = line.quantity
+                received_now += outstanding
+
     if target_status == PurchaseStatus.CLOSED.value:
         incomplete = any(line.received_quantity != line.quantity for line in purchase.lines)
         if incomplete:
@@ -257,6 +268,11 @@ def transition_purchase(
     purchase.status = target_status
     purchase.version += 1
 
+    event_metadata = dict(metadata or {})
+    if target_status == PurchaseStatus.RECEIVED.value:
+        event_metadata["received_quantity"] = received_now
+        event_metadata["receipt_mode"] = "complete_purchase"
+
     session.add(
         PurchaseEvent(
             purchase_request_id=purchase.id,
@@ -264,7 +280,7 @@ def transition_purchase(
             event_type="status_changed",
             previous_status=previous_status,
             current_status=target_status,
-            metadata_json=metadata,
+            metadata_json=event_metadata or None,
             occurred_at=datetime.now(UTC),
         )
     )
@@ -279,6 +295,7 @@ def transition_purchase(
                 "previous_status": previous_status,
                 "status": purchase.status,
                 "version": purchase.version,
+                "received_quantity": received_now,
             },
         )
     )
