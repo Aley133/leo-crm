@@ -57,8 +57,9 @@ const renderLine = (line) => {
   const title = line.product_id ? `<a class="line-title" href="/crm/products/${line.product_id}">${escapeHtml(line.title)}</a>` : `<strong>${escapeHtml(line.title)}</strong>`;
   const cost = line.procurement_unit_cost == null ? "—" : money(line.procurement_unit_cost);
   const source = line.procurement_source_name ? escapeHtml(line.procurement_source_name) : "Источник не выбран";
-  const margin = line.gross_margin == null ? "—" : `${money(line.gross_margin)} · ${percent(line.gross_margin_pct)}`;
-  return `<div class="order-line"><div>${title}<span class="muted">${identity}</span></div><div><span class="muted">Количество</span><strong>${Number(line.quantity || 0)}</strong></div><div><span class="muted">Цена продажи</span><strong>${money(line.unit_price)}</strong></div><div><span class="muted">Закупочная цена</span><strong>${cost}</strong><span class="muted">${source}</span></div><div><span class="muted">Маржа</span><strong>${margin}</strong><span class="muted">${escapeHtml(procurementLabel(line.procurement_state))}</span>${line.purchase_status ? `<span class="muted">${escapeHtml(purchaseStatusLabel(line.purchase_status))}</span>` : ""}${renderPurchaseAction(line)}</div></div>`;
+  const netProfit = line.net_profit == null ? "—" : `${money(line.net_profit)} · ${percent(line.net_margin_pct)}`;
+  const fees = `Комиссия ${money(line.kaspi_commission)} · налог ${money(line.tax)} · логистика ${money(line.logistics)}`;
+  return `<div class="order-line"><div>${title}<span class="muted">${identity}</span></div><div><span class="muted">Количество</span><strong>${Number(line.quantity || 0)}</strong></div><div><span class="muted">Цена продажи</span><strong>${money(line.unit_price)}</strong></div><div><span class="muted">Закупочная цена</span><strong>${cost}</strong><span class="muted">${source}</span></div><div><span class="muted">Чистая прибыль</span><strong>${netProfit}</strong><span class="muted">${fees}</span><span class="muted">${escapeHtml(procurementLabel(line.procurement_state))}</span>${line.purchase_status ? `<span class="muted">${escapeHtml(purchaseStatusLabel(line.purchase_status))}</span>` : ""}${renderPurchaseAction(line)}</div></div>`;
 };
 
 const renderOrder = (order) => {
