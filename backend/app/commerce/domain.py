@@ -45,13 +45,20 @@ class CommerceOrderLine:
     purchase_version: int | None = None
     procurement_unit_cost: Decimal | None = None
     procurement_source_name: str | None = None
+    inventory_allocated_quantity: int = 0
 
     @property
     def is_resolved(self) -> bool:
         return self.product_id is not None
 
     @property
+    def is_fully_allocated_from_inventory(self) -> bool:
+        return self.quantity > 0 and self.inventory_allocated_quantity >= self.quantity
+
+    @property
     def procurement_state(self) -> ProcurementState:
+        if self.is_fully_allocated_from_inventory:
+            return ProcurementState.NOT_REQUIRED
         if self.purchase_request_id is None:
             return ProcurementState.REQUIRED
         if self.purchase_status in {"received", "closed"}:
