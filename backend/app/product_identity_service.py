@@ -8,6 +8,7 @@ from sqlalchemy.dialects.postgresql import insert as postgresql_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 from sqlalchemy.orm import Session
 
+from .inventory_service import allocate_order_line_fifo
 from .models import MarketplaceOrderLine
 from .order_line_product_linking import find_product_for_order_line
 from .product_identity_models import (
@@ -125,11 +126,12 @@ def ensure_marketplace_listing_for_order_line(
     marketplace_account_id: int,
     order_line: MarketplaceOrderLine,
 ) -> ListingEnsureResult:
-    """Ensure listing identity and resolve it against the XML product registry.
+    """Ensure listing identity, catalogue resolution and FIFO stock allocation.
 
     Merchant SKU is shared by Kaspi order entries and the seller XML. When the
-    matching Product already exists, the listing and order line are resolved in
-    the same caller-owned transaction.
+    matching Product already exists, listing resolution and inventory allocation
+    happen in the same caller-owned import transaction. Repeating the same import
+    is safe because FIFO allocations are idempotent per order line and batch.
     """
 
     if order_line.id is None:
@@ -190,6 +192,8 @@ def ensure_marketplace_listing_for_order_line(
             "название не получено",
         }:
             order_line.title = product.name
+        session.flush()
+        allocate_order_line_fifo(session, order_line=order_line)
 
     _resolve_open_issue(session, order_line_id=order_line.id)
     return ListingEnsureResult(
