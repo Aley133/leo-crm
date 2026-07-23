@@ -7,6 +7,7 @@ from typing import Protocol
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
+from ..inventory_models import InventoryAllocation
 from ..kaspi_order_line_display import recover_order_line_title
 from ..models import (
     MarketplaceAccount,
@@ -109,6 +110,23 @@ class SqlAlchemyCommerceRepository:
             .where(MarketplaceOrderLine.marketplace_order_id.in_(order_ids))
             .order_by(MarketplaceOrderLine.id)
         ).all()
+        line_ids = [line.id for line, *_purchase in line_rows]
+
+        inventory_by_line: dict[int, tuple[int, Decimal]] = {}
+        if line_ids:
+            allocation_rows = self._session.execute(
+                select(
+                    InventoryAllocation.marketplace_order_line_id,
+                    func.sum(InventoryAllocation.quantity),
+                    func.sum(InventoryAllocation.quantity * InventoryAllocation.unit_cost),
+                )
+                .where(InventoryAllocation.marketplace_order_line_id.in_(line_ids))
+                .group_by(InventoryAllocation.marketplace_order_line_id)
+            ).all()
+            inventory_by_line = {
+                int(line_id): (int(quantity or 0), Decimal(total_cost or 0))
+                for line_id, quantity, total_cost in allocation_rows
+            }
 
         identities: set[str] = set()
         explicit_product_ids: set[int] = set()
@@ -196,9 +214,13 @@ class SqlAlchemyCommerceRepository:
                     title = recovered
 
             effective_product_id = product.id if product is not None else line.product_id
+            inventory_quantity, inventory_total_cost = inventory_by_line.get(line.id, (0, Decimal("0")))
             procurement_unit_cost = None
             procurement_source_name = None
-            if effective_product_id is not None:
+            if line.quantity > 0 and inventory_quantity >= line.quantity:
+                procurement_unit_cost = (inventory_total_cost / Decimal(line.quantity)).quantize(Decimal("0.01"))
+                procurement_source_name = "Склад FIFO"
+            elif effective_product_id is not None:
                 procurement_unit_cost, procurement_source_name = source_by_product.get(
                     effective_product_id, (None, None)
                 )
@@ -218,6 +240,7 @@ class SqlAlchemyCommerceRepository:
                     purchase_version=purchase_version,
                     procurement_unit_cost=procurement_unit_cost,
                     procurement_source_name=procurement_source_name,
+                    inventory_allocated_quantity=inventory_quantity,
                 )
             )
 
