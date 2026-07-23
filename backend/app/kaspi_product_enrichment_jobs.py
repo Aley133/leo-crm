@@ -122,12 +122,11 @@ def normalize_entry(
         entry_attrs.get("sku"),
     )
     external_product_id = _text(
-        merchant_attrs.get("productId"),
-        product_attrs.get("code"),
-        entry_attrs.get("productId"),
-        entry_attrs.get("externalProductId"),
         (product or {}).get("id"),
         _relationship_id(entry, "product", "masterProduct"),
+        merchant_attrs.get("productId"),
+        entry_attrs.get("productId"),
+        entry_attrs.get("externalProductId"),
     )
 
     return {
