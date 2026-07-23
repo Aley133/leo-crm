@@ -75,6 +75,8 @@ const render = (payload) => {
   document.querySelector("#summary-orders").textContent = Number(summary.orders_count || 0).toLocaleString("ru-RU");
   document.querySelector("#summary-active").textContent = Number(summary.active_orders || 0).toLocaleString("ru-RU");
   document.querySelector("#summary-revenue").textContent = money(summary.revenue || 0);
+  document.querySelector("#summary-profit").textContent = money(summary.confirmed_net_profit || 0);
+  document.querySelector("#summary-profit-units").textContent = `по ${Number(summary.confirmed_profit_units || 0).toLocaleString("ru-RU")} ед. с подтверждённой себестоимостью`;
   document.querySelector("#summary-procurement").textContent = Number(summary.procurement_required_lines || 0).toLocaleString("ru-RU");
   ordersList.innerHTML = (payload.items || []).map(renderOrder).join("");
   empty.classList.toggle("hidden", (payload.items || []).length > 0);
