@@ -19,7 +19,6 @@ from .dashboard_api import router as dashboard_router
 from .db import engine
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .inventory_api import router as inventory_router
-from .inventory_schema import ensure_inventory_schema
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
@@ -77,11 +76,6 @@ app.include_router(marketplace_orders_router)
 app.include_router(commerce_router)
 app.include_router(product_identity_router)
 app.include_router(purchase_router)
-
-
-@app.on_event("startup")
-def ensure_fifo_inventory_tables() -> None:
-    ensure_inventory_schema(engine)
 
 
 @app.get("/")
