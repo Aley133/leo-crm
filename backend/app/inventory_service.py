@@ -5,7 +5,7 @@ from datetime import UTC, datetime, time
 from decimal import Decimal
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .inventory_models import InventoryAllocation, InventoryBatch
@@ -167,6 +167,61 @@ def reconcile_product_orders_from_batch(
         allocated += result.newly_allocated_quantity
         if batch.quantity_remaining <= 0:
             break
+    return allocated
+
+
+def rebuild_product_fifo(
+    session: Session,
+    *,
+    product_id: int,
+    allocated_at: datetime | None = None,
+) -> int:
+    """Rebuild every FIFO allocation for one product after a stock correction.
+
+    This is the authoritative correction path for editing or deleting a batch.
+    Existing allocations are removed, all batch balances are reset, and eligible
+    order lines are allocated again in chronological order. No stale cost remains
+    attached to an order after the source batch changes.
+    """
+
+    batch_ids = select(InventoryBatch.id).where(InventoryBatch.product_id == product_id)
+    session.execute(
+        delete(InventoryAllocation).where(
+            InventoryAllocation.inventory_batch_id.in_(batch_ids)
+        )
+    )
+
+    batches = session.scalars(
+        select(InventoryBatch)
+        .where(InventoryBatch.product_id == product_id)
+        .order_by(InventoryBatch.received_at, InventoryBatch.id)
+        .with_for_update()
+    ).all()
+    for batch in batches:
+        batch.quantity_remaining = batch.quantity_received
+    session.flush()
+
+    rows = session.execute(
+        select(MarketplaceOrderLine, MarketplaceOrder)
+        .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
+        .where(
+            MarketplaceOrderLine.product_id == product_id,
+            MarketplaceOrder.status.not_in(_TERMINAL_ORDER_STATUSES),
+        )
+        .order_by(MarketplaceOrder.ordered_at, MarketplaceOrder.id, MarketplaceOrderLine.id)
+    ).all()
+
+    allocated = 0
+    now = allocated_at or datetime.now(UTC)
+    for line, order in rows:
+        result = allocate_order_line_fifo(
+            session,
+            order_line=line,
+            order=order,
+            allocated_at=now,
+        )
+        allocated += result.newly_allocated_quantity
+    session.flush()
     return allocated
 
 
