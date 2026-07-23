@@ -21,8 +21,13 @@ class InventoryBatch(Base):
         CheckConstraint("unit_cost >= 0", name="ck_inventory_batch_unit_cost_nonnegative"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
-    product_id: Mapped[int] = mapped_column(ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    product_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("products.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+    )
     received_at: Mapped[datetime] = mapped_column(UTCDateTime(), index=True)
     quantity_received: Mapped[int] = mapped_column(Integer)
     quantity_remaining: Mapped[int] = mapped_column(Integer)
@@ -50,14 +55,18 @@ class InventoryAllocation(Base):
         CheckConstraint("unit_cost >= 0", name="ck_inventory_allocation_unit_cost_nonnegative"),
     )
 
-    id: Mapped[int] = mapped_column(primary_key=True)
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
     inventory_batch_id: Mapped[int] = mapped_column(
+        Integer,
         ForeignKey("inventory_batches.id", ondelete="RESTRICT"),
         index=True,
+        nullable=False,
     )
     marketplace_order_line_id: Mapped[int] = mapped_column(
+        Integer,
         ForeignKey("marketplace_order_lines.id", ondelete="CASCADE"),
         index=True,
+        nullable=False,
     )
     quantity: Mapped[int] = mapped_column(Integer)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2))
