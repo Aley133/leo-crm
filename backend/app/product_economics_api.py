@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -14,6 +14,7 @@ from .commerce.profit_calculator import (
     calculate_line_economics,
 )
 from .db import get_db
+from .inventory_models import InventoryAllocation
 from .models import MarketplaceOrder, MarketplaceOrderLine, Product
 from .monitoring import SupplierOfferState
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -68,6 +69,23 @@ def get_product_economics(
     ).all()
     latest_line = sale_lines[0][0] if sale_lines else None
     sale_price = None if latest_line is None else Decimal(latest_line.unit_price)
+    line_ids = [line.id for line, _status in sale_lines]
+
+    inventory_by_line: dict[int, tuple[int, Decimal]] = {}
+    if line_ids:
+        inventory_rows = db.execute(
+            select(
+                InventoryAllocation.marketplace_order_line_id,
+                func.sum(InventoryAllocation.quantity),
+                func.sum(InventoryAllocation.quantity * InventoryAllocation.unit_cost),
+            )
+            .where(InventoryAllocation.marketplace_order_line_id.in_(line_ids))
+            .group_by(InventoryAllocation.marketplace_order_line_id)
+        ).all()
+        inventory_by_line = {
+            int(line_id): (int(quantity or 0), Decimal(total_cost or 0))
+            for line_id, quantity, total_cost in inventory_rows
+        }
 
     source_rows = db.execute(
         select(ProductBinding, SupplierProduct, Supplier, SupplierOfferState)
@@ -88,8 +106,8 @@ def get_product_economics(
         )
     ).all()
 
-    procurement_cost: Decimal | None = None
-    source_name: str | None = None
+    current_source_cost: Decimal | None = None
+    current_source_name: str | None = None
     for _binding, supplier_product, supplier, state in source_rows:
         candidate: Decimal | None = None
         if state is not None and state.price is not None and state.available is not False:
@@ -97,27 +115,46 @@ def get_product_economics(
         elif supplier_product.current_price is not None and supplier_product.in_stock is not False:
             candidate = Decimal(supplier_product.current_price)
         if candidate is not None:
-            procurement_cost = candidate
-            source_name = supplier.name
+            current_source_cost = candidate
+            current_source_name = supplier.name
             break
+
+    procurement_cost = current_source_cost
+    source_name = current_source_name
+    if latest_line is not None:
+        allocated_quantity, allocated_cost = inventory_by_line.get(latest_line.id, (0, Decimal("0")))
+        if latest_line.quantity > 0 and allocated_quantity >= latest_line.quantity:
+            procurement_cost = (allocated_cost / Decimal(latest_line.quantity)).quantize(Decimal("0.01"))
+            source_name = "Склад FIFO"
 
     commission_rate_pct = KASPI_COMMISSION_RATE * Decimal("100")
     tax_rate_pct = TAX_RATE * Decimal("100")
     profit_units_count = sum(int(line.quantity or 0) for line, _status in sale_lines)
 
+    total_profit = Decimal("0")
+    total_revenue = Decimal("0")
+    fully_costed = True
+    for line, _status in sale_lines:
+        allocated_quantity, allocated_cost = inventory_by_line.get(line.id, (0, Decimal("0")))
+        line_cost: Decimal | None = None
+        if line.quantity > 0 and allocated_quantity >= line.quantity:
+            line_cost = (allocated_cost / Decimal(line.quantity)).quantize(Decimal("0.01"))
+        elif current_source_cost is not None:
+            line_cost = current_source_cost
+        if line_cost is None:
+            fully_costed = False
+            continue
+        economics = calculate_line_economics(
+            unit_sale_price=Decimal(line.unit_price),
+            quantity=int(line.quantity),
+            procurement_unit_cost=line_cost,
+        )
+        total_profit += economics.net_profit
+        total_revenue += economics.revenue
+
     total_net_profit: Decimal | None = None
     total_net_margin_pct: Decimal | None = None
-    if procurement_cost is not None:
-        total_profit = Decimal("0")
-        total_revenue = Decimal("0")
-        for line, _status in sale_lines:
-            economics = calculate_line_economics(
-                unit_sale_price=Decimal(line.unit_price),
-                quantity=int(line.quantity),
-                procurement_unit_cost=procurement_cost,
-            )
-            total_profit += economics.net_profit
-            total_revenue += economics.revenue
+    if fully_costed and sale_lines:
         total_net_profit = total_profit.quantize(Decimal("0.01"))
         if total_revenue > 0:
             total_net_margin_pct = (
