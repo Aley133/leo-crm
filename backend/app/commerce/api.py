@@ -14,6 +14,7 @@ from ..kaspi_product_enrichment_jobs import (
     public_job as public_product_enrichment_job,
     run_job as run_product_enrichment_job,
 )
+from ..kaspi_raw_receiver_jobs import JOBS as RAW_JOBS
 from ..kaspi_raw_receiver_jobs import create_job, public_job, run_job
 from .repository import SqlAlchemyCommerceRepository
 from .schemas import CommerceOrderLineRead, CommerceOrderRead, CommerceOrdersResponse, CommerceSummaryRead
@@ -22,9 +23,53 @@ from .service import CommerceService
 router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depends(require_service_token)])
 
 
+async def _run_full_kaspi_rebuild(job_id: str, *, days: int) -> None:
+    """Run the complete Orders Center pipeline as one user-visible job.
+
+    A manual rebuild is not complete until order lines have been enriched with
+    Kaspi product name/SKU, linked to the XML product registry and allocated from
+    FIFO stock. Keep the raw job alive while the archive v1.1.0 enrichment runs.
+    """
+
+    await run_job(job_id)
+    raw_job = RAW_JOBS.get(job_id)
+    if raw_job is None or raw_job.get("status") == "failed":
+        return
+
+    enrichment_job_id = create_product_enrichment_job(days=days)
+    raw_job["status"] = "enriching_products"
+    raw_job["enrichment_job_id"] = enrichment_job_id
+    raw_job["message"] = "Заказы загружены. Получаем точные названия, артикулы и выполняем складское списание"
+
+    await run_product_enrichment_job(enrichment_job_id)
+    enrichment = public_product_enrichment_job(enrichment_job_id) or {}
+    enrichment_status = str(enrichment.get("status") or "failed")
+    enrichment_errors = list(enrichment.get("errors") or [])
+
+    raw_job["product_enrichment"] = {
+        "job_id": enrichment_job_id,
+        "status": enrichment_status,
+        "processed": enrichment.get("processed", 0),
+        "total": enrichment.get("total", 0),
+        "updated": enrichment.get("updated", 0),
+        "linked": enrichment.get("linked", 0),
+        "allocated": enrichment.get("allocated", 0),
+        "request_count": enrichment.get("request_count", 0),
+        "errors": enrichment_errors,
+    }
+    raw_job["status"] = "completed" if not enrichment_errors else "completed_with_errors"
+    raw_job["message"] = (
+        f"Готово: заказов {raw_job.get('orders_count', 0)}; "
+        f"обновлено товарных строк {enrichment.get('updated', 0)}; "
+        f"привязано {enrichment.get('linked', 0)}; "
+        f"списано со склада {enrichment.get('allocated', 0)}; "
+        f"ошибок enrichment {len(enrichment_errors)}"
+    )
+
+
 @router.post("/orders/rebuild", status_code=status.HTTP_202_ACCEPTED)
 async def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
-    """Start the archive-derived background raw receiver. Browser Agent is not involved."""
+    """Start the full archive-derived Kaspi Orders Center rebuild."""
 
     with SessionLocal() as session:
         session.execute(
@@ -38,12 +83,12 @@ async def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dic
         job_id = create_job(days=days)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    asyncio.create_task(run_job(job_id))
+    asyncio.create_task(_run_full_kaspi_rebuild(job_id, days=days))
     return {
         "job_id": job_id,
         "status": "queued",
         "days": days,
-        "message": "Kaspi raw receiver job queued",
+        "message": "Kaspi full order rebuild queued",
     }
 
 
