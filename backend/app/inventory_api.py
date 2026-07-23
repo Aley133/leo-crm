@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
@@ -35,6 +35,7 @@ class InventoryBatchRead(BaseModel):
     source_name: str | None
     reference: str | None
     note: str | None
+    can_delete: bool
 
 
 class ProductInventoryRead(BaseModel):
@@ -70,6 +71,7 @@ def _batch_read(batch: InventoryBatch) -> InventoryBatchRead:
         source_name=batch.source_name,
         reference=batch.reference,
         note=batch.note,
+        can_delete=allocated == 0,
     )
 
 
@@ -138,3 +140,36 @@ def add_product_inventory_batch(
         allocated_to_existing_orders=allocated,
         on_hand=on_hand,
     )
+
+
+@router.delete(
+    "/{product_id}/inventory/batches/{batch_id}",
+    status_code=status.HTTP_204_NO_CONTENT,
+)
+def delete_product_inventory_batch(
+    product_id: int,
+    batch_id: int,
+    db: Session = Depends(get_db),
+) -> Response:
+    batch = db.get(InventoryBatch, batch_id)
+    if batch is None or batch.product_id != product_id:
+        raise HTTPException(status_code=404, detail="Inventory batch not found")
+
+    allocation_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(InventoryAllocation)
+            .where(InventoryAllocation.inventory_batch_id == batch_id)
+        )
+        or 0
+    )
+    allocated_quantity = int(batch.quantity_received) - int(batch.quantity_remaining)
+    if allocation_count > 0 or allocated_quantity > 0:
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя удалить партию, из которой уже были списания. Сначала отмените связанные складские проводки.",
+        )
+
+    db.delete(batch)
+    db.commit()
+    return Response(status_code=status.HTTP_204_NO_CONTENT)
