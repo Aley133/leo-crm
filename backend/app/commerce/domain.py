@@ -184,12 +184,34 @@ class CommerceOrder:
             return Decimal("0")
         return self.total_amount
 
+    @property
+    def confirmed_net_profit(self) -> Decimal:
+        if self.stage in {
+            CommerceOrderStage.CANCELLING,
+            CommerceOrderStage.CANCELLED,
+            CommerceOrderStage.RETURNED,
+        }:
+            return Decimal("0")
+        return sum((line.net_profit for line in self.lines if line.net_profit is not None), Decimal("0"))
+
+    @property
+    def confirmed_profit_units(self) -> int:
+        if self.stage in {
+            CommerceOrderStage.CANCELLING,
+            CommerceOrderStage.CANCELLED,
+            CommerceOrderStage.RETURNED,
+        }:
+            return 0
+        return sum(line.quantity for line in self.lines if line.net_profit is not None)
+
 
 @dataclass(frozen=True, slots=True)
 class CommerceSummary:
     orders_count: int
     units_count: int
     revenue: Decimal
+    confirmed_net_profit: Decimal
+    confirmed_profit_units: int
     active_orders: int
     delivered_orders: int
     cancelled_orders: int
