@@ -80,12 +80,12 @@ class CommerceOrderLine:
         return (self.gross_margin / self.line_total * Decimal("100")).quantize(Decimal("0.01"))
 
     @property
-    def kaspi_commission(self) -> Decimal | None:
-        return None if self.procurement_unit_cost is None else self._economics.kaspi_commission
+    def kaspi_commission(self) -> Decimal:
+        return self._fees.kaspi_commission
 
     @property
-    def tax(self) -> Decimal | None:
-        return None if self.procurement_unit_cost is None else self._economics.tax
+    def tax(self) -> Decimal:
+        return self._fees.tax
 
     @property
     def logistics(self) -> Decimal:
@@ -98,6 +98,14 @@ class CommerceOrderLine:
     @property
     def net_margin_pct(self) -> Decimal | None:
         return None if self.procurement_unit_cost is None else self._economics.net_margin_pct
+
+    @property
+    def _fees(self):
+        return calculate_line_economics(
+            unit_sale_price=self.unit_price,
+            quantity=self.quantity,
+            procurement_unit_cost=Decimal("0"),
+        )
 
     @property
     def _economics(self):
