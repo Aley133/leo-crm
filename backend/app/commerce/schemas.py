@@ -25,6 +25,11 @@ class CommerceOrderLineRead(BaseModel):
     procurement_source_name: str | None
     gross_margin: Decimal | None
     gross_margin_pct: Decimal | None
+    kaspi_commission: Decimal | None
+    tax: Decimal | None
+    logistics: Decimal
+    net_profit: Decimal | None
+    net_margin_pct: Decimal | None
 
 
 class CommerceOrderRead(BaseModel):
