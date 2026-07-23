@@ -37,66 +37,38 @@ def _attrs(resource: dict[str, Any] | None) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _text(*values: Any) -> str | None:
-    for value in values:
-        if value is not None and str(value).strip():
-            return str(value).strip()
-    return None
-
-
-def _relationship_id(resource: dict[str, Any] | None, *names: str) -> str | None:
-    if not isinstance(resource, dict):
-        return None
+def _relationship_id(resource: dict[str, Any], *names: str) -> str | None:
     relationships = resource.get("relationships")
     if not isinstance(relationships, dict):
         return None
     for name in names:
         relation = relationships.get(name)
-        data = relation.get("data") if isinstance(relation, dict) else None
+        if not isinstance(relation, dict):
+            continue
+        data = relation.get("data")
         if isinstance(data, dict) and data.get("id") is not None:
             return str(data["id"])
     return None
 
 
-def _included_index(body: dict[str, Any]) -> dict[tuple[str, str], dict[str, Any]]:
-    included = body.get("included")
-    if not isinstance(included, list):
-        return {}
-    result: dict[tuple[str, str], dict[str, Any]] = {}
-    for item in included:
-        if not isinstance(item, dict):
+def _number(*values: Any) -> float:
+    for value in values:
+        if value is None or value == "":
             continue
-        key = (str(item.get("type") or ""), str(item.get("id") or ""))
-        if all(key):
-            result[key] = item
-    return result
-
-
-def _entries_from_order(body: dict[str, Any], order: dict[str, Any]) -> list[dict[str, Any]]:
-    attributes = _attrs(order)
-    embedded = attributes.get("entries")
-    if isinstance(embedded, list):
-        result = [item for item in embedded if isinstance(item, dict)]
-        if result:
-            return result
-
-    relationships = order.get("relationships")
-    relationships = relationships if isinstance(relationships, dict) else {}
-    relation = relationships.get("entries")
-    references = relation.get("data") if isinstance(relation, dict) else None
-    if not isinstance(references, list):
-        return []
-
-    included = _included_index(body)
-    entries: list[dict[str, Any]] = []
-    for reference in references:
-        if not isinstance(reference, dict):
+        try:
+            return float(value)
+        except (TypeError, ValueError):
             continue
-        key = (str(reference.get("type") or ""), str(reference.get("id") or ""))
-        resource = included.get(key)
-        if resource is not None:
-            entries.append(resource)
-    return entries
+    return 0.0
+
+
+def _text(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+        if value is not None and str(value).strip():
+            return str(value).strip()
+    return None
 
 
 def normalize_entry(
@@ -105,49 +77,67 @@ def normalize_entry(
     product: dict[str, Any] | None = None,
     merchant_product: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
-    """Normalize product identity with archive v1.1.0 priority.
+    """Normalize one Kaspi entry exactly as archive v1.1.0 does.
 
-    The fast path passes only ``entry`` because documented Kaspi order detail
-    payloads already contain exact product fields. Older archive callers may
-    still supply ``product`` and ``merchant_product``; those remain authoritative.
+    Product identity priority is authoritative and intentionally stable:
+    merchantProduct -> product/masterProduct -> order entry.
     """
 
-    attributes = _attrs(entry)
-    product_attributes = _attrs(product)
-    merchant_attributes = _attrs(merchant_product)
-    offer = attributes.get("offer")
-    offer = offer if isinstance(offer, dict) else {}
+    entry_attrs = _attrs(entry)
+    product_attrs = _attrs(product)
+    merchant_attrs = _attrs(merchant_product)
+
+    quantity = _number(entry_attrs.get("quantity"), entry_attrs.get("qty"), 1)
+    if quantity <= 0:
+        quantity = 1
+    unit_price = _number(
+        entry_attrs.get("basePrice"),
+        entry_attrs.get("unitPrice"),
+        entry_attrs.get("price"),
+    )
+    total_price = _number(
+        entry_attrs.get("totalPrice"),
+        entry_attrs.get("total"),
+        unit_price * quantity,
+    )
+    if unit_price <= 0 and total_price > 0 and quantity > 0:
+        unit_price = total_price / quantity
+
+    name = _text(
+        merchant_attrs.get("name"),
+        merchant_attrs.get("title"),
+        product_attrs.get("name"),
+        product_attrs.get("title"),
+        entry_attrs.get("name"),
+        entry_attrs.get("title"),
+        entry_attrs.get("productName"),
+    ) or "Название не получено"
+
+    sku = _text(
+        merchant_attrs.get("code"),
+        merchant_attrs.get("sku"),
+        product_attrs.get("code"),
+        entry_attrs.get("offerCode"),
+        entry_attrs.get("code"),
+        entry_attrs.get("sku"),
+    )
+    external_product_id = _text(
+        merchant_attrs.get("productId"),
+        product_attrs.get("code"),
+        entry_attrs.get("productId"),
+        entry_attrs.get("externalProductId"),
+        (product or {}).get("id"),
+        _relationship_id(entry, "product", "masterProduct"),
+    )
 
     return {
         "entry_id": str(entry.get("id") or "").strip(),
-        "name": _text(
-            merchant_attributes.get("name"),
-            merchant_attributes.get("title"),
-            product_attributes.get("name"),
-            product_attributes.get("title"),
-            attributes.get("name"),
-            offer.get("name"),
-            attributes.get("title"),
-            attributes.get("productName"),
-        )
-        or "Название не получено",
-        "sku": _text(
-            merchant_attributes.get("code"),
-            merchant_attributes.get("sku"),
-            product_attributes.get("code"),
-            product_attributes.get("sku"),
-            attributes.get("offerCode"),
-            offer.get("code"),
-            attributes.get("merchantSku"),
-            attributes.get("sku"),
-            attributes.get("code"),
-        ),
-        "external_product_id": _text(
-            (product or {}).get("id"),
-            attributes.get("productId"),
-            attributes.get("externalProductId"),
-            _relationship_id(entry, "product", "masterProduct"),
-        ),
+        "name": name,
+        "sku": sku,
+        "external_product_id": external_product_id,
+        "quantity": quantity,
+        "unit_price": unit_price,
+        "total_price": total_price,
     }
 
 
@@ -206,7 +196,7 @@ async def run_job(job_id: str) -> None:
     job = JOBS[job_id]
     job["status"] = "running"
     job["started_at"] = datetime.now(UTC).isoformat()
-    job["message"] = "Загружаем точные названия и артикулы из Kaspi"
+    job["message"] = "Загружаем состав заказов по модели архива v1.1.0"
 
     try:
         settings = KaspiHttpSettings.from_environment()
@@ -228,41 +218,46 @@ async def run_job(job_id: str) -> None:
             "Accept": "application/vnd.api+json",
             "Content-Type": "application/vnd.api+json",
             "X-Auth-Token": settings.api_token,
-            "User-Agent": "leo-crm-product-enrichment/1.2.0",
+            "User-Agent": "leo-crm-product-enrichment/archive-v1.1.0",
         }
-        queue: asyncio.Queue[Any] = asyncio.Queue()
-        for row in orders:
-            queue.put_nowait(row)
-        counters_lock = asyncio.Lock()
+        request_semaphore = asyncio.Semaphore(3)
+        counter_lock = asyncio.Lock()
+        merchant_cache_lock = asyncio.Lock()
+        merchant_cache: dict[str, dict[str, Any] | None] = {}
 
         async with httpx.AsyncClient(
             base_url=settings.base_url,
-            timeout=httpx.Timeout(connect=8, read=12, write=8, pool=12),
-            limits=httpx.Limits(max_connections=4, max_keepalive_connections=4),
+            timeout=httpx.Timeout(connect=8, read=15, write=8, pool=15),
+            limits=httpx.Limits(max_connections=3, max_keepalive_connections=3),
         ) as client:
 
-            async def request_json(
+            async def request_resource(
                 path: str,
                 *,
-                params: dict[str, Any] | None,
-                order_code: str,
+                order_key: str,
                 step: str,
+                params: dict[str, Any] | None = None,
+                entry_id: str | None = None,
             ) -> dict[str, Any] | None:
                 try:
-                    response = await asyncio.wait_for(
-                        client.get(path, params=params, headers=headers),
-                        timeout=15,
-                    )
-                    async with counters_lock:
+                    async with request_semaphore:
+                        response = await asyncio.wait_for(
+                            client.get(path, params=params, headers=headers),
+                            timeout=18,
+                        )
+                    async with counter_lock:
                         job["request_count"] += 1
                     response.raise_for_status()
                     body = response.json()
-                    return body if isinstance(body, dict) else None
+                    resources = _data(body)
+                    return resources[0] if resources else None
                 except (TimeoutError, httpx.HTTPError, ValueError) as exc:
-                    async with counters_lock:
+                    async with counter_lock:
+                        job["request_count"] += 1
                         job["errors"].append(
                             {
-                                "order": order_code,
+                                "order": order_key,
+                                "entry": entry_id,
                                 "step": step,
                                 "path": path,
                                 "error": f"{type(exc).__name__}: {exc}",
@@ -270,154 +265,177 @@ async def run_job(job_id: str) -> None:
                         )
                     return None
 
-            async def load_entries(
-                external_order_id: str | None,
-                external_code: str | None,
-            ) -> tuple[str, list[dict[str, Any]]]:
-                code = str(external_code or "").strip()
-                external_id = str(external_order_id or "").strip()
-                lookup = code or external_id
+            async def request_entries(order_id: str, order_key: str) -> list[dict[str, Any]]:
+                try:
+                    async with request_semaphore:
+                        response = await asyncio.wait_for(
+                            client.get(
+                                f"/orders/{order_id}/entries",
+                                params={"page[size]": 200},
+                                headers=headers,
+                            ),
+                            timeout=18,
+                        )
+                    async with counter_lock:
+                        job["request_count"] += 1
+                    response.raise_for_status()
+                    return _data(response.json())
+                except (TimeoutError, httpx.HTTPError, ValueError) as exc:
+                    async with counter_lock:
+                        job["request_count"] += 1
+                        job["errors"].append(
+                            {
+                                "order": order_key,
+                                "step": "entries",
+                                "path": f"/orders/{order_id}/entries",
+                                "error": f"{type(exc).__name__}: {exc}",
+                            }
+                        )
+                    return []
 
-                if code:
-                    body = await request_json(
-                        "/orders",
-                        params={
-                            "filter[orders][code]": code,
-                            "include": "entries",
-                            "page[number]": 0,
-                            "page[size]": 1,
-                        },
-                        order_code=code,
-                        step="order_by_code",
-                    )
-                    orders_data = _data(body)
-                    if body and orders_data:
-                        entries = _entries_from_order(body, orders_data[0])
-                        if entries:
-                            return code, entries
-                        external_id = str(orders_data[0].get("id") or external_id).strip()
+            async def merchant_for(
+                master_id: str,
+                *,
+                order_key: str,
+                entry_id: str,
+            ) -> dict[str, Any] | None:
+                async with merchant_cache_lock:
+                    if master_id in merchant_cache:
+                        return merchant_cache[master_id]
+                resource = await request_resource(
+                    f"/masterproducts/{master_id}/merchantProduct",
+                    order_key=order_key,
+                    entry_id=entry_id,
+                    step="merchant_product",
+                )
+                async with merchant_cache_lock:
+                    merchant_cache[master_id] = resource
+                return resource
 
-                if external_id:
-                    body = await request_json(
-                        f"/orders/{external_id}/entries",
-                        params={"page[size]": 200},
-                        order_code=lookup,
-                        step="entries_fallback",
-                    )
-                    entries = _data(body)
-                    if entries:
-                        return lookup, entries
-                return lookup, []
+            queue: asyncio.Queue[Any] = asyncio.Queue()
+            for row in orders:
+                queue.put_nowait(row)
 
             async def enrich_one(order_row: Any) -> None:
                 order_id, external_order_id, external_code, account_id = order_row
                 order_key = str(external_code or external_order_id or order_id)
-                try:
-                    order_key, entries = await load_entries(external_order_id, external_code)
-                    if not entries:
-                        async with counters_lock:
-                            job["errors"].append(
-                                {
-                                    "order": order_key,
-                                    "step": "entries",
-                                    "error": "Kaspi returned no order entries",
-                                }
-                            )
-                        return
-
-                    normalized_items = [normalize_entry(entry) for entry in entries]
-                    local_updated = 0
-                    local_linked = 0
-                    local_allocated = 0
-                    with SessionLocal() as session:
-                        with session.begin():
-                            stored_order = session.get(MarketplaceOrder, order_id)
-                            if stored_order is None:
-                                return
-                            lines = list(
-                                session.scalars(
-                                    select(MarketplaceOrderLine)
-                                    .where(MarketplaceOrderLine.marketplace_order_id == order_id)
-                                    .order_by(MarketplaceOrderLine.id)
-                                ).all()
-                            )
-                            for normalized in normalized_items:
-                                stored = _match_line(
-                                    lines,
-                                    normalized,
-                                    normalized_count=len(normalized_items),
-                                )
-                                if stored is None:
-                                    job["errors"].append(
-                                        {
-                                            "order": order_key,
-                                            "entry": normalized.get("entry_id"),
-                                            "step": "persist",
-                                            "error": "matching_order_line_not_found",
-                                        }
-                                    )
-                                    continue
-
-                                changed = False
-                                title = str(normalized.get("name") or "").strip()
-                                if title.casefold() not in _UNKNOWN_TITLES and stored.title != title:
-                                    stored.title = title
-                                    changed = True
-                                sku = _text(normalized.get("sku"))
-                                if sku and stored.merchant_sku != sku:
-                                    stored.merchant_sku = sku
-                                    changed = True
-                                external_product_id = _text(normalized.get("external_product_id"))
-                                if external_product_id and stored.external_product_id != external_product_id:
-                                    stored.external_product_id = external_product_id
-                                    changed = True
-                                entry_id = _text(normalized.get("entry_id"))
-                                if entry_id and stored.external_line_id != entry_id:
-                                    stored.external_line_id = entry_id
-                                    changed = True
-
-                                before_product_id = stored.product_id
-                                ensure_marketplace_listing_for_order_line(
-                                    session,
-                                    marketplace_account_id=account_id,
-                                    order_line=stored,
-                                )
-                                if before_product_id is None and stored.product_id is not None:
-                                    local_linked += 1
-
-                                allocation_result = allocate_order_line_fifo(
-                                    session,
-                                    order_line=stored,
-                                    order=stored_order,
-                                    allocated_at=datetime.now(UTC),
-                                )
-                                local_allocated += allocation_result.newly_allocated_quantity
-                                if changed:
-                                    local_updated += 1
-
-                    async with counters_lock:
-                        job["updated"] += local_updated
-                        job["linked"] += local_linked
-                        job["allocated"] += local_allocated
-                except Exception as exc:
-                    async with counters_lock:
+                kaspi_order_id = str(external_order_id or "").strip()
+                if not kaspi_order_id:
+                    async with counter_lock:
                         job["errors"].append(
-                            {
-                                "order": order_key,
-                                "step": "unexpected",
-                                "error": f"{type(exc).__name__}: {exc}",
-                            }
+                            {"order": order_key, "step": "entries", "error": "missing_order_id"}
                         )
-                finally:
-                    async with counters_lock:
-                        job["processed"] += 1
-                        total = int(job["total"] or 0)
-                        percent = round(job["processed"] * 100 / total, 1) if total else 100
-                        job["message"] = (
-                            f"Заказы с товарами: {job['processed']}/{total}; "
-                            f"обновлено: {job['updated']}; привязано: {job['linked']}; "
-                            f"списано со склада: {job['allocated']}; прогресс: {percent}%"
+                    return
+
+                entries = await request_entries(kaspi_order_id, order_key)
+                if not entries:
+                    return
+
+                async def enrich_entry(entry: dict[str, Any]) -> dict[str, Any]:
+                    entry_id = str(entry.get("id") or "").strip()
+                    product = None
+                    merchant = None
+                    if entry_id:
+                        product = await request_resource(
+                            f"/orderentries/{entry_id}/product",
+                            order_key=order_key,
+                            entry_id=entry_id,
+                            step="entry_product",
                         )
+                    master_id = str((product or {}).get("id") or "").strip()
+                    if not master_id:
+                        master_id = str(
+                            _relationship_id(entry, "product", "masterProduct") or ""
+                        ).strip()
+                    if master_id:
+                        merchant = await merchant_for(
+                            master_id,
+                            order_key=order_key,
+                            entry_id=entry_id,
+                        )
+                    return normalize_entry(
+                        entry,
+                        product=product,
+                        merchant_product=merchant,
+                    )
+
+                normalized_items = await asyncio.gather(
+                    *(enrich_entry(entry) for entry in entries)
+                )
+                local_updated = 0
+                local_linked = 0
+                local_allocated = 0
+
+                with SessionLocal() as session:
+                    with session.begin():
+                        stored_order = session.get(MarketplaceOrder, order_id)
+                        if stored_order is None:
+                            return
+                        lines = list(
+                            session.scalars(
+                                select(MarketplaceOrderLine)
+                                .where(MarketplaceOrderLine.marketplace_order_id == order_id)
+                                .order_by(MarketplaceOrderLine.id)
+                            ).all()
+                        )
+                        for normalized in normalized_items:
+                            stored = _match_line(
+                                lines,
+                                normalized,
+                                normalized_count=len(normalized_items),
+                            )
+                            if stored is None:
+                                job["errors"].append(
+                                    {
+                                        "order": order_key,
+                                        "entry": normalized.get("entry_id"),
+                                        "step": "persist",
+                                        "error": "matching_order_line_not_found",
+                                    }
+                                )
+                                continue
+
+                            changed = False
+                            title = str(normalized.get("name") or "").strip()
+                            if title.casefold() not in _UNKNOWN_TITLES and stored.title != title:
+                                stored.title = title
+                                changed = True
+                            sku = _text(normalized.get("sku"))
+                            if sku and stored.merchant_sku != sku:
+                                stored.merchant_sku = sku
+                                changed = True
+                            external_product_id = _text(normalized.get("external_product_id"))
+                            if external_product_id and stored.external_product_id != external_product_id:
+                                stored.external_product_id = external_product_id
+                                changed = True
+                            entry_id = _text(normalized.get("entry_id"))
+                            if entry_id and stored.external_line_id != entry_id:
+                                stored.external_line_id = entry_id
+                                changed = True
+
+                            before_product_id = stored.product_id
+                            ensure_marketplace_listing_for_order_line(
+                                session,
+                                marketplace_account_id=account_id,
+                                order_line=stored,
+                            )
+                            if before_product_id is None and stored.product_id is not None:
+                                local_linked += 1
+
+                            allocation = allocate_order_line_fifo(
+                                session,
+                                order_line=stored,
+                                order=stored_order,
+                                allocated_at=datetime.now(UTC),
+                            )
+                            local_allocated += allocation.newly_allocated_quantity
+                            if changed:
+                                local_updated += 1
+
+                async with counter_lock:
+                    job["updated"] += local_updated
+                    job["linked"] += local_linked
+                    job["allocated"] += local_allocated
 
             async def worker() -> None:
                 while True:
@@ -427,10 +445,28 @@ async def run_job(job_id: str) -> None:
                         return
                     try:
                         await enrich_one(row)
+                    except Exception as exc:
+                        async with counter_lock:
+                            job["errors"].append(
+                                {
+                                    "order": str(row[2] or row[1] or row[0]),
+                                    "step": "unexpected",
+                                    "error": f"{type(exc).__name__}: {exc}",
+                                }
+                            )
                     finally:
+                        async with counter_lock:
+                            job["processed"] += 1
+                            total = int(job["total"] or 0)
+                            percent = round(job["processed"] * 100 / total, 1) if total else 100
+                            job["message"] = (
+                                f"Товары: {job['processed']}/{total}; "
+                                f"обновлено: {job['updated']}; привязано: {job['linked']}; "
+                                f"списано: {job['allocated']}; прогресс: {percent}%"
+                            )
                         queue.task_done()
 
-            await asyncio.gather(*(worker() for _ in range(4)))
+            await asyncio.gather(*(worker() for _ in range(3)))
 
         job["status"] = "completed" if not job["errors"] else "completed_with_errors"
         job["message"] = (
