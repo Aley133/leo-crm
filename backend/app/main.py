@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -19,6 +20,8 @@ from .dashboard_api import router as dashboard_router
 from .db import engine
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .inventory_api import router as inventory_router
+from .kaspi_order_polling import LAST_RUN as KASPI_POLL_STATUS
+from .kaspi_order_polling import polling_loop
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
@@ -39,7 +42,7 @@ from .suppliers import router as suppliers_router
 from .ui import router as ui_router
 
 APP_VERSION = "0.18.0"
-DEPLOYMENT_MARKER = "fifo-inventory-batches-v1"
+DEPLOYMENT_MARKER = "kaspi-archive-enrichment-and-polling-v1"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -78,14 +81,50 @@ app.include_router(product_identity_router)
 app.include_router(purchase_router)
 
 
+@app.on_event("startup")
+async def start_kaspi_order_polling() -> None:
+    stop_event = asyncio.Event()
+    app.state.kaspi_poll_stop_event = stop_event
+    app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
+
+
+@app.on_event("shutdown")
+async def stop_kaspi_order_polling() -> None:
+    stop_event = getattr(app.state, "kaspi_poll_stop_event", None)
+    task = getattr(app.state, "kaspi_poll_task", None)
+    if stop_event is not None:
+        stop_event.set()
+    if task is not None:
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
 @app.get("/")
-async def root() -> dict[str, str]:
-    return {"service": "leo-crm", "status": "running", "version": APP_VERSION, "deployment_marker": DEPLOYMENT_MARKER, "docs": "/docs", "crm": "/crm"}
+async def root() -> dict[str, object]:
+    return {
+        "service": "leo-crm",
+        "status": "running",
+        "version": APP_VERSION,
+        "deployment_marker": DEPLOYMENT_MARKER,
+        "docs": "/docs",
+        "crm": "/crm",
+        "kaspi_polling": dict(KASPI_POLL_STATUS),
+    }
 
 
 @app.get("/health")
-async def health() -> dict[str, str]:
-    return {"status": "ok", "database": "not_checked", "version": APP_VERSION, "deployment_marker": DEPLOYMENT_MARKER, "timestamp": datetime.now(UTC).isoformat()}
+async def health() -> dict[str, object]:
+    return {
+        "status": "ok",
+        "database": "not_checked",
+        "version": APP_VERSION,
+        "deployment_marker": DEPLOYMENT_MARKER,
+        "timestamp": datetime.now(UTC).isoformat(),
+        "kaspi_polling": dict(KASPI_POLL_STATUS),
+    }
 
 
 @app.get("/ready")
@@ -94,5 +133,20 @@ async def ready():
         with engine.connect() as connection:
             connection.execute(text("SELECT 1"))
     except SQLAlchemyError:
-        return JSONResponse(status_code=503, content={"status": "not_ready", "database": "unavailable", "version": APP_VERSION, "deployment_marker": DEPLOYMENT_MARKER, "timestamp": datetime.now(UTC).isoformat()})
-    return {"status": "ready", "database": "ok", "version": APP_VERSION, "deployment_marker": DEPLOYMENT_MARKER, "timestamp": datetime.now(UTC).isoformat()}
+        return JSONResponse(
+            status_code=503,
+            content={
+                "status": "not_ready",
+                "database": "unavailable",
+                "version": APP_VERSION,
+                "deployment_marker": DEPLOYMENT_MARKER,
+                "timestamp": datetime.now(UTC).isoformat(),
+            },
+        )
+    return {
+        "status": "ready",
+        "database": "ok",
+        "version": APP_VERSION,
+        "deployment_marker": DEPLOYMENT_MARKER,
+        "timestamp": datetime.now(UTC).isoformat(),
+    }
