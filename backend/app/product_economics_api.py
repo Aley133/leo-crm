@@ -12,7 +12,6 @@ from .commerce.profit_calculator import (
     KASPI_COMMISSION_RATE,
     TAX_RATE,
     calculate_line_economics,
-    kaspi_logistics_per_unit,
 )
 from .db import get_db
 from .models import MarketplaceOrder, MarketplaceOrderLine, Product
@@ -58,7 +57,7 @@ def get_product_economics(
     )
     sale_price = None if latest_line is None else Decimal(latest_line.unit_price)
 
-    source_row = db.execute(
+    source_rows = db.execute(
         select(ProductBinding, SupplierProduct, Supplier, SupplierOfferState)
         .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
         .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
@@ -75,18 +74,20 @@ def get_product_economics(
             ProductBinding.priority,
             ProductBinding.id,
         )
-        .limit(1)
-    ).first()
+    ).all()
 
     procurement_cost: Decimal | None = None
     source_name: str | None = None
-    if source_row is not None:
-        _binding, supplier_product, supplier, state = source_row
-        source_name = supplier.name
+    for _binding, supplier_product, supplier, state in source_rows:
+        candidate: Decimal | None = None
         if state is not None and state.price is not None and state.available is not False:
-            procurement_cost = Decimal(state.price)
+            candidate = Decimal(state.price)
         elif supplier_product.current_price is not None and supplier_product.in_stock is not False:
-            procurement_cost = Decimal(supplier_product.current_price)
+            candidate = Decimal(supplier_product.current_price)
+        if candidate is not None:
+            procurement_cost = candidate
+            source_name = supplier.name
+            break
 
     commission_rate_pct = KASPI_COMMISSION_RATE * Decimal("100")
     tax_rate_pct = TAX_RATE * Decimal("100")
@@ -104,17 +105,21 @@ def get_product_economics(
             net_margin_pct=None,
         )
 
-    logistics = kaspi_logistics_per_unit(sale_price)
+    fees = calculate_line_economics(
+        unit_sale_price=sale_price,
+        quantity=1,
+        procurement_unit_cost=Decimal("0"),
+    )
     if procurement_cost is None:
         return ProductEconomicsRead(
             sale_unit_price=sale_price,
             procurement_unit_cost=None,
-            procurement_source_name=source_name,
+            procurement_source_name=None,
             kaspi_commission_rate_pct=commission_rate_pct,
             tax_rate_pct=tax_rate_pct,
-            kaspi_commission=None,
-            tax=None,
-            logistics=logistics,
+            kaspi_commission=fees.kaspi_commission,
+            tax=fees.tax,
+            logistics=fees.logistics,
             net_profit=None,
             net_margin_pct=None,
         )
