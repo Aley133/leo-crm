@@ -21,7 +21,7 @@ const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorde
 const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelling","cancelled","returned"].includes(stage) ? "bad" : "warn";
 const procurementLabel = (state) => ({required:"Нужно закупить",in_progress:"Закупка оформлена",received:"Получено",not_required:"Закупка не требуется",cancelled:"Закупка отменена"}[state] || state || "—");
 const purchaseStatusLabel = (status) => ({draft:"Черновик",requested:"Заявка отправлена",ordered:"Заказано",partially_received:"Получено частично",received:"Получено",closed:"Закрыто",cancelled:"Отменено"}[status] || status || "—");
-const nextPurchaseAction = (status) => ({draft:{target:"requested",label:"Отправить заявку"},requested:{target:"ordered",label:"Отметить заказанным"},ordered:{target:"received",label:"Отметить полученным"},partially_received:{target:"received",label:"Отметить полученным"},received:{target:"closed",label:"Закрыть закупку"}}[status] || null);
+const nextPurchaseAction = (status) => ({draft:{target:"requested",label:"Отправить заявку",loading:"Отправляю…"},requested:{target:"ordered",label:"Отметить заказанным",loading:"Сохраняю…"},ordered:{target:"received",label:"Отметить полученным",loading:"Принимаю…"},partially_received:{target:"received",label:"Отметить полученным",loading:"Принимаю…"},received:{target:"closed",label:"Закрыть закупку",loading:"Закрываю…"}}[status] || null);
 const headers = () => ({"Authorization": `Bearer ${localStorage.getItem(storageKey) || ""}`});
 
 const setLoading = (loading) => {
@@ -31,6 +31,21 @@ const setLoading = (loading) => {
   if (captureRevenueButton) captureRevenueButton.disabled = loading;
   if (rebuildDays) rebuildDays.disabled = loading;
   refreshButton.textContent = loading ? "Обновление…" : "Обновить экран";
+};
+
+const setButtonBusy = (button, loadingText) => {
+  button.dataset.originalLabel ||= button.textContent.trim();
+  button.disabled = true;
+  button.classList.add("is-loading");
+  button.setAttribute("aria-busy", "true");
+  button.innerHTML = `<span class="button-spinner" aria-hidden="true"></span><span>${escapeHtml(loadingText)}</span>`;
+};
+
+const restoreButton = (button) => {
+  button.disabled = false;
+  button.classList.remove("is-loading");
+  button.removeAttribute("aria-busy");
+  button.textContent = button.dataset.originalLabel || "Повторить";
 };
 
 const queryString = () => {
@@ -51,7 +66,7 @@ const responseError = async (response) => {
 const renderPurchaseAction = (line) => {
   const action = nextPurchaseAction(line.purchase_status);
   if (!action || !line.purchase_request_id || !line.purchase_version) return "";
-  return `<button class="button purchase-transition" type="button" data-purchase-id="${escapeHtml(line.purchase_request_id)}" data-version="${Number(line.purchase_version)}" data-target-status="${action.target}">${escapeHtml(action.label)}</button>`;
+  return `<button class="button purchase-transition" type="button" data-purchase-id="${escapeHtml(line.purchase_request_id)}" data-version="${Number(line.purchase_version)}" data-target-status="${action.target}" data-loading-label="${escapeHtml(action.loading)}">${escapeHtml(action.label)}</button>`;
 };
 
 const renderLine = (line) => {
@@ -72,14 +87,17 @@ const renderOrder = (order) => {
   return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Kaspi Orders API</span></div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${canCreatePurchase ? `<div class="order-actions"><button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button></div>` : ""}</article>`;
 };
 
-const render = (payload) => {
-  const summary = payload.summary || {};
+const updateSummary = (summary = {}) => {
   document.querySelector("#summary-orders").textContent = Number(summary.orders_count || 0).toLocaleString("ru-RU");
   document.querySelector("#summary-active").textContent = Number(summary.active_orders || 0).toLocaleString("ru-RU");
   document.querySelector("#summary-revenue").textContent = money(summary.revenue || 0);
   document.querySelector("#summary-profit").textContent = money(summary.confirmed_net_profit || 0);
   document.querySelector("#summary-profit-units").textContent = `по ${Number(summary.confirmed_profit_units || 0).toLocaleString("ru-RU")} ед. с подтверждённой себестоимостью`;
   document.querySelector("#summary-procurement").textContent = Number(summary.procurement_required_lines || 0).toLocaleString("ru-RU");
+};
+
+const render = (payload) => {
+  updateSummary(payload.summary || {});
   ordersList.innerHTML = (payload.items || []).map(renderOrder).join("");
   empty.classList.toggle("hidden", (payload.items || []).length > 0);
   document.querySelector("#rows-label").textContent = `Показано заказов: ${(payload.items || []).length} из ${payload.total || 0}`;
@@ -88,15 +106,35 @@ const render = (payload) => {
   ordersPage.classList.remove("hidden");
 };
 
+const fetchOrdersPayload = async () => {
+  const response = await fetch(`/api/commerce/orders?${queryString()}`, {headers:headers(), cache:"no-store"});
+  if (response.status === 401) { localStorage.removeItem(storageKey); throw new Error("Токен не принят. Введите актуальный SERVICE_API_TOKEN."); }
+  if (!response.ok) throw await responseError(response);
+  return response.json();
+};
+
+const refreshSingleOrder = async (orderId, currentCard) => {
+  const payload = await fetchOrdersPayload();
+  updateSummary(payload.summary || {});
+  const order = (payload.items || []).find((item) => Number(item.order_id) === Number(orderId));
+  if (!order) {
+    currentCard?.remove();
+  } else {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = renderOrder(order);
+    currentCard?.replaceWith(wrapper.firstElementChild);
+  }
+  const visibleCount = ordersList.querySelectorAll(".order-card").length;
+  empty.classList.toggle("hidden", visibleCount > 0);
+  document.querySelector("#rows-label").textContent = `Показано заказов: ${visibleCount} из ${payload.total || 0}`;
+  document.querySelector("#updated-at").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`;
+};
+
 const loadOrders = async () => {
   if (!localStorage.getItem(storageKey)) { authPanel.classList.remove("hidden"); ordersPage.classList.add("hidden"); return; }
   setLoading(true);
-  try {
-    const response = await fetch(`/api/commerce/orders?${queryString()}`, {headers:headers(), cache:"no-store"});
-    if (response.status === 401) { localStorage.removeItem(storageKey); throw new Error("Токен не принят. Введите актуальный SERVICE_API_TOKEN."); }
-    if (!response.ok) throw await responseError(response);
-    render(await response.json());
-  } catch (error) { message.textContent = error.message || "Не удалось загрузить заказы."; }
+  try { render(await fetchOrdersPayload()); }
+  catch (error) { message.textContent = error.message || "Не удалось загрузить заказы."; }
   finally { setLoading(false); }
 };
 
@@ -171,8 +209,38 @@ const captureRevenue = async () => {
   }
 };
 
-const createPurchase = async (orderId, button) => { button.disabled = true; try { const response = await fetch("/api/purchases/from-marketplace-order", {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({marketplace_order_id:Number(orderId),idempotency_key:`orders-center:${orderId}`,note:"Создано из Orders Center"})}); if (!response.ok && response.status !== 409) throw await responseError(response); const purchase = await response.json(); if (purchase.first_product_id) { window.location.assign(`/crm/products/${encodeURIComponent(purchase.first_product_id)}`); return; } message.textContent = "Заявка создана, но товар ещё не удалось связать с карточкой."; await loadOrders(); } catch (error) { message.textContent = error.message || "Не удалось создать заявку на закупку."; button.disabled = false; } };
-const transitionPurchase = async (button) => { const purchaseId = button.dataset.purchaseId; const targetStatus = button.dataset.targetStatus; const version = Number(button.dataset.version); button.disabled = true; try { const response = await fetch(`/api/purchases/${encodeURIComponent(purchaseId)}/transition`, {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({target_status:targetStatus,expected_version:version,idempotency_key:`orders-center:${purchaseId}:${version}:${targetStatus}`,metadata:{source:"orders-center"}})}); if (!response.ok) throw await responseError(response); await loadOrders(); } catch (error) { message.textContent = error.message || "Не удалось обновить статус закупки."; button.disabled = false; } };
+const createPurchase = async (orderId, button) => {
+  setButtonBusy(button, "Создаю…");
+  try {
+    const response = await fetch("/api/purchases/from-marketplace-order", {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({marketplace_order_id:Number(orderId),idempotency_key:`orders-center:${orderId}`,note:"Создано из Orders Center"})});
+    if (!response.ok && response.status !== 409) throw await responseError(response);
+    const purchase = await response.json();
+    if (purchase.first_product_id) { window.location.assign(`/crm/products/${encodeURIComponent(purchase.first_product_id)}`); return; }
+    message.textContent = "Заявка создана, но товар ещё не удалось связать с карточкой.";
+    await refreshSingleOrder(orderId, button.closest(".order-card"));
+  } catch (error) {
+    message.textContent = error.message || "Не удалось создать заявку на закупку.";
+    restoreButton(button);
+  }
+};
+
+const transitionPurchase = async (button) => {
+  const purchaseId = button.dataset.purchaseId;
+  const targetStatus = button.dataset.targetStatus;
+  const version = Number(button.dataset.version);
+  const card = button.closest(".order-card");
+  const orderId = card?.dataset.orderId;
+  setButtonBusy(button, button.dataset.loadingLabel || "Сохраняю…");
+  try {
+    const response = await fetch(`/api/purchases/${encodeURIComponent(purchaseId)}/transition`, {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({target_status:targetStatus,expected_version:version,idempotency_key:`orders-center:${purchaseId}:${version}:${targetStatus}`,metadata:{source:"orders-center"}})});
+    if (!response.ok) throw await responseError(response);
+    message.textContent = "Статус закупки обновлён.";
+    await refreshSingleOrder(orderId, card);
+  } catch (error) {
+    message.textContent = error.message || "Не удалось обновить статус закупки.";
+    restoreButton(button);
+  }
+};
 
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, tokenInput.value.trim()); tokenInput.value = ""; loadOrders(); });
 filters.addEventListener("submit", (event) => { event.preventDefault(); loadOrders(); });
