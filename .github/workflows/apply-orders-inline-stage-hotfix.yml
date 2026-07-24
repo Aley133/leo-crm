@@ -1,0 +1,136 @@
+name: Apply orders inline stage hotfix
+
+on:
+  push:
+    paths:
+      - .github/workflows/apply-orders-inline-stage-hotfix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Apply focused hotfix
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          domain = Path('backend/app/commerce/domain.py')
+          text = domain.read_text(encoding='utf-8')
+          old = '''    @property
+    def procurement_state(self) -> ProcurementState:
+        if self.is_fully_allocated_from_inventory:
+            return ProcurementState.NOT_REQUIRED
+        if self.purchase_request_id is None:
+            return ProcurementState.REQUIRED
+        if self.purchase_status in {"received", "closed"}:
+            return ProcurementState.RECEIVED
+        if self.purchase_status == "cancelled":
+            return ProcurementState.CANCELLED
+        return ProcurementState.IN_PROGRESS
+'''
+          new = '''    @property
+    def procurement_state(self) -> ProcurementState:
+        # An explicit purchase request is authoritative for preorder readiness.
+        # Existing FIFO allocation must not move a preorder to packaging while
+        # the requested goods are only ordered and have not been received yet.
+        if self.purchase_request_id is not None:
+            if self.purchase_status in {"received", "closed"}:
+                return ProcurementState.RECEIVED
+            if self.purchase_status == "cancelled":
+                return ProcurementState.CANCELLED
+            return ProcurementState.IN_PROGRESS
+        if self.is_fully_allocated_from_inventory:
+            return ProcurementState.NOT_REQUIRED
+        return ProcurementState.REQUIRED
+'''
+          if old not in text:
+              raise SystemExit('domain procurement_state block not found')
+          domain.write_text(text.replace(old, new), encoding='utf-8')
+
+          tests = Path('tests/test_commerce_core.py')
+          text = tests.read_text(encoding='utf-8')
+          old = '''    from_stock = _line(inventory_allocated_quantity=2)
+    assert _order(status="preorder", lines=(received,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(closed,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(from_stock,)).stage == CommerceOrderStage.ASSEMBLY
+'''
+          new = '''    from_stock = _line(inventory_allocated_quantity=2)
+    ordered_from_stock = _line(
+        purchase_request_id="purchase-3",
+        purchase_status="ordered",
+        inventory_allocated_quantity=2,
+    )
+    assert _order(status="preorder", lines=(received,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(closed,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(from_stock,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(ordered_from_stock,)).stage == CommerceOrderStage.PREORDER
+'''
+          if old not in text:
+              raise SystemExit('commerce stage regression block not found')
+          tests.write_text(text.replace(old, new), encoding='utf-8')
+
+          js = Path('backend/app/static/orders.js')
+          text = js.read_text(encoding='utf-8')
+          old = '''const refreshSingleOrder = async (orderId, currentCard) => {
+  const payload = await fetchOrdersPayload();
+  updateSummary(payload.summary || {});
+  const order = (payload.items || []).find((item) => Number(item.order_id) === Number(orderId));
+  if (!order) {
+    currentCard?.remove();
+  } else {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = renderOrder(order);
+    currentCard?.replaceWith(wrapper.firstElementChild);
+  }
+  const visibleCount = ordersList.querySelectorAll(".order-card").length;
+  empty.classList.toggle("hidden", visibleCount > 0);
+  document.querySelector("#rows-label").textContent = `Показано заказов: ${visibleCount} из ${payload.total || 0}`;
+  document.querySelector("#updated-at").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`;
+};
+'''
+          new = '''const refreshSingleOrder = async (orderId, currentCard) => {
+  const scrollTop = window.scrollY;
+  const payload = await fetchOrdersPayload();
+  updateSummary(payload.summary || {});
+  const order = (payload.items || []).find((item) => Number(item.order_id) === Number(orderId));
+  if (!order) {
+    currentCard?.remove();
+  } else {
+    const wrapper = document.createElement("div");
+    wrapper.innerHTML = renderOrder(order);
+    currentCard?.replaceWith(wrapper.firstElementChild);
+  }
+  const visibleCount = ordersList.querySelectorAll(".order-card").length;
+  empty.classList.toggle("hidden", visibleCount > 0);
+  document.querySelector("#rows-label").textContent = `Показано заказов: ${visibleCount} из ${payload.total || 0}`;
+  document.querySelector("#updated-at").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`;
+  requestAnimationFrame(() => window.scrollTo({top: scrollTop, left: 0, behavior: "instant"}));
+};
+'''
+          if old not in text:
+              raise SystemExit('refreshSingleOrder block not found')
+          js.write_text(text.replace(old, new), encoding='utf-8')
+
+          template = Path('backend/app/templates/orders.html')
+          text = template.read_text(encoding='utf-8')
+          text = text.replace('/static/orders.js?v=20260724-3', '/static/orders.js?v=20260724-4')
+          text = text.replace('/static/orders.js?v=20260724-2', '/static/orders.js?v=20260724-4')
+          template.write_text(text, encoding='utf-8')
+
+          Path('.github/workflows/apply-orders-inline-stage-hotfix.yml').unlink()
+          PY
+      - name: Run focused tests
+        run: python -m pytest -q tests/test_commerce_core.py
+      - name: Commit hotfix
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add backend/app/commerce/domain.py backend/app/static/orders.js backend/app/templates/orders.html tests/test_commerce_core.py .github/workflows/apply-orders-inline-stage-hotfix.yml
+          git commit -m "fix: keep preorder until goods are received"
+          git push origin HEAD:main
