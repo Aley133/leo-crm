@@ -1,0 +1,35 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Заказы Kaspi</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260724-1">
+  <link rel="stylesheet" href="/static/orders.css?v=20260724-2">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a class="active" href="/crm/orders">Заказы</a><a href="/crm/revenue">Выручка</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Commerce Core</span></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">KASPI RAW RECEIVER</p><h1>Заказы</h1><p class="subtitle">Жизненный цикл строится по проверенной модели архива v1.0.1, товары связываются с XML-каталогом по артикулу.</p></div>
+        <div class="order-actions"><select id="rebuild-days" class="button secondary" aria-label="Период загрузки"><option value="7">7 дней</option><option value="14">14 дней</option><option value="30">30 дней</option><option value="31">31 день</option></select><button id="rebuild-orders" class="button" type="button">Загрузить заказы Kaspi</button><button id="capture-revenue" class="button" type="button">Сохранить выручку и маржу</button><button id="refresh" class="button secondary" type="button">Обновить экран</button></div>
+      </header>
+      <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
+      <div id="message" class="message" role="status"></div>
+      <section id="orders-page" class="hidden" aria-busy="false">
+        <section class="metrics" aria-label="Сводка заказов"><article class="metric"><span>Заказов</span><strong id="summary-orders">0</strong><small>в текущей выборке</small></article><article class="metric"><span>Активных</span><strong id="summary-active">0</strong><small>требуют обработки</small></article><article class="metric"><span>Выручка</span><strong id="summary-revenue">0 ₸</strong><small>без отмен и возвратов</small></article><article class="metric"><span>Чистая прибыль</span><strong id="summary-profit">0 ₸</strong><small id="summary-profit-units">по 0 ед. с себестоимостью</small></article><article class="metric"><span>К закупке</span><strong id="summary-procurement">0</strong><small>строк предзаказа</small></article></section>
+        <form id="filters" class="filters"><label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Номер заказа, товар, Kaspi ID или артикул"></label><label><span>Этап LEO</span><select id="status"><option value="">Все</option><option value="preorder">Предзаказ</option><option value="assembly">Упаковка</option><option value="handover">Передача</option><option value="shipping">Передан в доставку</option><option value="cancelling">Отмена в процессе</option><option value="cancelled">Отменён</option><option value="delivered">Завершён</option><option value="unknown">Прочее</option></select></label><button class="button" type="submit">Применить</button><button id="reset" class="button secondary" type="button">Сбросить</button></form>
+        <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div><div id="orders-list" class="orders-list"></div><div id="empty" class="empty hidden">Заказы не найдены. Нажмите «Загрузить заказы Kaspi» или измените фильтры.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/orders.js?v=20260724-2" defer></script>
+</body>
+</html>
