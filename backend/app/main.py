@@ -36,6 +36,7 @@ from .product_supplier_binding_api import router as product_supplier_binding_rou
 from .product_xml_import_api import router as product_xml_import_router
 from .products import router as products_router
 from .purchase_api import router as purchase_router
+from .revenue_api import router as revenue_router
 from .supplier_products_api import router as supplier_products_router
 from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
@@ -79,6 +80,7 @@ app.include_router(marketplace_orders_router)
 app.include_router(commerce_router)
 app.include_router(product_identity_router)
 app.include_router(purchase_router)
+app.include_router(revenue_router)
 
 
 @app.on_event("startup")
