@@ -6,6 +6,7 @@ const tokenForm = document.querySelector("#token-form");
 const tokenInput = document.querySelector("#token");
 const refreshButton = document.querySelector("#refresh");
 const rebuildButton = document.querySelector("#rebuild-orders");
+const captureRevenueButton = document.querySelector("#capture-revenue");
 const rebuildDays = document.querySelector("#rebuild-days");
 const filters = document.querySelector("#filters");
 const resetButton = document.querySelector("#reset");
@@ -27,6 +28,7 @@ const setLoading = (loading) => {
   ordersPage.setAttribute("aria-busy", String(loading));
   refreshButton.disabled = loading;
   rebuildButton.disabled = loading;
+  if (captureRevenueButton) captureRevenueButton.disabled = loading;
   if (rebuildDays) rebuildDays.disabled = loading;
   refreshButton.textContent = loading ? "Обновление…" : "Обновить экран";
 };
@@ -99,7 +101,6 @@ const loadOrders = async () => {
 };
 
 const sleep = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
-
 const pollRebuildJob = async (jobId) => {
   while (true) {
     const response = await fetch(`/api/commerce/orders/rebuild/${encodeURIComponent(jobId)}`, {headers:headers(), cache:"no-store"});
@@ -129,6 +130,7 @@ const rebuildOrders = async (daysOverride = null, preserveFilters = false) => {
   const days = Number(daysOverride || rebuildDays?.value || 7);
   rebuildButton.disabled = true;
   refreshButton.disabled = true;
+  if (captureRevenueButton) captureRevenueButton.disabled = true;
   if (rebuildDays) rebuildDays.disabled = true;
   rebuildButton.textContent = "Загрузка…";
   message.textContent = `Загружаю свежие заказы Kaspi за ${days} дн.`;
@@ -146,8 +148,26 @@ const rebuildOrders = async (daysOverride = null, preserveFilters = false) => {
   } finally {
     rebuildButton.disabled = false;
     refreshButton.disabled = false;
+    if (captureRevenueButton) captureRevenueButton.disabled = false;
     if (rebuildDays) rebuildDays.disabled = false;
     rebuildButton.textContent = "Загрузить заказы Kaspi";
+  }
+};
+
+const captureRevenue = async () => {
+  captureRevenueButton.disabled = true;
+  captureRevenueButton.textContent = "Сохраняю…";
+  message.textContent = "Фиксирую выручку и прибыль по заказам в упаковке.";
+  try {
+    const response = await fetch("/api/revenue/daily/capture?timezone_name=Asia%2FAlmaty", {method:"POST", headers:headers()});
+    if (!response.ok) throw await responseError(response);
+    const result = await response.json();
+    if (Number(result.captured_count || 0) === 0) throw new Error("Нет заказов в упаковке, которые можно сохранить.");
+    window.location.assign("/crm/revenue");
+  } catch (error) {
+    message.textContent = error.message || "Не удалось сохранить выручку и маржу.";
+    captureRevenueButton.disabled = false;
+    captureRevenueButton.textContent = "Сохранить выручку и маржу";
   }
 };
 
@@ -159,5 +179,6 @@ filters.addEventListener("submit", (event) => { event.preventDefault(); loadOrde
 resetButton.addEventListener("click", () => { filters.reset(); loadOrders(); });
 refreshButton.addEventListener("click", () => rebuildOrders(1, true));
 rebuildButton.addEventListener("click", () => rebuildOrders());
+captureRevenueButton.addEventListener("click", captureRevenue);
 ordersList.addEventListener("click", (event) => { const createButton = event.target.closest(".create-purchase"); if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; } const transitionButton = event.target.closest(".purchase-transition"); if (transitionButton) transitionPurchase(transitionButton); });
 loadOrders();
