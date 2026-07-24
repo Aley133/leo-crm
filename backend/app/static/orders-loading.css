@@ -1,0 +1,28 @@
+.button.is-loading {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  cursor: wait;
+  opacity: .9;
+}
+
+.button.is-loading::before {
+  content: "";
+  width: 16px;
+  height: 16px;
+  flex: 0 0 16px;
+  border: 2px solid rgba(255,255,255,.38);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: leo-button-spin .7s linear infinite;
+}
+
+.button.is-loading:disabled {
+  opacity: .9;
+}
+
+@keyframes leo-button-spin {
+  to { transform: rotate(360deg); }
+}
