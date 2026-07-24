@@ -20,6 +20,9 @@
 .procurement-required { color:#f5b85b; }
 .procurement-ready { color:#72d9a5; }
 .order-actions { display:flex; justify-content:flex-end; gap:10px; padding:15px 20px 18px; border-top:1px solid #203047; }
+.purchase-transition.is-loading, .create-purchase.is-loading { display:inline-flex; align-items:center; justify-content:center; gap:9px; cursor:wait; opacity:.88; }
+.button-spinner { width:16px; height:16px; flex:0 0 16px; border:2px solid rgba(255,255,255,.38); border-top-color:#fff; border-radius:50%; animation:button-spin .75s linear infinite; }
+@keyframes button-spin { to { transform:rotate(360deg); } }
 .kaspi-detail { padding:20px; border-top:1px solid #203047; background:rgba(6,16,29,.72); }
 .kaspi-detail-grid { display:grid; grid-template-columns:minmax(0,1.4fr) minmax(300px,.8fr); gap:24px; }
 .kaspi-detail h3 { margin:8px 0 18px; font-size:18px; }
