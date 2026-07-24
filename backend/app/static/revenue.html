@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Выручка</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260724-1">
+  <link rel="stylesheet" href="/static/revenue.css?v=20260724-1">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/orders">Заказы</a><a class="active" href="/crm/revenue">Выручка</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Finance Core</span></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">DAILY REVENUE</p><h1>Выручка</h1><p class="subtitle">Сохранённые дневные итоги по заказам, находившимся в упаковке.</p></div>
+        <div><a class="button secondary" href="/crm/orders">Назад к заказам</a><button id="refresh" class="button" type="button">Обновить</button></div>
+      </header>
+      <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
+      <div id="message" class="message" role="status"></div>
+      <section id="revenue-page" class="hidden">
+        <section class="metrics">
+          <article class="metric"><span>Сохранено дней</span><strong id="summary-days">0</strong><small>дневных фиксаций</small></article>
+          <article class="metric"><span>Выручка</span><strong id="summary-revenue">0 KZT</strong><small>за сохранённые дни</small></article>
+          <article class="metric"><span>Чистая прибыль</span><strong id="summary-profit">0 KZT</strong><small id="summary-margin">маржа 0%</small></article>
+        </section>
+        <section class="revenue-card">
+          <div class="revenue-head"><span>Дата</span><span>Заказы</span><span>Единицы</span><span>Выручка</span><span>Чистая прибыль</span><span>Маржа</span><span>Зафиксировано</span></div>
+          <div id="revenue-list"></div>
+          <div id="empty" class="empty hidden">Дневная выручка ещё не сохранялась.</div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script src="/static/revenue.js?v=20260724-1" defer></script>
+</body>
+</html>
