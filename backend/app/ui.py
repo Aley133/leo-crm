@@ -29,6 +29,11 @@ def crm_orders() -> FileResponse:
     return FileResponse(STATIC_DIR / "orders.html")
 
 
+@router.get("/crm/revenue", response_class=FileResponse)
+def crm_revenue() -> FileResponse:
+    return FileResponse(STATIC_DIR / "revenue.html")
+
+
 @router.get("/crm/suppliers", response_class=FileResponse)
 def crm_suppliers() -> FileResponse:
     return FileResponse(STATIC_DIR / "suppliers.html")
