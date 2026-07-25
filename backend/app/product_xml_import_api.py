@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
@@ -20,6 +21,8 @@ router = APIRouter(
     tags=["product-registry"],
     dependencies=[Depends(require_service_token)],
 )
+
+_LOOKUP_BATCH_SIZE = 400
 
 
 def _local_name(value: str) -> str:
@@ -66,6 +69,32 @@ def _sample(products: list[KaspiXmlProduct], *, limit: int = 10) -> list[dict]:
         }
         for item in products[:limit]
     ]
+
+
+def _chunks(values: list[str], size: int = _LOOKUP_BATCH_SIZE) -> Iterable[list[str]]:
+    for index in range(0, len(values), size):
+        yield values[index : index + size]
+
+
+def _existing_product_ids(db: Session, ids: list[str]) -> set[str]:
+    result: set[str] = set()
+    for batch in _chunks(ids):
+        result.update(
+            db.scalars(
+                select(Product.kaspi_product_id).where(Product.kaspi_product_id.in_(batch))
+            ).all()
+        )
+    return result
+
+
+def _existing_products(db: Session, ids: list[str]) -> dict[str, Product]:
+    result: dict[str, Product] = {}
+    for batch in _chunks(ids):
+        for product in db.scalars(
+            select(Product).where(Product.kaspi_product_id.in_(batch))
+        ).all():
+            result[product.kaspi_product_id] = product
+    return result
 
 
 def _store_feed_source(
@@ -123,10 +152,8 @@ async def retain_xml_source(request: Request, db: Session = Depends(get_db)) -> 
 @router.post("/preview")
 async def preview_xml_import(request: Request, db: Session = Depends(get_db)) -> dict:
     _body, products, warnings = await _read_products(request)
-    ids = [item.kaspi_product_id for item in products]
-    existing_ids = set(
-        db.scalars(select(Product.kaspi_product_id).where(Product.kaspi_product_id.in_(ids))).all()
-    )
+    ids = list(dict.fromkeys(item.kaspi_product_id for item in products))
+    existing_ids = _existing_product_ids(db, ids)
     return {
         "total": len(products),
         "new_count": sum(1 for item in products if item.kaspi_product_id not in existing_ids),
@@ -140,11 +167,8 @@ async def preview_xml_import(request: Request, db: Session = Depends(get_db)) ->
 @router.post("/commit")
 async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> dict:
     body, products, warnings = await _read_products(request)
-    ids = [item.kaspi_product_id for item in products]
-    existing = {
-        item.kaspi_product_id: item
-        for item in db.scalars(select(Product).where(Product.kaspi_product_id.in_(ids))).all()
-    }
+    ids = list(dict.fromkeys(item.kaspi_product_id for item in products))
+    existing = _existing_products(db, ids)
 
     created = 0
     updated = 0
@@ -163,6 +187,7 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
                     status=ProductStatus.ACTIVE.value,
                 )
                 db.add(product)
+                existing[item.kaspi_product_id] = product
                 created += 1
             else:
                 changed = False
