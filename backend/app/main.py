@@ -20,6 +20,10 @@ from .dashboard_api import router as dashboard_router
 from .db import engine
 from .dumping_api import public_router as dumping_public_router
 from .dumping_api import router as dumping_router
+from .dumping_competitor_worker import (
+    start_dumping_competitor_worker,
+    stop_dumping_competitor_worker,
+)
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .inventory_api import router as inventory_router
 from .kaspi_order_polling import LAST_RUN as KASPI_POLL_STATUS
@@ -88,14 +92,18 @@ app.include_router(revenue_router)
 
 
 @app.on_event("startup")
-async def start_kaspi_order_polling() -> None:
+async def start_background_services() -> None:
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
+    # Dedicated server-side HTTP queue. It is intentionally separate from the
+    # local Browser Agent used for supplier pages.
+    await start_dumping_competitor_worker()
 
 
 @app.on_event("shutdown")
-async def stop_kaspi_order_polling() -> None:
+async def stop_background_services() -> None:
+    await stop_dumping_competitor_worker()
     stop_event = getattr(app.state, "kaspi_poll_stop_event", None)
     task = getattr(app.state, "kaspi_poll_task", None)
     if stop_event is not None:
@@ -152,7 +160,7 @@ async def ready():
         )
     return {
         "status": "ready",
-        "database": "ok",
+        "database": "available",
         "version": APP_VERSION,
         "deployment_marker": DEPLOYMENT_MARKER,
         "timestamp": datetime.now(UTC).isoformat(),
