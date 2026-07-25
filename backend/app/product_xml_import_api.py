@@ -8,7 +8,7 @@ from .auth import require_service_token
 from .db import get_db
 from .kaspi_xml_import import KaspiXmlProduct, parse_kaspi_products
 from .models import Product, ProductStatus
-from .order_line_product_linking import link_all_matching_order_lines
+from .order_line_product_linking import link_all_matching_order_lines_for_products
 
 
 router = APIRouter(
@@ -80,7 +80,6 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
                     status=ProductStatus.ACTIVE.value,
                 )
                 db.add(product)
-                db.flush()
                 created += 1
             else:
                 changed = False
@@ -98,9 +97,14 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
                     unchanged += 1
             stored_products.append(product)
 
-        for product in stored_products:
-            linked_order_lines += link_all_matching_order_lines(db, product=product)
-
+        # Assign IDs to newly added products once, then resolve all order lines in
+        # one database scan. The previous per-product query loop caused Render 520
+        # timeouts on normal 1,600-item Kaspi catalogs.
+        db.flush()
+        linked_order_lines = link_all_matching_order_lines_for_products(
+            db,
+            products=stored_products,
+        )
         db.commit()
     except Exception:
         db.rollback()
