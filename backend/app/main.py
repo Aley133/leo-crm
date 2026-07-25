@@ -160,7 +160,7 @@ async def ready():
         )
     return {
         "status": "ready",
-        "database": "available",
+        "database": "ok",
         "version": APP_VERSION,
         "deployment_marker": DEPLOYMENT_MARKER,
         "timestamp": datetime.now(UTC).isoformat(),
