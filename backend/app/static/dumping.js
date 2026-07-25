@@ -12,6 +12,10 @@ const productResults = document.querySelector("#product-results");
 const selectedProduct = document.querySelector("#selected-product");
 const list = document.querySelector("#dumping-list");
 const empty = document.querySelector("#empty");
+const xmlSource = document.querySelector("#xml-source");
+const xmlSourceTitle = document.querySelector("#xml-source-title");
+const xmlSourceMeta = document.querySelector("#xml-source-meta");
+const xmlSourceStatus = document.querySelector("#xml-source-status");
 let configuredRows = [];
 let searchTimer = null;
 let searchController = null;
@@ -118,6 +122,23 @@ const statusLabel = (row) => {
   return '<span class="badge-off">Ожидает запуска</span>';
 };
 
+const renderFeedStatus = (feed) => {
+  xmlSource.classList.toggle("ready", Boolean(feed.ready));
+  xmlSource.classList.toggle("missing", !feed.configured);
+  if (!feed.configured) {
+    xmlSourceTitle.textContent = "XML ещё не импортирован";
+    xmlSourceMeta.innerHTML = 'Демпинг использует XML из раздела «Товары». <a href="/crm/products">Перейти к товарам</a>';
+    xmlSourceStatus.textContent = "Нет источника";
+    return;
+  }
+  const filename = feed.source_filename || "Последний XML каталога";
+  const merchant = feed.merchant_id ? `merchantId ${feed.merchant_id}` : "merchantId не найден";
+  const imported = feed.imported_at ? `импортирован ${dateTime(feed.imported_at)}` : "дата импорта неизвестна";
+  xmlSourceTitle.textContent = filename;
+  xmlSourceMeta.textContent = `${merchant} · ${imported} · используется Pricing Engine`;
+  xmlSourceStatus.textContent = feed.ready ? "Готов к публикации" : "Нужен merchantId";
+};
+
 const render = (rows) => {
   configuredRows = rows;
   document.querySelector("#summary-total").textContent = rows.length;
@@ -189,8 +210,12 @@ const loadPage = async () => {
   if (!token) { authPanel.classList.remove("hidden"); page.classList.add("hidden"); return; }
   setBusy(refreshButton, true, "Обновляю…"); message.textContent = "";
   try {
-    const rows = await request("/api/dumping");
+    const [rows, feed] = await Promise.all([
+      request("/api/dumping"),
+      request("/api/dumping/feed-status"),
+    ]);
     render(rows);
+    renderFeedStatus(feed);
     authPanel.classList.add("hidden");
     page.classList.remove("hidden");
   } catch (error) {
