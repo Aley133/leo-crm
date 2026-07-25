@@ -1,9 +1,10 @@
 from __future__ import annotations
 
+from urllib.parse import unquote
 from xml.etree import ElementTree
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import select
+from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -38,6 +39,14 @@ def _merchant_id(xml_bytes: bytes) -> str | None:
     return None
 
 
+def _source_filename(request: Request) -> str | None:
+    raw = request.headers.get("X-Filename")
+    if not raw:
+        return None
+    value = unquote(raw).strip()
+    return value[:255] or None
+
+
 async def _read_products(request: Request) -> tuple[bytes, list[KaspiXmlProduct], list[str]]:
     body = await request.body()
     try:
@@ -59,13 +68,53 @@ def _sample(products: list[KaspiXmlProduct], *, limit: int = 10) -> list[dict]:
     ]
 
 
+def _store_feed_source(
+    db: Session,
+    *,
+    body: bytes,
+    source_filename: str | None,
+    activate: bool,
+) -> KaspiXmlFeed:
+    xml_text = body.decode("utf-8-sig")
+    feed = db.scalar(select(KaspiXmlFeed).order_by(KaspiXmlFeed.id.desc()).limit(1))
+    if feed is None:
+        feed = KaspiXmlFeed(
+            merchant_id=_merchant_id(body),
+            source_filename=source_filename,
+            source_xml=xml_text,
+            generated_xml=xml_text,
+            active=activate,
+        )
+        db.add(feed)
+    else:
+        feed.merchant_id = _merchant_id(body) or feed.merchant_id
+        feed.source_filename = source_filename or feed.source_filename
+        feed.source_xml = xml_text
+        if activate:
+            feed.generated_xml = xml_text
+            feed.active = True
+    return feed
+
+
 @router.post("/preview")
 async def preview_xml_import(request: Request, db: Session = Depends(get_db)) -> dict:
-    _body, products, warnings = await _read_products(request)
+    body, products, warnings = await _read_products(request)
     ids = [item.kaspi_product_id for item in products]
     existing_ids = set(
         db.scalars(select(Product.kaspi_product_id).where(Product.kaspi_product_id.in_(ids))).all()
     )
+
+    # Preserve the exact uploaded XML before the potentially long registry commit.
+    # This makes the Pricing Engine source recoverable even if Render interrupts
+    # the later import request.
+    _store_feed_source(
+        db,
+        body=body,
+        source_filename=_source_filename(request),
+        activate=False,
+    )
+    db.commit()
+
     return {
         "total": len(products),
         "new_count": sum(1 for item in products if item.kaspi_product_id not in existing_ids),
@@ -125,22 +174,14 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
             products=stored_products,
         )
 
-        xml_text = body.decode("utf-8-sig")
-        feed = db.scalar(select(KaspiXmlFeed).order_by(KaspiXmlFeed.id.desc()).limit(1))
-        if feed is None:
-            feed = KaspiXmlFeed(
-                merchant_id=_merchant_id(body),
-                source_xml=xml_text,
-                generated_xml=xml_text,
-                active=True,
-            )
-            db.add(feed)
-        else:
-            feed.merchant_id = _merchant_id(body) or feed.merchant_id
-            feed.source_xml = xml_text
-            feed.generated_xml = xml_text
-            feed.active = True
-
+        db.execute(update(KaspiXmlFeed).values(active=False))
+        feed = _store_feed_source(
+            db,
+            body=body,
+            source_filename=_source_filename(request),
+            activate=True,
+        )
+        feed.active = True
         db.commit()
     except Exception:
         db.rollback()
