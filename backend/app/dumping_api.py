@@ -95,9 +95,6 @@ def _source_payload(db: Session, policy: DumpingPolicy) -> tuple[dict | None, st
             inventory_first=policy.inventory_first,
         )
     except Exception as exc:
-        # A broken or partially migrated supplier binding must not make the
-        # whole dumping workspace unavailable. The card remains visible and
-        # the operator can fix its source separately.
         return None, str(exc)
     if source is None:
         return None, None
@@ -136,6 +133,35 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
             "latest_run": _run_payload(latest),
         })
     return result
+
+
+@router.get("/feed-status")
+def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
+    feed = db.scalar(
+        select(KaspiXmlFeed)
+        .where(KaspiXmlFeed.active.is_(True))
+        .order_by(KaspiXmlFeed.id.desc())
+        .limit(1)
+    )
+    if feed is None:
+        return {
+            "configured": False,
+            "ready": False,
+            "source_filename": None,
+            "merchant_id": None,
+            "imported_at": None,
+            "generated_at": None,
+            "feed_url": "/feeds/kaspi/catalog.xml",
+        }
+    return {
+        "configured": True,
+        "ready": bool(feed.merchant_id and feed.generated_xml),
+        "source_filename": feed.source_filename,
+        "merchant_id": feed.merchant_id,
+        "imported_at": feed.imported_at,
+        "generated_at": feed.generated_at,
+        "feed_url": "/feeds/kaspi/catalog.xml",
+    }
 
 
 @router.get("/products/{product_id}")
