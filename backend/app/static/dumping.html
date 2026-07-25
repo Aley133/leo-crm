@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Демпинг</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
-  <link rel="stylesheet" href="/static/dumping.css?v=20260725-1">
+  <link rel="stylesheet" href="/static/dumping.css?v=20260725-2">
 </head>
 <body>
   <div class="shell">
@@ -31,9 +31,16 @@
           <article class="metric"><span>Публичный XML</span><strong class="feed-status">HTTPS</strong><small>/feeds/kaspi/catalog.xml</small></article>
         </section>
         <section class="connect-card">
-          <div><h2>Подключить товар вручную</h2><p>Выбери карточку, задай минимальную чистую прибыль и шаг ниже конкурента.</p></div>
+          <div><h2>Подключить товар вручную</h2><p>Введи название, артикул или Kaspi ID, затем выбери найденную карточку.</p></div>
           <form id="policy-form" class="policy-form">
-            <label class="wide"><span>Товар</span><select id="product-id" required><option value="">Выберите товар</option></select></label>
+            <label class="wide product-picker-label"><span>Товар</span>
+              <div id="product-picker" class="product-picker">
+                <input id="product-search" type="search" autocomplete="off" placeholder="Название, артикул или Kaspi ID" aria-controls="product-results" aria-expanded="false" required>
+                <input id="product-id" type="hidden">
+                <div id="product-results" class="product-results hidden" role="listbox"></div>
+              </div>
+              <small id="selected-product" class="selected-product">Товар не выбран</small>
+            </label>
             <label><span>Минимальная прибыль, ₸</span><input id="minimum-profit" type="number" min="0" step="1" value="1000" required></label>
             <label><span>Шаг ниже конкурента, ₸</span><input id="undercut-step" type="number" min="1" step="1" value="1" required></label>
             <label><span>Запас к доставке, дней</span><input id="delivery-buffer" type="number" min="0" max="30" value="1" required></label>
@@ -51,6 +58,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/dumping.js?v=20260725-1" defer></script>
+  <script src="/static/dumping.js?v=20260725-2" defer></script>
 </body>
 </html>
