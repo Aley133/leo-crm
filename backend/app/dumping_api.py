@@ -2,15 +2,15 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .db import get_db
+from .dumping_competitor_worker import enqueue_competitor_scan, state_for_product
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
-from .dumping_runner import execute_dumping_for_product
 from .dumping_service import resolve_cost_source
 from .models import Product
 
@@ -131,6 +131,7 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
             "source": source,
             "source_error": source_error,
             "latest_run": _run_payload(latest),
+            "scan_state": state_for_product(product.id),
         })
     return result
 
@@ -191,6 +192,7 @@ def read_dumping_policy(product_id: int, db: Session = Depends(get_db)) -> dict:
         "source": source,
         "source_error": source_error,
         "latest_run": _run_payload(latest),
+        "scan_state": state_for_product(product_id),
     }
 
 
@@ -212,19 +214,26 @@ def upsert_dumping_policy(
             setattr(policy, key, value)
     db.commit()
     db.refresh(policy)
+    if policy.enabled:
+        enqueue_competitor_scan(product_id, reason="policy_saved")
     return _policy_payload(policy) or {}
 
 
-@router.post("/products/{product_id}/run-now")
-async def run_dumping_now(product_id: int, db: Session = Depends(get_db)) -> dict:
-    try:
-        return await execute_dumping_for_product(db, product_id)
-    except ValueError as exc:
-        db.rollback()
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    except Exception as exc:
-        db.rollback()
-        raise HTTPException(status_code=502, detail=f"Kaspi competitor scan failed: {exc}") from exc
+@router.post("/products/{product_id}/run-now", status_code=status.HTTP_202_ACCEPTED)
+def run_dumping_now(product_id: int, db: Session = Depends(get_db)) -> dict:
+    product = db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+    policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
+    if policy is None or not policy.enabled:
+        raise HTTPException(status_code=409, detail="Демпинг для товара не подключён")
+    accepted = enqueue_competitor_scan(product_id, reason="manual")
+    return {
+        "status": "queued" if accepted else "already_queued",
+        "product_id": product_id,
+        "message": "Проверка Kaspi поставлена в отдельную очередь",
+        "scan_state": state_for_product(product_id),
+    }
 
 
 @public_router.get("/feeds/kaspi/catalog.xml", response_class=Response)
