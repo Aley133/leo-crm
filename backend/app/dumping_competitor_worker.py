@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import random
+import threading
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
@@ -11,8 +12,8 @@ from sqlalchemy import select
 from .db import SessionLocal
 from .dumping_models import DumpingPolicy
 
-# This queue is intentionally independent from Browser Agent.  It does not use
-# browser_agent_jobs, leases, heartbeats or the local Windows agent.  Supplier
+# This queue is intentionally independent from Browser Agent. It does not use
+# browser_agent_jobs, leases, heartbeats or the local Windows agent. Supplier
 # observations may enqueue product IDs after their own transaction commits, but
 # competitor HTTP work is executed only by this worker.
 _QUEUE: asyncio.Queue[int] = asyncio.Queue()
@@ -22,6 +23,8 @@ _DELAYED_TASKS: set[asyncio.Task] = set()
 _STOP_EVENT: asyncio.Event | None = None
 _WORKER_TASK: asyncio.Task | None = None
 _SCHEDULER_TASK: asyncio.Task | None = None
+_LOOP: asyncio.AbstractEventLoop | None = None
+_STATE_LOCK = threading.Lock()
 
 MIN_REQUEST_INTERVAL_SECONDS = 8.0
 PERIODIC_REFRESH_SECONDS = 10 * 60
@@ -33,32 +36,43 @@ def _now() -> datetime:
 
 
 def state_for_product(product_id: int) -> dict[str, Any] | None:
-    state = _STATES.get(product_id)
-    return None if state is None else dict(state)
+    with _STATE_LOCK:
+        state = _STATES.get(product_id)
+        return None if state is None else dict(state)
 
 
 def _set_state(product_id: int, **values: Any) -> None:
-    current = _STATES.setdefault(product_id, {})
-    current.update(values)
-    current["updated_at"] = _now().isoformat()
+    with _STATE_LOCK:
+        current = _STATES.setdefault(product_id, {})
+        current.update(values)
+        current["updated_at"] = _now().isoformat()
+
+
+def _enqueue_on_worker_loop(product_id: int, reason: str) -> None:
+    with _STATE_LOCK:
+        if product_id in _PENDING:
+            return
+        _PENDING.add(product_id)
+        current = _STATES.setdefault(product_id, {})
+        current.update(status="queued", reason=reason, last_error=None)
+        current["updated_at"] = _now().isoformat()
+    _QUEUE.put_nowait(product_id)
 
 
 def enqueue_competitor_scan(product_id: int, *, reason: str = "manual") -> bool:
-    """Put one product into the dedicated competitor queue once.
+    """Schedule one product in the dedicated competitor queue.
 
-    Safe to call from synchronous supplier-ingestion code.  No Browser Agent
-    job is created and no external request is performed by this function.
+    This function is thread-safe for synchronous supplier-ingestion callbacks.
+    It performs no external request and creates no Browser Agent job.
     """
-    if product_id in _PENDING:
-        return False
-    _PENDING.add(product_id)
-    _set_state(product_id, status="queued", reason=reason, last_error=None)
-    try:
-        _QUEUE.put_nowait(product_id)
-    except RuntimeError:
-        _PENDING.discard(product_id)
+    loop = _LOOP
+    if loop is None or loop.is_closed():
         _set_state(product_id, status="worker_unavailable", reason=reason)
         return False
+    with _STATE_LOCK:
+        if product_id in _PENDING:
+            return False
+    loop.call_soon_threadsafe(_enqueue_on_worker_loop, product_id, reason)
     return True
 
 
@@ -84,7 +98,6 @@ def _retry_after_seconds(exc: httpx.HTTPStatusError, attempts: int) -> float:
 
 
 async def _worker_loop(stop_event: asyncio.Event) -> None:
-    # Imported lazily to avoid an import cycle: dumping_runner imports enqueue.
     from .dumping_runner import execute_dumping_for_product
 
     last_request_at = 0.0
@@ -95,8 +108,9 @@ async def _worker_loop(stop_event: asyncio.Event) -> None:
         except asyncio.TimeoutError:
             continue
 
-        _PENDING.discard(product_id)
-        state = _STATES.get(product_id, {})
+        with _STATE_LOCK:
+            _PENDING.discard(product_id)
+            state = dict(_STATES.get(product_id, {}))
         attempts = int(state.get("attempts") or 0) + 1
         elapsed = loop.time() - last_request_at
         if elapsed < MIN_REQUEST_INTERVAL_SECONDS:
@@ -136,7 +150,7 @@ async def _worker_loop(stop_event: asyncio.Event) -> None:
                 )
         except (ValueError, RuntimeError) as exc:
             _set_state(product_id, status="blocked", attempts=attempts, last_error=str(exc), next_retry_at=None)
-        except Exception as exc:  # keep the queue alive on isolated product failures
+        except Exception as exc:
             delay = min(MAX_BACKOFF_SECONDS, 60.0 * (2 ** max(0, attempts - 1)))
             next_retry = _now() + timedelta(seconds=delay)
             _set_state(
@@ -153,7 +167,7 @@ async def _worker_loop(stop_event: asyncio.Event) -> None:
 
 
 async def _scheduler_loop(stop_event: asyncio.Event) -> None:
-    # Small startup delay prevents deployment startup from immediately hitting Kaspi.
+    # Do not hit Kaspi immediately after deployment startup.
     try:
         await asyncio.wait_for(stop_event.wait(), timeout=45.0)
         return
@@ -181,16 +195,17 @@ async def _scheduler_loop(stop_event: asyncio.Event) -> None:
 
 
 async def start_dumping_competitor_worker() -> None:
-    global _STOP_EVENT, _WORKER_TASK, _SCHEDULER_TASK
+    global _STOP_EVENT, _WORKER_TASK, _SCHEDULER_TASK, _LOOP
     if _WORKER_TASK is not None and not _WORKER_TASK.done():
         return
+    _LOOP = asyncio.get_running_loop()
     _STOP_EVENT = asyncio.Event()
     _WORKER_TASK = asyncio.create_task(_worker_loop(_STOP_EVENT), name="dumping-competitor-worker")
     _SCHEDULER_TASK = asyncio.create_task(_scheduler_loop(_STOP_EVENT), name="dumping-competitor-scheduler")
 
 
 async def stop_dumping_competitor_worker() -> None:
-    global _STOP_EVENT, _WORKER_TASK, _SCHEDULER_TASK
+    global _STOP_EVENT, _WORKER_TASK, _SCHEDULER_TASK, _LOOP
     if _STOP_EVENT is not None:
         _STOP_EVENT.set()
     for task in (_WORKER_TASK, _SCHEDULER_TASK):
@@ -207,3 +222,4 @@ async def stop_dumping_competitor_worker() -> None:
     _WORKER_TASK = None
     _SCHEDULER_TASK = None
     _STOP_EVENT = None
+    _LOOP = None
