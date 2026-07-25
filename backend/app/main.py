@@ -18,6 +18,8 @@ from .catalog_api import router as catalog_router
 from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
 from .db import engine
+from .dumping_api import public_router as dumping_public_router
+from .dumping_api import router as dumping_router
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .inventory_api import router as inventory_router
 from .kaspi_order_polling import LAST_RUN as KASPI_POLL_STATUS
@@ -42,8 +44,8 @@ from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 from .ui import router as ui_router
 
-APP_VERSION = "0.18.0"
-DEPLOYMENT_MARKER = "kaspi-archive-enrichment-and-polling-v1"
+APP_VERSION = "0.19.0"
+DEPLOYMENT_MARKER = "manual-dumping-engine-v1"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -75,6 +77,8 @@ app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
 app.include_router(browser_agent_registry_router)
 app.include_router(pricing_router)
+app.include_router(dumping_router)
+app.include_router(dumping_public_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
 app.include_router(commerce_router)
@@ -113,6 +117,7 @@ async def root() -> dict[str, object]:
         "deployment_marker": DEPLOYMENT_MARKER,
         "docs": "/docs",
         "crm": "/crm",
+        "kaspi_feed": "/feeds/kaspi/catalog.xml",
         "kaspi_polling": dict(KASPI_POLL_STATUS),
     }
 
