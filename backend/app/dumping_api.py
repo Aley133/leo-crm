@@ -11,7 +11,7 @@ from .auth import require_service_token
 from .db import get_db
 from .dumping_competitor_worker import enqueue_competitor_scan, state_for_product
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
-from .dumping_service import resolve_cost_source
+from .dumping_service import calculate_safe_floor, resolve_cost_source
 from .models import Product
 
 
@@ -106,6 +106,20 @@ def _source_payload(db: Session, policy: DumpingPolicy) -> tuple[dict | None, st
     }, None
 
 
+def _pricing_preview(policy: DumpingPolicy, source: dict | None) -> dict | None:
+    if source is None:
+        return None
+    floor = calculate_safe_floor(
+        unit_cost_kzt=Decimal(source["unit_cost_kzt"]),
+        minimum_profit_kzt=Decimal(policy.minimum_profit_kzt),
+    )
+    preorder_days = 0 if source["kind"] == "inventory" else int(source["delivery_days"] or 0) + int(policy.supplier_delivery_buffer_days)
+    return {
+        "safe_floor_kzt": floor,
+        "preorder_days": preorder_days,
+    }
+
+
 @router.get("")
 def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
@@ -130,6 +144,7 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
             "policy": _policy_payload(policy),
             "source": source,
             "source_error": source_error,
+            "pricing_preview": _pricing_preview(policy, source),
             "latest_run": _run_payload(latest),
             "scan_state": state_for_product(product.id),
         })
@@ -191,6 +206,7 @@ def read_dumping_policy(product_id: int, db: Session = Depends(get_db)) -> dict:
         "policy": _policy_payload(policy),
         "source": source,
         "source_error": source_error,
+        "pricing_preview": None if policy is None else _pricing_preview(policy, source),
         "latest_run": _run_payload(latest),
         "scan_state": state_for_product(product_id),
     }
