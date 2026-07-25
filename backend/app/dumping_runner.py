@@ -1,11 +1,10 @@
 from __future__ import annotations
 
-import asyncio
-
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
+from .dumping_competitor_worker import enqueue_competitor_scan
 from .dumping_models import DumpingPolicy, KaspiXmlFeed
 from .dumping_service import decide_dumping_price, publish_decision
 from .kaspi_offer_competitor import scan_kaspi_competitors
@@ -14,6 +13,12 @@ from .suppliers import ProductBinding
 
 
 async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
+    """Execute one competitor scan and publish one pricing decision.
+
+    This function is called by the dedicated dumping competitor worker only.
+    It does not create Browser Agent jobs and does not depend on the supplier
+    browser process.
+    """
     product = db.get(Product, product_id)
     if product is None:
         raise ValueError("Product not found")
@@ -63,20 +68,12 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
     }
 
 
-async def _refresh_supplier_products(product_ids: list[int]) -> None:
-    for product_id in product_ids:
-        with SessionLocal() as db:
-            try:
-                await execute_dumping_for_product(db, product_id)
-            except Exception:
-                db.rollback()
-
-
 def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
-    """Reprice every enabled product bound to a changed supplier offer.
+    """Queue enabled products after a committed supplier observation.
 
-    This runs after the supplier observation transaction commits and always uses
-    fresh database sessions, so Browser Agent ingestion remains authoritative.
+    Supplier ingestion remains authoritative and finishes first.  This function
+    only resolves product IDs and places them into the independent competitor
+    queue.  It never calls Kaspi and never interacts with Browser Agent jobs.
     """
     with SessionLocal() as db:
         product_ids = list(
@@ -92,5 +89,5 @@ def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
                 .distinct()
             )
         )
-    if product_ids:
-        asyncio.run(_refresh_supplier_products(product_ids))
+    for product_id in product_ids:
+        enqueue_competitor_scan(product_id, reason="supplier_snapshot_changed")
