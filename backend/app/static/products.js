@@ -124,7 +124,9 @@ const previewXml = async (file) => {
   confirmImportButton.disabled = true;
   xmlDialog.showModal();
   try {
-    renderXmlPreview(await xmlRequest("preview", file));
+    const preview = await xmlRequest("preview", file);
+    renderXmlPreview(preview);
+    await xmlRequest("retain-source", file);
     confirmImportButton.disabled = false;
   } catch (error) {
     xmlPreview.innerHTML = `<div class="empty">${escapeHtml(error instanceof Error ? error.message : "Не удалось проверить XML")}</div>`;
