@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .browser_agent_models import BrowserAgentJob
+from .dumping_events import mark_supplier_product_for_dumping_refresh
 from .monitoring import (
     AttemptOutcome,
     MonitorAttempt,
@@ -97,7 +98,8 @@ def persist_browser_agent_success(
 
     A changed supplier state creates its price recommendation in the same
     transaction. Repeated checks with an identical fingerprint do not create
-    duplicate calculations.
+    duplicate calculations. Enabled dumping policies are scheduled only after
+    this transaction commits successfully.
     """
     if job.monitor_target_id is None:
         raise BrowserAgentResultError("job is not linked to a monitor target")
@@ -212,6 +214,7 @@ def persist_browser_agent_success(
         )
         session.flush()
         calculate_product_price(session, product_id=product_id)
+        mark_supplier_product_for_dumping_refresh(session, supplier_product.id)
 
     target.last_checked_at = finished_at
     target.next_check_at = finished_at + timedelta(seconds=target.interval_seconds)
