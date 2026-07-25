@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import html
 import json
+import random
 import re
 import uuid
 from dataclasses import dataclass
@@ -109,6 +111,26 @@ def _merchant_id(offer: dict[str, Any]) -> str:
     return str(offer.get("merchantId") or offer.get("merchantUID") or "").strip()
 
 
+async def _request_with_retry(client: httpx.AsyncClient, method: str, url: str, **kwargs: Any) -> httpx.Response:
+    response: httpx.Response | None = None
+    for attempt in range(4):
+        response = await client.request(method, url, **kwargs)
+        if response.status_code != 429:
+            response.raise_for_status()
+            return response
+        if attempt == 3:
+            response.raise_for_status()
+        retry_after = response.headers.get("Retry-After")
+        try:
+            delay = float(retry_after) if retry_after else 1.5 * (2 ** attempt)
+        except ValueError:
+            delay = 1.5 * (2 ** attempt)
+        await asyncio.sleep(min(8.0, max(0.8, delay)) + random.uniform(0.1, 0.5))
+    assert response is not None
+    response.raise_for_status()
+    return response
+
+
 async def scan_kaspi_competitors(
     product: Product,
     *,
@@ -121,7 +143,9 @@ async def scan_kaspi_competitors(
     product_url = f"https://kaspi.kz/shop/p/{_slugify(product.name)}-{master_id}/?c={city_id}"
     timeout = httpx.Timeout(25.0, connect=15.0)
     async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
-        page = await client.get(
+        page = await _request_with_retry(
+            client,
+            "GET",
             product_url,
             headers={
                 "User-Agent": HEADERS["User-Agent"],
@@ -129,7 +153,6 @@ async def scan_kaspi_competitors(
                 "Accept-Language": HEADERS["Accept-Language"],
             },
         )
-        page.raise_for_status()
         promo = _promo_conditions(page.text)
         if promo is None:
             raise ValueError("Kaspi promoConditions не найдены на карточке")
@@ -164,8 +187,7 @@ async def scan_kaspi_competitors(
         for page_no in range(max_pages):
             body = dict(body_base)
             body["page"] = page_no
-            response = await client.post(endpoint, headers=headers, json=body)
-            response.raise_for_status()
+            response = await _request_with_retry(client, "POST", endpoint, headers=headers, json=body)
             page_rows = _offers(response.json())
             added = 0
             for offer in page_rows:
