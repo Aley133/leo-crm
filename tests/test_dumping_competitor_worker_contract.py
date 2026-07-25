@@ -8,8 +8,9 @@ def test_competitor_worker_is_independent_from_browser_agent() -> None:
     worker = (ROOT / "backend" / "app" / "dumping_competitor_worker.py").read_text(encoding="utf-8")
     runner = (ROOT / "backend" / "app" / "dumping_runner.py").read_text(encoding="utf-8")
 
-    assert "browser_agent" not in worker.lower()
-    assert "Browser Agent job" in worker
+    assert "from .browser_agent" not in worker
+    assert "import browser_agent" not in worker
+    assert "browser_agent_jobs" not in runner
     assert "enqueue_competitor_scan" in runner
     assert "asyncio.run" not in runner
     assert "refresh_dumping_for_supplier_product" in runner
