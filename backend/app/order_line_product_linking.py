@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable
 from datetime import UTC, datetime
 
 from sqlalchemy import or_, select
@@ -72,21 +73,66 @@ def link_order_line_to_product(
     return product
 
 
-def link_all_matching_order_lines(session: Session, *, product: Product) -> int:
-    conditions = []
-    if _clean(product.merchant_sku):
-        conditions.append(MarketplaceOrderLine.merchant_sku == product.merchant_sku.strip())
-        conditions.append(MarketplaceOrderLine.external_product_id == product.merchant_sku.strip())
-    if _clean(product.kaspi_product_id):
-        conditions.append(MarketplaceOrderLine.external_product_id == product.kaspi_product_id.strip())
-        conditions.append(MarketplaceOrderLine.merchant_sku == product.kaspi_product_id.strip())
-    if not conditions:
+def _product_identity_map(products: Iterable[Product]) -> dict[str, Product]:
+    """Build one deterministic identity map for a bulk XML import.
+
+    The XML merchant SKU is authoritative. ``setdefault`` keeps the first stored
+    product when malformed source data contains a duplicate identity, matching the
+    previous ``ORDER BY Product.id`` behaviour.
+    """
+
+    identity_map: dict[str, Product] = {}
+    for product in products:
+        for identity in (_clean(product.merchant_sku), _clean(product.kaspi_product_id)):
+            if identity is not None:
+                identity_map.setdefault(identity, product)
+    return identity_map
+
+
+def link_all_matching_order_lines_for_products(
+    session: Session,
+    *,
+    products: Iterable[Product],
+) -> int:
+    """Link all matching order lines in one database read.
+
+    The old XML commit called ``link_all_matching_order_lines`` once per product.
+    A normal 1,600-item catalog therefore produced thousands of SQL statements and
+    could exceed Render's HTTP timeout. This implementation builds an in-memory
+    identity map and scans the existing order lines once.
+    """
+
+    identity_map = _product_identity_map(products)
+    if not identity_map:
         return 0
 
     linked = 0
-    for line in session.scalars(select(MarketplaceOrderLine).where(or_(*conditions))):
+    lines = session.scalars(
+        select(MarketplaceOrderLine).where(
+            or_(
+                MarketplaceOrderLine.merchant_sku.is_not(None),
+                MarketplaceOrderLine.external_product_id.is_not(None),
+            )
+        )
+    )
+    for line in lines:
+        product = None
+        for identity in (_clean(line.merchant_sku), _clean(line.external_product_id)):
+            if identity is not None:
+                product = identity_map.get(identity)
+                if product is not None:
+                    break
+        if product is None:
+            continue
+
         line.product_id = product.id
         if not line.title or line.title.strip().casefold() in {"unknown product", "название не получено"}:
             line.title = product.name
         linked += 1
     return linked
+
+
+def link_all_matching_order_lines(session: Session, *, product: Product) -> int:
+    """Backward-compatible single-product wrapper."""
+
+    return link_all_matching_order_lines_for_products(session, products=(product,))
