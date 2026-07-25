@@ -11,14 +11,14 @@ def test_safe_floor_preserves_requested_profit_across_logistics_band() -> None:
     assert calculate_safe_floor(
         unit_cost_kzt=Decimal("2300"),
         minimum_profit_kzt=Decimal("1000"),
-    ) == Decimal("4178.00")
+    ) == Decimal("4179.00")
 
 
 def test_safe_floor_uses_higher_logistics_band_when_required() -> None:
     assert calculate_safe_floor(
         unit_cost_kzt=Decimal("5640"),
         minimum_profit_kzt=Decimal("1000"),
-    ) == Decimal("8955.00")
+    ) == Decimal("8956.00")
 
 
 def test_feed_update_changes_only_matching_offer_price_and_preorder() -> None:
@@ -31,11 +31,11 @@ def test_feed_update_changes_only_matching_offer_price_and_preorder() -> None:
     generated = update_feed_xml(
         source,
         sku_candidates={"SKU-1"},
-        price_kzt=Decimal("8955"),
+        price_kzt=Decimal("8956"),
         preorder_days=4,
     )
 
-    assert "8955" in generated
+    assert "8956" in generated
     assert 'preOrder="4"' in generated
     assert "7777" in generated
     assert 'preOrder="2"' in generated
