@@ -26,16 +26,9 @@ const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU") : "�
 
 const request = async (url, options = {}) => {
   const token = localStorage.getItem(storageKey);
-  const response = await fetch(url, {
-    cache: "no-store",
-    ...options,
-    headers: {Authorization:`Bearer ${token}`, ...(options.headers || {})},
-  });
+  const response = await fetch(url, {cache:"no-store", ...options, headers:{Authorization:`Bearer ${token}`, ...(options.headers || {})}});
   const payload = await response.json().catch(() => ({}));
-  if (response.status === 401) {
-    localStorage.removeItem(storageKey);
-    throw new Error("Токен не принят");
-  }
+  if (response.status === 401) { localStorage.removeItem(storageKey); throw new Error("Токен не принят"); }
   if (!response.ok) throw new Error(payload.detail || `API вернул ошибку ${response.status}`);
   return payload;
 };
@@ -47,23 +40,14 @@ const setBusy = (button, busy, text) => {
   button.textContent = busy ? text : button.dataset.label;
 };
 
-const productCaption = (row) => {
-  const identity = row.merchant_sku || row.kaspi_product_id || "без артикула";
-  return `${row.name} · ${identity}`;
-};
-
-const closeProductResults = () => {
-  productResults.classList.add("hidden");
-  productSearch.setAttribute("aria-expanded", "false");
-};
-
-const clearProductSelection = ({keepQuery = false} = {}) => {
+const productCaption = (row) => `${row.name} · ${row.merchant_sku || row.kaspi_product_id || "без артикула"}`;
+const closeProductResults = () => { productResults.classList.add("hidden"); productSearch.setAttribute("aria-expanded", "false"); };
+const clearProductSelection = ({keepQuery=false}={}) => {
   productIdInput.value = "";
   selectedProduct.textContent = "Товар не выбран";
   selectedProduct.classList.remove("selected");
   if (!keepQuery) productSearch.value = "";
 };
-
 const selectProduct = (row) => {
   productIdInput.value = String(row.product_id);
   productSearch.value = row.name;
@@ -75,38 +59,28 @@ const selectProduct = (row) => {
 const renderProductResults = (rows, query) => {
   const configured = new Set(configuredRows.map((row) => Number(row.product_id)));
   const available = rows.filter((row) => !configured.has(Number(row.product_id)));
-  if (!available.length) {
-    productResults.innerHTML = `<div class="product-result-empty">По запросу «${escapeHtml(query)}» свободные карточки не найдены.</div>`;
-  } else {
-    productResults.innerHTML = available.map((row) => `
-      <button class="product-result" type="button" role="option" data-product-id="${row.product_id}">
-        <strong>${escapeHtml(row.name)}</strong>
-        <span>Артикул: ${escapeHtml(row.merchant_sku || "—")} · Kaspi ID: ${escapeHtml(row.kaspi_product_id)}</span>
-      </button>`).join("");
-  }
+  productResults.innerHTML = available.length ? available.map((row) => `
+    <button class="product-result" type="button" role="option" data-product-id="${row.product_id}">
+      <strong>${escapeHtml(row.name)}</strong>
+      <span>Артикул: ${escapeHtml(row.merchant_sku || "—")} · Kaspi ID: ${escapeHtml(row.kaspi_product_id)}</span>
+    </button>`).join("") : `<div class="product-result-empty">По запросу «${escapeHtml(query)}» свободные карточки не найдены.</div>`;
   productResults.classList.remove("hidden");
   productSearch.setAttribute("aria-expanded", "true");
-  productResults.querySelectorAll(".product-result").forEach((button) => {
-    button.addEventListener("click", () => {
-      const row = available.find((item) => Number(item.product_id) === Number(button.dataset.productId));
-      if (row) selectProduct(row);
-    });
-  });
+  productResults.querySelectorAll(".product-result").forEach((button) => button.addEventListener("click", () => {
+    const row = available.find((item) => Number(item.product_id) === Number(button.dataset.productId));
+    if (row) selectProduct(row);
+  }));
 };
 
 const searchProducts = async () => {
   const query = productSearch.value.trim();
-  if (query.length < 2) {
-    closeProductResults();
-    return;
-  }
+  if (query.length < 2) { closeProductResults(); return; }
   if (searchController) searchController.abort();
   searchController = new AbortController();
   productResults.innerHTML = '<div class="product-result-empty">Ищу товар…</div>';
   productResults.classList.remove("hidden");
-  productSearch.setAttribute("aria-expanded", "true");
   try {
-    const rows = await request(`/api/product-registry/products?q=${encodeURIComponent(query)}&limit=20`, {signal: searchController.signal});
+    const rows = await request(`/api/product-registry/products?q=${encodeURIComponent(query)}&limit=20`, {signal:searchController.signal});
     renderProductResults(rows, query);
   } catch (error) {
     if (error?.name === "AbortError") return;
@@ -114,12 +88,26 @@ const searchProducts = async () => {
   }
 };
 
-const statusLabel = (row) => {
+const scanLabel = (row) => {
+  const state = row.scan_state;
   if (!row.policy.enabled) return '<span class="badge-off">Отключён</span>';
-  const status = row.latest_run?.status;
-  if (status === "floor_limited") return '<span class="badge-limited">Ограничен порогом</span>';
-  if (status) return '<span class="badge-ready">Активен</span>';
+  if (state?.status === "queued") return '<span class="badge-off">В очереди</span>';
+  if (state?.status === "scanning") return '<span class="badge-ready">Проверяется</span>';
+  if (state?.status === "retry_wait") return '<span class="badge-limited">Повтор позже</span>';
+  if (state?.status === "blocked" || state?.status === "failed") return '<span class="badge-limited">Нужна проверка</span>';
+  if (row.latest_run?.status === "floor_limited") return '<span class="badge-limited">Ограничен порогом</span>';
+  if (row.latest_run?.status) return '<span class="badge-ready">Активен</span>';
   return '<span class="badge-off">Ожидает запуска</span>';
+};
+
+const scanMeta = (row) => {
+  const state = row.scan_state;
+  if (!state) return "Отдельная очередь конкурентов";
+  if (state.status === "retry_wait") return `${state.last_error || "Kaspi временно ограничил запросы"}. Следующая попытка: ${dateTime(state.next_retry_at)}`;
+  if (state.status === "queued") return "Проверка поставлена в отдельную очередь";
+  if (state.status === "scanning") return "Сканируется отдельным HTTP-исполнителем";
+  if (state.last_error) return state.last_error;
+  return `Обновлено: ${dateTime(state.updated_at)}`;
 };
 
 const renderFeedStatus = (feed) => {
@@ -131,10 +119,9 @@ const renderFeedStatus = (feed) => {
     xmlSourceStatus.textContent = "Нет источника";
     return;
   }
-  const filename = feed.source_filename || "Последний XML каталога";
+  xmlSourceTitle.textContent = feed.source_filename || "Последний XML каталога";
   const merchant = feed.merchant_id ? `merchantId ${feed.merchant_id}` : "merchantId не найден";
   const imported = feed.imported_at ? `импортирован ${dateTime(feed.imported_at)}` : "дата импорта неизвестна";
-  xmlSourceTitle.textContent = filename;
   xmlSourceMeta.textContent = `${merchant} · ${imported} · используется Pricing Engine`;
   xmlSourceStatus.textContent = feed.ready ? "Готов к публикации" : "Нужен merchantId";
 };
@@ -150,10 +137,10 @@ const render = (rows) => {
     <article class="dumping-card" data-product-id="${row.product_id}">
       <div class="dumping-head">
         <div class="dumping-title"><h2>${escapeHtml(row.name)}</h2><span>Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}</span></div>
-        <div class="dumping-actions"><button class="button secondary edit-policy" type="button">Настроить</button><button class="button run-now" type="button">Запустить сейчас</button></div>
+        <div class="dumping-actions"><button class="button secondary edit-policy" type="button">Настроить</button><button class="button run-now" type="button">Поставить в очередь</button></div>
       </div>
       <div class="dumping-grid">
-        <div><span>Статус</span><strong>${statusLabel(row)}</strong></div>
+        <div><span>Статус</span><strong>${scanLabel(row)}</strong><small>${escapeHtml(scanMeta(row))}</small></div>
         <div><span>Источник</span><strong>${escapeHtml(row.source?.name || "Нет источника")}</strong><small>${escapeHtml(row.source?.kind || "—")}</small></div>
         <div><span>Себестоимость</span><strong>${money(row.source?.unit_cost_kzt)}</strong></div>
         <div><span>Безопасный порог</span><strong>${money(row.latest_run?.safe_floor_kzt)}</strong></div>
@@ -164,19 +151,14 @@ const render = (rows) => {
         <div><span>Шаг</span><strong>${money(row.policy.undercut_step_kzt)}</strong></div>
         <div><span>preOrder</span><strong>${row.latest_run?.preorder_days ?? "—"} дн.</strong></div>
         <div><span>Цена конкурента</span><strong>${money(row.latest_run?.competitor_price_kzt)}</strong></div>
-        <div><span>Последний запуск</span><strong>${dateTime(row.latest_run?.created_at)}</strong></div>
+        <div><span>Последний успешный запуск</span><strong>${dateTime(row.latest_run?.created_at)}</strong></div>
       </div>
     </article>`).join("");
   empty.classList.toggle("hidden", rows.length > 0);
 };
 
 const fillForm = (row) => {
-  selectProduct({
-    product_id: row.product_id,
-    name: row.name,
-    merchant_sku: row.merchant_sku,
-    kaspi_product_id: row.kaspi_product_id,
-  });
+  selectProduct({product_id:row.product_id,name:row.name,merchant_sku:row.merchant_sku,kaspi_product_id:row.kaspi_product_id});
   document.querySelector("#minimum-profit").value = row.policy.minimum_profit_kzt;
   document.querySelector("#undercut-step").value = row.policy.undercut_step_kzt;
   document.querySelector("#delivery-buffer").value = row.policy.supplier_delivery_buffer_days;
@@ -190,8 +172,7 @@ const fillForm = (row) => {
 };
 
 const resetPolicyForm = () => {
-  policyForm.reset();
-  clearProductSelection();
+  policyForm.reset(); clearProductSelection();
   document.querySelector("#minimum-profit").value = "1000";
   document.querySelector("#undercut-step").value = "1";
   document.querySelector("#delivery-buffer").value = "1";
@@ -200,9 +181,7 @@ const resetPolicyForm = () => {
   document.querySelector("#inventory-first").checked = true;
   document.querySelector("#auto-publish").checked = true;
   document.querySelector("#enabled").checked = true;
-  const button = document.querySelector("#save-policy");
-  button.dataset.label = "Подключить";
-  button.textContent = "Подключить";
+  const button = document.querySelector("#save-policy"); button.dataset.label = "Подключить"; button.textContent = "Подключить";
 };
 
 const loadPage = async () => {
@@ -210,83 +189,55 @@ const loadPage = async () => {
   if (!token) { authPanel.classList.remove("hidden"); page.classList.add("hidden"); return; }
   setBusy(refreshButton, true, "Обновляю…"); message.textContent = "";
   try {
-    const [rows, feed] = await Promise.all([
-      request("/api/dumping"),
-      request("/api/dumping/feed-status"),
-    ]);
-    render(rows);
-    renderFeedStatus(feed);
-    authPanel.classList.add("hidden");
-    page.classList.remove("hidden");
+    const [rows, feed] = await Promise.all([request("/api/dumping"), request("/api/dumping/feed-status")]);
+    render(rows); renderFeedStatus(feed); authPanel.classList.add("hidden"); page.classList.remove("hidden");
   } catch (error) {
     message.textContent = error instanceof Error ? error.message : "Не удалось загрузить демпинг";
     if (!localStorage.getItem(storageKey)) authPanel.classList.remove("hidden");
   } finally { setBusy(refreshButton, false, ""); }
 };
 
-productSearch.addEventListener("input", () => {
-  clearProductSelection({keepQuery:true});
-  window.clearTimeout(searchTimer);
-  searchTimer = window.setTimeout(searchProducts, 250);
-});
-
-productSearch.addEventListener("focus", () => {
-  if (productSearch.value.trim().length >= 2 && !productIdInput.value) searchProducts();
-});
-
-document.addEventListener("click", (event) => {
-  if (!event.target.closest("#product-picker")) closeProductResults();
-});
+productSearch.addEventListener("input", () => { clearProductSelection({keepQuery:true}); clearTimeout(searchTimer); searchTimer = setTimeout(searchProducts, 250); });
+productSearch.addEventListener("focus", () => { if (productSearch.value.trim().length >= 2 && !productIdInput.value) searchProducts(); });
+document.addEventListener("click", (event) => { if (!event.target.closest("#product-picker")) closeProductResults(); });
 
 policyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const productId = Number(productIdInput.value);
-  if (!productId) {
-    message.textContent = "Сначала найди и выбери товар из результатов поиска.";
-    productSearch.focus();
-    return;
-  }
-  const button = document.querySelector("#save-policy");
-  setBusy(button, true, "Сохраняю…"); message.textContent = "";
+  if (!productId) { message.textContent = "Сначала найди и выбери товар из результатов поиска."; productSearch.focus(); return; }
+  const button = document.querySelector("#save-policy"); setBusy(button, true, "Сохраняю…"); message.textContent = "";
   try {
-    await request(`/api/dumping/products/${productId}`, {
-      method:"PUT",
-      headers:{"Content-Type":"application/json"},
-      body:JSON.stringify({
-        enabled:document.querySelector("#enabled").checked,
-        minimum_profit_kzt:Number(document.querySelector("#minimum-profit").value),
-        undercut_step_kzt:Number(document.querySelector("#undercut-step").value),
-        supplier_delivery_buffer_days:Number(document.querySelector("#delivery-buffer").value),
-        inventory_first:document.querySelector("#inventory-first").checked,
-        auto_publish_xml:document.querySelector("#auto-publish").checked,
-        city_id:document.querySelector("#city-id").value.trim(),
-        zone_id:document.querySelector("#zone-id").value.trim(),
-      }),
-    });
-    message.textContent = "Настройки демпинга сохранены.";
-    resetPolicyForm();
-    await loadPage();
+    await request(`/api/dumping/products/${productId}`, {method:"PUT",headers:{"Content-Type":"application/json"},body:JSON.stringify({
+      enabled:document.querySelector("#enabled").checked,
+      minimum_profit_kzt:Number(document.querySelector("#minimum-profit").value),
+      undercut_step_kzt:Number(document.querySelector("#undercut-step").value),
+      supplier_delivery_buffer_days:Number(document.querySelector("#delivery-buffer").value),
+      inventory_first:document.querySelector("#inventory-first").checked,
+      auto_publish_xml:document.querySelector("#auto-publish").checked,
+      city_id:document.querySelector("#city-id").value.trim(),
+      zone_id:document.querySelector("#zone-id").value.trim(),
+    })});
+    message.textContent = "Настройки сохранены. Первая проверка поставлена в отдельную очередь.";
+    resetPolicyForm(); await loadPage();
   } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось сохранить"; }
   finally { setBusy(button, false, ""); }
 });
 
 list.addEventListener("click", async (event) => {
-  const card = event.target.closest(".dumping-card");
-  if (!card) return;
+  const card = event.target.closest(".dumping-card"); if (!card) return;
   const productId = Number(card.dataset.productId);
   const row = configuredRows.find((item) => Number(item.product_id) === productId);
   if (event.target.closest(".edit-policy") && row) { fillForm(row); return; }
-  const runButton = event.target.closest(".run-now");
-  if (!runButton) return;
-  setBusy(runButton, true, "Проверяю Kaspi…"); message.textContent = "";
+  const runButton = event.target.closest(".run-now"); if (!runButton) return;
+  setBusy(runButton, true, "Ставлю в очередь…"); message.textContent = "";
   try {
     const result = await request(`/api/dumping/products/${productId}/run-now`, {method:"POST"});
-    message.textContent = `Опубликовано: ${money(result.decision.target_price_kzt)}, preOrder ${result.decision.preorder_days} дн.`;
+    message.textContent = result.status === "already_queued" ? "Карточка уже ожидает проверку." : "Проверка поставлена в отдельную очередь. Страница Kaspi не запрашивается из интерфейса.";
     await loadPage();
-  } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось выполнить демпинг"; }
+  } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось поставить проверку в очередь"; }
   finally { setBusy(runButton, false, ""); }
 });
 
-tokenForm.addEventListener("submit", (event) => { event.preventDefault(); const token = tokenInput.value.trim(); if (!token) return; localStorage.setItem(storageKey, token); tokenInput.value = ""; loadPage(); });
+tokenForm.addEventListener("submit", (event) => { event.preventDefault(); const token=tokenInput.value.trim(); if(!token)return; localStorage.setItem(storageKey,token); tokenInput.value=""; loadPage(); });
 refreshButton.addEventListener("click", loadPage);
 loadPage();
