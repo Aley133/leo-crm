@@ -19,6 +19,7 @@ const xmlSourceStatus = document.querySelector("#xml-source-status");
 let configuredRows = [];
 let searchTimer = null;
 let searchController = null;
+let livePollTimer = null;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} KZT`;
@@ -93,7 +94,8 @@ const scanLabel = (row) => {
   if (!row.policy.enabled) return '<span class="badge-off">Отключён</span>';
   if (state?.status === "queued") return '<span class="badge-off">В очереди</span>';
   if (state?.status === "scanning") return '<span class="badge-ready">Проверяется</span>';
-  if (state?.status === "retry_wait") return '<span class="badge-limited">Повтор позже</span>';
+  if (state?.status === "retry_wait") return '<span class="badge-limited">Автоповтор</span>';
+  if (state?.status === "completed") return '<span class="badge-ready">Успешно</span>';
   if (state?.status === "blocked" || state?.status === "failed") return '<span class="badge-limited">Нужна проверка</span>';
   if (row.latest_run?.status === "floor_limited") return '<span class="badge-limited">Ограничен порогом</span>';
   if (row.latest_run?.status) return '<span class="badge-ready">Активен</span>';
@@ -102,10 +104,11 @@ const scanLabel = (row) => {
 
 const scanMeta = (row) => {
   const state = row.scan_state;
-  if (!state) return "Отдельная очередь конкурентов";
-  if (state.status === "retry_wait") return `${state.last_error || "Kaspi временно ограничил запросы"}. Следующая попытка: ${dateTime(state.next_retry_at)}`;
-  if (state.status === "queued") return "Проверка поставлена в отдельную очередь";
-  if (state.status === "scanning") return "Сканируется отдельным HTTP-исполнителем";
+  if (!state) return "Отдельная очередь конкурентов готова";
+  if (state.status === "retry_wait") return `${state.last_error || "Kaspi временно ограничил запросы"}. Попытка №${state.attempts || 1}; следующий запуск: ${dateTime(state.next_retry_at)}`;
+  if (state.status === "queued") return `Ожидает выполнения. В очереди сейчас: ${state.queue_size ?? 0}`;
+  if (state.status === "scanning") return state.stage === "opening_product_card" ? "Открываем карточку Kaspi и получаем параметры офферов" : "Получаем продавцов и рассчитываем новую цену";
+  if (state.status === "completed") return `XML обновлён: ${dateTime(state.last_success_at || state.finished_at)}`;
   if (state.last_error) return state.last_error;
   return `Обновлено: ${dateTime(state.updated_at)}`;
 };
@@ -133,28 +136,49 @@ const render = (rows) => {
   document.querySelector("#summary-limited").textContent = rows.filter((row) => row.latest_run?.status === "floor_limited").length;
   document.querySelector("#rows-label").textContent = `Подключено карточек: ${rows.length}`;
   document.querySelector("#updated-at").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit", minute:"2-digit"})}`;
-  list.innerHTML = rows.map((row) => `
+  list.innerHTML = rows.map((row) => {
+    const run = row.latest_run || {};
+    const preview = row.pricing_preview || {};
+    const state = row.scan_state || {};
+    const explanation = run.explanation_json || {};
+    const ownPrice = run.own_price_kzt ?? state.own_price_kzt;
+    const competitorPrice = run.competitor_price_kzt ?? state.competitor_price_kzt;
+    const competitorName = explanation.competitor_name || state.competitor_name || "—";
+    const ownPosition = explanation.own_position ?? state.own_position;
+    const sellerCount = explanation.seller_count ?? state.seller_count;
+    const safeFloor = run.safe_floor_kzt ?? preview.safe_floor_kzt;
+    const targetPrice = run.target_price_kzt ?? state.target_price_kzt;
+    const preorderDays = run.preorder_days ?? preview.preorder_days;
+    return `
     <article class="dumping-card" data-product-id="${row.product_id}">
       <div class="dumping-head">
         <div class="dumping-title"><h2>${escapeHtml(row.name)}</h2><span>Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}</span></div>
-        <div class="dumping-actions"><button class="button secondary edit-policy" type="button">Настроить</button><button class="button run-now" type="button">Поставить в очередь</button></div>
+        <div class="dumping-actions"><button class="button secondary edit-policy" type="button">Настроить</button><button class="button run-now" type="button">Проверить сейчас</button></div>
       </div>
       <div class="dumping-grid">
-        <div><span>Статус</span><strong>${scanLabel(row)}</strong><small>${escapeHtml(scanMeta(row))}</small></div>
-        <div><span>Источник</span><strong>${escapeHtml(row.source?.name || "Нет источника")}</strong><small>${escapeHtml(row.source?.kind || "—")}</small></div>
+        <div><span>Статус проверки</span><strong>${scanLabel(row)}</strong><small>${escapeHtml(scanMeta(row))}</small></div>
+        <div><span>Источник себестоимости</span><strong>${escapeHtml(row.source?.name || "Нет источника")}</strong><small>${escapeHtml(row.source?.kind || "—")}</small></div>
         <div><span>Себестоимость</span><strong>${money(row.source?.unit_cost_kzt)}</strong></div>
-        <div><span>Безопасный порог</span><strong>${money(row.latest_run?.safe_floor_kzt)}</strong></div>
-        <div><span>Целевая цена</span><strong>${money(row.latest_run?.target_price_kzt)}</strong></div>
+        <div><span>Безопасный порог</span><strong>${money(safeFloor)}</strong></div>
+        <div><span>Целевая цена XML</span><strong>${money(targetPrice)}</strong></div>
+      </div>
+      <div class="dumping-grid">
+        <div><span>Наша цена</span><strong>${money(ownPrice)}</strong></div>
+        <div><span>Первое место</span><strong>${money(competitorPrice)}</strong><small>${escapeHtml(competitorName)}</small></div>
+        <div><span>Наша позиция</span><strong>${ownPosition == null ? "—" : `№ ${ownPosition}`}</strong><small>${sellerCount == null ? "Продавцы ещё не загружены" : `Всего продавцов: ${sellerCount}`}</small></div>
+        <div><span>preOrder</span><strong>${preorderDays ?? "—"} дн.</strong></div>
+        <div><span>Последний успешный запуск</span><strong>${dateTime(run.created_at || state.last_success_at)}</strong></div>
       </div>
       <div class="dumping-grid">
         <div><span>Минимальная прибыль</span><strong>${money(row.policy.minimum_profit_kzt)}</strong></div>
-        <div><span>Шаг</span><strong>${money(row.policy.undercut_step_kzt)}</strong></div>
-        <div><span>preOrder</span><strong>${row.latest_run?.preorder_days ?? "—"} дн.</strong></div>
-        <div><span>Цена конкурента</span><strong>${money(row.latest_run?.competitor_price_kzt)}</strong></div>
-        <div><span>Последний успешный запуск</span><strong>${dateTime(row.latest_run?.created_at)}</strong></div>
+        <div><span>Шаг ниже конкурента</span><strong>${money(row.policy.undercut_step_kzt)}</strong></div>
       </div>
-    </article>`).join("");
+    </article>`;
+  }).join("");
   empty.classList.toggle("hidden", rows.length > 0);
+  const hasLiveWork = rows.some((row) => ["queued", "scanning", "retry_wait"].includes(row.scan_state?.status));
+  clearTimeout(livePollTimer);
+  if (hasLiveWork) livePollTimer = setTimeout(() => loadPage({silent:true}), 5000);
 };
 
 const fillForm = (row) => {
@@ -184,17 +208,18 @@ const resetPolicyForm = () => {
   const button = document.querySelector("#save-policy"); button.dataset.label = "Подключить"; button.textContent = "Подключить";
 };
 
-const loadPage = async () => {
+const loadPage = async ({silent=false}={}) => {
   const token = localStorage.getItem(storageKey);
   if (!token) { authPanel.classList.remove("hidden"); page.classList.add("hidden"); return; }
-  setBusy(refreshButton, true, "Обновляю…"); message.textContent = "";
+  if (!silent) setBusy(refreshButton, true, "Обновляю…");
+  if (!silent) message.textContent = "";
   try {
     const [rows, feed] = await Promise.all([request("/api/dumping"), request("/api/dumping/feed-status")]);
     render(rows); renderFeedStatus(feed); authPanel.classList.add("hidden"); page.classList.remove("hidden");
   } catch (error) {
     message.textContent = error instanceof Error ? error.message : "Не удалось загрузить демпинг";
     if (!localStorage.getItem(storageKey)) authPanel.classList.remove("hidden");
-  } finally { setBusy(refreshButton, false, ""); }
+  } finally { if (!silent) setBusy(refreshButton, false, ""); }
 };
 
 productSearch.addEventListener("input", () => { clearProductSelection({keepQuery:true}); clearTimeout(searchTimer); searchTimer = setTimeout(searchProducts, 250); });
@@ -232,12 +257,12 @@ list.addEventListener("click", async (event) => {
   setBusy(runButton, true, "Ставлю в очередь…"); message.textContent = "";
   try {
     const result = await request(`/api/dumping/products/${productId}/run-now`, {method:"POST"});
-    message.textContent = result.status === "already_queued" ? "Карточка уже ожидает проверку." : "Проверка поставлена в отдельную очередь. Страница Kaspi не запрашивается из интерфейса.";
+    message.textContent = result.status === "already_queued" ? "Карточка уже ожидает проверку." : "Проверка запущена. Статус и цены будут обновляться автоматически каждые 5 секунд.";
     await loadPage();
   } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось поставить проверку в очередь"; }
   finally { setBusy(runButton, false, ""); }
 });
 
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); const token=tokenInput.value.trim(); if(!token)return; localStorage.setItem(storageKey,token); tokenInput.value=""; loadPage(); });
-refreshButton.addEventListener("click", loadPage);
+refreshButton.addEventListener("click", () => loadPage());
 loadPage();
