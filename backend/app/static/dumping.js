@@ -6,10 +6,15 @@ const tokenForm = document.querySelector("#token-form");
 const tokenInput = document.querySelector("#token");
 const refreshButton = document.querySelector("#refresh");
 const policyForm = document.querySelector("#policy-form");
-const productSelect = document.querySelector("#product-id");
+const productIdInput = document.querySelector("#product-id");
+const productSearch = document.querySelector("#product-search");
+const productResults = document.querySelector("#product-results");
+const selectedProduct = document.querySelector("#selected-product");
 const list = document.querySelector("#dumping-list");
 const empty = document.querySelector("#empty");
 let configuredRows = [];
+let searchTimer = null;
+let searchController = null;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} KZT`;
@@ -38,13 +43,71 @@ const setBusy = (button, busy, text) => {
   button.textContent = busy ? text : button.dataset.label;
 };
 
-const loadProducts = async () => {
-  const rows = await request("/api/product-registry/products?limit=500");
+const productCaption = (row) => {
+  const identity = row.merchant_sku || row.kaspi_product_id || "без артикула";
+  return `${row.name} · ${identity}`;
+};
+
+const closeProductResults = () => {
+  productResults.classList.add("hidden");
+  productSearch.setAttribute("aria-expanded", "false");
+};
+
+const clearProductSelection = ({keepQuery = false} = {}) => {
+  productIdInput.value = "";
+  selectedProduct.textContent = "Товар не выбран";
+  selectedProduct.classList.remove("selected");
+  if (!keepQuery) productSearch.value = "";
+};
+
+const selectProduct = (row) => {
+  productIdInput.value = String(row.product_id);
+  productSearch.value = row.name;
+  selectedProduct.textContent = `Выбрано: ${productCaption(row)} · Kaspi ID ${row.kaspi_product_id}`;
+  selectedProduct.classList.add("selected");
+  closeProductResults();
+};
+
+const renderProductResults = (rows, query) => {
   const configured = new Set(configuredRows.map((row) => Number(row.product_id)));
-  productSelect.innerHTML = '<option value="">Выберите товар</option>' + rows
-    .filter((row) => !configured.has(Number(row.product_id)))
-    .map((row) => `<option value="${row.product_id}">${escapeHtml(row.name)} · ${escapeHtml(row.merchant_sku || row.kaspi_product_id)}</option>`)
-    .join("");
+  const available = rows.filter((row) => !configured.has(Number(row.product_id)));
+  if (!available.length) {
+    productResults.innerHTML = `<div class="product-result-empty">По запросу «${escapeHtml(query)}» свободные карточки не найдены.</div>`;
+  } else {
+    productResults.innerHTML = available.map((row) => `
+      <button class="product-result" type="button" role="option" data-product-id="${row.product_id}">
+        <strong>${escapeHtml(row.name)}</strong>
+        <span>Артикул: ${escapeHtml(row.merchant_sku || "—")} · Kaspi ID: ${escapeHtml(row.kaspi_product_id)}</span>
+      </button>`).join("");
+  }
+  productResults.classList.remove("hidden");
+  productSearch.setAttribute("aria-expanded", "true");
+  productResults.querySelectorAll(".product-result").forEach((button) => {
+    button.addEventListener("click", () => {
+      const row = available.find((item) => Number(item.product_id) === Number(button.dataset.productId));
+      if (row) selectProduct(row);
+    });
+  });
+};
+
+const searchProducts = async () => {
+  const query = productSearch.value.trim();
+  if (query.length < 2) {
+    closeProductResults();
+    return;
+  }
+  if (searchController) searchController.abort();
+  searchController = new AbortController();
+  productResults.innerHTML = '<div class="product-result-empty">Ищу товар…</div>';
+  productResults.classList.remove("hidden");
+  productSearch.setAttribute("aria-expanded", "true");
+  try {
+    const rows = await request(`/api/product-registry/products?q=${encodeURIComponent(query)}&limit=20`, {signal: searchController.signal});
+    renderProductResults(rows, query);
+  } catch (error) {
+    if (error?.name === "AbortError") return;
+    productResults.innerHTML = `<div class="product-result-empty">${escapeHtml(error instanceof Error ? error.message : "Поиск временно недоступен")}</div>`;
+  }
 };
 
 const statusLabel = (row) => {
@@ -87,8 +150,12 @@ const render = (rows) => {
 };
 
 const fillForm = (row) => {
-  productSelect.innerHTML = `<option value="${row.product_id}">${escapeHtml(row.name)}</option>`;
-  productSelect.value = String(row.product_id);
+  selectProduct({
+    product_id: row.product_id,
+    name: row.name,
+    merchant_sku: row.merchant_sku,
+    kaspi_product_id: row.kaspi_product_id,
+  });
   document.querySelector("#minimum-profit").value = row.policy.minimum_profit_kzt;
   document.querySelector("#undercut-step").value = row.policy.undercut_step_kzt;
   document.querySelector("#delivery-buffer").value = row.policy.supplier_delivery_buffer_days;
@@ -101,6 +168,22 @@ const fillForm = (row) => {
   policyForm.scrollIntoView({behavior:"smooth", block:"center"});
 };
 
+const resetPolicyForm = () => {
+  policyForm.reset();
+  clearProductSelection();
+  document.querySelector("#minimum-profit").value = "1000";
+  document.querySelector("#undercut-step").value = "1";
+  document.querySelector("#delivery-buffer").value = "1";
+  document.querySelector("#city-id").value = "750000000";
+  document.querySelector("#zone-id").value = "Magnum_ZONE1";
+  document.querySelector("#inventory-first").checked = true;
+  document.querySelector("#auto-publish").checked = true;
+  document.querySelector("#enabled").checked = true;
+  const button = document.querySelector("#save-policy");
+  button.dataset.label = "Подключить";
+  button.textContent = "Подключить";
+};
+
 const loadPage = async () => {
   const token = localStorage.getItem(storageKey);
   if (!token) { authPanel.classList.remove("hidden"); page.classList.add("hidden"); return; }
@@ -108,7 +191,6 @@ const loadPage = async () => {
   try {
     const rows = await request("/api/dumping");
     render(rows);
-    await loadProducts();
     authPanel.classList.add("hidden");
     page.classList.remove("hidden");
   } catch (error) {
@@ -117,10 +199,28 @@ const loadPage = async () => {
   } finally { setBusy(refreshButton, false, ""); }
 };
 
+productSearch.addEventListener("input", () => {
+  clearProductSelection({keepQuery:true});
+  window.clearTimeout(searchTimer);
+  searchTimer = window.setTimeout(searchProducts, 250);
+});
+
+productSearch.addEventListener("focus", () => {
+  if (productSearch.value.trim().length >= 2 && !productIdInput.value) searchProducts();
+});
+
+document.addEventListener("click", (event) => {
+  if (!event.target.closest("#product-picker")) closeProductResults();
+});
+
 policyForm.addEventListener("submit", async (event) => {
   event.preventDefault();
-  const productId = Number(productSelect.value);
-  if (!productId) return;
+  const productId = Number(productIdInput.value);
+  if (!productId) {
+    message.textContent = "Сначала найди и выбери товар из результатов поиска.";
+    productSearch.focus();
+    return;
+  }
   const button = document.querySelector("#save-policy");
   setBusy(button, true, "Сохраняю…"); message.textContent = "";
   try {
@@ -139,16 +239,7 @@ policyForm.addEventListener("submit", async (event) => {
       }),
     });
     message.textContent = "Настройки демпинга сохранены.";
-    policyForm.reset();
-    document.querySelector("#minimum-profit").value = "1000";
-    document.querySelector("#undercut-step").value = "1";
-    document.querySelector("#delivery-buffer").value = "1";
-    document.querySelector("#city-id").value = "750000000";
-    document.querySelector("#zone-id").value = "Magnum_ZONE1";
-    document.querySelector("#inventory-first").checked = true;
-    document.querySelector("#auto-publish").checked = true;
-    document.querySelector("#enabled").checked = true;
-    button.dataset.label = "Подключить";
+    resetPolicyForm();
     await loadPage();
   } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось сохранить"; }
   finally { setBusy(button, false, ""); }
