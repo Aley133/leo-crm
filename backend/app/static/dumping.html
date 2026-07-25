@@ -1,0 +1,56 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Демпинг</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
+  <link rel="stylesheet" href="/static/dumping.css?v=20260725-1">
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/orders">Заказы</a><a href="/crm/revenue">Выручка</a><a class="active" href="/crm/dumping">Демпинг</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Pricing Engine</span></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">PRICING ENGINE</p><h1>Демпинг</h1><p class="subtitle">Ручное подключение карточек, безопасный порог прибыли и автоматическая публикация полного Kaspi XML.</p></div>
+        <div><a class="button secondary" href="/feeds/kaspi/catalog.xml" target="_blank" rel="noopener">Открыть XML-feed</a><button id="refresh" class="button" type="button">Обновить</button></div>
+      </header>
+      <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
+      <div id="message" class="message" role="status"></div>
+      <section id="dumping-page" class="hidden">
+        <section class="metrics">
+          <article class="metric"><span>Подключено</span><strong id="summary-total">0</strong><small>карточек</small></article>
+          <article class="metric"><span>Активно</span><strong id="summary-enabled">0</strong><small>политик</small></article>
+          <article class="metric"><span>Ограничено порогом</span><strong id="summary-limited">0</strong><small>конкурент ниже пола</small></article>
+          <article class="metric"><span>Публичный XML</span><strong class="feed-status">HTTPS</strong><small>/feeds/kaspi/catalog.xml</small></article>
+        </section>
+        <section class="connect-card">
+          <div><h2>Подключить товар вручную</h2><p>Выбери карточку, задай минимальную чистую прибыль и шаг ниже конкурента.</p></div>
+          <form id="policy-form" class="policy-form">
+            <label class="wide"><span>Товар</span><select id="product-id" required><option value="">Выберите товар</option></select></label>
+            <label><span>Минимальная прибыль, ₸</span><input id="minimum-profit" type="number" min="0" step="1" value="1000" required></label>
+            <label><span>Шаг ниже конкурента, ₸</span><input id="undercut-step" type="number" min="1" step="1" value="1" required></label>
+            <label><span>Запас к доставке, дней</span><input id="delivery-buffer" type="number" min="0" max="30" value="1" required></label>
+            <label><span>Город Kaspi</span><input id="city-id" value="750000000" required></label>
+            <label><span>Зона</span><input id="zone-id" value="Magnum_ZONE1" required></label>
+            <label class="check"><input id="inventory-first" type="checkbox" checked><span>Сначала склад FIFO</span></label>
+            <label class="check"><input id="auto-publish" type="checkbox" checked><span>Автопубликация после Supplier Snapshot</span></label>
+            <label class="check"><input id="enabled" type="checkbox" checked><span>Демпинг включён</span></label>
+            <button id="save-policy" class="button" type="submit">Подключить</button>
+          </form>
+        </section>
+        <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div>
+        <div id="dumping-list" class="dumping-list"></div>
+        <div id="empty" class="empty hidden">Пока ни одна карточка не подключена к демпингу.</div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/dumping.js?v=20260725-1" defer></script>
+</body>
+</html>
