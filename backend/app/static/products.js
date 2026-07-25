@@ -116,6 +116,14 @@ const renderXmlPreview = (payload) => {
   xmlWarnings.innerHTML = payload.warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("");
 };
 
+const retainXmlSource = async (file) => {
+  try {
+    await xmlRequest("retain-source", file);
+  } catch (error) {
+    console.warn("XML source retention failed; commit remains authoritative", error);
+  }
+};
+
 const previewXml = async (file) => {
   selectedXmlFile = file;
   document.querySelector("#xml-file-name").textContent = `${file.name} · ${(file.size / 1024 / 1024).toLocaleString("ru-RU", {maximumFractionDigits:2})} МБ`;
@@ -126,8 +134,8 @@ const previewXml = async (file) => {
   try {
     const preview = await xmlRequest("preview", file);
     renderXmlPreview(preview);
-    await xmlRequest("retain-source", file);
     confirmImportButton.disabled = false;
+    void retainXmlSource(file);
   } catch (error) {
     xmlPreview.innerHTML = `<div class="empty">${escapeHtml(error instanceof Error ? error.message : "Не удалось проверить XML")}</div>`;
   }
