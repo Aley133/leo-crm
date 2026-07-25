@@ -10,8 +10,8 @@ from sqlalchemy.orm import Session
 from .auth import require_service_token
 from .db import get_db
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
-from .dumping_service import decide_dumping_price, publish_decision, resolve_cost_source
-from .kaspi_offer_competitor import scan_kaspi_competitors
+from .dumping_runner import execute_dumping_for_product
+from .dumping_service import resolve_cost_source
 from .models import Product
 
 
@@ -115,60 +115,14 @@ def upsert_dumping_policy(
 
 @router.post("/products/{product_id}/run-now")
 async def run_dumping_now(product_id: int, db: Session = Depends(get_db)) -> dict:
-    product = db.get(Product, product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-    policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
-    if policy is None or not policy.enabled:
-        raise HTTPException(status_code=409, detail="Демпинг для товара не подключён")
-    feed = db.scalar(select(KaspiXmlFeed).order_by(KaspiXmlFeed.id.desc()).limit(1))
-    if feed is None or not feed.merchant_id:
-        raise HTTPException(status_code=409, detail="Импортируйте полный XML с merchantid")
-
     try:
-        market = await scan_kaspi_competitors(
-            product,
-            own_merchant_id=feed.merchant_id,
-            city_id=policy.city_id,
-            zone_id=policy.zone_id,
-        )
-        decision = decide_dumping_price(
-            db,
-            product=product,
-            policy=policy,
-            competitor_price_kzt=market.competitor_price_kzt,
-            own_price_kzt=market.own_price_kzt,
-        )
-        run = publish_decision(db, product=product, policy=policy, decision=decision)
-        run.explanation_json = {
-            **run.explanation_json,
-            "competitor_name": market.competitor_name,
-            "own_position": market.own_position,
-            "seller_count": market.seller_count,
-            "product_url": market.product_url,
-        }
-        db.commit()
-        db.refresh(run)
+        return await execute_dumping_for_product(db, product_id)
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except Exception as exc:
         db.rollback()
         raise HTTPException(status_code=502, detail=f"Kaspi competitor scan failed: {exc}") from exc
-    return {
-        "run": run,
-        "feed_url": "/feeds/kaspi/catalog.xml",
-        "decision": {
-            "source_kind": decision.source.kind,
-            "source_name": decision.source.name,
-            "source_cost_kzt": decision.source.unit_cost_kzt,
-            "safe_floor_kzt": decision.safe_floor_kzt,
-            "competitor_price_kzt": decision.competitor_price_kzt,
-            "target_price_kzt": decision.target_price_kzt,
-            "preorder_days": decision.preorder_days,
-            "status": decision.status,
-        },
-    }
 
 
 @public_router.get("/feeds/kaspi/catalog.xml", response_class=Response)
