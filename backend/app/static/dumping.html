@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Демпинг</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
-  <link rel="stylesheet" href="/static/dumping.css?v=20260725-2">
+  <link rel="stylesheet" href="/static/dumping.css?v=20260725-3">
 </head>
 <body>
   <div class="shell">
@@ -24,6 +24,14 @@
       <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
       <div id="message" class="message" role="status"></div>
       <section id="dumping-page" class="hidden">
+        <section id="xml-source" class="xml-source-card" aria-live="polite">
+          <div>
+            <span class="xml-source-label">Источник XML</span>
+            <h2 id="xml-source-title">Проверяем каталог…</h2>
+            <p id="xml-source-meta">Демпинг использует последний XML, импортированный во вкладке «Товары».</p>
+          </div>
+          <div id="xml-source-status" class="xml-source-status">Проверка</div>
+        </section>
         <section class="metrics">
           <article class="metric"><span>Подключено</span><strong id="summary-total">0</strong><small>карточек</small></article>
           <article class="metric"><span>Активно</span><strong id="summary-enabled">0</strong><small>политик</small></article>
@@ -58,6 +66,6 @@
       </section>
     </main>
   </div>
-  <script src="/static/dumping.js?v=20260725-2" defer></script>
+  <script src="/static/dumping.js?v=20260725-3" defer></script>
 </body>
 </html>
