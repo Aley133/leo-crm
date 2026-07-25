@@ -34,6 +34,81 @@ router = APIRouter(
 public_router = APIRouter(tags=["dumping-feed"], include_in_schema=True)
 
 
+def _policy_payload(policy: DumpingPolicy | None) -> dict | None:
+    if policy is None:
+        return None
+    return {
+        "id": policy.id,
+        "product_id": policy.product_id,
+        "enabled": policy.enabled,
+        "minimum_profit_kzt": policy.minimum_profit_kzt,
+        "undercut_step_kzt": policy.undercut_step_kzt,
+        "supplier_delivery_buffer_days": policy.supplier_delivery_buffer_days,
+        "inventory_first": policy.inventory_first,
+        "auto_publish_xml": policy.auto_publish_xml,
+        "city_id": policy.city_id,
+        "zone_id": policy.zone_id,
+        "created_at": policy.created_at,
+        "updated_at": policy.updated_at,
+    }
+
+
+def _run_payload(run: DumpingRun | None) -> dict | None:
+    if run is None:
+        return None
+    return {
+        "id": run.id,
+        "product_id": run.product_id,
+        "dumping_policy_id": run.dumping_policy_id,
+        "status": run.status,
+        "source_kind": run.source_kind,
+        "source_name": run.source_name,
+        "source_cost_kzt": run.source_cost_kzt,
+        "source_delivery_days": run.source_delivery_days,
+        "safe_floor_kzt": run.safe_floor_kzt,
+        "own_price_kzt": run.own_price_kzt,
+        "competitor_price_kzt": run.competitor_price_kzt,
+        "target_price_kzt": run.target_price_kzt,
+        "preorder_days": run.preorder_days,
+        "published": run.published,
+        "explanation_json": run.explanation_json or {},
+        "created_at": run.created_at,
+    }
+
+
+def _product_payload(product: Product) -> dict:
+    return {
+        "id": product.id,
+        "name": product.name,
+        "kaspi_product_id": product.kaspi_product_id,
+        "merchant_sku": product.merchant_sku,
+        "brand": product.brand,
+        "status": product.status,
+    }
+
+
+def _source_payload(db: Session, policy: DumpingPolicy) -> tuple[dict | None, str | None]:
+    try:
+        source = resolve_cost_source(
+            db,
+            product_id=policy.product_id,
+            inventory_first=policy.inventory_first,
+        )
+    except Exception as exc:
+        # A broken or partially migrated supplier binding must not make the
+        # whole dumping workspace unavailable. The card remains visible and
+        # the operator can fix its source separately.
+        return None, str(exc)
+    if source is None:
+        return None, None
+    return {
+        "kind": source.kind,
+        "name": source.name,
+        "unit_cost_kzt": source.unit_cost_kzt,
+        "delivery_days": source.delivery_days,
+    }, None
+
+
 @router.get("")
 def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
     rows = db.execute(
@@ -49,20 +124,16 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
             .order_by(DumpingRun.id.desc())
             .limit(1)
         )
-        source = resolve_cost_source(db, product_id=product.id, inventory_first=policy.inventory_first)
+        source, source_error = _source_payload(db, policy)
         result.append({
             "product_id": product.id,
             "name": product.name,
             "kaspi_product_id": product.kaspi_product_id,
             "merchant_sku": product.merchant_sku,
-            "policy": policy,
-            "source": None if source is None else {
-                "kind": source.kind,
-                "name": source.name,
-                "unit_cost_kzt": source.unit_cost_kzt,
-                "delivery_days": source.delivery_days,
-            },
-            "latest_run": latest,
+            "policy": _policy_payload(policy),
+            "source": source,
+            "source_error": source_error,
+            "latest_run": _run_payload(latest),
         })
     return result
 
@@ -74,21 +145,21 @@ def read_dumping_policy(product_id: int, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="Product not found")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     latest = db.scalar(
-        select(DumpingRun).where(DumpingRun.product_id == product_id).order_by(DumpingRun.id.desc()).limit(1)
+        select(DumpingRun)
+        .where(DumpingRun.product_id == product_id)
+        .order_by(DumpingRun.id.desc())
+        .limit(1)
     )
-    source = None if policy is None else resolve_cost_source(
-        db, product_id=product_id, inventory_first=policy.inventory_first
-    )
+    source = None
+    source_error = None
+    if policy is not None:
+        source, source_error = _source_payload(db, policy)
     return {
-        "product": product,
-        "policy": policy,
-        "source": None if source is None else {
-            "kind": source.kind,
-            "name": source.name,
-            "unit_cost_kzt": source.unit_cost_kzt,
-            "delivery_days": source.delivery_days,
-        },
-        "latest_run": latest,
+        "product": _product_payload(product),
+        "policy": _policy_payload(policy),
+        "source": source,
+        "source_error": source_error,
+        "latest_run": _run_payload(latest),
     }
 
 
@@ -97,7 +168,7 @@ def upsert_dumping_policy(
     product_id: int,
     payload: DumpingPolicyUpsert,
     db: Session = Depends(get_db),
-):
+) -> dict:
     if db.get(Product, product_id) is None:
         raise HTTPException(status_code=404, detail="Product not found")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
@@ -110,7 +181,7 @@ def upsert_dumping_policy(
             setattr(policy, key, value)
     db.commit()
     db.refresh(policy)
-    return policy
+    return _policy_payload(policy) or {}
 
 
 @router.post("/products/{product_id}/run-now")
@@ -127,7 +198,12 @@ async def run_dumping_now(product_id: int, db: Session = Depends(get_db)) -> dic
 
 @public_router.get("/feeds/kaspi/catalog.xml", response_class=Response)
 def kaspi_catalog_feed(db: Session = Depends(get_db)) -> Response:
-    feed = db.scalar(select(KaspiXmlFeed).where(KaspiXmlFeed.active.is_(True)).order_by(KaspiXmlFeed.id.desc()).limit(1))
+    feed = db.scalar(
+        select(KaspiXmlFeed)
+        .where(KaspiXmlFeed.active.is_(True))
+        .order_by(KaspiXmlFeed.id.desc())
+        .limit(1)
+    )
     if feed is None:
         raise HTTPException(status_code=404, detail="Kaspi XML feed is not configured")
     return Response(
