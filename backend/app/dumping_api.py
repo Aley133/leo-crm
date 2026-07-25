@@ -4,7 +4,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -144,9 +144,12 @@ def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
         .limit(1)
     )
     if feed is None:
+        product_count = int(db.scalar(select(func.count(Product.id))) or 0)
         return {
             "configured": False,
             "ready": False,
+            "legacy_catalog_detected": product_count > 0,
+            "product_count": product_count,
             "source_filename": None,
             "merchant_id": None,
             "imported_at": None,
@@ -156,6 +159,8 @@ def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
     return {
         "configured": True,
         "ready": bool(feed.merchant_id and feed.generated_xml),
+        "legacy_catalog_detected": False,
+        "product_count": int(db.scalar(select(func.count(Product.id))) or 0),
         "source_filename": feed.source_filename,
         "merchant_id": feed.merchant_id,
         "imported_at": feed.imported_at,
