@@ -26,9 +26,9 @@ _SCHEDULER_TASK: asyncio.Task | None = None
 _LOOP: asyncio.AbstractEventLoop | None = None
 _STATE_LOCK = threading.Lock()
 
-MIN_REQUEST_INTERVAL_SECONDS = 8.0
+MIN_REQUEST_INTERVAL_SECONDS = 1.5
 PERIODIC_REFRESH_SECONDS = 10 * 60
-MAX_BACKOFF_SECONDS = 30 * 60
+MAX_BACKOFF_SECONDS = 5 * 60
 
 
 def _now() -> datetime:
@@ -38,7 +38,11 @@ def _now() -> datetime:
 def state_for_product(product_id: int) -> dict[str, Any] | None:
     with _STATE_LOCK:
         state = _STATES.get(product_id)
-        return None if state is None else dict(state)
+        if state is None:
+            return None
+        payload = dict(state)
+        payload["queue_size"] = _QUEUE.qsize()
+        return payload
 
 
 def _set_state(product_id: int, **values: Any) -> None:
@@ -54,7 +58,7 @@ def _enqueue_on_worker_loop(product_id: int, reason: str) -> None:
             return
         _PENDING.add(product_id)
         current = _STATES.setdefault(product_id, {})
-        current.update(status="queued", reason=reason, last_error=None)
+        current.update(status="queued", stage="queued", reason=reason, last_error=None)
         current["updated_at"] = _now().isoformat()
     _QUEUE.put_nowait(product_id)
 
@@ -67,7 +71,7 @@ def enqueue_competitor_scan(product_id: int, *, reason: str = "manual") -> bool:
     """
     loop = _LOOP
     if loop is None or loop.is_closed():
-        _set_state(product_id, status="worker_unavailable", reason=reason)
+        _set_state(product_id, status="worker_unavailable", stage="unavailable", reason=reason)
         return False
     with _STATE_LOCK:
         if product_id in _PENDING:
@@ -91,10 +95,10 @@ def _retry_after_seconds(exc: httpx.HTTPStatusError, attempts: int) -> float:
     header = exc.response.headers.get("Retry-After")
     if header:
         try:
-            return min(MAX_BACKOFF_SECONDS, max(30.0, float(header)))
+            return min(MAX_BACKOFF_SECONDS, max(10.0, float(header)))
         except ValueError:
             pass
-    return min(MAX_BACKOFF_SECONDS, 60.0 * (2 ** max(0, attempts - 1)))
+    return min(MAX_BACKOFF_SECONDS, 15.0 * (2 ** max(0, attempts - 1)))
 
 
 async def _worker_loop(stop_event: asyncio.Event) -> None:
@@ -116,17 +120,36 @@ async def _worker_loop(stop_event: asyncio.Event) -> None:
         if elapsed < MIN_REQUEST_INTERVAL_SECONDS:
             await asyncio.sleep(MIN_REQUEST_INTERVAL_SECONDS - elapsed)
 
-        _set_state(product_id, status="scanning", attempts=attempts, started_at=_now().isoformat())
+        _set_state(
+            product_id,
+            status="scanning",
+            stage="opening_product_card",
+            attempts=attempts,
+            started_at=_now().isoformat(),
+            next_retry_at=None,
+        )
         try:
             with SessionLocal() as db:
-                await execute_dumping_for_product(db, product_id)
+                result = await execute_dumping_for_product(db, product_id)
+            market = result.get("market") or {}
+            decision = result.get("decision") or {}
             _set_state(
                 product_id,
                 status="completed",
+                stage="published",
                 attempts=0,
                 last_error=None,
                 next_retry_at=None,
                 finished_at=_now().isoformat(),
+                last_success_at=_now().isoformat(),
+                own_price_kzt=market.get("own_price_kzt"),
+                competitor_price_kzt=market.get("competitor_price_kzt"),
+                competitor_name=market.get("competitor_name"),
+                own_position=market.get("own_position"),
+                seller_count=market.get("seller_count"),
+                safe_floor_kzt=decision.get("safe_floor_kzt"),
+                target_price_kzt=decision.get("target_price_kzt"),
+                preorder_days=decision.get("preorder_days"),
             )
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 429:
@@ -135,8 +158,10 @@ async def _worker_loop(stop_event: asyncio.Event) -> None:
                 _set_state(
                     product_id,
                     status="retry_wait",
+                    stage="kaspi_rate_limited",
                     attempts=attempts,
-                    last_error="Kaspi временно ограничил частоту запросов (429)",
+                    last_http_status=429,
+                    last_error="Kaspi ограничил серверный IP. Быстрый повтор поставлен автоматически",
                     next_retry_at=next_retry.isoformat(),
                 )
                 _schedule_retry(product_id, delay, "retry_after_429")
@@ -144,18 +169,21 @@ async def _worker_loop(stop_event: asyncio.Event) -> None:
                 _set_state(
                     product_id,
                     status="failed",
+                    stage="http_failed",
                     attempts=attempts,
+                    last_http_status=exc.response.status_code,
                     last_error=f"Kaspi HTTP {exc.response.status_code}",
                     next_retry_at=None,
                 )
         except (ValueError, RuntimeError) as exc:
-            _set_state(product_id, status="blocked", attempts=attempts, last_error=str(exc), next_retry_at=None)
+            _set_state(product_id, status="blocked", stage="business_blocked", attempts=attempts, last_error=str(exc), next_retry_at=None)
         except Exception as exc:
-            delay = min(MAX_BACKOFF_SECONDS, 60.0 * (2 ** max(0, attempts - 1)))
+            delay = min(MAX_BACKOFF_SECONDS, 15.0 * (2 ** max(0, attempts - 1)))
             next_retry = _now() + timedelta(seconds=delay)
             _set_state(
                 product_id,
                 status="retry_wait",
+                stage="temporary_error",
                 attempts=attempts,
                 last_error=f"{type(exc).__name__}: {exc}",
                 next_retry_at=next_retry.isoformat(),
@@ -167,7 +195,6 @@ async def _worker_loop(stop_event: asyncio.Event) -> None:
 
 
 async def _scheduler_loop(stop_event: asyncio.Event) -> None:
-    # Do not hit Kaspi immediately after deployment startup.
     try:
         await asyncio.wait_for(stop_event.wait(), timeout=45.0)
         return
