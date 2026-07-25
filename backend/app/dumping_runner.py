@@ -53,8 +53,16 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
     db.commit()
     db.refresh(run)
     return {
-        "run": run,
+        "run_id": run.id,
         "feed_url": "/feeds/kaspi/catalog.xml",
+        "market": {
+            "own_price_kzt": market.own_price_kzt,
+            "competitor_price_kzt": market.competitor_price_kzt,
+            "competitor_name": market.competitor_name,
+            "own_position": market.own_position,
+            "seller_count": market.seller_count,
+            "product_url": market.product_url,
+        },
         "decision": {
             "source_kind": decision.source.kind,
             "source_name": decision.source.name,
@@ -71,9 +79,9 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
 def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
     """Queue enabled products after a committed supplier observation.
 
-    Supplier ingestion remains authoritative and finishes first.  This function
+    Supplier ingestion remains authoritative and finishes first. This function
     only resolves product IDs and places them into the independent competitor
-    queue.  It never calls Kaspi and never interacts with Browser Agent jobs.
+    queue. It never calls Kaspi and never interacts with Browser Agent jobs.
     """
     with SessionLocal() as db:
         product_ids = list(
