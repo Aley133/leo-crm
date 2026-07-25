@@ -41,6 +41,16 @@ def test_product_registry_exposes_preview_and_commit_import_endpoints() -> None:
     assert "app.include_router(product_xml_import_router)" in main
 
 
+def test_xml_commit_links_order_lines_in_one_bulk_pass() -> None:
+    source = (ROOT / "backend" / "app" / "product_xml_import_api.py").read_text(encoding="utf-8")
+    linking = (ROOT / "backend" / "app" / "order_line_product_linking.py").read_text(encoding="utf-8")
+
+    assert "link_all_matching_order_lines_for_products" in source
+    assert "for product in stored_products:" not in source
+    assert "def link_all_matching_order_lines_for_products" in linking
+    assert "identity_map = _product_identity_map(products)" in linking
+
+
 def test_product_center_has_two_step_xml_import_ui() -> None:
     html = (ROOT / "backend" / "app" / "static" / "products.html").read_text(encoding="utf-8")
     script = (ROOT / "backend" / "app" / "static" / "products.js").read_text(encoding="utf-8")
