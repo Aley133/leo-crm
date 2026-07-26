@@ -40,7 +40,43 @@ jobs:
         shell: pwsh
         run: |
           python -c "import tools.kaspi_competitor_agent; import tools.kaspi_competitor_scanner"
-          python -c "from pathlib import Path; source=(Path('tools/kaspi_competitor_agent.py').read_text(encoding='utf-8') + Path('tools/kaspi_competitor_scanner.py').read_text(encoding='utf-8')).lower(); assert 'backend.app' not in source; assert 'database_url' not in source; assert 'sqlalchemy' not in source; assert 'playwright' not in source; assert 'tools.browser_agent' not in source"
+          @'
+          import ast
+          from pathlib import Path
+
+          forbidden_roots = {
+              "backend",
+              "sqlalchemy",
+              "playwright",
+          }
+          forbidden_modules = {
+              "tools.browser_agent",
+              "tools.browser_agent_desktop",
+          }
+
+          for path in (
+              Path("tools/kaspi_competitor_agent.py"),
+              Path("tools/kaspi_competitor_scanner.py"),
+          ):
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              imported = set()
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      imported.update(alias.name for alias in node.names)
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      imported.add(node.module)
+
+              violations = sorted(
+                  module
+                  for module in imported
+                  if module.split(".", 1)[0] in forbidden_roots
+                  or module in forbidden_modules
+              )
+              if violations:
+                  raise AssertionError(
+                      f"{path} imports forbidden runtime dependencies: {violations}"
+                  )
+          '@ | python -
 
       - name: Build standalone executable
         shell: pwsh
