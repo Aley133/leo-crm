@@ -6,9 +6,8 @@ on:
       - main
     paths:
       - "tools/kaspi_competitor_agent.py"
-      - "backend/app/kaspi_offer_competitor.py"
+      - "tools/kaspi_competitor_scanner.py"
       - ".github/workflows/kaspi-competitor-agent-release.yml"
-      - "requirements.txt"
   workflow_dispatch:
 
 permissions:
@@ -31,17 +30,17 @@ jobs:
           python-version: "3.12"
           cache: pip
 
-      - name: Install dependencies
+      - name: Install standalone dependencies
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install -r requirements.txt pyinstaller
+          pip install httpx pyinstaller
 
       - name: Verify isolated agent import
         shell: pwsh
         run: |
-          python -c "import tools.kaspi_competitor_agent"
-          python -c "from pathlib import Path; source=Path('tools/kaspi_competitor_agent.py').read_text(encoding='utf-8'); assert 'playwright' not in source.lower(); assert 'tools.browser_agent' not in source"
+          python -c "import tools.kaspi_competitor_agent; import tools.kaspi_competitor_scanner"
+          python -c "from pathlib import Path; source=(Path('tools/kaspi_competitor_agent.py').read_text(encoding='utf-8') + Path('tools/kaspi_competitor_scanner.py').read_text(encoding='utf-8')).lower(); assert 'backend.app' not in source; assert 'database_url' not in source; assert 'sqlalchemy' not in source; assert 'playwright' not in source; assert 'tools.browser_agent' not in source"
 
       - name: Build standalone executable
         shell: pwsh
@@ -49,7 +48,8 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --console `
             --name LEO-Kaspi-Competitor-Agent `
             --paths . `
-            --hidden-import backend.app.kaspi_offer_competitor `
+            --hidden-import tools.kaspi_competitor_scanner `
+            --collect-submodules httpx `
             tools/kaspi_competitor_agent.py
 
       - name: Verify executable was created
@@ -89,11 +89,11 @@ jobs:
             gh release create kaspi-competitor-agent-latest `
               --target "$env:GITHUB_SHA" `
               --title "LEO Kaspi Competitor Agent" `
-              --notes "Локальный агент анализа конкурентов Kaspi. Работает отдельно от LEO Browser Agent поставщиков. После первого запуска введите SERVICE_API_TOKEN из Render."
+              --notes "Автономный локальный агент анализа конкурентов Kaspi. Не требует DATABASE_URL, SQLAlchemy, Playwright или LEO Browser Agent. После первого запуска введите SERVICE_API_TOKEN из Render."
           } else {
             gh release edit kaspi-competitor-agent-latest `
               --target "$env:GITHUB_SHA" `
               --title "LEO Kaspi Competitor Agent" `
-              --notes "Локальный агент анализа конкурентов Kaspi. Работает отдельно от LEO Browser Agent поставщиков. После первого запуска введите SERVICE_API_TOKEN из Render."
+              --notes "Автономный локальный агент анализа конкурентов Kaspi. Не требует DATABASE_URL, SQLAlchemy, Playwright или LEO Browser Agent. После первого запуска введите SERVICE_API_TOKEN из Render."
           }
           gh release upload kaspi-competitor-agent-latest "dist/LEO-Kaspi-Competitor-Agent.exe" --clobber
