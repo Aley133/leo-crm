@@ -26,6 +26,7 @@ from .dumping_competitor_worker import (
 )
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .inventory_api import router as inventory_router
+from .kaspi_competitor_agent_api import router as kaspi_competitor_agent_router
 from .kaspi_order_polling import LAST_RUN as KASPI_POLL_STATUS
 from .kaspi_order_polling import polling_loop
 from .marketplace_api import router as marketplace_router
@@ -80,6 +81,7 @@ app.include_router(monitoring_center_router)
 app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
 app.include_router(browser_agent_registry_router)
+app.include_router(kaspi_competitor_agent_router)
 app.include_router(pricing_router)
 app.include_router(dumping_router)
 app.include_router(dumping_public_router)
@@ -96,8 +98,8 @@ async def start_background_services() -> None:
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
-    # Dedicated server-side HTTP queue. It is intentionally separate from the
-    # local Browser Agent used for supplier pages.
+    # No server-side Kaspi competitor requests are started here. The compatibility
+    # hook is intentionally a no-op; local Kaspi Competitor Agent owns scans.
     await start_dumping_competitor_worker()
 
 
