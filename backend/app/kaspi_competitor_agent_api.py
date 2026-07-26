@@ -6,7 +6,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -107,13 +107,7 @@ def claim_job(payload: AgentClaim, db: Session = Depends(get_db)) -> dict:
     now = _now()
     job = db.scalar(
         select(DumpingRun)
-        .where(
-            or_(
-                DumpingRun.status == "queued_local",
-                (DumpingRun.status == "leased_local")
-                & (DumpingRun.explanation_json["lease_until"].as_string() < now.isoformat()),
-            )
-        )
+        .where(DumpingRun.status == "queued_local")
         .order_by(DumpingRun.id)
         .with_for_update(skip_locked=True)
         .limit(1)
