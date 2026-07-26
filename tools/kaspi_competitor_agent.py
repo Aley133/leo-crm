@@ -12,13 +12,12 @@ import time
 import traceback
 from datetime import UTC, datetime
 from pathlib import Path
-from types import SimpleNamespace
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
-from backend.app.kaspi_offer_competitor import scan_kaspi_competitors
+from tools.kaspi_competitor_scanner import scan_kaspi_competitors
 
-VERSION = "1.2.0"
+VERSION = "1.3.0"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 15
 
@@ -59,10 +58,7 @@ def _load_config() -> dict:
 
 
 def _save_config(payload: dict) -> None:
-    _config_path().write_text(
-        json.dumps(payload, ensure_ascii=False, indent=2),
-        encoding="utf-8",
-    )
+    _config_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
 
 
 def _prompt_token_gui() -> str:
@@ -104,7 +100,6 @@ def _service_token(config: dict) -> str:
     value = (os.getenv("CRM_SERVICE_TOKEN") or config.get("service_token") or "").strip()
     if value:
         return value
-
     value = _prompt_token_gui() if os.name == "nt" else ""
     if not value:
         try:
@@ -113,7 +108,6 @@ def _service_token(config: dict) -> str:
             value = ""
     if not value:
         raise RuntimeError("SERVICE_API_TOKEN не введён")
-
     config["service_token"] = value
     _save_config(config)
     return value
@@ -128,7 +122,8 @@ def _post_json(url: str, token: str, payload: dict) -> dict:
     )
     try:
         with urlopen(request, timeout=45) as response:
-            return json.loads(response.read().decode("utf-8"))
+            body = response.read().decode("utf-8")
+            return json.loads(body) if body else {}
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
         raise RuntimeError(f"CRM returned HTTP {exc.code}: {body}") from exc
@@ -173,16 +168,11 @@ async def _claim(api_url: str, token: str, agent_id: str, concurrency: int) -> d
 
 async def _process_job(api_url: str, token: str, job: dict) -> None:
     _log(f"Проверяю Kaspi: #{job['id']} {job['name']}")
-    product = SimpleNamespace(
-        id=job["product_id"],
-        name=job["name"],
-        brand=job.get("brand"),
-        kaspi_product_id=job["kaspi_product_id"],
-        merchant_sku=job.get("merchant_sku"),
-    )
     try:
         market = await scan_kaspi_competitors(
-            product,
+            product_name=str(job["name"]),
+            product_brand=job.get("brand"),
+            kaspi_product_id=str(job["kaspi_product_id"]),
             own_merchant_id=str(job["own_merchant_id"]),
             city_id=str(job["city_id"]),
             zone_id=str(job["zone_id"]),
@@ -234,7 +224,7 @@ async def main(*, once: bool = False) -> int:
     _log(f"CRM: {api_url}")
     _log(f"Agent ID: {agent_id}")
     _log(f"Параллельных проверок: {1 if once else concurrency}")
-    _log("Browser Agent поставщиков не используется.")
+    _log("Автономный режим: DATABASE_URL, SQLAlchemy и Browser Agent не используются.")
 
     try:
         await asyncio.to_thread(
