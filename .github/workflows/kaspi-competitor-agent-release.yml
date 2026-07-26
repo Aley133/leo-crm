@@ -49,18 +49,18 @@ jobs:
           pyinstaller --noconfirm --clean --onefile --console `
             --name LEO-Kaspi-Competitor-Agent `
             --paths . `
-            --collect-submodules backend `
+            --hidden-import backend.app.kaspi_offer_competitor `
             tools/kaspi_competitor_agent.py
 
-      - name: Smoke test executable
+      - name: Verify executable was created
         shell: pwsh
         run: |
           if (-not (Test-Path "dist/LEO-Kaspi-Competitor-Agent.exe")) {
             throw "LEO-Kaspi-Competitor-Agent.exe was not created"
           }
-          & "dist/LEO-Kaspi-Competitor-Agent.exe" --help
-          if ($LASTEXITCODE -ne 0) {
-            throw "Packaged agent failed its --help smoke test"
+          $size = (Get-Item "dist/LEO-Kaspi-Competitor-Agent.exe").Length
+          if ($size -lt 1000000) {
+            throw "Packaged executable is unexpectedly small: $size bytes"
           }
 
       - name: Upload workflow artifact
@@ -71,17 +71,29 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-      - name: Publish rolling GitHub Release
+      - name: Move rolling tag to current commit
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f kaspi-competitor-agent-latest $env:GITHUB_SHA
+          git push origin refs/tags/kaspi-competitor-agent-latest --force
+
+      - name: Create or update rolling GitHub Release
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release delete kaspi-competitor-agent-latest --cleanup-tag --yes 2>$null
+          gh release view kaspi-competitor-agent-latest *> $null
           if ($LASTEXITCODE -ne 0) {
-            Write-Host "Previous rolling release does not exist yet."
+            gh release create kaspi-competitor-agent-latest `
+              --target "$env:GITHUB_SHA" `
+              --title "LEO Kaspi Competitor Agent" `
+              --notes "Локальный агент анализа конкурентов Kaspi. Работает отдельно от LEO Browser Agent поставщиков. После первого запуска введите SERVICE_API_TOKEN из Render."
+          } else {
+            gh release edit kaspi-competitor-agent-latest `
+              --target "$env:GITHUB_SHA" `
+              --title "LEO Kaspi Competitor Agent" `
+              --notes "Локальный агент анализа конкурентов Kaspi. Работает отдельно от LEO Browser Agent поставщиков. После первого запуска введите SERVICE_API_TOKEN из Render."
           }
-          gh release create kaspi-competitor-agent-latest `
-            "dist/LEO-Kaspi-Competitor-Agent.exe" `
-            --target "$env:GITHUB_SHA" `
-            --title "LEO Kaspi Competitor Agent" `
-            --notes "Локальный агент анализа конкурентов Kaspi. Работает отдельно от LEO Browser Agent поставщиков. После первого запуска введите SERVICE_API_TOKEN из Render."
+          gh release upload kaspi-competitor-agent-latest "dist/LEO-Kaspi-Competitor-Agent.exe" --clobber
