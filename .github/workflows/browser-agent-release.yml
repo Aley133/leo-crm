@@ -8,9 +8,11 @@ on:
       - "tools/__init__.py"
       - "tools/browser_agent.py"
       - "tools/browser_agent_desktop.py"
+      - "tools/kaspi_competitor_agent.py"
       - "tools/kaspi_seller_browser.py"
       - "tools/windows/LEO-Browser-Agent.iss"
       - "backend/app/supplier_adapters/**"
+      - "backend/app/kaspi_offer_competitor.py"
       - "backend/app/kaspi_seller/**"
       - ".github/workflows/browser-agent-release.yml"
       - "requirements.txt"
@@ -35,10 +37,10 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Verify desktop imports
+      - name: Verify agent imports
         shell: pwsh
         run: |
-          python -c "import tools.browser_agent; import tools.browser_agent_desktop"
+          python -c "import tools.browser_agent; import tools.browser_agent_desktop; import tools.kaspi_competitor_agent"
 
       - name: Verify release version alignment
         shell: pwsh
@@ -51,7 +53,7 @@ jobs:
             throw "Browser Agent version mismatch: desktop=$desktopVersion installer=$installerVersion"
           }
 
-      - name: Build application executable
+      - name: Build application executables
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --windowed `
@@ -61,11 +63,18 @@ jobs:
             --collect-submodules backend `
             --collect-submodules tools `
             tools/browser_agent_desktop.py
+          pyinstaller --noconfirm --clean --onefile --console `
+            --name LEO-Kaspi-Competitor-Agent `
+            --paths . `
+            --collect-submodules backend `
+            --collect-submodules tools `
+            tools/kaspi_competitor_agent.py
 
-      - name: Smoke test packaged executable
+      - name: Smoke test packaged executables
         shell: pwsh
         run: |
           if (-not (Test-Path "dist/LEO-Browser-Agent.exe")) { throw "Browser Agent executable was not created" }
+          if (-not (Test-Path "dist/LEO-Kaspi-Competitor-Agent.exe")) { throw "Kaspi Competitor Agent executable was not created" }
 
       - name: Install Inno Setup
         shell: pwsh
@@ -76,11 +85,13 @@ jobs:
         run: |
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" "tools\windows\LEO-Browser-Agent.iss"
 
-      - name: Upload workflow artifact
+      - name: Upload workflow artifacts
         uses: actions/upload-artifact@v4
         with:
-          name: LEO-Browser-Agent-Windows
-          path: dist/LEO-Browser-Agent-Setup.exe
+          name: LEO-Windows-Agents
+          path: |
+            dist/LEO-Browser-Agent-Setup.exe
+            dist/LEO-Kaspi-Competitor-Agent.exe
 
       - name: Publish rolling GitHub Release
         shell: pwsh
@@ -93,6 +104,7 @@ jobs:
           git push origin refs/tags/browser-agent-latest --force
           gh release view browser-agent-latest *> $null
           if ($LASTEXITCODE -ne 0) {
-            gh release create browser-agent-latest --title "LEO Browser Agent" --notes "Автоматическая сборка Windows Browser Agent."
+            gh release create browser-agent-latest --title "LEO Windows Agents" --notes "Автоматическая сборка Browser Agent и Kaspi Competitor Agent."
           }
           gh release upload browser-agent-latest dist/LEO-Browser-Agent-Setup.exe --clobber
+          gh release upload browser-agent-latest dist/LEO-Kaspi-Competitor-Agent.exe --clobber
