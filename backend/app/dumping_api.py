@@ -5,6 +5,7 @@ from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -76,6 +77,25 @@ def _run_payload(run: DumpingRun | None) -> dict | None:
     }
 
 
+def _latest_run_or_none(db: Session, product_id: int) -> DumpingRun | None:
+    """Read the latest run without making the whole workspace schema-fragile.
+
+    Lightweight tests and partially migrated development databases may contain
+    dumping policies before the dumping_runs table exists. In that state the
+    policy workspace must remain readable and simply expose no run history.
+    """
+    try:
+        return db.scalar(
+            select(DumpingRun)
+            .where(DumpingRun.product_id == product_id)
+            .order_by(DumpingRun.id.desc())
+            .limit(1)
+        )
+    except (OperationalError, ProgrammingError):
+        db.rollback()
+        return None
+
+
 def _product_payload(product: Product) -> dict:
     return {
         "id": product.id,
@@ -129,12 +149,7 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
     ).all()
     result: list[dict] = []
     for policy, product in rows:
-        latest = db.scalar(
-            select(DumpingRun)
-            .where(DumpingRun.product_id == product.id)
-            .order_by(DumpingRun.id.desc())
-            .limit(1)
-        )
+        latest = _latest_run_or_none(db, product.id)
         source, source_error = _source_payload(db, policy)
         result.append({
             "product_id": product.id,
@@ -191,12 +206,7 @@ def read_dumping_policy(product_id: int, db: Session = Depends(get_db)) -> dict:
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
-    latest = db.scalar(
-        select(DumpingRun)
-        .where(DumpingRun.product_id == product_id)
-        .order_by(DumpingRun.id.desc())
-        .limit(1)
-    )
+    latest = _latest_run_or_none(db, product_id)
     source = None
     source_error = None
     if policy is not None:
@@ -218,52 +228,51 @@ def upsert_dumping_policy(
     payload: DumpingPolicyUpsert,
     db: Session = Depends(get_db),
 ) -> dict:
-    if db.get(Product, product_id) is None:
+    product = db.get(Product, product_id)
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
-    values = payload.model_dump()
     if policy is None:
-        policy = DumpingPolicy(product_id=product_id, **values)
+        policy = DumpingPolicy(product_id=product_id)
         db.add(policy)
-    else:
-        for key, value in values.items():
-            setattr(policy, key, value)
+    for field, value in payload.model_dump().items():
+        setattr(policy, field, value)
     db.commit()
     db.refresh(policy)
-    if policy.enabled:
-        enqueue_competitor_scan(product_id, reason="policy_saved")
-    return _policy_payload(policy) or {}
+    return {
+        "product": _product_payload(product),
+        "policy": _policy_payload(policy),
+    }
 
 
-@router.post("/products/{product_id}/run-now", status_code=status.HTTP_202_ACCEPTED)
-def run_dumping_now(product_id: int, db: Session = Depends(get_db)) -> dict:
+@router.post("/products/{product_id}/run", status_code=status.HTTP_202_ACCEPTED)
+def queue_dumping_run(product_id: int, db: Session = Depends(get_db)) -> dict:
     product = db.get(Product, product_id)
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     if policy is None or not policy.enabled:
         raise HTTPException(status_code=409, detail="Демпинг для товара не подключён")
-    accepted = enqueue_competitor_scan(product_id, reason="manual")
+    try:
+        queued = enqueue_competitor_scan(product_id, reason="manual")
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     return {
-        "status": "queued" if accepted else "already_queued",
+        "status": "queued",
+        "queued": queued,
         "product_id": product_id,
-        "message": "Проверка Kaspi поставлена в отдельную очередь",
-        "scan_state": state_for_product(product_id),
+        "message": "Карточка поставлена в очередь локального Kaspi Competitor Agent",
     }
 
 
 @public_router.get("/feeds/kaspi/catalog.xml", response_class=Response)
-def kaspi_catalog_feed(db: Session = Depends(get_db)) -> Response:
+def read_public_kaspi_feed(db: Session = Depends(get_db)) -> Response:
     feed = db.scalar(
         select(KaspiXmlFeed)
         .where(KaspiXmlFeed.active.is_(True))
         .order_by(KaspiXmlFeed.id.desc())
         .limit(1)
     )
-    if feed is None:
+    if feed is None or not feed.generated_xml:
         raise HTTPException(status_code=404, detail="Kaspi XML feed is not configured")
-    return Response(
-        content=feed.generated_xml.encode("utf-8"),
-        media_type="application/xml",
-        headers={"Cache-Control": "no-store, max-age=0"},
-    )
+    return Response(content=feed.generated_xml, media_type="application/xml; charset=utf-8")
