@@ -37,10 +37,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt pyinstaller
 
-      - name: Verify agent imports
+      - name: Verify Browser Agent imports
         shell: pwsh
         run: |
-          python -c "import tools.browser_agent; import tools.browser_agent_desktop; import tools.kaspi_competitor_agent"
+          python -c "import tools.browser_agent; import tools.browser_agent_desktop"
+
+      - name: Verify Kaspi Competitor Agent import
+        shell: pwsh
+        run: |
+          python -c "import tools.kaspi_competitor_agent"
 
       - name: Verify release version alignment
         shell: pwsh
