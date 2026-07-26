@@ -3,6 +3,7 @@ from __future__ import annotations
 import secrets
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
@@ -16,6 +17,7 @@ from .dumping_runner import apply_competitor_snapshot
 from .kaspi_offer_competitor import KaspiCompetitorSnapshot
 from .models import Product
 
+
 router = APIRouter(
     prefix="/api/kaspi-competitor-agent",
     tags=["kaspi-competitor-agent"],
@@ -23,6 +25,9 @@ router = APIRouter(
 )
 
 LEASE_SECONDS = 180
+AGENT_ONLINE_SECONDS = 45
+_AGENT_HEARTBEATS: dict[str, dict] = {}
+_AGENT_HEARTBEATS_LOCK = Lock()
 
 
 class AgentClaim(BaseModel):
@@ -30,6 +35,11 @@ class AgentClaim(BaseModel):
     hostname: str | None = Field(default=None, max_length=255)
     platform: str | None = Field(default=None, max_length=128)
     version: str | None = Field(default=None, max_length=32)
+    concurrency: int | None = Field(default=None, ge=1, le=32)
+
+
+class AgentHeartbeat(AgentClaim):
+    status: str = Field(default="online", max_length=32)
 
 
 class AgentComplete(BaseModel):
@@ -47,6 +57,41 @@ class AgentComplete(BaseModel):
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _touch_agent(payload: AgentClaim, *, status: str = "online") -> dict:
+    now = _now()
+    record = {
+        "agent_id": payload.agent_id,
+        "hostname": payload.hostname,
+        "platform": payload.platform,
+        "version": payload.version,
+        "concurrency": payload.concurrency,
+        "status": status,
+        "last_seen_at": now.isoformat(),
+    }
+    with _AGENT_HEARTBEATS_LOCK:
+        _AGENT_HEARTBEATS[payload.agent_id] = record
+    return record
+
+
+def _agent_status_payload() -> dict:
+    now = _now()
+    with _AGENT_HEARTBEATS_LOCK:
+        agents = [dict(item) for item in _AGENT_HEARTBEATS.values()]
+    for item in agents:
+        try:
+            seen = datetime.fromisoformat(str(item["last_seen_at"]))
+            item["online"] = (now - seen).total_seconds() <= AGENT_ONLINE_SECONDS
+        except (TypeError, ValueError):
+            item["online"] = False
+    agents.sort(key=lambda item: str(item.get("last_seen_at") or ""), reverse=True)
+    return {
+        "online": any(item["online"] for item in agents),
+        "online_count": sum(1 for item in agents if item["online"]),
+        "agents": agents,
+        "checked_at": now.isoformat(),
+    }
 
 
 def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> DumpingRun:
@@ -102,8 +147,20 @@ def state_for_product(db: Session, product_id: int) -> dict | None:
     }
 
 
+@router.post("/heartbeat")
+def heartbeat(payload: AgentHeartbeat) -> dict:
+    record = _touch_agent(payload, status=payload.status)
+    return {"accepted": True, "agent": record}
+
+
+@router.get("/agents/status")
+def read_agent_status() -> dict:
+    return _agent_status_payload()
+
+
 @router.post("/claim")
 def claim_job(payload: AgentClaim, db: Session = Depends(get_db)) -> dict:
+    _touch_agent(payload)
     now = _now()
     job = db.scalar(
         select(DumpingRun)
