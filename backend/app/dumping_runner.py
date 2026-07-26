@@ -6,6 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
+from .dumping_competitor_worker import enqueue_competitor_scan
 from .dumping_models import DumpingPolicy, KaspiXmlFeed
 from .dumping_service import decide_dumping_price, publish_decision
 from .kaspi_offer_competitor import KaspiCompetitorSnapshot, scan_kaspi_competitors
@@ -101,8 +102,6 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
 
 def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
     """Queue enabled products after a committed supplier observation."""
-    from .kaspi_competitor_agent_api import queue_competitor_job
-
     with SessionLocal() as db:
         product_ids = list(
             db.scalars(
@@ -117,6 +116,6 @@ def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
                 .distinct()
             )
         )
-        for product_id in product_ids:
-            queue_competitor_job(db, product_id=product_id, reason="supplier_snapshot_changed")
-        db.commit()
+
+    for product_id in product_ids:
+        enqueue_competitor_scan(product_id, reason="supplier_snapshot_changed")
