@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import getpass
 import json
 import os
 import platform
@@ -14,12 +15,16 @@ from urllib.request import Request, urlopen
 from backend.app.kaspi_offer_competitor import scan_kaspi_competitors
 
 VERSION = "1.0.0"
+DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 
 
-def _required_env(name: str) -> str:
-    value = (os.getenv(name) or "").strip()
+def _service_token() -> str:
+    value = (os.getenv("CRM_SERVICE_TOKEN") or "").strip()
+    if value:
+        return value
+    value = getpass.getpass("Вставьте SERVICE_API_TOKEN из Render: ").strip()
     if not value:
-        raise RuntimeError(f"Environment variable {name} is required")
+        raise RuntimeError("SERVICE_API_TOKEN не введён")
     return value
 
 
@@ -98,8 +103,8 @@ async def _process_job(api_url: str, token: str, job: dict) -> None:
 
 
 async def main(*, once: bool = False) -> int:
-    api_url = _required_env("CRM_API_URL").rstrip("/")
-    token = _required_env("CRM_SERVICE_TOKEN")
+    api_url = (os.getenv("CRM_API_URL") or DEFAULT_API_URL).strip().rstrip("/")
+    token = _service_token()
     agent_id = (os.getenv("KASPI_COMPETITOR_AGENT_ID") or f"kaspi-competitor-{socket.gethostname()}").strip()
     poll_seconds = max(1.0, float(os.getenv("KASPI_COMPETITOR_POLL_SECONDS") or "3"))
     concurrency = max(1, min(8, int(os.getenv("KASPI_COMPETITOR_CONCURRENCY") or "2")))
