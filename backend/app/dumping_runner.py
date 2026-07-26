@@ -1,23 +1,29 @@
 from __future__ import annotations
 
+from decimal import Decimal
+
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .dumping_competitor_worker import enqueue_competitor_scan
 from .dumping_models import DumpingPolicy, KaspiXmlFeed
 from .dumping_service import decide_dumping_price, publish_decision
-from .kaspi_offer_competitor import scan_kaspi_competitors
+from .kaspi_offer_competitor import KaspiCompetitorSnapshot, scan_kaspi_competitors
 from .models import Product
 from .suppliers import ProductBinding
 
 
-async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
-    """Execute one competitor scan and publish one pricing decision.
+def apply_competitor_snapshot(
+    db: Session,
+    *,
+    product_id: int,
+    market: KaspiCompetitorSnapshot,
+) -> dict:
+    """Apply a market snapshot received from the local competitor agent.
 
-    This function is called by the dedicated dumping competitor worker only.
-    It does not create Browser Agent jobs and does not depend on the supplier
-    browser process.
+    External Kaspi HTTP work is deliberately outside this function. The local
+    competitor agent scans Kaspi from the seller network and returns only facts;
+    CRM remains authoritative for pricing, audit and XML publication.
     """
     product = db.get(Product, product_id)
     if product is None:
@@ -25,16 +31,7 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     if policy is None or not policy.enabled:
         raise ValueError("Демпинг для товара не подключён")
-    feed = db.scalar(select(KaspiXmlFeed).order_by(KaspiXmlFeed.id.desc()).limit(1))
-    if feed is None or not feed.merchant_id:
-        raise ValueError("Импортируйте полный XML с merchantid")
 
-    market = await scan_kaspi_competitors(
-        product,
-        own_merchant_id=feed.merchant_id,
-        city_id=policy.city_id,
-        zone_id=policy.zone_id,
-    )
     decision = decide_dumping_price(
         db,
         product=product,
@@ -44,11 +41,12 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
     )
     run = publish_decision(db, product=product, policy=policy, decision=decision)
     run.explanation_json = {
-        **run.explanation_json,
+        **(run.explanation_json or {}),
         "competitor_name": market.competitor_name,
         "own_position": market.own_position,
         "seller_count": market.seller_count,
         "product_url": market.product_url,
+        "scan_source": "local_kaspi_competitor_agent",
     }
     db.commit()
     db.refresh(run)
@@ -76,13 +74,35 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
     }
 
 
-def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
-    """Queue enabled products after a committed supplier observation.
+async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
+    """Legacy server-side scanner kept for diagnostics only.
 
-    Supplier ingestion remains authoritative and finishes first. This function
-    only resolves product IDs and places them into the independent competitor
-    queue. It never calls Kaspi and never interacts with Browser Agent jobs.
+    Production jobs are executed by the local Kaspi Competitor Agent and applied
+    through :func:`apply_competitor_snapshot`.
     """
+    product = db.get(Product, product_id)
+    if product is None:
+        raise ValueError("Product not found")
+    policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
+    if policy is None or not policy.enabled:
+        raise ValueError("Демпинг для товара не подключён")
+    feed = db.scalar(select(KaspiXmlFeed).order_by(KaspiXmlFeed.id.desc()).limit(1))
+    if feed is None or not feed.merchant_id:
+        raise ValueError("Импортируйте полный XML с merchantid")
+
+    market = await scan_kaspi_competitors(
+        product,
+        own_merchant_id=feed.merchant_id,
+        city_id=policy.city_id,
+        zone_id=policy.zone_id,
+    )
+    return apply_competitor_snapshot(db, product_id=product_id, market=market)
+
+
+def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
+    """Queue enabled products after a committed supplier observation."""
+    from .kaspi_competitor_agent_api import queue_competitor_job
+
     with SessionLocal() as db:
         product_ids = list(
             db.scalars(
@@ -97,5 +117,6 @@ def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
                 .distinct()
             )
         )
-    for product_id in product_ids:
-        enqueue_competitor_scan(product_id, reason="supplier_snapshot_changed")
+        for product_id in product_ids:
+            queue_competitor_job(db, product_id=product_id, reason="supplier_snapshot_changed")
+        db.commit()
