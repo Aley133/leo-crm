@@ -15,18 +15,38 @@ PERIODIC_REFRESH_SECONDS = 10 * 60
 MAX_BACKOFF_SECONDS = 5 * 60
 
 
+_STATUS_MAP = {
+    "queued_local": "queued",
+    "leased_local": "scanning",
+    "succeeded_local": "completed",
+    "failed_local": "failed",
+}
+
+
 def state_for_product(product_id: int) -> dict[str, Any] | None:
     from .kaspi_competitor_agent_api import state_for_product as read_state
 
     with SessionLocal() as db:
         try:
-            return read_state(db, product_id)
+            state = read_state(db, product_id)
         except (OperationalError, ProgrammingError):
             # Some lightweight test/dev schemas intentionally omit dumping_runs.
             # The workspace must remain readable until the full Alembic schema is
             # available; absence of queue state is represented as None.
             db.rollback()
             return None
+
+    if state is None:
+        return None
+
+    raw_status = str(state.get("status") or "")
+    normalized = _STATUS_MAP.get(raw_status, raw_status)
+    return {
+        **state,
+        "raw_status": raw_status,
+        "status": normalized,
+        "stage": state.get("stage") or normalized,
+    }
 
 
 def enqueue_competitor_scan(product_id: int, *, reason: str = "manual") -> bool:
