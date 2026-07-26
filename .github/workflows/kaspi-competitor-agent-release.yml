@@ -1,0 +1,87 @@
+name: Kaspi Competitor Agent Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "tools/kaspi_competitor_agent.py"
+      - "backend/app/kaspi_offer_competitor.py"
+      - ".github/workflows/kaspi-competitor-agent-release.yml"
+      - "requirements.txt"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kaspi-competitor-agent-release
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+
+      - name: Verify isolated agent import
+        shell: pwsh
+        run: |
+          python -c "import tools.kaspi_competitor_agent"
+          python -c "from pathlib import Path; source=Path('tools/kaspi_competitor_agent.py').read_text(encoding='utf-8'); assert 'playwright' not in source.lower(); assert 'tools.browser_agent' not in source"
+
+      - name: Build standalone executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --console `
+            --name LEO-Kaspi-Competitor-Agent `
+            --paths . `
+            --collect-submodules backend `
+            tools/kaspi_competitor_agent.py
+
+      - name: Smoke test executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/LEO-Kaspi-Competitor-Agent.exe")) {
+            throw "LEO-Kaspi-Competitor-Agent.exe was not created"
+          }
+          & "dist/LEO-Kaspi-Competitor-Agent.exe" --help
+          if ($LASTEXITCODE -ne 0) {
+            throw "Packaged agent failed its --help smoke test"
+          }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LEO-Kaspi-Competitor-Agent-Windows
+          path: dist/LEO-Kaspi-Competitor-Agent.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish rolling GitHub Release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete kaspi-competitor-agent-latest --cleanup-tag --yes 2>$null
+          if ($LASTEXITCODE -ne 0) {
+            Write-Host "Previous rolling release does not exist yet."
+          }
+          gh release create kaspi-competitor-agent-latest `
+            "dist/LEO-Kaspi-Competitor-Agent.exe" `
+            --target "$env:GITHUB_SHA" `
+            --title "LEO Kaspi Competitor Agent" `
+            --notes "Локальный агент анализа конкурентов Kaspi. Работает отдельно от LEO Browser Agent поставщиков. После первого запуска введите SERVICE_API_TOKEN из Render."
