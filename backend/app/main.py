@@ -24,6 +24,7 @@ from .dumping_competitor_worker import (
     start_dumping_competitor_worker,
     stop_dumping_competitor_worker,
 )
+from .dumping_run_compat_api import router as dumping_run_compat_router
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .inventory_api import router as inventory_router
 from .kaspi_competitor_agent_api import router as kaspi_competitor_agent_router
@@ -84,6 +85,7 @@ app.include_router(browser_agent_registry_router)
 app.include_router(kaspi_competitor_agent_router)
 app.include_router(pricing_router)
 app.include_router(dumping_router)
+app.include_router(dumping_run_compat_router)
 app.include_router(dumping_public_router)
 app.include_router(marketplace_router)
 app.include_router(marketplace_orders_router)
