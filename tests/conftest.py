@@ -19,21 +19,32 @@ from backend.app.workspace_models import Workspace
 LEGACY_TEST_WORKSPACE_ID = 1
 
 
-def _attach_legacy_workspace_to_old_fixtures(
-    session: Session,
-    _flush_context,
-    _instances,
+def _default_legacy_workspace_for_old_account_factories(
+    _target: MarketplaceAccount,
+    _args: tuple,
+    kwargs: dict,
 ) -> None:
-    """Keep pre-workspace test factories valid during the staged migration.
+    """Keep legacy MarketplaceAccount test constructors valid during M2.
 
-    Production code remains fail-closed: MarketplaceAccount.workspace_id is still
-    NOT NULL and new request paths must pass an explicit workspace. This adapter
-    exists only in the isolated SQLite test session so the existing regression
-    suite continues to exercise FIFO, orders, purchases and sync unchanged.
+    Several regression tests create their own SQLAlchemy sessions instead of using
+    the shared ``db_session`` fixture. A mapper init hook is therefore required so
+    every test-only MarketplaceAccount constructor receives workspace 1 unless the
+    test explicitly supplies another workspace.
+
+    This hook lives only in tests. Production remains fail-closed because the model
+    and database column are still NOT NULL and production constructors receive no
+    implicit workspace.
     """
-    for item in session.new:
-        if isinstance(item, MarketplaceAccount) and item.workspace_id is None:
-            item.workspace_id = LEGACY_TEST_WORKSPACE_ID
+    kwargs.setdefault("workspace_id", LEGACY_TEST_WORKSPACE_ID)
+
+
+# Install once at test import time so it also covers tests with private sessions.
+event.listen(
+    MarketplaceAccount,
+    "init",
+    _default_legacy_workspace_for_old_account_factories,
+    propagate=True,
+)
 
 
 @pytest.fixture()
@@ -46,7 +57,6 @@ def db_session() -> Iterator[Session]:
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     session = factory()
-    event.listen(session, "before_flush", _attach_legacy_workspace_to_old_fixtures)
     session.add(
         Workspace(
             id=LEGACY_TEST_WORKSPACE_ID,
@@ -58,7 +68,6 @@ def db_session() -> Iterator[Session]:
     try:
         yield session
     finally:
-        event.remove(session, "before_flush", _attach_legacy_workspace_to_old_fixtures)
         session.close()
         Base.metadata.drop_all(engine)
         engine.dispose()
