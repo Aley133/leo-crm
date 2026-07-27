@@ -52,6 +52,7 @@ from .ui import router as ui_router
 from .workspace_auth_api import router as workspace_auth_router
 from .workspace_kaspi_api import router as workspace_kaspi_router
 from .workspace_kaspi_import_api import router as workspace_kaspi_import_router
+from .workspace_orders_api import router as workspace_orders_router
 
 APP_VERSION = "0.19.0"
 DEPLOYMENT_MARKER = "manual-dumping-engine-v1"
@@ -68,6 +69,7 @@ app.include_router(ui_router)
 app.include_router(workspace_auth_router)
 app.include_router(workspace_kaspi_router)
 app.include_router(workspace_kaspi_import_router)
+app.include_router(workspace_orders_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
 app.include_router(product_economics_router)
