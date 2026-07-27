@@ -66,10 +66,18 @@ class Product(Base):
 class MarketplaceAccount(Base):
     __tablename__ = "marketplace_accounts"
     __table_args__ = (
-        UniqueConstraint("provider", "external_account_id", name="uq_marketplace_account_provider_external"),
+        UniqueConstraint(
+            "workspace_id",
+            "provider",
+            "external_account_id",
+            name="uq_marketplace_account_workspace_provider_external",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
     provider: Mapped[str] = mapped_column(String(32), index=True)
     external_account_id: Mapped[str] = mapped_column(String(128))
     display_name: Mapped[str] = mapped_column(String(255))
