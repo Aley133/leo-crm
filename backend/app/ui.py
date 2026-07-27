@@ -73,6 +73,11 @@ def crm_workspace_products() -> FileResponse:
     return _file("workspace-products.html")
 
 
+@router.get("/crm/workspace/products/{product_id}", response_class=FileResponse)
+def crm_workspace_product_detail(product_id: int) -> FileResponse:
+    return _file("workspace-product-detail.html")
+
+
 @router.get("/crm/workspace/inventory", response_class=FileResponse)
 def crm_workspace_inventory() -> FileResponse:
     return _file("workspace-inventory.html")
