@@ -9,6 +9,7 @@ const headers = (json = false) => ({
 
 const form = document.querySelector("#kaspi-form");
 const configured = document.querySelector("#configured");
+const openCabinet = document.querySelector("#open-cabinet");
 const save = document.querySelector("#save");
 const message = document.querySelector("#message");
 
@@ -23,6 +24,7 @@ const readError = async (response) => {
 
 const applyConnection = (payload) => {
   configured.classList.toggle("hidden", !payload.configured);
+  openCabinet.classList.toggle("hidden", !payload.configured);
   if (!payload.configured) return;
   document.querySelector("#current-shop").textContent = payload.shop_name || "—";
   document.querySelector("#current-partner").textContent = payload.partner_id || "—";
@@ -70,9 +72,9 @@ form.addEventListener("submit", async (event) => {
     document.querySelector("#api-token").value = "";
     message.textContent = wasConfigured
       ? "Подключение обновлено."
-      : "Магазин подключён. Открываю Orders Center…";
+      : "Магазин подключён. Открываю кабинет…";
     if (!wasConfigured) {
-      window.setTimeout(() => window.location.assign("/crm/orders"), 500);
+      window.setTimeout(() => window.location.assign("/crm/workspace/orders"), 500);
     }
   } catch (error) {
     message.textContent = error.message || "Не удалось подключить магазин.";
