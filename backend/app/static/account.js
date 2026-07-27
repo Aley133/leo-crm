@@ -49,6 +49,7 @@ const load = async () => {
 
 form.addEventListener("submit", async (event) => {
   event.preventDefault();
+  const wasConfigured = !configured.classList.contains("hidden");
   save.disabled = true;
   save.textContent = "Сохраняю…";
   message.textContent = "";
@@ -67,7 +68,12 @@ form.addEventListener("submit", async (event) => {
     const payload = await response.json();
     applyConnection(payload);
     document.querySelector("#api-token").value = "";
-    message.textContent = "Магазин подключён. Данные сохранены в вашем рабочем пространстве.";
+    message.textContent = wasConfigured
+      ? "Подключение обновлено."
+      : "Магазин подключён. Открываю Orders Center…";
+    if (!wasConfigured) {
+      window.setTimeout(() => window.location.assign("/crm/orders"), 500);
+    }
   } catch (error) {
     message.textContent = error.message || "Не удалось подключить магазин.";
   } finally {
