@@ -49,6 +49,7 @@ from .supplier_products_api import router as supplier_products_router
 from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 from .ui import router as ui_router
+from .workspace_auth_api import router as workspace_auth_router
 
 APP_VERSION = "0.19.0"
 DEPLOYMENT_MARKER = "manual-dumping-engine-v1"
@@ -62,6 +63,7 @@ app = FastAPI(
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
+app.include_router(workspace_auth_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
 app.include_router(product_economics_router)
