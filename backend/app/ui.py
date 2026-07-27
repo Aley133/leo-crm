@@ -73,6 +73,11 @@ def crm_workspace_products() -> FileResponse:
     return _file("workspace-products.html")
 
 
+@router.get("/crm/workspace/inventory", response_class=FileResponse)
+def crm_workspace_inventory() -> FileResponse:
+    return _file("workspace-inventory.html")
+
+
 @router.get("/crm/revenue", response_class=FileResponse)
 def crm_revenue() -> FileResponse:
     return _no_store(FileResponse(STATIC_DIR / "revenue.html"))
