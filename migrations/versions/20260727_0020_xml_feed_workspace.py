@@ -7,8 +7,8 @@ Revises: 20260727_0019
 from alembic import op
 import sqlalchemy as sa
 
-revision = "20260727_0020"
-down_revision = "20260727_0019"
+revision: str = "20260727_0020"
+down_revision: str | None = "20260727_0019"
 branch_labels = None
 depends_on = None
 
