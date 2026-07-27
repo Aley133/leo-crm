@@ -52,9 +52,19 @@ class MarketplaceImportStatus(StrEnum):
 
 class Product(Base):
     __tablename__ = "products"
+    __table_args__ = (
+        UniqueConstraint(
+            "workspace_id",
+            "kaspi_product_id",
+            name="uq_products_workspace_kaspi_product_id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kaspi_product_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    workspace_id: Mapped[int] = mapped_column(
+        ForeignKey("workspaces.id", ondelete="RESTRICT"), nullable=False, index=True
+    )
+    kaspi_product_id: Mapped[str] = mapped_column(String(64), index=True)
     merchant_sku: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String(500))
     brand: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
