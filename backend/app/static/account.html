@@ -1,0 +1,39 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Подключение магазина</title>
+  <link rel="stylesheet" href="/static/account.css?v=20260727-1">
+</head>
+<body>
+  <main class="account-shell">
+    <header class="account-topbar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <button id="logout" class="secondary" type="button">Выйти</button>
+    </header>
+
+    <section class="account-card">
+      <p class="eyebrow">Первый запуск</p>
+      <h1>Подключение Kaspi-магазина</h1>
+      <p class="subtitle">Данные этого магазина будут доступны только вашему рабочему пространству.</p>
+
+      <div id="configured" class="configured hidden">
+        <div><span>Магазин</span><strong id="current-shop">—</strong></div>
+        <div><span>Partner ID</span><strong id="current-partner">—</strong></div>
+        <div><span>Статус</span><strong>Подключён</strong></div>
+      </div>
+
+      <form id="kaspi-form">
+        <label>Название магазина<input id="shop-name" maxlength="255" placeholder="Например, TGBAD" required></label>
+        <label>Kaspi Partner ID<input id="partner-id" maxlength="128" required></label>
+        <label>Kaspi API Token<input id="api-token" type="password" maxlength="4096" autocomplete="off" required></label>
+        <label>Часовой пояс<input id="timezone" value="Asia/Almaty" maxlength="64" required></label>
+        <button id="save" class="primary" type="submit">Подключить магазин</button>
+      </form>
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+  <script src="/static/account.js?v=20260727-1"></script>
+</body>
+</html>
