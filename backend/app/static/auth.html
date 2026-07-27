@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Вход</title>
+  <link rel="stylesheet" href="/static/account.css?v=20260727-1">
+</head>
+<body>
+  <main class="auth-shell">
+    <section class="auth-card">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <p class="eyebrow">Кабинет продавца</p>
+      <h1 id="title">Вход</h1>
+      <p id="subtitle" class="subtitle">Введите логин и пароль своего рабочего пространства.</p>
+
+      <div class="tabs" role="tablist">
+        <button id="login-tab" class="tab active" type="button">Войти</button>
+        <button id="register-tab" class="tab" type="button">Регистрация</button>
+      </div>
+
+      <form id="auth-form">
+        <label>Логин<input id="username" autocomplete="username" minlength="3" maxlength="64" required></label>
+        <label>Пароль<input id="password" type="password" autocomplete="current-password" minlength="8" maxlength="256" required></label>
+        <label id="confirm-row" class="hidden">Повторите пароль<input id="confirm-password" type="password" autocomplete="new-password" minlength="8" maxlength="256"></label>
+        <label id="workspace-row" class="hidden">Название магазина<input id="workspace-name" maxlength="255" placeholder="Например, TGBAD"></label>
+        <button id="submit" class="primary" type="submit">Войти</button>
+      </form>
+      <p id="message" class="message" role="status" aria-live="polite"></p>
+    </section>
+  </main>
+  <script src="/static/auth.js?v=20260727-1"></script>
+</body>
+</html>
