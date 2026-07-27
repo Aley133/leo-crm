@@ -20,8 +20,18 @@ def crm_account() -> FileResponse:
 
 
 @router.get("/crm", response_class=FileResponse)
-def crm_dashboard() -> FileResponse:
+def crm_entrypoint() -> FileResponse:
+    return FileResponse(STATIC_DIR / "crm-gateway.html")
+
+
+@router.get("/crm/legacy", response_class=FileResponse)
+def crm_legacy_dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "dashboard.html")
+
+
+@router.get("/crm/workspace/orders", response_class=FileResponse)
+def crm_workspace_orders() -> FileResponse:
+    return FileResponse(STATIC_DIR / "workspace-orders.html")
 
 
 @router.get("/crm/products", response_class=FileResponse)
