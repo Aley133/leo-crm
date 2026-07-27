@@ -8,7 +8,7 @@ from .db import get_db
 from .models import Product
 from .product_detail_api import ProductDetailResponse, get_product_detail
 from .product_economics_api import ProductEconomicsRead, get_product_economics
-from .workspace_auth import WorkspaceSession, require_workspace_session
+from .workspace_auth import WorkspacePrincipal, require_workspace_principal
 
 
 router = APIRouter(prefix="/api/workspace/products", tags=["workspace-product-detail"])
@@ -30,28 +30,28 @@ def _owned_product(
 def get_workspace_product_detail(
     product_id: int,
     observation_limit: int = Query(default=100, ge=1, le=500),
-    session: WorkspaceSession = Depends(require_workspace_session),
+    principal: WorkspacePrincipal = Depends(require_workspace_principal),
     db: Session = Depends(get_db),
 ) -> ProductDetailResponse:
-    _owned_product(db, product_id=product_id, workspace_id=session.workspace_id)
+    _owned_product(db, product_id=product_id, workspace_id=principal.workspace_id)
     return get_product_detail(product_id=product_id, observation_limit=observation_limit, db=db)
 
 
 @router.get("/{product_id}/economics", response_model=ProductEconomicsRead)
 def get_workspace_product_economics(
     product_id: int,
-    session: WorkspaceSession = Depends(require_workspace_session),
+    principal: WorkspacePrincipal = Depends(require_workspace_principal),
     db: Session = Depends(get_db),
 ) -> ProductEconomicsRead:
-    _owned_product(db, product_id=product_id, workspace_id=session.workspace_id)
+    _owned_product(db, product_id=product_id, workspace_id=principal.workspace_id)
     return get_product_economics(product_id=product_id, db=db)
 
 
 @router.get("/{product_id}/action", response_model=ActionRecommendationRead)
 def get_workspace_product_action(
     product_id: int,
-    session: WorkspaceSession = Depends(require_workspace_session),
+    principal: WorkspacePrincipal = Depends(require_workspace_principal),
     db: Session = Depends(get_db),
 ) -> ActionRecommendationRead:
-    _owned_product(db, product_id=product_id, workspace_id=session.workspace_id)
+    _owned_product(db, product_id=product_id, workspace_id=principal.workspace_id)
     return get_product_action_recommendation(product_id=product_id, db=db)
