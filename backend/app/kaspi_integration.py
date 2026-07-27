@@ -9,6 +9,8 @@ from sqlalchemy.orm import Session
 from .kaspi_http_transport import KaspiConfigurationError, KaspiHttpTransport
 from .models import MarketplaceAccount, MarketplaceProvider
 
+LEGACY_WORKSPACE_ID = 1
+
 
 @dataclass(frozen=True, slots=True)
 class KaspiIntegrationStatus:
@@ -60,11 +62,19 @@ def build_kaspi_order_transport() -> KaspiHttpTransport:
     return KaspiHttpTransport.from_environment()
 
 
-def ensure_kaspi_marketplace_account(session: Session) -> MarketplaceAccount:
-    """Return or create the single Kaspi account represented by deployment config."""
+def ensure_kaspi_marketplace_account(
+    session: Session,
+    workspace_id: int = LEGACY_WORKSPACE_ID,
+) -> MarketplaceAccount:
+    """Return or create the Kaspi account owned by the requested workspace.
+
+    Existing background jobs omit workspace_id and therefore remain attached to
+    workspace 1 until the request/session context is introduced in the next slice.
+    """
     partner_id = _partner_id()
     account = session.scalar(
         select(MarketplaceAccount).where(
+            MarketplaceAccount.workspace_id == workspace_id,
             MarketplaceAccount.provider == MarketplaceProvider.KASPI.value,
             MarketplaceAccount.external_account_id == partner_id,
         )
@@ -73,6 +83,7 @@ def ensure_kaspi_marketplace_account(session: Session) -> MarketplaceAccount:
         return account
 
     account = MarketplaceAccount(
+        workspace_id=workspace_id,
         provider=MarketplaceProvider.KASPI.value,
         external_account_id=partner_id,
         display_name=os.getenv("KASPI_SHOP_NAME", "Kaspi Shop").strip() or "Kaspi Shop",
