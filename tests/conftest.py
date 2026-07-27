@@ -11,7 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.db import Base
-from backend.app import models, monitoring, suppliers  # noqa: F401,E402
+from backend.app import models, monitoring, suppliers, workspace_models  # noqa: F401,E402
 
 
 @pytest.fixture()
