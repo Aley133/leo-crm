@@ -51,6 +51,7 @@ from .workspace_inventory_api import router as workspace_inventory_router
 from .workspace_kaspi_api import router as workspace_kaspi_router
 from .workspace_kaspi_import_api import router as workspace_kaspi_import_router
 from .workspace_orders_api import router as workspace_orders_router
+from .workspace_product_detail_api import router as workspace_product_detail_router
 from .workspace_product_registry_api import router as workspace_product_registry_router
 from .workspace_product_xml_import_api import router as workspace_product_xml_import_router
 from .workspace_supplier_binding_api import router as workspace_supplier_binding_router
@@ -72,6 +73,7 @@ app.include_router(workspace_kaspi_router)
 app.include_router(workspace_kaspi_import_router)
 app.include_router(workspace_orders_router)
 app.include_router(workspace_product_registry_router)
+app.include_router(workspace_product_detail_router)
 app.include_router(workspace_product_xml_import_router)
 app.include_router(workspace_supplier_binding_router)
 app.include_router(workspace_inventory_router)
