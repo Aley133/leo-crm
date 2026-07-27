@@ -73,6 +73,14 @@ class KaspiXmlFeed(Base):
     __tablename__ = "kaspi_xml_feeds"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        Integer,
+        ForeignKey("workspaces.id", ondelete="CASCADE"),
+        index=True,
+        nullable=False,
+        default=1,
+        server_default="1",
+    )
     merchant_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_xml: Mapped[str] = mapped_column(Text, nullable=False)
