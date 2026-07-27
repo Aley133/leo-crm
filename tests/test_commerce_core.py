@@ -50,9 +50,15 @@ def test_received_preorder_moves_to_packaging() -> None:
     received = _line(purchase_request_id="purchase-1", purchase_status="received")
     closed = _line(purchase_request_id="purchase-2", purchase_status="closed")
     from_stock = _line(inventory_allocated_quantity=2)
+    ordered_from_stock = _line(
+        purchase_request_id="purchase-3",
+        purchase_status="ordered",
+        inventory_allocated_quantity=2,
+    )
     assert _order(status="preorder", lines=(received,)).stage == CommerceOrderStage.ASSEMBLY
     assert _order(status="preorder", lines=(closed,)).stage == CommerceOrderStage.ASSEMBLY
     assert _order(status="preorder", lines=(from_stock,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(ordered_from_stock,)).stage == CommerceOrderStage.PREORDER
 
 
 def test_incomplete_preorder_stays_preorder() -> None:
