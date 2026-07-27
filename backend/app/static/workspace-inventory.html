@@ -1,0 +1,58 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta http-equiv="Cache-Control" content="no-store, no-cache, must-revalidate">
+  <title>LEO CRM — Склад и FIFO</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260727-5">
+  <link rel="stylesheet" href="/static/products.css?v=20260727-5">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span>LEO</span><small>CRM</small></div>
+    <nav aria-label="Основная навигация">
+      <a href="/crm/workspace/orders">Заказы</a>
+      <a href="/crm/account">Магазин и Kaspi API</a>
+      <a href="/crm/workspace/products">Товары</a>
+      <a class="active" href="/crm/workspace/inventory">Склад и FIFO</a>
+      <a class="disabled" href="#" aria-disabled="true">Закупки</a>
+      <a class="disabled" href="#" aria-disabled="true">Поставщики</a>
+      <a class="disabled" href="#" aria-disabled="true">Мониторинг</a>
+      <a class="disabled" href="#" aria-disabled="true">Демпинг и XML</a>
+    </nav>
+    <div class="runtime-status"><span class="dot"></span><span id="workspace-label">Workspace</span></div>
+    <button id="logout" class="button secondary" type="button">Выйти</button>
+  </aside>
+  <main>
+    <header class="topbar">
+      <div><p class="eyebrow">СКЛАД</p><h1 id="shop-title">Склад и FIFO</h1><p class="subtitle">Партии, остатки и подтверждённая себестоимость только текущего магазина.</p></div>
+      <button id="refresh" class="button secondary" type="button">Обновить</button>
+    </header>
+    <div id="message" class="message" role="status"></div>
+    <section class="summary-grid" aria-label="Сводка склада">
+      <article><span>Товаров</span><strong id="summary-products">0</strong></article>
+      <article><span>Остаток</span><strong id="summary-on-hand">0</strong></article>
+      <article><span>Принято</span><strong id="summary-received">0</strong></article>
+      <article><span>Распределено</span><strong id="summary-allocated">0</strong></article>
+    </section>
+    <form id="filters" class="filters"><label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Название, Kaspi ID или SKU"></label><button class="button" type="submit">Применить</button><button id="reset" class="button secondary" type="button">Сбросить</button></form>
+    <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div>
+    <div id="inventory-list" class="orders-list"></div>
+    <div id="empty" class="empty hidden">Товары не найдены.</div>
+  </main>
+</div>
+<dialog id="batch-dialog" class="xml-dialog">
+  <form id="batch-form" class="dialog-card">
+    <div class="dialog-header"><div><p class="eyebrow">FIFO</p><h2 id="batch-title">Новая партия</h2></div><button id="batch-close" class="dialog-close" type="button">×</button></div>
+    <input id="batch-product-id" type="hidden">
+    <label>Количество<input id="batch-quantity" type="number" min="1" required></label>
+    <label>Себестоимость за единицу<input id="batch-unit-cost" type="number" min="0" step="0.01" required></label>
+    <label>Поставщик<input id="batch-source" maxlength="255"></label>
+    <label>Документ / ссылка<input id="batch-reference" maxlength="255"></label>
+    <label>Примечание<textarea id="batch-note" maxlength="2000"></textarea></label>
+    <div class="dialog-actions"><button id="batch-cancel" class="button secondary" type="button">Отмена</button><button class="button" type="submit">Добавить партию</button></div>
+  </form>
+</dialog>
+<script src="/static/workspace-inventory.js?v=20260727-1" defer></script>
+</body></html>
