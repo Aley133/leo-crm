@@ -46,6 +46,10 @@ class AuthResponse(BaseModel):
     workspace_slug: str
 
 
+class LogoutResponse(BaseModel):
+    success: bool = True
+
+
 def _slug(username: str) -> str:
     return f"{username[:40]}-{secrets.token_hex(4)}"
 
@@ -120,11 +124,12 @@ def me(principal: WorkspacePrincipal = Depends(require_workspace_principal)) -> 
     }
 
 
-@router.post("/logout", status_code=status.HTTP_204_NO_CONTENT)
+@router.post("/logout", response_model=LogoutResponse, status_code=status.HTTP_200_OK)
 def logout(
     credentials: HTTPAuthorizationCredentials | None = Security(_bearer),
     db: Session = Depends(get_db),
-) -> None:
+) -> LogoutResponse:
     if credentials is not None:
         revoke_session(db, credentials.credentials)
         db.commit()
+    return LogoutResponse()
