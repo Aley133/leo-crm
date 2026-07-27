@@ -50,6 +50,7 @@ from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 from .ui import router as ui_router
 from .workspace_auth_api import router as workspace_auth_router
+from .workspace_inventory_api import router as workspace_inventory_router
 from .workspace_kaspi_api import router as workspace_kaspi_router
 from .workspace_kaspi_import_api import router as workspace_kaspi_import_router
 from .workspace_orders_api import router as workspace_orders_router
@@ -74,6 +75,7 @@ app.include_router(workspace_kaspi_import_router)
 app.include_router(workspace_orders_router)
 app.include_router(workspace_product_registry_router)
 app.include_router(workspace_supplier_binding_router)
+app.include_router(workspace_inventory_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
 app.include_router(product_economics_router)
@@ -112,8 +114,6 @@ async def start_background_services() -> None:
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
-    # No server-side Kaspi competitor requests are started here. The compatibility
-    # hook is intentionally a no-op; local Kaspi Competitor Agent owns scans.
     await start_dumping_competitor_worker()
 
 
