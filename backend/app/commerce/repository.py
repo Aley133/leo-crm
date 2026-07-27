@@ -34,8 +34,9 @@ class CommerceRepository(Protocol):
 
 
 class SqlAlchemyCommerceRepository:
-    def __init__(self, session: Session) -> None:
+    def __init__(self, session: Session, *, workspace_id: int | None = None) -> None:
         self._session = session
+        self._workspace_id = workspace_id
 
     def list_orders(
         self,
@@ -46,6 +47,8 @@ class SqlAlchemyCommerceRepository:
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...]]:
         filters = []
+        if self._workspace_id is not None:
+            filters.append(MarketplaceAccount.workspace_id == self._workspace_id)
         if status:
             filters.append(MarketplaceOrder.status == status)
         if query:
@@ -65,11 +68,18 @@ class SqlAlchemyCommerceRepository:
                 )
             )
 
-        total = self._session.scalar(select(func.count(MarketplaceOrder.id)).where(*filters)) or 0
-        order_rows = self._session.execute(
+        base_query = (
             select(MarketplaceOrder, MarketplaceAccount)
             .join(MarketplaceAccount, MarketplaceAccount.id == MarketplaceOrder.marketplace_account_id)
             .where(*filters)
+        )
+        total = self._session.scalar(
+            select(func.count(MarketplaceOrder.id))
+            .join(MarketplaceAccount, MarketplaceAccount.id == MarketplaceOrder.marketplace_account_id)
+            .where(*filters)
+        ) or 0
+        order_rows = self._session.execute(
+            base_query
             .order_by(MarketplaceOrder.ordered_at.desc().nullslast(), MarketplaceOrder.id.desc())
             .offset(offset)
             .limit(limit)
@@ -79,6 +89,7 @@ class SqlAlchemyCommerceRepository:
 
         order_ids = [order.id for order, _account in order_rows]
         external_order_ids = [order.external_order_id for order, _account in order_rows]
+        account_ids = [account.id for _order, account in order_rows]
         raw_payload_by_external_id: dict[str, dict] = {}
         raw_rows = self._session.execute(
             select(
@@ -88,6 +99,7 @@ class SqlAlchemyCommerceRepository:
                 MarketplaceRawPayload.id,
             )
             .where(
+                MarketplaceRawPayload.marketplace_account_id.in_(account_ids),
                 MarketplaceRawPayload.payload_type == "order",
                 MarketplaceRawPayload.external_object_id.in_(external_order_ids),
             )
