@@ -4,7 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Подключение магазина</title>
-  <link rel="stylesheet" href="/static/account.css?v=20260727-1">
+  <link rel="stylesheet" href="/static/account.css?v=20260727-2">
 </head>
 <body>
   <main class="account-shell">
@@ -14,15 +14,16 @@
     </header>
 
     <section class="account-card">
-      <p class="eyebrow">Первый запуск</p>
+      <p class="eyebrow">Настройки магазина</p>
       <h1>Подключение Kaspi-магазина</h1>
-      <p class="subtitle">Данные этого магазина будут доступны только вашему рабочему пространству.</p>
+      <p class="subtitle">Данные этого магазина доступны только вашему рабочему пространству.</p>
 
       <div id="configured" class="configured hidden">
         <div><span>Магазин</span><strong id="current-shop">—</strong></div>
         <div><span>Partner ID</span><strong id="current-partner">—</strong></div>
         <div><span>Статус</span><strong>Подключён</strong></div>
       </div>
+      <a id="open-cabinet" class="primary hidden" href="/crm/workspace/orders">Открыть кабинет</a>
 
       <form id="kaspi-form">
         <label>Название магазина<input id="shop-name" maxlength="255" placeholder="Например, TGBAD" required></label>
@@ -34,6 +35,6 @@
       <p id="message" class="message" role="status" aria-live="polite"></p>
     </section>
   </main>
-  <script src="/static/account.js?v=20260727-1"></script>
+  <script src="/static/account.js?v=20260727-2"></script>
 </body>
 </html>
