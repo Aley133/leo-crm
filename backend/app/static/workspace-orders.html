@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>LEO CRM — Заказы</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260727-1">
+  <link rel="stylesheet" href="/static/orders.css?v=20260727-1">
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <div class="brand"><span>LEO</span><small>CRM</small></div>
+    <nav><a class="active" href="/crm/workspace/orders">Заказы</a><a href="/crm/account">Магазин</a></nav>
+    <button id="logout" class="button secondary" type="button">Выйти</button>
+  </aside>
+  <main>
+    <header class="topbar"><div><p class="eyebrow">РАБОЧЕЕ ПРОСТРАНСТВО</p><h1 id="shop-title">Заказы</h1><p class="subtitle">Данные только текущего магазина.</p></div><div class="order-actions"><select id="import-days" class="button secondary"><option value="1">1 день</option><option value="7" selected>7 дней</option><option value="14">14 дней</option><option value="30">30 дней</option></select><button id="import" class="button" type="button">Загрузить из Kaspi</button><button id="refresh" class="button secondary" type="button">Обновить</button></div></header>
+    <div id="message" class="message" role="status"></div>
+    <section class="metrics"><article class="metric"><span>Заказов</span><strong id="summary-orders">0</strong></article><article class="metric"><span>Активных</span><strong id="summary-active">0</strong></article><article class="metric"><span>Выручка</span><strong id="summary-revenue">0 ₸</strong></article><article class="metric"><span>К закупке</span><strong id="summary-procurement">0</strong></article></section>
+    <form id="filters" class="filters"><label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Номер заказа или товар"></label><label><span>Этап</span><select id="status"><option value="">Все</option><option value="preorder">Предзаказ</option><option value="assembly">Упаковка</option><option value="handover">Передача</option><option value="shipping">Доставка</option><option value="delivered">Завершён</option><option value="cancelled">Отменён</option></select></label><button class="button" type="submit">Применить</button></form>
+    <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div>
+    <div id="orders-list" class="orders-list"></div><div id="empty" class="empty hidden">Заказы не найдены. Нажмите «Загрузить из Kaspi».</div>
+  </main>
+</div>
+<script src="/static/workspace-orders.js?v=20260727-1" defer></script>
+</body></html>
