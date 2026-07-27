@@ -9,6 +9,16 @@ STATIC_DIR = Path(__file__).resolve().parent / "static"
 router = APIRouter(tags=["crm-ui"], include_in_schema=False)
 
 
+@router.get("/login", response_class=FileResponse)
+def login_page() -> FileResponse:
+    return FileResponse(STATIC_DIR / "auth.html")
+
+
+@router.get("/crm/account", response_class=FileResponse)
+def crm_account() -> FileResponse:
+    return FileResponse(STATIC_DIR / "account.html")
+
+
 @router.get("/crm", response_class=FileResponse)
 def crm_dashboard() -> FileResponse:
     return FileResponse(STATIC_DIR / "dashboard.html")
