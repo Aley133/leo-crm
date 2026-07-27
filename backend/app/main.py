@@ -20,10 +20,7 @@ from .dashboard_api import router as dashboard_router
 from .db import engine
 from .dumping_api import public_router as dumping_public_router
 from .dumping_api import router as dumping_router
-from .dumping_competitor_worker import (
-    start_dumping_competitor_worker,
-    stop_dumping_competitor_worker,
-)
+from .dumping_competitor_worker import start_dumping_competitor_worker, stop_dumping_competitor_worker
 from .dumping_run_compat_api import router as dumping_run_compat_router
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .inventory_api import router as inventory_router
@@ -55,6 +52,7 @@ from .workspace_kaspi_api import router as workspace_kaspi_router
 from .workspace_kaspi_import_api import router as workspace_kaspi_import_router
 from .workspace_orders_api import router as workspace_orders_router
 from .workspace_product_registry_api import router as workspace_product_registry_router
+from .workspace_product_xml_import_api import router as workspace_product_xml_import_router
 from .workspace_supplier_binding_api import router as workspace_supplier_binding_router
 
 APP_VERSION = "0.19.0"
@@ -74,6 +72,7 @@ app.include_router(workspace_kaspi_router)
 app.include_router(workspace_kaspi_import_router)
 app.include_router(workspace_orders_router)
 app.include_router(workspace_product_registry_router)
+app.include_router(workspace_product_xml_import_router)
 app.include_router(workspace_supplier_binding_router)
 app.include_router(workspace_inventory_router)
 app.include_router(products_router)
