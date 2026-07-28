@@ -7,7 +7,7 @@ from typing import Protocol
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from ..inventory_models import InventoryAllocation
+from ..inventory_models import InventoryAllocation, InventoryBatch
 from ..kaspi_order_line_display import recover_order_line_title
 from ..models import (
     MarketplaceAccount,
@@ -36,6 +36,73 @@ class CommerceRepository(Protocol):
 class SqlAlchemyCommerceRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
+
+    def _incoming_reservations(self) -> dict[int, int]:
+        """Virtually reserve expected stock to preorder lines in order-date FIFO order."""
+        incoming_rows = self._session.execute(
+            select(
+                InventoryBatch.product_id,
+                func.coalesce(func.sum(InventoryBatch.quantity_received), 0),
+            )
+            .where(InventoryBatch.is_received.is_(False))
+            .group_by(InventoryBatch.product_id)
+        ).all()
+        incoming_by_product = {
+            int(product_id): int(quantity or 0)
+            for product_id, quantity in incoming_rows
+            if int(quantity or 0) > 0
+        }
+        if not incoming_by_product:
+            return {}
+
+        candidate_rows = self._session.execute(
+            select(MarketplaceOrderLine, MarketplaceOrder)
+            .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
+            .where(
+                MarketplaceOrderLine.product_id.in_(incoming_by_product),
+                MarketplaceOrder.status.in_(("accepted", "preorder")),
+            )
+            .order_by(
+                MarketplaceOrder.ordered_at.asc().nullsfirst(),
+                MarketplaceOrder.id.asc(),
+                MarketplaceOrderLine.id.asc(),
+            )
+        ).all()
+        if not candidate_rows:
+            return {}
+
+        line_ids = [line.id for line, _order in candidate_rows]
+        allocated_rows = self._session.execute(
+            select(
+                InventoryAllocation.marketplace_order_line_id,
+                func.coalesce(func.sum(InventoryAllocation.quantity), 0),
+            )
+            .where(InventoryAllocation.marketplace_order_line_id.in_(line_ids))
+            .group_by(InventoryAllocation.marketplace_order_line_id)
+        ).all()
+        allocated_by_line = {
+            int(line_id): int(quantity or 0)
+            for line_id, quantity in allocated_rows
+        }
+
+        reserved: dict[int, int] = {}
+        remaining = dict(incoming_by_product)
+        for line, _order in candidate_rows:
+            product_id = line.product_id
+            if product_id is None:
+                continue
+            available = remaining.get(product_id, 0)
+            if available <= 0:
+                continue
+            physical = allocated_by_line.get(line.id, 0)
+            needed = max(int(line.quantity or 0) - physical, 0)
+            if needed <= 0:
+                continue
+            quantity = min(needed, available)
+            if quantity > 0:
+                reserved[line.id] = quantity
+                remaining[product_id] = available - quantity
+        return reserved
 
     def list_orders(
         self,
@@ -77,6 +144,7 @@ class SqlAlchemyCommerceRepository:
         if not order_rows:
             return total, ()
 
+        incoming_reserved_by_line = self._incoming_reservations()
         order_ids = [order.id for order, _account in order_rows]
         external_order_ids = [order.external_order_id for order, _account in order_rows]
         raw_payload_by_external_id: dict[str, dict] = {}
@@ -241,6 +309,7 @@ class SqlAlchemyCommerceRepository:
                     procurement_unit_cost=procurement_unit_cost,
                     procurement_source_name=procurement_source_name,
                     inventory_allocated_quantity=inventory_quantity,
+                    incoming_reserved_quantity=incoming_reserved_by_line.get(line.id, 0),
                 )
             )
 
