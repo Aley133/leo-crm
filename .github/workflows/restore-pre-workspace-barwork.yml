@@ -1,0 +1,127 @@
+name: Restore BARWORK before workspace sessions
+
+on:
+  push:
+    paths:
+      - .github/workflows/restore-pre-workspace-barwork.yml
+
+permissions:
+  contents: write
+
+jobs:
+  restore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Restore pre-workspace application and preserve database compatibility
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          # Keep the migration files already applied to production so Alembic can
+          # still resolve the current database revision after the code rollback.
+          mkdir -p /tmp/current-migrations
+          cp migrations/versions/*.py /tmp/current-migrations/
+
+          # 5691681 is the first workspace/login-password database commit.
+          # Its parent is the complete BARWORK CRM immediately before sessions.
+          RESTORE_REF="$(git rev-parse 5691681^)"
+          echo "Restoring application tree to ${RESTORE_REF}"
+          git reset --hard "${RESTORE_REF}"
+
+          # Preserve every migration known by the production database. Old BARWORK
+          # code ignores extra workspace tables/columns, while Alembic remains able
+          # to resolve revision 0020.
+          mkdir -p migrations/versions
+          cp /tmp/current-migrations/*.py migrations/versions/
+
+          cat > migrations/versions/20260728_0021_legacy_workspace_defaults.py <<'PY'
+          """restore legacy BARWORK insert compatibility
+
+          Revision ID: 20260728_0021
+          Revises: 20260727_0020
+
+          The application has been restored to the complete single-workspace
+          BARWORK release. Workspace columns remain in PostgreSQL to avoid a
+          destructive data downgrade. Give every integer workspace_id column a
+          server default of legacy workspace 1 so unchanged legacy insert paths
+          continue to work exactly as before sessions were introduced.
+          """
+
+          from alembic import op
+
+          revision: str = "20260728_0021"
+          down_revision: str | None = "20260727_0020"
+          branch_labels: str | None = None
+          depends_on: str | None = None
+
+
+          def upgrade() -> None:
+              op.execute(
+                  """
+                  DO $$
+                  DECLARE
+                      item record;
+                  BEGIN
+                      FOR item IN
+                          SELECT table_schema, table_name
+                          FROM information_schema.columns
+                          WHERE column_name = 'workspace_id'
+                            AND data_type IN ('integer', 'bigint', 'smallint')
+                            AND table_schema = current_schema()
+                      LOOP
+                          EXECUTE format(
+                              'ALTER TABLE %I.%I ALTER COLUMN workspace_id SET DEFAULT 1',
+                              item.table_schema,
+                              item.table_name
+                          );
+                      END LOOP;
+                  END $$;
+                  """
+              )
+
+
+          def downgrade() -> None:
+              op.execute(
+                  """
+                  DO $$
+                  DECLARE
+                      item record;
+                  BEGIN
+                      FOR item IN
+                          SELECT table_schema, table_name
+                          FROM information_schema.columns
+                          WHERE column_name = 'workspace_id'
+                            AND data_type IN ('integer', 'bigint', 'smallint')
+                            AND table_schema = current_schema()
+                      LOOP
+                          EXECUTE format(
+                              'ALTER TABLE %I.%I ALTER COLUMN workspace_id DROP DEFAULT',
+                              item.table_schema,
+                              item.table_name
+                          );
+                      END LOOP;
+                  END $$;
+                  """
+              )
+          PY
+
+          # Do not leave the destructive one-shot workflow in the restored tree.
+          rm -f .github/workflows/restore-pre-workspace-barwork.yml
+
+      - name: Run restored BARWORK test suite
+        run: python -m pytest -q -m "not postgres"
+
+      - name: Commit and force-push restored BARWORK
+        shell: bash
+        run: |
+          set -euo pipefail
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add -A
+          git commit -m "restore: complete BARWORK CRM before workspace sessions"
+          git push --force-with-lease origin HEAD:main
