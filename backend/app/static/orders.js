@@ -108,9 +108,76 @@ const renderOrder = (order) => {
   return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Kaspi Orders API</span></div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${canCreatePurchase ? `<div class="order-actions"><button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button></div>` : ""}</article>`;
 };
 
-const updateSummary = (summary = {}) => {
+const procurementProductKey = (line) => {
+  if (line.product_id != null) return `product:${line.product_id}`;
+  if (line.merchant_sku) return `sku:${line.merchant_sku}`;
+  if (line.external_product_id) return `kaspi:${line.external_product_id}`;
+  return `title:${line.title || line.line_id}`;
+};
+
+const procurementBreakdown = (orders = []) => {
+  const products = new Map();
+  for (const order of orders) {
+    if (!["new", "preorder"].includes(order.operational_stage)) continue;
+    for (const line of order.lines || []) {
+      const incoming = Number(line.incoming_reserved_quantity || 0);
+      const shortage = Number(line.uncovered_quantity || 0);
+      if (incoming <= 0 && shortage <= 0) continue;
+      const key = procurementProductKey(line);
+      const current = products.get(key) || {
+        productId: line.product_id,
+        title: line.title || "Товар без названия",
+        merchantSku: line.merchant_sku,
+        externalProductId: line.external_product_id,
+        demand: 0,
+        inventory: 0,
+        incoming: 0,
+        shortage: 0,
+      };
+      current.demand += Number(line.quantity || 0);
+      current.inventory += Number(line.inventory_allocated_quantity || 0);
+      current.incoming += incoming;
+      current.shortage += shortage;
+      products.set(key, current);
+    }
+  }
+  return [...products.values()].sort((left, right) =>
+    right.shortage - left.shortage
+    || right.incoming - left.incoming
+    || left.title.localeCompare(right.title, "ru")
+  );
+};
+
+const procurementProductIdentity = (product) => [
+  product.merchantSku ? `Артикул ${product.merchantSku}` : null,
+  product.externalProductId ? `Kaspi ID ${product.externalProductId}` : null,
+].filter(Boolean).join(" · ");
+
+const renderProcurementProduct = (product) => {
+  const demand = product.demand.toLocaleString("ru-RU");
+  const incoming = product.incoming.toLocaleString("ru-RU");
+  const shortage = product.shortage.toLocaleString("ru-RU");
+  const inventory = product.inventory.toLocaleString("ru-RU");
+  const identity = procurementProductIdentity(product);
+  const title = product.productId
+    ? `<a href="/crm/products/${product.productId}">${escapeHtml(product.title)}</a>`
+    : `<strong>${escapeHtml(product.title)}</strong>`;
+  let action;
+  if (product.shortage > 0 && product.incoming > 0) {
+    action = `В пути ${incoming} шт. — они уже распределены по предзаказам. <b>Закажите ещё ${shortage} шт.</b>`;
+  } else if (product.shortage > 0) {
+    action = `Товаром в пути не покрыто. <b>Закажите ${shortage} шт.</b>`;
+  } else {
+    action = `В пути ${incoming} шт. — текущие предзаказы покрыты. Дозаказ не нужен.`;
+  }
+  const physical = product.inventory > 0 ? `<span>Со склада покрыто: ${inventory} шт.</span>` : "";
+  return `<article class="procurement-product"><div>${title}${identity ? `<span>${escapeHtml(identity)}</span>` : ""}</div><div><span>Предзаказано: ${demand} шт.</span>${physical}<p>${action}</p></div></article>`;
+};
+
+const updateSummary = (summary = {}, orders = []) => {
   const shortage = Number(summary.procurement_required_units || 0);
   const incoming = Number(summary.incoming_reserved_units || 0);
+  const products = procurementBreakdown(orders);
   document.querySelector("#summary-orders").textContent = Number(summary.orders_count || 0).toLocaleString("ru-RU");
   document.querySelector("#summary-active").textContent = Number(summary.active_orders || 0).toLocaleString("ru-RU");
   document.querySelector("#summary-revenue").textContent = money(summary.revenue || 0);
@@ -120,22 +187,23 @@ const updateSummary = (summary = {}) => {
   document.querySelector("#summary-procurement-caption").textContent = `единиц · в пути: ${incoming.toLocaleString("ru-RU")}`;
   const advice = document.querySelector("#procurement-advice");
   if (shortage > 0) {
-    advice.textContent = `Требуется дополнительная закупка: ${shortage.toLocaleString("ru-RU")} ед. Уже покрыто товаром в пути: ${incoming.toLocaleString("ru-RU")} ед.`;
+    advice.innerHTML = `<div class="procurement-advice-header"><strong>Нужно дозаказать ${shortage.toLocaleString("ru-RU")} шт.</strong><span>В пути и уже распределено по предзаказам: ${incoming.toLocaleString("ru-RU")} шт.</span></div><div class="procurement-products">${products.map(renderProcurementProduct).join("")}</div>`;
     advice.classList.remove("hidden");
   } else if (incoming > 0) {
-    advice.textContent = `Все текущие предзаказы покрыты. В пути зарезервировано: ${incoming.toLocaleString("ru-RU")} ед.`;
+    advice.innerHTML = `<div class="procurement-advice-header"><strong>Все текущие предзаказы покрыты</strong><span>В пути и уже распределено: ${incoming.toLocaleString("ru-RU")} шт.</span></div><div class="procurement-products">${products.map(renderProcurementProduct).join("")}</div>`;
     advice.classList.remove("hidden");
   } else {
-    advice.textContent = "";
+    advice.replaceChildren();
     advice.classList.add("hidden");
   }
 };
 
 const render = (payload) => {
-  updateSummary(payload.summary || {});
-  ordersList.innerHTML = (payload.items || []).map(renderOrder).join("");
-  empty.classList.toggle("hidden", (payload.items || []).length > 0);
-  document.querySelector("#rows-label").textContent = `Показано заказов: ${(payload.items || []).length} из ${payload.total || 0}`;
+  const orders = payload.items || [];
+  updateSummary(payload.summary || {}, orders);
+  ordersList.innerHTML = orders.map(renderOrder).join("");
+  empty.classList.toggle("hidden", orders.length > 0);
+  document.querySelector("#rows-label").textContent = `Показано заказов: ${orders.length} из ${payload.total || 0}`;
   document.querySelector("#updated-at").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`;
   authPanel.classList.add("hidden");
   ordersPage.classList.remove("hidden");
@@ -155,7 +223,7 @@ const fetchOrdersPayload = async () => {
 
 const refreshSingleOrder = async (orderId, currentCard) => {
   const payload = await fetchOrdersPayload();
-  updateSummary(payload.summary || {});
+  updateSummary(payload.summary || {}, payload.items || []);
   const order = (payload.items || []).find((item) => Number(item.order_id) === Number(orderId));
   if (!order) {
     currentCard?.remove();

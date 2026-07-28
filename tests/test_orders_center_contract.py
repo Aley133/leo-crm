@@ -36,3 +36,25 @@ def test_orders_center_does_not_duplicate_commerce_business_logic() -> None:
     assert "procurement_state" in script
     assert "orders-coverage.js" not in html
     assert "incoming_reserved_units" in script
+
+
+def test_orders_center_explains_preorder_coverage_per_product() -> None:
+    html = (ROOT / "backend" / "app" / "static" / "orders.html").read_text(
+        encoding="utf-8"
+    )
+    styles = (ROOT / "backend" / "app" / "static" / "orders.css").read_text(
+        encoding="utf-8"
+    )
+    script = (ROOT / "backend" / "app" / "static" / "orders.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "procurementBreakdown" in script
+    assert "incoming_reserved_quantity" in script
+    assert "uncovered_quantity" in script
+    assert "В пути ${incoming} шт. — они уже распределены по предзаказам." in script
+    assert "Закажите ещё ${shortage} шт." in script
+    assert "merchant_sku" in script
+    assert "external_product_id" in script
+    assert 'class="procurement-advice hidden"' in html
+    assert ".procurement-product" in styles
