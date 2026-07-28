@@ -24,28 +24,18 @@ router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depe
 
 
 async def _run_full_kaspi_rebuild(job_id: str, *, days: int) -> None:
-    """Run the complete Orders Center pipeline as one user-visible job.
-
-    A manual rebuild is not complete until order lines have been enriched with
-    Kaspi product name/SKU, linked to the XML product registry and allocated from
-    FIFO stock. Keep the raw job alive while the archive v1.1.0 enrichment runs.
-    """
-
     await run_job(job_id)
     raw_job = RAW_JOBS.get(job_id)
     if raw_job is None or raw_job.get("status") == "failed":
         return
-
     enrichment_job_id = create_product_enrichment_job(days=days)
     raw_job["status"] = "enriching_products"
     raw_job["enrichment_job_id"] = enrichment_job_id
     raw_job["message"] = "Заказы загружены. Получаем точные названия, артикулы и выполняем складское списание"
-
     await run_product_enrichment_job(enrichment_job_id)
     enrichment = public_product_enrichment_job(enrichment_job_id) or {}
     enrichment_status = str(enrichment.get("status") or "failed")
     enrichment_errors = list(enrichment.get("errors") or [])
-
     raw_job["product_enrichment"] = {
         "job_id": enrichment_job_id,
         "status": enrichment_status,
@@ -69,27 +59,15 @@ async def _run_full_kaspi_rebuild(job_id: str, *, days: int) -> None:
 
 @router.post("/orders/rebuild", status_code=status.HTTP_202_ACCEPTED)
 async def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
-    """Start the full archive-derived Kaspi Orders Center rebuild."""
-
     with SessionLocal() as session:
-        session.execute(
-            delete(BrowserAgentJob).where(
-                BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%")
-            )
-        )
+        session.execute(delete(BrowserAgentJob).where(BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%")))
         session.commit()
-
     try:
         job_id = create_job(days=days)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     asyncio.create_task(_run_full_kaspi_rebuild(job_id, days=days))
-    return {
-        "job_id": job_id,
-        "status": "queued",
-        "days": days,
-        "message": "Kaspi full order rebuild queued",
-    }
+    return {"job_id": job_id, "status": "queued", "days": days, "message": "Kaspi full order rebuild queued"}
 
 
 @router.get("/orders/rebuild/{job_id}")
@@ -101,22 +79,13 @@ def read_rebuild_job(job_id: str) -> dict[str, object]:
 
 
 @router.post("/orders/enrich-products", status_code=status.HTTP_202_ACCEPTED)
-async def enrich_kaspi_order_products(
-    days: int = Query(default=7, ge=1, le=31),
-) -> dict[str, object]:
-    """Run archive v1.1.0 product enrichment without Browser Agent."""
-
+async def enrich_kaspi_order_products(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
     try:
         job_id = create_product_enrichment_job(days=days)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
     asyncio.create_task(run_product_enrichment_job(job_id))
-    return {
-        "job_id": job_id,
-        "status": "queued",
-        "days": days,
-        "message": "Kaspi product enrichment job queued",
-    }
+    return {"job_id": job_id, "status": "queued", "days": days, "message": "Kaspi product enrichment job queued"}
 
 
 @router.get("/orders/enrich-products/{job_id}")
@@ -152,6 +121,8 @@ def list_commerce_orders(
             cancelled_orders=summary.cancelled_orders,
             unresolved_lines=summary.unresolved_lines,
             procurement_required_lines=summary.procurement_required_lines,
+            procurement_required_units=summary.procurement_required_units,
+            incoming_reserved_units=summary.incoming_reserved_units,
         ),
         items=[
             CommerceOrderRead(
@@ -171,6 +142,8 @@ def list_commerce_orders(
                 units=order.units,
                 unresolved_lines=order.unresolved_lines,
                 procurement_required_lines=order.procurement_required_lines,
+                procurement_required_units=order.procurement_required_units,
+                incoming_reserved_units=order.incoming_reserved_units,
                 lines=[
                     CommerceOrderLineRead(
                         line_id=line.line_id,
@@ -189,6 +162,9 @@ def list_commerce_orders(
                         procurement_unit_cost=line.procurement_unit_cost,
                         procurement_total_cost=line.procurement_total_cost,
                         procurement_source_name=line.procurement_source_name,
+                        inventory_allocated_quantity=line.inventory_allocated_quantity,
+                        incoming_reserved_quantity=line.incoming_reserved_quantity,
+                        uncovered_quantity=line.uncovered_quantity,
                         gross_margin=line.gross_margin,
                         gross_margin_pct=line.gross_margin_pct,
                         kaspi_commission=line.kaspi_commission,
