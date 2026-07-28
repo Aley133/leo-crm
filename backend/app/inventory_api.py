@@ -11,7 +11,11 @@ from sqlalchemy.orm import Session
 from .auth import require_service_token
 from .db import get_db
 from .inventory_models import InventoryAllocation, InventoryBatch
-from .inventory_service import create_inventory_batch, rebuild_product_fifo
+from .inventory_service import (
+    create_inventory_batch,
+    mark_inventory_batch_received,
+    rebuild_product_fifo,
+)
 from .models import Product
 
 
@@ -23,6 +27,7 @@ class InventoryBatchCreate(BaseModel):
     reference: str | None = Field(default=None, max_length=255)
     note: str | None = Field(default=None, max_length=2000)
     reconcile_existing_orders: bool = True
+    is_received: bool = True
 
 
 class InventoryBatchUpdate(BaseModel):
@@ -41,6 +46,7 @@ class InventoryBatchRead(BaseModel):
     quantity_remaining: int
     quantity_allocated: int
     unit_cost: Decimal
+    is_received: bool
     source_name: str | None
     reference: str | None
     note: str | None
@@ -52,6 +58,7 @@ class ProductInventoryRead(BaseModel):
     product_id: int
     on_hand: int
     received_total: int
+    expected_total: int
     allocated_total: int
     batches: list[InventoryBatchRead]
 
@@ -76,7 +83,7 @@ router = APIRouter(
 
 
 def _batch_read(batch: InventoryBatch) -> InventoryBatchRead:
-    allocated = int(batch.quantity_received) - int(batch.quantity_remaining)
+    allocated = int(batch.quantity_received) - int(batch.quantity_remaining) if batch.is_received else 0
     return InventoryBatchRead(
         id=batch.id,
         received_at=batch.received_at,
@@ -84,6 +91,7 @@ def _batch_read(batch: InventoryBatch) -> InventoryBatchRead:
         quantity_remaining=batch.quantity_remaining,
         quantity_allocated=allocated,
         unit_cost=Decimal(batch.unit_cost),
+        is_received=bool(batch.is_received),
         source_name=batch.source_name,
         reference=batch.reference,
         note=batch.note,
@@ -96,7 +104,8 @@ def _on_hand(db: Session, product_id: int) -> int:
     return int(
         db.scalar(
             select(func.coalesce(func.sum(InventoryBatch.quantity_remaining), 0)).where(
-                InventoryBatch.product_id == product_id
+                InventoryBatch.product_id == product_id,
+                InventoryBatch.is_received.is_(True),
             )
         )
         or 0
@@ -116,12 +125,16 @@ def get_product_inventory(
         .where(InventoryBatch.product_id == product_id)
         .order_by(InventoryBatch.received_at.desc(), InventoryBatch.id.desc())
     ).all()
-    received_total = sum(int(batch.quantity_received) for batch in batches)
-    on_hand = sum(int(batch.quantity_remaining) for batch in batches)
+    received_batches = [batch for batch in batches if batch.is_received]
+    expected_batches = [batch for batch in batches if not batch.is_received]
+    received_total = sum(int(batch.quantity_received) for batch in received_batches)
+    expected_total = sum(int(batch.quantity_received) for batch in expected_batches)
+    on_hand = sum(int(batch.quantity_remaining) for batch in received_batches)
     return ProductInventoryRead(
         product_id=product_id,
         on_hand=on_hand,
         received_total=received_total,
+        expected_total=expected_total,
         allocated_total=received_total - on_hand,
         batches=[_batch_read(batch) for batch in batches],
     )
@@ -148,6 +161,7 @@ def add_product_inventory_batch(
             reference=payload.reference,
             note=payload.note,
             reconcile_existing_orders=payload.reconcile_existing_orders,
+            is_received=payload.is_received,
         )
         db.commit()
         db.refresh(batch)
@@ -158,6 +172,36 @@ def add_product_inventory_batch(
     return InventoryBatchCreated(
         batch=_batch_read(batch),
         allocated_to_existing_orders=allocated,
+        on_hand=_on_hand(db, product_id),
+    )
+
+
+@router.post(
+    "/{product_id}/inventory/batches/{batch_id}/receive",
+    response_model=InventoryBatchUpdated,
+)
+def receive_product_inventory_batch(
+    product_id: int,
+    batch_id: int,
+    db: Session = Depends(get_db),
+) -> InventoryBatchUpdated:
+    batch = db.scalar(
+        select(InventoryBatch)
+        .where(
+            InventoryBatch.id == batch_id,
+            InventoryBatch.product_id == product_id,
+        )
+        .with_for_update()
+    )
+    if batch is None:
+        raise HTTPException(status_code=404, detail="Inventory batch not found")
+
+    allocated = mark_inventory_batch_received(db, batch=batch, received_at=datetime.now(UTC))
+    db.commit()
+    db.refresh(batch)
+    return InventoryBatchUpdated(
+        batch=_batch_read(batch),
+        reallocated_quantity=allocated,
         on_hand=_on_hand(db, product_id),
     )
 
@@ -188,7 +232,7 @@ def update_product_inventory_batch(
         received = received.replace(tzinfo=UTC)
 
     batch.quantity_received = payload.quantity
-    batch.quantity_remaining = payload.quantity
+    batch.quantity_remaining = payload.quantity if batch.is_received else 0
     batch.unit_cost = payload.unit_cost
     batch.received_at = received
     batch.source_name = (payload.source_name or "").strip() or None
