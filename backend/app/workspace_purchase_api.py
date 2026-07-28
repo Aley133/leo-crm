@@ -51,9 +51,9 @@ def create_workspace_purchase(
     principal: WorkspacePrincipal = Depends(require_workspace_principal),
     db: Session = Depends(get_db),
 ) -> PurchaseResponse:
-    _owned_order(db, payload.marketplace_order_id, principal.workspace_id)
     try:
         with db.begin():
+            _owned_order(db, payload.marketplace_order_id, principal.workspace_id)
             purchase = create_purchase_from_marketplace_order(
                 db,
                 marketplace_order_id=payload.marketplace_order_id,
@@ -72,9 +72,9 @@ def transition_workspace_purchase(
     principal: WorkspacePrincipal = Depends(require_workspace_principal),
     db: Session = Depends(get_db),
 ) -> PurchaseResponse:
-    _owned_purchase(db, purchase_request_id, principal.workspace_id)
     try:
         with db.begin():
+            _owned_purchase(db, purchase_request_id, principal.workspace_id)
             purchase = transition_purchase(
                 db,
                 purchase_request_id=purchase_request_id,
