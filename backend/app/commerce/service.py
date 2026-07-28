@@ -69,4 +69,6 @@ class CommerceService:
             ),
             unresolved_lines=sum(order.unresolved_lines for order in orders),
             procurement_required_lines=sum(order.procurement_required_lines for order in orders),
+            procurement_required_units=sum(order.procurement_required_units for order in orders),
+            incoming_reserved_units=sum(order.incoming_reserved_units for order in orders),
         )
