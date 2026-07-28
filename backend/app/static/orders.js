@@ -12,6 +12,7 @@ const filters = document.querySelector("#filters");
 const resetButton = document.querySelector("#reset");
 const ordersList = document.querySelector("#orders-list");
 const empty = document.querySelector("#empty");
+let pendingScrollTop = 0;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
@@ -46,6 +47,26 @@ const restoreButton = (button) => {
   button.classList.remove("is-loading");
   button.removeAttribute("aria-busy");
   button.textContent = button.dataset.originalLabel || "Повторить";
+};
+
+const restoreListContextFromUrl = () => {
+  const params = new URLSearchParams(window.location.search);
+  const query = params.get("query");
+  const status = params.get("status");
+  const scrollTop = Number(params.get("scroll") || 0);
+  if (query != null) document.querySelector("#search").value = query;
+  if (status != null) document.querySelector("#status").value = status;
+  pendingScrollTop = Number.isFinite(scrollTop) && scrollTop > 0 ? scrollTop : 0;
+};
+
+const currentOrdersReturnUrl = () => {
+  const params = new URLSearchParams();
+  const query = document.querySelector("#search").value.trim();
+  const status = document.querySelector("#status").value;
+  if (query) params.set("query", query);
+  if (status) params.set("status", status);
+  params.set("scroll", String(Math.max(0, Math.round(window.scrollY))));
+  return `/crm/orders?${params.toString()}`;
 };
 
 const queryString = () => {
@@ -104,6 +125,11 @@ const render = (payload) => {
   document.querySelector("#updated-at").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`;
   authPanel.classList.add("hidden");
   ordersPage.classList.remove("hidden");
+  if (pendingScrollTop > 0) {
+    const scrollTop = pendingScrollTop;
+    pendingScrollTop = 0;
+    requestAnimationFrame(() => window.scrollTo({top: scrollTop, left: 0, behavior: "instant"}));
+  }
 };
 
 const fetchOrdersPayload = async () => {
@@ -215,7 +241,11 @@ const createPurchase = async (orderId, button) => {
     const response = await fetch("/api/purchases/from-marketplace-order", {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({marketplace_order_id:Number(orderId),idempotency_key:`orders-center:${orderId}`,note:"Создано из Orders Center"})});
     if (!response.ok && response.status !== 409) throw await responseError(response);
     const purchase = await response.json();
-    if (purchase.first_product_id) { window.location.assign(`/crm/products/${encodeURIComponent(purchase.first_product_id)}`); return; }
+    if (purchase.first_product_id) {
+      const returnTo = currentOrdersReturnUrl();
+      window.location.assign(`/crm/products/${encodeURIComponent(purchase.first_product_id)}?return_to=${encodeURIComponent(returnTo)}`);
+      return;
+    }
     message.textContent = "Заявка создана, но товар ещё не удалось связать с карточкой.";
     await refreshSingleOrder(orderId, button.closest(".order-card"));
   } catch (error) {
@@ -249,4 +279,5 @@ refreshButton.addEventListener("click", () => rebuildOrders(1, true));
 rebuildButton.addEventListener("click", () => rebuildOrders());
 captureRevenueButton.addEventListener("click", captureRevenue);
 ordersList.addEventListener("click", (event) => { const createButton = event.target.closest(".create-purchase"); if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; } const transitionButton = event.target.closest(".purchase-transition"); if (transitionButton) transitionPurchase(transitionButton); });
+restoreListContextFromUrl();
 loadOrders();
