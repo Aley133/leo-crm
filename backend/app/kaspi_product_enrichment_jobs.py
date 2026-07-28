@@ -34,7 +34,10 @@ def _attrs(resource: dict[str, Any] | None) -> dict[str, Any]:
     if not isinstance(resource, dict):
         return {}
     value = resource.get("attributes")
-    return value if isinstance(value, dict) else {}
+    # Some Kaspi endpoints return a JSON:API resource, while others
+    # return the attributes as a flat object. Never discard a valid
+    # flat product/merchantProduct response.
+    return value if isinstance(value, dict) else resource
 
 
 def _relationship_id(resource: dict[str, Any], *names: str) -> str | None:
@@ -106,18 +109,27 @@ def normalize_entry(
     name = _text(
         merchant_attrs.get("name"),
         merchant_attrs.get("title"),
+        merchant_attrs.get("productName"),
         product_attrs.get("name"),
         product_attrs.get("title"),
+        product_attrs.get("productName"),
         entry_attrs.get("name"),
         entry_attrs.get("title"),
         entry_attrs.get("productName"),
+        entry_attrs.get("merchantProductName"),
     ) or "Название не получено"
 
     sku = _text(
         merchant_attrs.get("code"),
         merchant_attrs.get("sku"),
+        merchant_attrs.get("merchantSku"),
+        merchant_attrs.get("offerCode"),
         product_attrs.get("code"),
+        product_attrs.get("sku"),
+        product_attrs.get("merchantSku"),
+        product_attrs.get("offerCode"),
         entry_attrs.get("offerCode"),
+        entry_attrs.get("merchantSku"),
         entry_attrs.get("code"),
         entry_attrs.get("sku"),
     )
@@ -265,32 +277,45 @@ async def run_job(job_id: str) -> None:
                     return None
 
             async def request_entries(order_id: str, order_key: str) -> list[dict[str, Any]]:
-                try:
-                    async with request_semaphore:
-                        response = await asyncio.wait_for(
-                            client.get(
-                                f"/orders/{order_id}/entries",
-                                params={"page[size]": 200},
-                                headers=headers,
+                last_error: Exception | None = None
+                for endpoint in (
+                    f"/orders/{order_id}/entries",
+                    f"/orders/{order_id}/orderentries",
+                ):
+                    try:
+                        async with request_semaphore:
+                            response = await asyncio.wait_for(
+                                client.get(
+                                    endpoint,
+                                    params={"page[size]": 200},
+                                    headers=headers,
+                                ),
+                                timeout=18,
+                            )
+                        async with counter_lock:
+                            job["request_count"] += 1
+                        response.raise_for_status()
+                        resources = _data(response.json())
+                        if resources:
+                            return resources
+                    except (TimeoutError, httpx.HTTPError, ValueError) as exc:
+                        last_error = exc
+                        async with counter_lock:
+                            job["request_count"] += 1
+                async with counter_lock:
+                    job["errors"].append(
+                        {
+                            "order": order_key,
+                            "step": "entries",
+                            "path": f"/orders/{order_id}/entries|orderentries",
+                            "error": (
+                                f"{type(last_error).__name__}: {last_error}"
+                                if last_error is not None
+                                else "empty_entries"
                             ),
-                            timeout=18,
-                        )
-                    async with counter_lock:
-                        job["request_count"] += 1
-                    response.raise_for_status()
-                    return _data(response.json())
-                except (TimeoutError, httpx.HTTPError, ValueError) as exc:
-                    async with counter_lock:
-                        job["request_count"] += 1
-                        job["errors"].append(
-                            {
-                                "order": order_key,
-                                "step": "entries",
-                                "path": f"/orders/{order_id}/entries",
-                                "error": f"{type(exc).__name__}: {exc}",
-                            }
-                        )
-                    return []
+                        }
+                    )
+                return []
 
             async def merchant_for(
                 master_id: str,
