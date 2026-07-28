@@ -23,6 +23,9 @@ class CommerceOrderLineRead(BaseModel):
     procurement_unit_cost: Decimal | None
     procurement_total_cost: Decimal | None
     procurement_source_name: str | None
+    inventory_allocated_quantity: int
+    incoming_reserved_quantity: int
+    uncovered_quantity: int
     gross_margin: Decimal | None
     gross_margin_pct: Decimal | None
     kaspi_commission: Decimal | None
@@ -49,6 +52,8 @@ class CommerceOrderRead(BaseModel):
     units: int
     unresolved_lines: int
     procurement_required_lines: int
+    procurement_required_units: int
+    incoming_reserved_units: int
     lines: list[CommerceOrderLineRead]
 
 
@@ -63,6 +68,8 @@ class CommerceSummaryRead(BaseModel):
     cancelled_orders: int
     unresolved_lines: int
     procurement_required_lines: int
+    procurement_required_units: int
+    incoming_reserved_units: int
 
 
 class CommerceOrdersResponse(BaseModel):
