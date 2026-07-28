@@ -54,6 +54,7 @@ from .workspace_orders_api import router as workspace_orders_router
 from .workspace_product_detail_api import router as workspace_product_detail_router
 from .workspace_product_registry_api import router as workspace_product_registry_router
 from .workspace_product_xml_import_api import router as workspace_product_xml_import_router
+from .workspace_purchase_api import router as workspace_purchase_router
 from .workspace_supplier_binding_api import router as workspace_supplier_binding_router
 
 APP_VERSION = "0.19.0"
@@ -77,6 +78,7 @@ app.include_router(workspace_product_detail_router)
 app.include_router(workspace_product_xml_import_router)
 app.include_router(workspace_supplier_binding_router)
 app.include_router(workspace_inventory_router)
+app.include_router(workspace_purchase_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
 app.include_router(product_economics_router)
