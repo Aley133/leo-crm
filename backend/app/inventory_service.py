@@ -68,14 +68,6 @@ def allocate_order_line_fifo(
     order: MarketplaceOrder | None = None,
     allocated_at: datetime | None = None,
 ) -> AllocationResult:
-    """Allocate available inventory to one order line without double write-off.
-
-    FIFO is based on batch receipt time. A batch is eligible when it was received
-    no later than the end of the order's local Almaty calendar day. This matches
-    the owner's operational rule: stock received on 23 July may cover orders from
-    23 July, regardless of the exact clock time used during manual entry.
-    """
-
     requested = max(int(order_line.quantity or 0), 0)
     previous = allocated_quantity_for_line(session, order_line.id)
     needed = max(requested - previous, 0)
@@ -94,6 +86,7 @@ def allocate_order_line_fifo(
         select(InventoryBatch)
         .where(
             InventoryBatch.product_id == order_line.product_id,
+            InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
             InventoryBatch.received_at <= eligible_until,
         )
@@ -142,7 +135,8 @@ def reconcile_product_orders_from_batch(
     batch: InventoryBatch,
     allocated_at: datetime | None = None,
 ) -> int:
-    """Use a newly received batch for active orders from its Almaty receipt date."""
+    if not batch.is_received:
+        return 0
 
     day_start = _almaty_day_start(batch.received_at)
     rows = session.execute(
@@ -176,14 +170,6 @@ def rebuild_product_fifo(
     product_id: int,
     allocated_at: datetime | None = None,
 ) -> int:
-    """Rebuild every FIFO allocation for one product after a stock correction.
-
-    This is the authoritative correction path for editing or deleting a batch.
-    Existing allocations are removed, all batch balances are reset, and eligible
-    order lines are allocated again in chronological order. No stale cost remains
-    attached to an order after the source batch changes.
-    """
-
     batch_ids = select(InventoryBatch.id).where(InventoryBatch.product_id == product_id)
     session.execute(
         delete(InventoryAllocation).where(
@@ -198,7 +184,7 @@ def rebuild_product_fifo(
         .with_for_update()
     ).all()
     for batch in batches:
-        batch.quantity_remaining = batch.quantity_received
+        batch.quantity_remaining = batch.quantity_received if batch.is_received else 0
     session.flush()
 
     rows = session.execute(
@@ -236,6 +222,7 @@ def create_inventory_batch(
     reference: str | None = None,
     note: str | None = None,
     reconcile_existing_orders: bool = True,
+    is_received: bool = True,
 ) -> tuple[InventoryBatch, int]:
     if quantity <= 0:
         raise ValueError("quantity must be positive")
@@ -248,8 +235,9 @@ def create_inventory_batch(
         product_id=product.id,
         received_at=received,
         quantity_received=quantity,
-        quantity_remaining=quantity,
+        quantity_remaining=quantity if is_received else 0,
         unit_cost=cost,
+        is_received=is_received,
         source_name=(source_name or "").strip() or None,
         reference=(reference or "").strip() or None,
         note=(note or "").strip() or None,
@@ -258,6 +246,21 @@ def create_inventory_batch(
     session.flush()
 
     allocated = 0
-    if reconcile_existing_orders:
+    if is_received and reconcile_existing_orders:
         allocated = reconcile_product_orders_from_batch(session, batch=batch)
     return batch, allocated
+
+
+def mark_inventory_batch_received(
+    session: Session,
+    *,
+    batch: InventoryBatch,
+    received_at: datetime | None = None,
+) -> int:
+    if batch.is_received:
+        return 0
+    batch.is_received = True
+    batch.received_at = received_at or datetime.now(UTC)
+    batch.quantity_remaining = batch.quantity_received
+    session.flush()
+    return reconcile_product_orders_from_batch(session, batch=batch)
