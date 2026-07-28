@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -32,6 +32,13 @@ class InventoryBatch(Base):
     quantity_received: Mapped[int] = mapped_column(Integer)
     quantity_remaining: Mapped[int] = mapped_column(Integer)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    is_received: Mapped[bool] = mapped_column(
+        Boolean,
+        nullable=False,
+        default=True,
+        server_default=true(),
+        index=True,
+    )
     source_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     reference: Mapped[str | None] = mapped_column(String(255), nullable=True)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
