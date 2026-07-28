@@ -5,7 +5,14 @@ from backend.app.commerce.domain import CommerceOrder, CommerceOrderLine, Commer
 from backend.app.commerce.service import CommerceService
 
 
-def _line(*, product_id=1, purchase_request_id=None, purchase_status=None, inventory_allocated_quantity=0):
+def _line(
+    *,
+    product_id=1,
+    purchase_request_id=None,
+    purchase_status=None,
+    inventory_allocated_quantity=0,
+    incoming_reserved_quantity=0,
+):
     return CommerceOrderLine(
         line_id=1,
         product_id=product_id,
@@ -18,6 +25,7 @@ def _line(*, product_id=1, purchase_request_id=None, purchase_status=None, inven
         purchase_request_id=purchase_request_id,
         purchase_status=purchase_status,
         inventory_allocated_quantity=inventory_allocated_quantity,
+        incoming_reserved_quantity=incoming_reserved_quantity,
     )
 
 
@@ -68,6 +76,26 @@ def test_incomplete_preorder_stays_preorder() -> None:
     assert _order(status="preorder", lines=(ordered_from_stock,)).stage == CommerceOrderStage.PREORDER
 
 
+def test_incoming_stock_covers_preorder_without_moving_it_to_packaging() -> None:
+    covered = _line(incoming_reserved_quantity=2)
+    order = _order(status="preorder", lines=(covered,))
+    assert covered.uncovered_quantity == 0
+    assert covered.procurement_state == ProcurementState.IN_PROGRESS
+    assert order.stage == CommerceOrderStage.PREORDER
+    assert order.procurement_required_lines == 0
+    assert order.procurement_required_units == 0
+    assert order.incoming_reserved_units == 2
+
+
+def test_partial_incoming_stock_leaves_only_shortage_to_purchase() -> None:
+    partially_covered = _line(incoming_reserved_quantity=1)
+    order = _order(status="preorder", lines=(partially_covered,))
+    assert partially_covered.uncovered_quantity == 1
+    assert partially_covered.procurement_state == ProcurementState.REQUIRED
+    assert order.procurement_required_lines == 1
+    assert order.procurement_required_units == 1
+
+
 def test_order_stage_source_is_official_kaspi_orders_api() -> None:
     assert _order(status="preorder").stage_source == "kaspi_orders_api"
 
@@ -106,3 +134,5 @@ def test_cancelled_and_returned_orders_are_excluded_from_revenue() -> None:
     assert summary.cancelled_orders == 2
     assert summary.unresolved_lines == 1
     assert summary.procurement_required_lines == 1
+    assert summary.procurement_required_units == 2
+    assert summary.incoming_reserved_units == 0
