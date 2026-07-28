@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
-from sqlalchemy import select
+from sqlalchemy import func, or_, select
 
 from .db import SessionLocal
 from .inventory_service import allocate_order_line_fifo
@@ -28,6 +28,34 @@ def _data(body: Any) -> list[dict[str, Any]]:
     if isinstance(value, dict):
         return [value]
     return []
+
+
+def _single_resource(body: Any) -> dict[str, Any] | None:
+    """Read one Kaspi product from JSON:API or a flat endpoint response."""
+
+    resources = _data(body)
+    if resources:
+        return resources[0]
+    if not isinstance(body, dict):
+        return None
+
+    for key in ("product", "masterProduct", "merchantProduct"):
+        nested = body.get(key)
+        if isinstance(nested, dict):
+            return nested
+
+    resource_keys = {
+        "id",
+        "attributes",
+        "name",
+        "title",
+        "productName",
+        "code",
+        "sku",
+        "merchantSku",
+        "offerCode",
+    }
+    return body if resource_keys.intersection(body) else None
 
 
 def _attrs(resource: dict[str, Any] | None) -> dict[str, Any]:
@@ -213,6 +241,18 @@ async def run_job(job_id: str) -> None:
         settings = KaspiHttpSettings.from_environment()
         since = datetime.now(UTC) - timedelta(days=int(job["days"]))
         with SessionLocal() as session:
+            unresolved_order_ids = (
+                select(MarketplaceOrderLine.marketplace_order_id)
+                .where(
+                    or_(
+                        func.lower(func.trim(MarketplaceOrderLine.title)).in_(
+                            tuple(_UNKNOWN_TITLES)
+                        ),
+                        func.trim(func.coalesce(MarketplaceOrderLine.merchant_sku, "")) == "",
+                    )
+                )
+                .distinct()
+            )
             orders = session.execute(
                 select(
                     MarketplaceOrder.id,
@@ -220,8 +260,11 @@ async def run_job(job_id: str) -> None:
                     MarketplaceOrder.external_code,
                     MarketplaceOrder.marketplace_account_id,
                 )
-                .where(MarketplaceOrder.ordered_at >= since)
-                .order_by(MarketplaceOrder.id)
+                .where(
+                    MarketplaceOrder.ordered_at >= since,
+                    MarketplaceOrder.id.in_(unresolved_order_ids),
+                )
+                .order_by(MarketplaceOrder.ordered_at.desc(), MarketplaceOrder.id.desc())
             ).all()
         job["total"] = len(orders)
 
@@ -250,31 +293,39 @@ async def run_job(job_id: str) -> None:
                 params: dict[str, Any] | None = None,
                 entry_id: str | None = None,
             ) -> dict[str, Any] | None:
-                try:
-                    async with request_semaphore:
-                        response = await asyncio.wait_for(
-                            client.get(path, params=params, headers=headers),
-                            timeout=18,
-                        )
+                last_error: Exception | None = None
+                for attempt in range(2):
+                    try:
+                        async with request_semaphore:
+                            response = await asyncio.wait_for(
+                                client.get(path, params=params, headers=headers),
+                                timeout=18,
+                            )
+                        response.raise_for_status()
+                        resource = _single_resource(response.json())
+                        if resource is None:
+                            raise ValueError("Kaspi returned an empty product resource")
+                        return resource
+                    except (TimeoutError, httpx.HTTPError, ValueError) as exc:
+                        last_error = exc
+                        if attempt == 0:
+                            await asyncio.sleep(0.25)
+                    finally:
+                        async with counter_lock:
+                            job["request_count"] += 1
+
+                if last_error is not None:
                     async with counter_lock:
-                        job["request_count"] += 1
-                    response.raise_for_status()
-                    body = response.json()
-                    resources = _data(body)
-                    return resources[0] if resources else None
-                except (TimeoutError, httpx.HTTPError, ValueError) as exc:
-                    async with counter_lock:
-                        job["request_count"] += 1
                         job["errors"].append(
                             {
                                 "order": order_key,
                                 "entry": entry_id,
                                 "step": step,
                                 "path": path,
-                                "error": f"{type(exc).__name__}: {exc}",
+                                "error": f"{type(last_error).__name__}: {last_error}",
                             }
                         )
-                    return None
+                return None
 
             async def request_entries(order_id: str, order_key: str) -> list[dict[str, Any]]:
                 last_error: Exception | None = None
