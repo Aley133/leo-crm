@@ -1,0 +1,14 @@
+.run-elapsed {
+  display: block;
+  margin-top: 7px;
+  color: #f0f6fd;
+  font-size: 13px;
+}
+
+.active-run-stalled td {
+  background: #28151b;
+}
+
+.active-run-stalled .run-elapsed {
+  color: #ffacba;
+}

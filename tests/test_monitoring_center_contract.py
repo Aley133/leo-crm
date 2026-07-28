@@ -13,6 +13,7 @@ def test_monitoring_center_api_is_registered_and_protected() -> None:
     assert 'prefix="/api/monitoring-center"' in source
     assert "dependencies=[Depends(require_service_token)]" in source
     for route in (
+        '@router.get("/active-runs"',
         '@router.get("/summary"',
         '@router.get("/jobs"',
         '@router.get("/jobs/{job_id}"',
@@ -67,6 +68,7 @@ def test_monitoring_center_page_is_live_and_operable() -> None:
     ui = (ROOT / "backend" / "app" / "ui.py").read_text(encoding="utf-8")
     html = (ROOT / "backend" / "app" / "static" / "monitoring.html").read_text(encoding="utf-8")
     script = (ROOT / "backend" / "app" / "static" / "monitoring.js").read_text(encoding="utf-8")
+    presence = (ROOT / "backend" / "app" / "static" / "browser-agent-presence.js").read_text(encoding="utf-8")
 
     assert '@router.get("/crm/monitoring"' in ui
     assert 'FileResponse(STATIC_DIR / "monitoring.html")' in ui
@@ -94,6 +96,7 @@ def test_monitoring_center_page_is_live_and_operable() -> None:
     assert '"leo_crm_service_token"' in script
     for endpoint in (
         "/api/monitoring-center/summary",
+        "/api/monitoring-center/active-runs",
         "/api/monitoring-center/jobs",
         "/api/monitoring-center/attempts",
         "/api/monitoring-center/sources",
@@ -108,6 +111,9 @@ def test_monitoring_center_page_is_live_and_operable() -> None:
     assert 'method:"PUT"' not in script
     assert 'method:"PATCH"' not in script
     assert 'method:"DELETE"' not in script
+    assert "/api/browser-agent/agents" in presence
+    assert "/api/kaspi-competitor-agent/agents/status" in presence
+    assert "Ozon/WB и Kaspi подключены" in presence
 
 
 def test_monitoring_center_formats_runtime_data_for_operators() -> None:
@@ -133,6 +139,9 @@ def test_monitoring_center_formats_runtime_data_for_operators() -> None:
     assert "Ошибка сети" in script
     assert '<details class="error-details">' in script
     assert "const renderLeased" in script
+    assert "cachedActiveRuns" in script
+    assert "const pollActiveRuns" in script
+    assert "setInterval(pollActiveRuns,5000)" in script
     assert "24*60*60*1000" in script
     assert "cachedJobs" in script
     assert "cachedAttempts" in script

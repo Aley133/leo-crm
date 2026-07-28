@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import UTC, datetime
+from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from pydantic import BaseModel
@@ -10,6 +11,7 @@ from sqlalchemy.orm import Session
 from .auth import require_service_token
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import get_db
+from .dumping_models import DumpingRun
 from .lease_engine import utc_now
 from .models import Product
 from .monitoring import MonitorAttempt, MonitorTarget, SourceHealth
@@ -87,6 +89,25 @@ class RuntimeEventRow(BaseModel):
     detail: str | None = None
 
 
+class ActiveMonitoringRunRow(BaseModel):
+    run_key: str
+    job_id: int
+    runtime: str
+    status: str
+    product_id: int | None
+    kaspi_product_id: str | None
+    merchant_sku: str | None
+    product_name: str | None
+    source_code: str
+    source_name: str
+    source_url: str | None
+    agent_id: str | None
+    lease_until: datetime | None
+    started_at: datetime
+    updated_at: datetime
+    detail: str
+
+
 router = APIRouter(
     prefix="/api/monitoring-center",
     tags=["monitoring-center"],
@@ -117,6 +138,126 @@ def _job_lifecycle(job: BrowserAgentJob) -> tuple[str, str | None]:
     if job.error_code == "operator_cancelled":
         return "cancelled", "Отменено оператором до получения lease"
     return "failed", job.error_code or "Завершено с ошибкой"
+
+
+def _runtime_datetime(value: object, *, fallback: datetime) -> datetime:
+    if isinstance(value, datetime):
+        result = value
+    elif isinstance(value, str):
+        try:
+            result = datetime.fromisoformat(value)
+        except ValueError:
+            result = fallback
+    else:
+        result = fallback
+    return result if result.tzinfo is not None else result.replace(tzinfo=UTC)
+
+
+def _active_run_status(lease_until: datetime | None) -> tuple[str, str]:
+    if lease_until is not None and _runtime_datetime(lease_until, fallback=utc_now()) < utc_now():
+        return "lease_expired", "Lease истёк — агент не подтвердил завершение"
+    return "processing", "Проверка выполняется локальным агентом"
+
+
+def _supplier_code_from_url(url: str) -> str:
+    host = (urlparse(url).hostname or "").casefold()
+    if "wildberries" in host or host.endswith("wb.ru"):
+        return "wb"
+    if "ozon" in host:
+        return "ozon"
+    return "supplier"
+
+
+@router.get("/active-runs", response_model=list[ActiveMonitoringRunRow])
+def list_active_monitoring_runs(db: Session = Depends(get_db)) -> list[ActiveMonitoringRunRow]:
+    supplier_rows = db.execute(
+        select(
+            BrowserAgentJob,
+            Product.id,
+            Product.kaspi_product_id,
+            Product.merchant_sku,
+            Product.name,
+            Supplier.code,
+            Supplier.name,
+        )
+        .outerjoin(MonitorTarget, MonitorTarget.id == BrowserAgentJob.monitor_target_id)
+        .outerjoin(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
+        .outerjoin(Product, Product.id == ProductBinding.product_id)
+        .outerjoin(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
+        .outerjoin(Supplier, Supplier.id == SupplierProduct.supplier_id)
+        .where(BrowserAgentJob.status == BrowserAgentJobStatus.LEASED.value)
+        .order_by(BrowserAgentJob.updated_at.desc(), BrowserAgentJob.id.desc())
+    ).all()
+
+    result: list[ActiveMonitoringRunRow] = []
+    for job, product_id, kaspi_id, merchant_sku, product_name, supplier_code, supplier_name in supplier_rows:
+        started_at = _runtime_datetime(job.updated_at, fallback=job.created_at)
+        lease_until = (
+            _runtime_datetime(job.lease_until, fallback=started_at)
+            if job.lease_until is not None
+            else None
+        )
+        run_status, detail = _active_run_status(lease_until)
+        source_code = supplier_code or _supplier_code_from_url(job.url)
+        result.append(
+            ActiveMonitoringRunRow(
+                run_key=f"supplier:{job.id}",
+                job_id=job.id,
+                runtime="supplier_monitoring",
+                status=run_status,
+                product_id=product_id,
+                kaspi_product_id=kaspi_id,
+                merchant_sku=merchant_sku,
+                product_name=product_name,
+                source_code=source_code,
+                source_name=supplier_name or source_code.upper(),
+                source_url=job.url,
+                agent_id=job.lease_owner,
+                lease_until=lease_until,
+                started_at=started_at,
+                updated_at=started_at,
+                detail=detail,
+            )
+        )
+
+    kaspi_rows = db.execute(
+        select(DumpingRun, Product.id, Product.kaspi_product_id, Product.merchant_sku, Product.name)
+        .join(Product, Product.id == DumpingRun.product_id)
+        .where(DumpingRun.status == "leased_local")
+        .order_by(DumpingRun.id.desc())
+    ).all()
+    for job, product_id, kaspi_id, merchant_sku, product_name in kaspi_rows:
+        metadata = job.explanation_json or {}
+        started_at = _runtime_datetime(metadata.get("leased_at"), fallback=job.created_at)
+        lease_until = (
+            _runtime_datetime(metadata.get("lease_until"), fallback=started_at)
+            if metadata.get("lease_until")
+            else None
+        )
+        updated_at = _runtime_datetime(metadata.get("updated_at"), fallback=started_at)
+        run_status, detail = _active_run_status(lease_until)
+        result.append(
+            ActiveMonitoringRunRow(
+                run_key=f"kaspi:{job.id}",
+                job_id=job.id,
+                runtime="kaspi_competitor",
+                status=run_status,
+                product_id=product_id,
+                kaspi_product_id=kaspi_id,
+                merchant_sku=merchant_sku,
+                product_name=product_name,
+                source_code="kaspi",
+                source_name="Kaspi",
+                source_url=None,
+                agent_id=metadata.get("agent_id"),
+                lease_until=lease_until,
+                started_at=started_at,
+                updated_at=updated_at,
+                detail=detail,
+            )
+        )
+
+    return sorted(result, key=lambda item: item.started_at, reverse=True)
 
 
 @router.get("/summary", response_model=MonitoringSummary)
