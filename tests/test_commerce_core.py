@@ -96,6 +96,18 @@ def test_partial_incoming_stock_leaves_only_shortage_to_purchase() -> None:
     assert order.procurement_required_units == 1
 
 
+def test_existing_purchase_does_not_hide_residual_shortage() -> None:
+    partially_covered = _line(
+        purchase_request_id="purchase-1",
+        purchase_status="ordered",
+        incoming_reserved_quantity=1,
+    )
+    order = _order(status="preorder", lines=(partially_covered,))
+    assert partially_covered.uncovered_quantity == 1
+    assert order.procurement_required_lines == 1
+    assert order.procurement_required_units == 1
+
+
 def test_order_stage_source_is_official_kaspi_orders_api() -> None:
     assert _order(status="preorder").stage_source == "kaspi_orders_api"
 

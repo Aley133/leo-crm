@@ -109,12 +109,26 @@ const renderOrder = (order) => {
 };
 
 const updateSummary = (summary = {}) => {
+  const shortage = Number(summary.procurement_required_units || 0);
+  const incoming = Number(summary.incoming_reserved_units || 0);
   document.querySelector("#summary-orders").textContent = Number(summary.orders_count || 0).toLocaleString("ru-RU");
   document.querySelector("#summary-active").textContent = Number(summary.active_orders || 0).toLocaleString("ru-RU");
   document.querySelector("#summary-revenue").textContent = money(summary.revenue || 0);
   document.querySelector("#summary-profit").textContent = money(summary.confirmed_net_profit || 0);
   document.querySelector("#summary-profit-units").textContent = `по ${Number(summary.confirmed_profit_units || 0).toLocaleString("ru-RU")} ед. с подтверждённой себестоимостью`;
-  document.querySelector("#summary-procurement").textContent = Number(summary.procurement_required_lines || 0).toLocaleString("ru-RU");
+  document.querySelector("#summary-procurement").textContent = shortage.toLocaleString("ru-RU");
+  document.querySelector("#summary-procurement-caption").textContent = `единиц · в пути: ${incoming.toLocaleString("ru-RU")}`;
+  const advice = document.querySelector("#procurement-advice");
+  if (shortage > 0) {
+    advice.textContent = `Требуется дополнительная закупка: ${shortage.toLocaleString("ru-RU")} ед. Уже покрыто товаром в пути: ${incoming.toLocaleString("ru-RU")} ед.`;
+    advice.classList.remove("hidden");
+  } else if (incoming > 0) {
+    advice.textContent = `Все текущие предзаказы покрыты. В пути зарезервировано: ${incoming.toLocaleString("ru-RU")} ед.`;
+    advice.classList.remove("hidden");
+  } else {
+    advice.textContent = "";
+    advice.classList.add("hidden");
+  }
 };
 
 const render = (payload) => {

@@ -24,6 +24,9 @@ def test_orders_center_uses_commerce_and_purchase_apis() -> None:
 
 
 def test_orders_center_does_not_duplicate_commerce_business_logic() -> None:
+    html = (ROOT / "backend" / "app" / "static" / "orders.html").read_text(
+        encoding="utf-8"
+    )
     script = (ROOT / "backend" / "app" / "static" / "orders.js").read_text(encoding="utf-8")
 
     assert "MarketplaceOrder" not in script
@@ -31,3 +34,5 @@ def test_orders_center_does_not_duplicate_commerce_business_logic() -> None:
     assert "SqlAlchemyCommerceRepository" not in script
     assert "procurement_required_lines" in script
     assert "procurement_state" in script
+    assert "orders-coverage.js" not in html
+    assert "incoming_reserved_units" in script

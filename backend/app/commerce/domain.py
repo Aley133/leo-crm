@@ -186,13 +186,13 @@ class CommerceOrder:
     def procurement_required_lines(self) -> int:
         if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.PREORDER}:
             return 0
-        return sum(1 for line in self.lines if line.uncovered_quantity > 0 and line.purchase_request_id is None)
+        return sum(1 for line in self.lines if line.uncovered_quantity > 0)
 
     @property
     def procurement_required_units(self) -> int:
         if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.PREORDER}:
             return 0
-        return sum(line.uncovered_quantity for line in self.lines if line.purchase_request_id is None)
+        return sum(line.uncovered_quantity for line in self.lines)
 
     @property
     def incoming_reserved_units(self) -> int:
