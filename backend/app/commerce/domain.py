@@ -57,15 +57,18 @@ class CommerceOrderLine:
 
     @property
     def procurement_state(self) -> ProcurementState:
+        # An explicit purchase request is authoritative for preorder readiness.
+        # Existing FIFO allocation must not move a preorder to packaging while
+        # requested goods are only ordered and have not actually been received.
+        if self.purchase_request_id is not None:
+            if self.purchase_status in {"received", "closed"}:
+                return ProcurementState.RECEIVED
+            if self.purchase_status == "cancelled":
+                return ProcurementState.CANCELLED
+            return ProcurementState.IN_PROGRESS
         if self.is_fully_allocated_from_inventory:
             return ProcurementState.NOT_REQUIRED
-        if self.purchase_request_id is None:
-            return ProcurementState.REQUIRED
-        if self.purchase_status in {"received", "closed"}:
-            return ProcurementState.RECEIVED
-        if self.purchase_status == "cancelled":
-            return ProcurementState.CANCELLED
-        return ProcurementState.IN_PROGRESS
+        return ProcurementState.REQUIRED
 
     @property
     def procurement_total_cost(self) -> Decimal | None:
