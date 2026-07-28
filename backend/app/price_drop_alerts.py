@@ -8,7 +8,11 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .models import OutboxEvent, Product
-from .monitoring import SupplierOfferObservation
+from .monitoring import (
+    MonitorAttempt,
+    MonitorTarget,
+    SupplierOfferObservation,
+)
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
@@ -62,7 +66,10 @@ def _historical_prices(
     return [Decimal(str(price)) for price in rows if price is not None]
 
 
-def _alert_context(session: Session, supplier_product_id: int) -> dict[str, object]:
+def _alert_context(
+    session: Session,
+    observation: SupplierOfferObservation,
+) -> dict[str, object] | None:
     row = session.execute(
         select(
             SupplierProduct,
@@ -70,32 +77,37 @@ def _alert_context(session: Session, supplier_product_id: int) -> dict[str, obje
             ProductBinding,
             Product,
         )
-        .select_from(SupplierProduct)
-        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
-        .outerjoin(
+        .select_from(MonitorAttempt)
+        .join(MonitorTarget, MonitorTarget.id == MonitorAttempt.monitor_target_id)
+        .join(
             ProductBinding,
-            ProductBinding.supplier_product_id == SupplierProduct.id,
+            ProductBinding.id == MonitorTarget.product_binding_id,
         )
-        .outerjoin(Product, Product.id == ProductBinding.product_id)
-        .where(SupplierProduct.id == supplier_product_id)
-        .order_by(
-            ProductBinding.is_primary.desc(),
-            ProductBinding.priority.asc(),
-            ProductBinding.id.asc(),
+        .join(Product, Product.id == ProductBinding.product_id)
+        .join(
+            SupplierProduct,
+            SupplierProduct.id == ProductBinding.supplier_product_id,
         )
-        .limit(1)
-    ).one()
+        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+        .where(
+            MonitorAttempt.id == observation.monitor_attempt_id,
+            SupplierProduct.id == observation.supplier_product_id,
+        )
+    ).one_or_none()
+    if row is None:
+        return None
     supplier_product, supplier, binding, product = row
     return {
-        "product_id": product.id if product is not None else None,
-        "product_name": product.name if product is not None else supplier_product.title,
-        "merchant_sku": product.merchant_sku if product is not None else None,
-        "kaspi_product_id": product.kaspi_product_id if product is not None else None,
+        "price_drop_alert_enabled": product.sudden_price_alert_enabled,
+        "product_id": product.id,
+        "product_name": product.name,
+        "merchant_sku": product.merchant_sku,
+        "kaspi_product_id": product.kaspi_product_id,
         "supplier_code": supplier.code,
         "supplier_name": supplier.name,
         "supplier_product_title": supplier_product.title,
         "supplier_product_url": supplier_product.url,
-        "binding_id": binding.id if binding is not None else None,
+        "binding_id": binding.id,
     }
 
 
@@ -116,6 +128,10 @@ def enqueue_price_drop_alert(
         or observation.available is False
         or observation.stock == 0
     ):
+        return None
+
+    context = _alert_context(session, observation)
+    if context is None or not context.pop("price_drop_alert_enabled"):
         return None
 
     prices = _historical_prices(session, observation=observation)
@@ -140,7 +156,6 @@ def enqueue_price_drop_alert(
         / baseline_price
         * Decimal("100")
     ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
-    context = _alert_context(session, observation.supplier_product_id)
     event = OutboxEvent(
         aggregate_type="supplier_product",
         aggregate_id=str(observation.supplier_product_id),

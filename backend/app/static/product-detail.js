@@ -17,6 +17,9 @@ const addSupplierButton = document.querySelector("#add-supplier");
 const sourceTypeInput = document.querySelector("#supplier-source-type");
 const onlineFields = document.querySelector("#online-source-fields");
 const fixedFields = document.querySelector("#fixed-source-fields");
+const priceDropAlertToggle = document.querySelector("#price-drop-alert-enabled");
+const testPriceAlertButton = document.querySelector("#test-price-alert");
+const priceAlertResult = document.querySelector("#price-alert-result");
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency || "KZT"}`.trim();
@@ -97,6 +100,7 @@ const render = (data, action) => {
   const { product, sales, bindings, observations, best_offer: bestOffer, supplier_scores: supplierScores, best_offer_decision: bestOfferDecision, decision_timeline: decisionTimeline } = data;
   setText("product-name", product.name); setText("product-meta", `Kaspi ${product.kaspi_product_id}${product.brand ? ` · ${product.brand}` : ""}${product.merchant_sku ? ` · SKU ${product.merchant_sku}` : ""}`);
   setText("kaspi-product-id", product.kaspi_product_id); setText("merchant-sku", product.merchant_sku || "—"); setText("product-brand", product.brand || "—"); setText("product-status", statusLabel(product.status)); setText("product-updated-at", `Обновлено в CRM ${dateTime(product.updated_at)}`);
+  priceDropAlertToggle.checked = Boolean(product.sudden_price_alert_enabled);
   setText("units-sold", Number(sales.units_sold || 0).toLocaleString("ru-RU")); setText("orders-count", `строк заказов: ${Number(sales.orders_count || 0).toLocaleString("ru-RU")}`); setText("revenue-kzt", money(sales.revenue_kzt)); setText("last-ordered-at", `последняя продажа: ${dateTime(sales.last_ordered_at)}`);
   setText("bindings-count", bindings.length); setText("observations-count", observations.length); setText("available-count", bindings.filter((item) => item.available === true).length); setText("failures-count", bindings.filter((item) => item.consecutive_failures > 0).length); setText("updated-at", `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`);
   renderBestOffer(bestOffer, bestOfferDecision, bindings); renderActionCenter(action); renderDecisionTimeline(decisionTimeline); renderBindings(bindings, supplierScores); renderObservations(observations); authPanel.classList.add("hidden"); detailPage.classList.remove("hidden");
@@ -152,6 +156,52 @@ supplierForm.addEventListener("submit", async (event) => {
     if (!response.ok) throw await responseError(response);
     const result = await response.json(); supplierResult.textContent = sourceType === "online" && result.job_id ? `Поставщик привязан. Job #${result.job_id} уже в очереди.` : "Источник закупки сохранён."; await loadDetail(); setTimeout(closeSupplierDialog, 1200);
   } catch (error) { supplierResult.textContent = error instanceof Error ? error.message : "Не удалось сохранить источник закупки."; } finally { saveButton.disabled = false; }
+});
+
+priceDropAlertToggle.addEventListener("change", async () => {
+  const token = localStorage.getItem(storageKey);
+  const enabled = priceDropAlertToggle.checked;
+  priceDropAlertToggle.disabled = true;
+  priceAlertResult.textContent = "Сохраняю настройку…";
+  try {
+    const response = await fetch(`/api/products/${productId}/price-drop-alert`, {
+      method:"PATCH",
+      headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
+      body:JSON.stringify({enabled}),
+    });
+    if (!response.ok) throw await responseError(response);
+    const result = await response.json();
+    priceDropAlertToggle.checked = Boolean(result.enabled);
+    priceAlertResult.textContent = result.enabled
+      ? "Сигнал включён. При аномальном падении цены CRM отправит уведомление."
+      : "Сигнал выключен. Эта карточка не будет отправлять уведомления об аномальной цене.";
+  } catch (error) {
+    priceDropAlertToggle.checked = !enabled;
+    priceAlertResult.textContent = error instanceof Error ? error.message : "Не удалось сохранить настройку.";
+  } finally {
+    priceDropAlertToggle.disabled = false;
+  }
+});
+
+testPriceAlertButton.addEventListener("click", async () => {
+  const token = localStorage.getItem(storageKey);
+  testPriceAlertButton.disabled = true;
+  testPriceAlertButton.textContent = "Отправляю…";
+  priceAlertResult.textContent = "";
+  try {
+    const response = await fetch(`/api/products/${productId}/price-drop-alert/test`, {
+      method:"POST",
+      headers:{Authorization:`Bearer ${token}`},
+    });
+    if (!response.ok) throw await responseError(response);
+    const result = await response.json();
+    priceAlertResult.textContent = result.message;
+  } catch (error) {
+    priceAlertResult.textContent = error instanceof Error ? error.message : "Не удалось отправить тестовое уведомление.";
+  } finally {
+    testPriceAlertButton.disabled = false;
+    testPriceAlertButton.textContent = "Отправить тестовое уведомление";
+  }
 });
 
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); const token = tokenInput.value.trim(); if (!token) return; localStorage.setItem(storageKey, token); tokenInput.value = ""; loadDetail(); });

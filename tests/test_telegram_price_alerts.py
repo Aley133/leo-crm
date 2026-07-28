@@ -10,12 +10,15 @@ from sqlalchemy.orm import sessionmaker
 from sqlalchemy.pool import StaticPool
 
 from backend.app.db import Base
-from backend.app.models import OutboxEvent
+from backend.app.models import OutboxEvent, Product
 from backend.app.price_drop_alerts import PRICE_DROP_EVENT_TYPE
 from backend.app.telegram_price_alerts import (
+    TelegramDeliveryError,
     TelegramPriceAlertSettings,
     format_price_drop_message,
+    format_test_price_alert_message,
     publish_pending_price_alerts,
+    send_test_price_alert_message,
 )
 
 
@@ -69,6 +72,52 @@ def test_environment_requires_both_telegram_values(monkeypatch) -> None:
     assert settings.chat_id == "-100123"
 
 
+def test_test_message_identifies_the_product_and_is_html_safe() -> None:
+    message = format_test_price_alert_message(
+        product_name="Берберин <500 мг>",
+        merchant_sku="BERB&60",
+        kaspi_product_id="101010101",
+    )
+
+    assert "Тестовое уведомление LEO CRM" in message
+    assert "Telegram подключён правильно" in message
+    assert "Берберин &lt;500 мг&gt;" in message
+    assert "SKU: BERB&amp;60" in message
+    assert "Kaspi ID: 101010101" in message
+
+
+def test_telegram_rejection_does_not_expose_the_bot_token() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            400,
+            json={"ok": False, "description": "Bad Request: chat not found"},
+        )
+
+    settings = TelegramPriceAlertSettings(
+        bot_token="do-not-leak-this-secret",
+        chat_id="-100123",
+        api_base_url="https://telegram.example",
+    )
+
+    async def run() -> None:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            await send_test_price_alert_message(
+                client,
+                settings=settings,
+                product_name="Товар",
+                merchant_sku=None,
+                kaspi_product_id="123",
+            )
+
+    try:
+        asyncio.run(run())
+    except TelegramDeliveryError as exc:
+        assert "chat not found" in str(exc)
+        assert settings.bot_token not in str(exc)
+    else:
+        raise AssertionError("TelegramDeliveryError was not raised")
+
+
 def test_outbox_event_is_marked_only_after_telegram_accepts_it() -> None:
     engine = create_engine(
         "sqlite+pysqlite:///:memory:",
@@ -79,6 +128,15 @@ def test_outbox_event_is_marked_only_after_telegram_accepts_it() -> None:
     factory = sessionmaker(bind=engine, expire_on_commit=False)
     event_id = uuid4()
     with factory() as session:
+        session.add(
+            Product(
+                id=3,
+                kaspi_product_id="101010101",
+                merchant_sku="BERB-60",
+                name="Берберин 500 мг",
+                sudden_price_alert_enabled=True,
+            )
+        )
         session.add(
             OutboxEvent(
                 id=event_id,
@@ -120,6 +178,71 @@ def test_outbox_event_is_marked_only_after_telegram_accepts_it() -> None:
         assert event.published_at is not None
         assert event.publish_attempts == 1
         assert event.last_error is None
+
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def test_pending_event_is_suppressed_if_product_was_disabled() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    event_id = uuid4()
+    with factory() as session:
+        session.add(
+            Product(
+                id=3,
+                kaspi_product_id="101010101",
+                merchant_sku="BERB-60",
+                name="Берберин 500 мг",
+                sudden_price_alert_enabled=False,
+            )
+        )
+        session.add(
+            OutboxEvent(
+                id=event_id,
+                aggregate_type="supplier_product",
+                aggregate_id="7",
+                event_type=PRICE_DROP_EVENT_TYPE,
+                idempotency_key="supplier-price-drop:7:observation:disabled",
+                payload_json=_payload(),
+            )
+        )
+        session.commit()
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    settings = TelegramPriceAlertSettings(
+        bot_token="secret",
+        chat_id="-100123",
+        api_base_url="https://telegram.example",
+    )
+
+    async def run() -> tuple[int, int]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await publish_pending_price_alerts(
+                settings=settings,
+                session_factory=factory,
+                client=client,
+            )
+
+    assert asyncio.run(run()) == (0, 0)
+    assert requests == []
+
+    with factory() as session:
+        event = session.get(OutboxEvent, event_id)
+        assert event is not None
+        assert event.published_at is not None
+        assert event.publish_attempts == 0
+        assert event.last_error == "suppressed: product price alert disabled"
 
     Base.metadata.drop_all(engine)
     engine.dispose()

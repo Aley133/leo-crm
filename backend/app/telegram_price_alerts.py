@@ -13,13 +13,17 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
-from .models import OutboxEvent
+from .models import OutboxEvent, Product
 from .price_drop_alerts import PRICE_DROP_EVENT_TYPE
 
 
 PUBLISH_INTERVAL_SECONDS = 10
 PUBLISH_BATCH_SIZE = 10
 SessionFactory = Callable[[], Session]
+
+
+class TelegramDeliveryError(RuntimeError):
+    """A sanitized Telegram failure that never exposes the bot token."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,25 +97,89 @@ def format_price_drop_message(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
+def format_test_price_alert_message(
+    *,
+    product_name: str,
+    merchant_sku: str | None,
+    kaspi_product_id: str,
+) -> str:
+    identity_parts = []
+    if merchant_sku:
+        identity_parts.append(f"SKU: {escape(merchant_sku)}")
+    if kaspi_product_id:
+        identity_parts.append(f"Kaspi ID: {escape(kaspi_product_id)}")
+    lines = [
+        "✅ <b>Тестовое уведомление LEO CRM</b>",
+        "",
+        f"<b>{escape(product_name)}</b>",
+    ]
+    if identity_parts:
+        lines.append(" · ".join(identity_parts))
+    lines.extend(
+        [
+            "",
+            "Telegram подключён правильно.",
+            "При аномальном падении закупочной цены по включённой карточке уведомление придёт в этот чат.",
+        ]
+    )
+    return "\n".join(lines)
+
+
+async def _send_telegram_message(
+    client: httpx.AsyncClient,
+    *,
+    settings: TelegramPriceAlertSettings,
+    text: str,
+) -> None:
+    response = await client.post(
+        f"{settings.api_base_url}/bot{settings.bot_token}/sendMessage",
+        json={
+            "chat_id": settings.chat_id,
+            "text": text,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": True,
+        },
+    )
+    try:
+        body = response.json()
+    except ValueError:
+        body = {}
+    if not response.is_success or body.get("ok") is not True:
+        description = body.get("description") if isinstance(body, dict) else None
+        reason = str(description or f"HTTP {response.status_code}")
+        raise TelegramDeliveryError(f"Telegram отклонил уведомление: {reason}")
+
+
 async def send_price_drop_message(
     client: httpx.AsyncClient,
     *,
     settings: TelegramPriceAlertSettings,
     payload: dict[str, object],
 ) -> None:
-    response = await client.post(
-        f"{settings.api_base_url}/bot{settings.bot_token}/sendMessage",
-        json={
-            "chat_id": settings.chat_id,
-            "text": format_price_drop_message(payload),
-            "parse_mode": "HTML",
-            "disable_web_page_preview": True,
-        },
+    await _send_telegram_message(
+        client,
+        settings=settings,
+        text=format_price_drop_message(payload),
     )
-    response.raise_for_status()
-    body = response.json()
-    if body.get("ok") is not True:
-        raise RuntimeError(f"Telegram rejected price alert: {body}")
+
+
+async def send_test_price_alert_message(
+    client: httpx.AsyncClient,
+    *,
+    settings: TelegramPriceAlertSettings,
+    product_name: str,
+    merchant_sku: str | None,
+    kaspi_product_id: str,
+) -> None:
+    await _send_telegram_message(
+        client,
+        settings=settings,
+        text=format_test_price_alert_message(
+            product_name=product_name,
+            merchant_sku=merchant_sku,
+            kaspi_product_id=kaspi_product_id,
+        ),
+    )
 
 
 def _pending_events(
@@ -129,7 +197,24 @@ def _pending_events(
             .order_by(OutboxEvent.created_at.desc(), OutboxEvent.id.desc())
             .limit(limit)
         ).all()
-        return [(event.id, dict(event.payload_json)) for event in events]
+        pending: list[tuple[object, dict[str, object]]] = []
+        suppressed = False
+        for event in events:
+            payload = dict(event.payload_json)
+            product_id = payload.get("product_id")
+            try:
+                product = session.get(Product, int(product_id))
+            except (TypeError, ValueError):
+                product = None
+            if product is not None and product.sudden_price_alert_enabled:
+                pending.append((event.id, payload))
+                continue
+            event.published_at = datetime.now(UTC)
+            event.last_error = "suppressed: product price alert disabled"
+            suppressed = True
+        if suppressed:
+            session.commit()
+        return pending
 
 
 def _record_publish_result(

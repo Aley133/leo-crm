@@ -24,6 +24,7 @@ def test_product_detail_contract_contains_sales_bindings_and_history() -> None:
         "orders_count", "units_sold", "revenue_kzt", "last_ordered_at", "bindings",
         "observations", "supplier_product_url", "monitor_status", "consecutive_failures",
         "price", "currency", "available", "delivery_days", "observed_at",
+        "sudden_price_alert_enabled",
     ):
         assert field in source
 
@@ -49,6 +50,8 @@ def test_product_detail_ui_route_and_assets_are_exposed() -> None:
         'id="revenue-kzt"', 'id="last-ordered-at"', 'id="best-offer"',
         'id="bindings"', 'id="observations-body"', 'id="add-supplier"',
         'id="supplier-dialog"', 'id="supplier-form"', 'id="supplier-url"',
+        'id="price-drop-alert-enabled"', 'id="test-price-alert"',
+        'id="price-alert-result"',
     ):
         assert element_id in html
     assert '/api/products/${productId}/detail?observation_limit=100' in script
@@ -76,5 +79,25 @@ def test_product_detail_allows_only_explicit_supplier_binding_write() -> None:
     assert '/api/product-registry/products/${productId}/supplier-bindings/manual' in script
     assert 'method:"POST"' in script
     assert "/run-now" not in script
-    assert 'method:"PATCH"' not in script
     assert 'method:"DELETE"' not in script
+
+
+def test_product_detail_exposes_price_alert_opt_in_and_test_action() -> None:
+    source = (ROOT / "backend" / "app" / "product_detail_api.py").read_text(encoding="utf-8")
+    script = (ROOT / "backend" / "app" / "static" / "product-detail.js").read_text(encoding="utf-8")
+    migration = (
+        ROOT
+        / "migrations"
+        / "versions"
+        / "20260729_0024_product_price_alert_opt_in.py"
+    ).read_text(encoding="utf-8")
+
+    assert '@router.patch(' in source
+    assert '"/{product_id}/price-drop-alert"' in source
+    assert '@router.post(' in source
+    assert '"/{product_id}/price-drop-alert/test"' in source
+    assert "TelegramPriceAlertSettings.from_environment()" in source
+    assert "sudden_price_alert_enabled" in script
+    assert 'method:"PATCH"' in script
+    assert 'method:"POST"' in script
+    assert "server_default=sa.false()" in migration

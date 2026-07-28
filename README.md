@@ -36,4 +36,7 @@ Set both deployment variables to deliver sudden supplier price-drop events:
 - `TELEGRAM_CHAT_ID`
 
 The alert detector uses the monitoring history and emits when an available
-supplier price falls by at least 50% from its recent median baseline.
+supplier price falls by at least 50% from its recent median baseline. Alerts
+are disabled by default and must be enabled per product in its CRM card. The
+same card includes a temporary test-notification action for verifying the
+Telegram deployment settings.

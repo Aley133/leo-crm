@@ -17,11 +17,16 @@ from backend.app.suppliers import ProductBinding, Supplier, SupplierProduct
 STARTED_AT = datetime(2026, 7, 29, 10, 0, tzinfo=UTC)
 
 
-def _seed_target(session: Session) -> tuple[MonitorTarget, SupplierProduct]:
+def _seed_target(
+    session: Session,
+    *,
+    price_alert_enabled: bool = True,
+) -> tuple[MonitorTarget, SupplierProduct]:
     product = Product(
         kaspi_product_id="PRICE-DROP-001",
         merchant_sku="SKU-DROP-001",
         name="Выгодный товар",
+        sudden_price_alert_enabled=price_alert_enabled,
     )
     supplier = Supplier(code="ozon", name="Ozon")
     session.add_all([product, supplier])
@@ -142,6 +147,31 @@ def test_six_price_baseline_detects_a_sudden_ozon_drop(db_session: Session) -> N
         "supplier_product_url": "https://www.ozon.ru/product/price-drop-001/",
         "binding_id": alerts[0].payload_json["binding_id"],
     }
+
+
+def test_product_must_explicitly_opt_in_to_price_drop_alerts(
+    db_session: Session,
+) -> None:
+    target, supplier_product = _seed_target(
+        db_session,
+        price_alert_enabled=False,
+    )
+    _record(
+        db_session,
+        target=target,
+        supplier_product=supplier_product,
+        price="3000",
+        minute=0,
+    )
+    _record(
+        db_session,
+        target=target,
+        supplier_product=supplier_product,
+        price="1000",
+        minute=1,
+    )
+
+    assert _alerts(db_session) == []
 
 
 def test_drop_below_fifty_percent_does_not_alert(db_session: Session) -> None:
