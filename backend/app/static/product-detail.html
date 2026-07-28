@@ -45,5 +45,17 @@
   <script src="/static/product-detail.js?v=20260728-1" defer></script>
   <script src="/static/product-economics.js?v=20260723-5" defer></script>
   <script src="/static/product-inventory.js?v=20260723-3" defer></script>
+  <script>
+    document.addEventListener("DOMContentLoaded", () => {
+      const button = document.querySelector("#back-to-orders");
+      if (!button) return;
+      const returnTo = new URLSearchParams(window.location.search).get("return_to");
+      if (!returnTo || !returnTo.startsWith("/crm/orders")) return;
+      button.href = returnTo;
+      const status = new URL(returnTo, window.location.origin).searchParams.get("status");
+      button.textContent = status === "preorder" ? "Вернуться к списку предзаказов" : "Вернуться к списку заказов";
+      button.classList.remove("hidden");
+    });
+  </script>
 </body>
 </html>
