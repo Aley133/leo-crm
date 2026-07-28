@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from sqlalchemy.exc import OperationalError, ProgrammingError
+from sqlalchemy.orm import Session
 
 from .db import SessionLocal
 
@@ -23,19 +24,7 @@ _STATUS_MAP = {
 }
 
 
-def state_for_product(product_id: int) -> dict[str, Any] | None:
-    from .kaspi_competitor_agent_api import state_for_product as read_state
-
-    with SessionLocal() as db:
-        try:
-            state = read_state(db, product_id)
-        except (OperationalError, ProgrammingError):
-            # Some lightweight test/dev schemas intentionally omit dumping_runs.
-            # The workspace must remain readable until the full Alembic schema is
-            # available; absence of queue state is represented as None.
-            db.rollback()
-            return None
-
+def _normalized_state(state: dict[str, Any] | None) -> dict[str, Any] | None:
     if state is None:
         return None
 
@@ -47,6 +36,31 @@ def state_for_product(product_id: int) -> dict[str, Any] | None:
         "status": normalized,
         "stage": state.get("stage") or normalized,
     }
+
+
+def state_for_product(
+    product_id: int,
+    *,
+    db: Session | None = None,
+) -> dict[str, Any] | None:
+    from .kaspi_competitor_agent_api import state_for_product as read_state
+
+    if db is not None:
+        try:
+            return _normalized_state(read_state(db, product_id))
+        except (OperationalError, ProgrammingError):
+            # Some lightweight test/dev schemas intentionally omit dumping_runs.
+            # The workspace must remain readable until the full Alembic schema is
+            # available; absence of queue state is represented as None.
+            db.rollback()
+            return None
+
+    with SessionLocal() as owned_db:
+        try:
+            return _normalized_state(read_state(owned_db, product_id))
+        except (OperationalError, ProgrammingError):
+            owned_db.rollback()
+            return None
 
 
 def enqueue_competitor_scan(product_id: int, *, reason: str = "manual") -> bool:

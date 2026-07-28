@@ -30,6 +30,21 @@ def test_monitoring_page_serializes_database_backed_reads() -> None:
     assert "originalFetch(input, init)" in queue_script
 
 
+def test_dumping_page_serializes_database_backed_reads() -> None:
+    source = (ROOT / "backend" / "app" / "static" / "dumping.js").read_text(
+        encoding="utf-8"
+    )
+
+    load_page = source.split("const loadPage = async", 1)[1].split(
+        "const pollDumpingRuntime", 1
+    )[0]
+    assert "databaseReadInFlight" in load_page
+    assert 'await request("/api/dumping")' in load_page
+    assert 'await request("/api/dumping/feed-status")' in load_page
+    assert 'await request("/api/dumping/runtime")' in load_page
+    assert "Promise.all" not in load_page
+
+
 def test_liveness_does_not_acquire_database_connection() -> None:
     source = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
     health_block = source.split('@app.get("/health")', 1)[1].split('@app.get("/ready")', 1)[0]

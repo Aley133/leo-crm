@@ -1,6 +1,8 @@
 from decimal import Decimal
 
 from backend.app.dumping_api import list_dumping_products
+from backend.app.dumping_competitor_worker import state_for_product
+from backend.app.dumping_models import DumpingRun
 from backend.app.dumping_models import DumpingPolicy
 from backend.app.models import Product
 
@@ -39,3 +41,51 @@ def test_dumping_workspace_is_json_safe_after_first_policy(db_session) -> None:
     assert row["source"] is None
     assert row["source_error"] is None
     assert row["latest_run"] is None
+
+
+def test_dumping_workspace_reuses_request_session_for_scan_state(
+    db_session,
+    monkeypatch,
+) -> None:
+    product = Product(
+        kaspi_product_id="123456789",
+        merchant_sku="SKU-123456789",
+        name="Товар с состоянием проверки",
+        status="active",
+    )
+    db_session.add(product)
+    db_session.flush()
+    db_session.add(
+        DumpingPolicy(
+            product_id=product.id,
+            enabled=True,
+            minimum_profit_kzt=Decimal("1000"),
+            undercut_step_kzt=1,
+            supplier_delivery_buffer_days=1,
+            inventory_first=True,
+            auto_publish_xml=True,
+            city_id="750000000",
+            zone_id="Magnum_ZONE1",
+        )
+    )
+    run = DumpingRun(
+        product_id=product.id,
+        status="queued_local",
+        published=False,
+        explanation_json={"reason": "manual"},
+    )
+    db_session.add(run)
+    db_session.commit()
+
+    def fail_if_new_session_is_opened():
+        raise AssertionError("dumping workspace opened a nested database session")
+
+    monkeypatch.setattr(
+        "backend.app.dumping_competitor_worker.SessionLocal",
+        fail_if_new_session_is_opened,
+    )
+
+    rows = list_dumping_products(db_session)
+
+    assert rows[0]["scan_state"]["status"] == "queued"
+    assert state_for_product(product.id, db=db_session)["job_id"] == run.id

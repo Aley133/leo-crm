@@ -241,7 +241,7 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
             "source_error": source_error,
             "pricing_preview": _pricing_preview(policy, source),
             "latest_run": _run_payload(latest),
-            "scan_state": state_for_product(product.id),
+            "scan_state": state_for_product(product.id, db=db),
         })
     return result
 
@@ -333,7 +333,7 @@ def read_dumping_policy(product_id: int, db: Session = Depends(get_db)) -> dict:
         "source_error": source_error,
         "pricing_preview": None if policy is None else _pricing_preview(policy, source),
         "latest_run": _run_payload(latest),
-        "scan_state": state_for_product(product_id),
+        "scan_state": state_for_product(product_id, db=db),
     }
 
 

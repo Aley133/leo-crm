@@ -19,8 +19,8 @@ const xmlSourceStatus = document.querySelector("#xml-source-status");
 let configuredRows = [];
 let searchTimer = null;
 let searchController = null;
-let livePollTimer = null;
-let runtimePollInFlight = false;
+let databaseReadInFlight = false;
+let dumpingWorkActive = false;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} KZT`;
@@ -152,17 +152,10 @@ const renderFeedStatus = (feed) => {
   xmlSourceStatus.textContent = feed.ready ? "Готов к публикации" : "Нужен merchantId";
 };
 
-const scheduleLivePageRefresh = () => {
-  if (livePollTimer) return;
-  livePollTimer = setTimeout(() => {
-    livePollTimer = null;
-    loadPage({silent:true});
-  }, 5000);
-};
-
 const renderDumpingRuntime = (snapshot) => {
   const rows = snapshot.active_runs || [];
   const latest = snapshot.latest_run;
+  dumpingWorkActive = rows.length > 0 || Number(snapshot.queued_count || 0) > 0;
   const body = document.querySelector("#dumping-runtime-body");
   const tableWrap = document.querySelector("#dumping-runtime-table-wrap");
   const idle = document.querySelector("#dumping-runtime-empty");
@@ -200,7 +193,6 @@ const renderDumpingRuntime = (snapshot) => {
     idleDetail.textContent = "Очередь демпинга пуста. Kaspi Competitor Agent ожидает следующую карточку.";
   }
 
-  if (rows.length || snapshot.queued_count) scheduleLivePageRefresh();
 };
 
 const tickRuntimeDurations = () => document.querySelectorAll(".dumping-runtime-elapsed[data-started-at]").forEach((element) => {
@@ -254,8 +246,6 @@ const render = (rows) => {
     </article>`;
   }).join("");
   empty.classList.toggle("hidden", rows.length > 0);
-  const hasLiveWork = rows.some((row) => ["queued", "scanning", "retry_wait"].includes(row.scan_state?.status));
-  if (hasLiveWork) scheduleLivePageRefresh();
 };
 
 const fillForm = (row) => {
@@ -288,26 +278,37 @@ const resetPolicyForm = () => {
 const loadPage = async ({silent=false}={}) => {
   const token = localStorage.getItem(storageKey);
   if (!token) { authPanel.classList.remove("hidden"); page.classList.add("hidden"); return; }
+  if (databaseReadInFlight) return;
+  databaseReadInFlight = true;
   if (!silent) setBusy(refreshButton, true, "Обновляю…");
   if (!silent) message.textContent = "";
   try {
-    const [rows, feed, runtime] = await Promise.all([request("/api/dumping"), request("/api/dumping/feed-status"), request("/api/dumping/runtime")]);
+    const rows = await request("/api/dumping");
+    const feed = await request("/api/dumping/feed-status");
+    const runtime = await request("/api/dumping/runtime");
     render(rows); renderFeedStatus(feed); renderDumpingRuntime(runtime); authPanel.classList.add("hidden"); page.classList.remove("hidden");
   } catch (error) {
     message.textContent = error instanceof Error ? error.message : "Не удалось загрузить демпинг";
     if (!localStorage.getItem(storageKey)) authPanel.classList.remove("hidden");
-  } finally { if (!silent) setBusy(refreshButton, false, ""); }
+  } finally {
+    databaseReadInFlight = false;
+    if (!silent) setBusy(refreshButton, false, "");
+  }
 };
 
 const pollDumpingRuntime = async () => {
-  if (!localStorage.getItem(storageKey) || document.hidden || runtimePollInFlight) return;
-  runtimePollInFlight = true;
+  if (!localStorage.getItem(storageKey) || document.hidden || databaseReadInFlight) return;
+  if (dumpingWorkActive) {
+    await loadPage({silent:true});
+    return;
+  }
+  databaseReadInFlight = true;
   try {
     renderDumpingRuntime(await request("/api/dumping/runtime"));
   } catch {
     document.querySelector("#dumping-runtime-label").textContent = "Нет свежих данных — повторяем запрос";
   } finally {
-    runtimePollInFlight = false;
+    databaseReadInFlight = false;
   }
 };
 
