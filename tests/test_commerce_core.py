@@ -58,8 +58,14 @@ def test_received_preorder_moves_to_packaging() -> None:
 def test_incomplete_preorder_stays_preorder() -> None:
     ordered = _line(purchase_request_id="purchase-1", purchase_status="ordered")
     received = _line(purchase_request_id="purchase-2", purchase_status="received")
+    ordered_from_stock = _line(
+        purchase_request_id="purchase-3",
+        purchase_status="ordered",
+        inventory_allocated_quantity=2,
+    )
     assert _order(status="preorder", lines=(ordered,)).stage == CommerceOrderStage.PREORDER
     assert _order(status="preorder", lines=(received, ordered)).stage == CommerceOrderStage.PREORDER
+    assert _order(status="preorder", lines=(ordered_from_stock,)).stage == CommerceOrderStage.PREORDER
 
 
 def test_order_stage_source_is_official_kaspi_orders_api() -> None:
