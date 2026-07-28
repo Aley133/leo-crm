@@ -46,6 +46,7 @@ class CommerceOrderLine:
     procurement_unit_cost: Decimal | None = None
     procurement_source_name: str | None = None
     inventory_allocated_quantity: int = 0
+    incoming_reserved_quantity: int = 0
 
     @property
     def is_resolved(self) -> bool:
@@ -56,10 +57,13 @@ class CommerceOrderLine:
         return self.quantity > 0 and self.inventory_allocated_quantity >= self.quantity
 
     @property
+    def uncovered_quantity(self) -> int:
+        covered = self.inventory_allocated_quantity + self.incoming_reserved_quantity
+        return max(int(self.quantity) - int(covered), 0)
+
+    @property
     def procurement_state(self) -> ProcurementState:
         # An explicit purchase request is authoritative for preorder readiness.
-        # Existing FIFO allocation must not move a preorder to packaging while
-        # requested goods are only ordered and have not actually been received.
         if self.purchase_request_id is not None:
             if self.purchase_status in {"received", "closed"}:
                 return ProcurementState.RECEIVED
@@ -68,6 +72,8 @@ class CommerceOrderLine:
             return ProcurementState.IN_PROGRESS
         if self.is_fully_allocated_from_inventory:
             return ProcurementState.NOT_REQUIRED
+        if self.incoming_reserved_quantity > 0 and self.uncovered_quantity == 0:
+            return ProcurementState.IN_PROGRESS
         return ProcurementState.REQUIRED
 
     @property
@@ -180,7 +186,17 @@ class CommerceOrder:
     def procurement_required_lines(self) -> int:
         if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.PREORDER}:
             return 0
-        return sum(1 for line in self.lines if line.procurement_state == ProcurementState.REQUIRED)
+        return sum(1 for line in self.lines if line.uncovered_quantity > 0 and line.purchase_request_id is None)
+
+    @property
+    def procurement_required_units(self) -> int:
+        if self.stage not in {CommerceOrderStage.NEW, CommerceOrderStage.PREORDER}:
+            return 0
+        return sum(line.uncovered_quantity for line in self.lines if line.purchase_request_id is None)
+
+    @property
+    def incoming_reserved_units(self) -> int:
+        return sum(line.incoming_reserved_quantity for line in self.lines)
 
     def effective_procurement_state(self, line: CommerceOrderLine) -> ProcurementState:
         if line.procurement_state != ProcurementState.REQUIRED:
@@ -232,3 +248,5 @@ class CommerceSummary:
     cancelled_orders: int
     unresolved_lines: int
     procurement_required_lines: int
+    procurement_required_units: int
+    incoming_reserved_units: int
