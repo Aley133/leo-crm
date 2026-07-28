@@ -1,0 +1,193 @@
+name: Apply Kaspi line enrichment recovery
+
+on:
+  push:
+    paths:
+      - .github/workflows/apply-kaspi-line-enrichment-fix.yml
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Patch enrichment compatibility
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+
+          path = Path('backend/app/kaspi_product_enrichment_jobs.py')
+          text = path.read_text(encoding='utf-8')
+
+          old = '''def _attrs(resource: dict[str, Any] | None) -> dict[str, Any]:
+              if not isinstance(resource, dict):
+                  return {}
+              value = resource.get("attributes")
+              return value if isinstance(value, dict) else {}
+          '''
+          new = '''def _attrs(resource: dict[str, Any] | None) -> dict[str, Any]:
+              if not isinstance(resource, dict):
+                  return {}
+              value = resource.get("attributes")
+              # Some Kaspi endpoints return a JSON:API resource, while others
+              # return the attributes as a flat object. Never discard a valid
+              # flat product/merchantProduct response.
+              return value if isinstance(value, dict) else resource
+          '''
+          if old not in text:
+              raise SystemExit('_attrs block not found')
+          text = text.replace(old, new)
+
+          old = '''    name = _text(
+                  merchant_attrs.get("name"),
+                  merchant_attrs.get("title"),
+                  product_attrs.get("name"),
+                  product_attrs.get("title"),
+                  entry_attrs.get("name"),
+                  entry_attrs.get("title"),
+                  entry_attrs.get("productName"),
+              ) or "Название не получено"
+
+              sku = _text(
+                  merchant_attrs.get("code"),
+                  merchant_attrs.get("sku"),
+                  product_attrs.get("code"),
+                  entry_attrs.get("offerCode"),
+                  entry_attrs.get("code"),
+                  entry_attrs.get("sku"),
+              )
+          '''
+          new = '''    name = _text(
+                  merchant_attrs.get("name"),
+                  merchant_attrs.get("title"),
+                  merchant_attrs.get("productName"),
+                  product_attrs.get("name"),
+                  product_attrs.get("title"),
+                  product_attrs.get("productName"),
+                  entry_attrs.get("name"),
+                  entry_attrs.get("title"),
+                  entry_attrs.get("productName"),
+                  entry_attrs.get("merchantProductName"),
+              ) or "Название не получено"
+
+              sku = _text(
+                  merchant_attrs.get("code"),
+                  merchant_attrs.get("sku"),
+                  merchant_attrs.get("merchantSku"),
+                  merchant_attrs.get("offerCode"),
+                  product_attrs.get("code"),
+                  product_attrs.get("sku"),
+                  product_attrs.get("merchantSku"),
+                  product_attrs.get("offerCode"),
+                  entry_attrs.get("offerCode"),
+                  entry_attrs.get("merchantSku"),
+                  entry_attrs.get("code"),
+                  entry_attrs.get("sku"),
+              )
+          '''
+          if old not in text:
+              raise SystemExit('name/sku normalization block not found')
+          text = text.replace(old, new)
+
+          old = '''            async def request_entries(order_id: str, order_key: str) -> list[dict[str, Any]]:
+                          try:
+                              async with request_semaphore:
+                                  response = await asyncio.wait_for(
+                                      client.get(
+                                          f"/orders/{order_id}/entries",
+                                          params={"page[size]": 200},
+                                          headers=headers,
+                                      ),
+                                      timeout=18,
+                                  )
+                              async with counter_lock:
+                                  job["request_count"] += 1
+                              response.raise_for_status()
+                              return _data(response.json())
+                          except (TimeoutError, httpx.HTTPError, ValueError) as exc:
+                              async with counter_lock:
+                                  job["request_count"] += 1
+                                  job["errors"].append(
+                                      {
+                                          "order": order_key,
+                                          "step": "entries",
+                                          "path": f"/orders/{order_id}/entries",
+                                          "error": f"{type(exc).__name__}: {exc}",
+                                      }
+                                  )
+                              return []
+          '''
+          new = '''            async def request_entries(order_id: str, order_key: str) -> list[dict[str, Any]]:
+                          last_error: Exception | None = None
+                          for endpoint in (
+                              f"/orders/{order_id}/entries",
+                              f"/orders/{order_id}/orderentries",
+                          ):
+                              try:
+                                  async with request_semaphore:
+                                      response = await asyncio.wait_for(
+                                          client.get(
+                                              endpoint,
+                                              params={"page[size]": 200},
+                                              headers=headers,
+                                          ),
+                                          timeout=18,
+                                      )
+                                  async with counter_lock:
+                                      job["request_count"] += 1
+                                  response.raise_for_status()
+                                  resources = _data(response.json())
+                                  if resources:
+                                      return resources
+                              except (TimeoutError, httpx.HTTPError, ValueError) as exc:
+                                  last_error = exc
+                                  async with counter_lock:
+                                      job["request_count"] += 1
+                          async with counter_lock:
+                              job["errors"].append(
+                                  {
+                                      "order": order_key,
+                                      "step": "entries",
+                                      "path": f"/orders/{order_id}/entries|orderentries",
+                                      "error": (
+                                          f"{type(last_error).__name__}: {last_error}"
+                                          if last_error is not None
+                                          else "empty_entries"
+                                      ),
+                                  }
+                              )
+                          return []
+          '''
+          if old not in text:
+              raise SystemExit('request_entries block not found')
+          text = text.replace(old, new)
+
+          path.write_text(text, encoding='utf-8')
+
+          test_path = Path('tests/test_kaspi_product_enrichment_flat_payload.py')
+          test_path.write_text('''from backend.app.kaspi_product_enrichment_jobs import normalize_entry\n\n\ndef test_flat_merchant_product_restores_title_and_sku() -> None:\n    entry = {\n        "id": "entry-1",\n        "attributes": {"quantity": 1, "basePrice": 8040},\n    }\n    product = {"id": "product-1", "productName": "Fallback product"}\n    merchant = {\n        "productName": "Полное название товара",\n        "merchantSku": "996801988_SKU",\n    }\n\n    normalized = normalize_entry(entry, product=product, merchant_product=merchant)\n\n    assert normalized["name"] == "Полное название товара"\n    assert normalized["sku"] == "996801988_SKU"\n    assert normalized["external_product_id"] == "product-1"\n''', encoding='utf-8')
+
+          Path('.github/workflows/apply-kaspi-line-enrichment-fix.yml').unlink()
+          PY
+
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+
+      - name: Run focused tests
+        run: |
+          python -m pytest -q \
+            tests/test_kaspi_product_enrichment_flat_payload.py \
+            tests/test_kaspi_enriched_order_line_persistence.py
+
+      - name: Commit recovery
+        run: |
+          git config user.name github-actions[bot]
+          git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git add backend/app/kaspi_product_enrichment_jobs.py tests/test_kaspi_product_enrichment_flat_payload.py .github/workflows/apply-kaspi-line-enrichment-fix.yml
+          git commit -m "fix: recover Kaspi order line titles and SKU"
+          git push origin HEAD:main
