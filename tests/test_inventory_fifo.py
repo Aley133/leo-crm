@@ -6,7 +6,11 @@ from decimal import Decimal
 from sqlalchemy import select
 
 from backend.app.inventory_models import InventoryAllocation, InventoryBatch
-from backend.app.inventory_service import allocate_order_line_fifo, create_inventory_batch
+from backend.app.inventory_service import (
+    allocate_order_line_fifo,
+    create_inventory_batch,
+    mark_inventory_batch_received,
+)
 from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderLine, Product
 
 
@@ -103,35 +107,88 @@ def test_fifo_allocates_oldest_batch_first_and_is_idempotent(db_session) -> None
     ]
 
 
-def test_new_batch_reconciles_active_orders_from_receipt_day(db_session) -> None:
+def test_new_batch_reconciles_older_active_orders_by_order_fifo(db_session) -> None:
     product = _product(db_session)
-    _order, line = _order_line(
+    _later_order, later_line = _order_line(
         db_session,
         product,
-        code="1002",
-        ordered_at=datetime(2026, 7, 23, 3, 0, tzinfo=UTC),
+        code="1002-later",
+        ordered_at=datetime(2026, 7, 27, 3, 0, tzinfo=UTC),
+        quantity=1,
+    )
+    _earlier_order, earlier_line = _order_line(
+        db_session,
+        product,
+        code="1002-earlier",
+        ordered_at=datetime(2026, 7, 24, 3, 0, tzinfo=UTC),
         quantity=1,
     )
 
     batch, allocated = create_inventory_batch(
         db_session,
         product=product,
-        quantity=10,
+        quantity=1,
         unit_cost=Decimal("700"),
-        received_at=datetime(2026, 7, 23, 10, 0, tzinfo=UTC),
+        received_at=datetime(2026, 7, 29, 10, 0, tzinfo=UTC),
         reconcile_existing_orders=True,
     )
 
     assert allocated == 1
-    assert batch.quantity_remaining == 9
-    allocation = db_session.scalar(
-        select(InventoryAllocation).where(
-            InventoryAllocation.marketplace_order_line_id == line.id
-        )
+    assert batch.quantity_remaining == 0
+    allocations = db_session.scalars(
+        select(InventoryAllocation).order_by(InventoryAllocation.marketplace_order_line_id)
+    ).all()
+    assert [(allocation.marketplace_order_line_id, allocation.quantity) for allocation in allocations] == [
+        (earlier_line.id, 1),
+    ]
+    assert later_line.id not in {
+        allocation.marketplace_order_line_id for allocation in allocations
+    }
+    assert Decimal(allocations[0].unit_cost) == Decimal("700")
+
+
+def test_expected_batch_covers_orders_from_previous_days_when_marked_received(
+    db_session,
+) -> None:
+    product = _product(db_session)
+    lines = [
+        _order_line(
+            db_session,
+            product,
+            code=f"arrival-{day}",
+            ordered_at=datetime(2026, 7, day, 10, 0, tzinfo=UTC),
+        )[1]
+        for day in (24, 25, 26, 27)
+    ]
+    batch, allocated = create_inventory_batch(
+        db_session,
+        product=product,
+        quantity=2,
+        unit_cost=Decimal("4100"),
+        received_at=datetime(2026, 7, 29, 16, 50, tzinfo=UTC),
+        reconcile_existing_orders=True,
+        is_received=False,
+        source_name="OZON",
     )
-    assert allocation is not None
-    assert allocation.quantity == 1
-    assert Decimal(allocation.unit_cost) == Decimal("700")
+
+    assert allocated == 0
+    assert batch.quantity_remaining == 0
+
+    allocated = mark_inventory_batch_received(
+        db_session,
+        batch=batch,
+        received_at=datetime(2026, 7, 29, 16, 50, tzinfo=UTC),
+    )
+
+    assert allocated == 2
+    assert batch.quantity_remaining == 0
+    allocations = db_session.scalars(
+        select(InventoryAllocation).order_by(InventoryAllocation.marketplace_order_line_id)
+    ).all()
+    assert [(allocation.marketplace_order_line_id, allocation.quantity) for allocation in allocations] == [
+        (lines[0].id, 1),
+        (lines[1].id, 1),
+    ]
 
 
 def test_cancelled_order_does_not_consume_stock(db_session) -> None:

@@ -1,9 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import UTC, datetime, time
+from datetime import UTC, datetime
 from decimal import Decimal
-from zoneinfo import ZoneInfo
 
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
@@ -38,18 +37,6 @@ class AllocationResult:
         return self.remaining_quantity == 0
 
 
-def _almaty_day_end(value: datetime) -> datetime:
-    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    local_date = aware.astimezone(ZoneInfo("Asia/Almaty")).date()
-    return datetime.combine(local_date, time.max, tzinfo=ZoneInfo("Asia/Almaty")).astimezone(UTC)
-
-
-def _almaty_day_start(value: datetime) -> datetime:
-    aware = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-    local_date = aware.astimezone(ZoneInfo("Asia/Almaty")).date()
-    return datetime.combine(local_date, time.min, tzinfo=ZoneInfo("Asia/Almaty")).astimezone(UTC)
-
-
 def allocated_quantity_for_line(session: Session, order_line_id: int) -> int:
     return int(
         session.scalar(
@@ -78,8 +65,6 @@ def allocate_order_line_fifo(
     if resolved_order is None or resolved_order.status in _TERMINAL_ORDER_STATUSES:
         return AllocationResult(requested, previous, 0)
 
-    order_time = resolved_order.ordered_at or allocated_at or datetime.now(UTC)
-    eligible_until = _almaty_day_end(order_time)
     now = allocated_at or datetime.now(UTC)
 
     batches = session.scalars(
@@ -88,7 +73,6 @@ def allocate_order_line_fifo(
             InventoryBatch.product_id == order_line.product_id,
             InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
-            InventoryBatch.received_at <= eligible_until,
         )
         .order_by(InventoryBatch.received_at, InventoryBatch.id)
         .with_for_update()
@@ -138,13 +122,11 @@ def reconcile_product_orders_from_batch(
     if not batch.is_received:
         return 0
 
-    day_start = _almaty_day_start(batch.received_at)
     rows = session.execute(
         select(MarketplaceOrderLine, MarketplaceOrder)
         .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
         .where(
             MarketplaceOrderLine.product_id == batch.product_id,
-            MarketplaceOrder.ordered_at >= day_start,
             MarketplaceOrder.status.not_in(_TERMINAL_ORDER_STATUSES),
         )
         .order_by(MarketplaceOrder.ordered_at, MarketplaceOrder.id, MarketplaceOrderLine.id)

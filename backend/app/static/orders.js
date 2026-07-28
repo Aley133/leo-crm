@@ -187,10 +187,13 @@ const updateSummary = (summary = {}, orders = []) => {
   document.querySelector("#summary-procurement-caption").textContent = `единиц · в пути: ${incoming.toLocaleString("ru-RU")}`;
   const advice = document.querySelector("#procurement-advice");
   if (shortage > 0) {
-    advice.innerHTML = `<div class="procurement-advice-header"><strong>Нужно дозаказать ${shortage.toLocaleString("ru-RU")} шт.</strong><span>В пути и уже распределено по предзаказам: ${incoming.toLocaleString("ru-RU")} шт.</span></div><div class="procurement-products">${products.map(renderProcurementProduct).join("")}</div>`;
+    const headline = incoming > 0
+      ? `В пути ${incoming.toLocaleString("ru-RU")} шт. — они уже распределены по предзаказам. Закажите ещё ${shortage.toLocaleString("ru-RU")} шт.`
+      : `Товаров в пути нет. Закажите ${shortage.toLocaleString("ru-RU")} шт.`;
+    advice.innerHTML = `<details class="procurement-disclosure"><summary class="procurement-advice-header"><strong>${headline}</strong><span class="procurement-toggle"><span class="procurement-toggle-open">Показать список товаров</span><span class="procurement-toggle-close">Скрыть список товаров</span><b aria-hidden="true">⌄</b></span></summary><div class="procurement-products">${products.map(renderProcurementProduct).join("")}</div></details>`;
     advice.classList.remove("hidden");
   } else if (incoming > 0) {
-    advice.innerHTML = `<div class="procurement-advice-header"><strong>Все текущие предзаказы покрыты</strong><span>В пути и уже распределено: ${incoming.toLocaleString("ru-RU")} шт.</span></div><div class="procurement-products">${products.map(renderProcurementProduct).join("")}</div>`;
+    advice.innerHTML = `<details class="procurement-disclosure"><summary class="procurement-advice-header"><strong>В пути ${incoming.toLocaleString("ru-RU")} шт. — они уже распределены по предзаказам. Текущие предзаказы покрыты.</strong><span class="procurement-toggle"><span class="procurement-toggle-open">Показать список товаров</span><span class="procurement-toggle-close">Скрыть список товаров</span><b aria-hidden="true">⌄</b></span></summary><div class="procurement-products">${products.map(renderProcurementProduct).join("")}</div></details>`;
     advice.classList.remove("hidden");
   } else {
     advice.replaceChildren();

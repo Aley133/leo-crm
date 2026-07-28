@@ -117,6 +117,11 @@
           headers: {Authorization: `Bearer ${token}`},
         });
         if (!response.ok) throw new Error(`API вернул ошибку ${response.status}`);
+        const data = await response.json();
+        const pageMessage = document.querySelector("#message");
+        if (pageMessage) {
+          pageMessage.textContent = `Партия принята. FIFO списал ${Number(data.reallocated_quantity || 0).toLocaleString("ru-RU")} ед. на самые ранние активные заказы. Остаток на складе: ${Number(data.on_hand || 0).toLocaleString("ru-RU")} ед.`;
+        }
         await loadInventory();
         document.querySelector("#refresh")?.click();
       } catch (error) {

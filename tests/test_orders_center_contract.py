@@ -54,7 +54,11 @@ def test_orders_center_explains_preorder_coverage_per_product() -> None:
     assert "uncovered_quantity" in script
     assert "В пути ${incoming} шт. — они уже распределены по предзаказам." in script
     assert "Закажите ещё ${shortage} шт." in script
+    assert '<details class="procurement-disclosure">' in script
+    assert "Показать список товаров" in script
+    assert "Скрыть список товаров" in script
     assert "merchant_sku" in script
     assert "external_product_id" in script
     assert 'class="procurement-advice hidden"' in html
     assert ".procurement-product" in styles
+    assert ".procurement-disclosure[open]" in styles
