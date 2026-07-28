@@ -5,8 +5,8 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Мониторинг</title>
   <link rel="stylesheet" href="/static/dashboard.css">
-  <link rel="stylesheet" href="/static/monitoring.css">
-  <link rel="stylesheet" href="/static/monitoring-active-runs.css">
+  <link rel="stylesheet" href="/static/monitoring.css?v=20260729-1">
+  <link rel="stylesheet" href="/static/monitoring-active-runs.css?v=20260729-1">
 </head>
 <body>
   <div class="shell">
@@ -56,7 +56,7 @@
         <section class="panel wide">
           <div class="panel-title"><h2>Сейчас выполняется</h2><span id="leased-label">Проверяем активные задания…</span></div>
           <div id="leased-empty" class="agent-idle-card">
-            <div><span class="agent-state-dot"></span><strong>Проверяем локальные агенты…</strong><p id="agent-idle-detail">Ожидаем heartbeat от Ozon/WB и Kaspi.</p></div>
+            <div><span class="agent-state-dot"></span><strong>Проверяем Browser Agent…</strong><p id="agent-idle-detail">Ожидаем heartbeat от агента Ozon/WB.</p></div>
             <dl><div><dt>Очередь</dt><dd id="agent-queue-count">—</dd></div><div><dt>Последняя работа</dt><dd id="agent-last-work">—</dd></div><div><dt>Среднее время</dt><dd id="agent-average-time">—</dd></div></dl>
           </div>
           <div class="table-wrap"><table id="leased-table"><thead><tr><th>Job</th><th>Товар</th><th>Источник</th><th>Agent</th><th>Lease до</th><th>Ход работы</th></tr></thead><tbody id="leased-body"></tbody></table></div>
@@ -91,9 +91,9 @@
     <div class="dialog-header"><h2 id="job-dialog-title">Job</h2><button id="job-dialog-close" class="icon-button" type="button" aria-label="Закрыть">×</button></div>
     <div id="job-dialog-content"></div>
   </dialog>
-  <script src="/static/monitoring-request-queue.js"></script>
-  <script src="/static/monitoring.js" defer></script>
-  <script src="/static/browser-agent-presence.js" defer></script>
-  <script src="/static/connection-status.js" defer></script>
+  <script src="/static/monitoring-request-queue.js?v=20260729-1"></script>
+  <script src="/static/monitoring.js?v=20260729-1" defer></script>
+  <script src="/static/browser-agent-presence.js?v=20260729-1" defer></script>
+  <script src="/static/connection-status.js?v=20260729-1" defer></script>
 </body>
 </html>

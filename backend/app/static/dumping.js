@@ -20,10 +20,33 @@ let configuredRows = [];
 let searchTimer = null;
 let searchController = null;
 let livePollTimer = null;
+let runtimePollInFlight = false;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} KZT`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU") : "Ещё не запускался";
+const shortDateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "—";
+const formatDuration = (milliseconds) => {
+  const value = Number(milliseconds);
+  if (!Number.isFinite(value) || value < 0) return "—";
+  if (value < 60000) return `${Math.max(1, Math.round(value / 1000))} с`;
+  const minutes = Math.floor(value / 60000);
+  const seconds = Math.round((value % 60000) / 1000);
+  if (minutes < 60) return `${minutes} мин ${seconds} с`;
+  return `${Math.floor(minutes / 60)} ч ${minutes % 60} мин`;
+};
+const elapsed = (value) => value ? formatDuration(Math.max(0, Date.now() - new Date(value).getTime())) : "—";
+const runtimeStatusLabel = (status) => ({
+  queued:"В очереди",
+  processing:"Выполняется",
+  lease_expired:"Lease истёк",
+  succeeded:"Успешно",
+  failed:"Ошибка",
+}[status] || status || "Нет данных");
+const runtimeBadge = (status) => {
+  const kind = status === "succeeded" ? "ok" : ["failed", "lease_expired"].includes(status) ? "bad" : "";
+  return `<span class="dumping-runtime-badge ${kind}">${escapeHtml(runtimeStatusLabel(status))}</span>`;
+};
 
 const request = async (url, options = {}) => {
   const token = localStorage.getItem(storageKey);
@@ -129,6 +152,61 @@ const renderFeedStatus = (feed) => {
   xmlSourceStatus.textContent = feed.ready ? "Готов к публикации" : "Нужен merchantId";
 };
 
+const scheduleLivePageRefresh = () => {
+  if (livePollTimer) return;
+  livePollTimer = setTimeout(() => {
+    livePollTimer = null;
+    loadPage({silent:true});
+  }, 5000);
+};
+
+const renderDumpingRuntime = (snapshot) => {
+  const rows = snapshot.active_runs || [];
+  const latest = snapshot.latest_run;
+  const body = document.querySelector("#dumping-runtime-body");
+  const tableWrap = document.querySelector("#dumping-runtime-table-wrap");
+  const idle = document.querySelector("#dumping-runtime-empty");
+  body.innerHTML = rows.map((row) => `
+    <tr class="${row.status === "lease_expired" ? "dumping-runtime-stalled" : ""}">
+      <td><strong>#${row.job_id}</strong><span class="dumping-runtime-meta">Kaspi</span></td>
+      <td><a href="/crm/products/${row.product_id}">${escapeHtml(row.product_name)}</a><span class="dumping-runtime-meta">${escapeHtml(row.merchant_sku ? `SKU ${row.merchant_sku}` : `Kaspi ID ${row.kaspi_product_id}`)}</span></td>
+      <td>${escapeHtml(row.agent_id || "—")}</td>
+      <td>${shortDateTime(row.lease_until)}</td>
+      <td>${runtimeBadge(row.status)}<strong class="dumping-runtime-elapsed" data-started-at="${escapeHtml(row.started_at)}">${elapsed(row.started_at)}</strong><span class="dumping-runtime-detail">${escapeHtml(row.detail)}</span></td>
+    </tr>`).join("");
+  tableWrap.classList.toggle("hidden", rows.length === 0);
+  idle.classList.toggle("hidden", rows.length > 0);
+
+  const stalled = rows.filter((row) => row.status === "lease_expired").length;
+  document.querySelector("#dumping-runtime-label").textContent = rows.length
+    ? stalled
+      ? `${rows.length} в работе · ${stalled} требует внимания`
+      : `${rows.length} в работе · автообновление`
+    : `${snapshot.queued_count || 0} в очереди · автообновление`;
+  document.querySelector("#dumping-runtime-queue").textContent = snapshot.queued_count || 0;
+  document.querySelector("#dumping-runtime-last-time").textContent = latest ? shortDateTime(latest.updated_at) : "Нет данных";
+  document.querySelector("#dumping-runtime-last-result").textContent = latest ? runtimeStatusLabel(latest.status) : "Нет данных";
+
+  const idleTitle = document.querySelector("#dumping-runtime-idle-title");
+  const idleDetail = document.querySelector("#dumping-runtime-idle-detail");
+  if (snapshot.queued_count) {
+    idleTitle.textContent = "Очередь ждёт Kaspi Competitor Agent";
+    idleDetail.textContent = `Ожидают проверки: ${snapshot.queued_count}. Агент заберёт следующую карточку при свободном потоке.`;
+  } else if (latest?.status === "failed" || latest?.status === "lease_expired") {
+    idleTitle.textContent = "Последняя проверка требует внимания";
+    idleDetail.textContent = latest.detail || "Kaspi Agent вернул ошибку.";
+  } else {
+    idleTitle.textContent = "Сейчас активных проверок нет";
+    idleDetail.textContent = "Очередь демпинга пуста. Kaspi Competitor Agent ожидает следующую карточку.";
+  }
+
+  if (rows.length || snapshot.queued_count) scheduleLivePageRefresh();
+};
+
+const tickRuntimeDurations = () => document.querySelectorAll(".dumping-runtime-elapsed[data-started-at]").forEach((element) => {
+  element.textContent = elapsed(element.dataset.startedAt);
+});
+
 const render = (rows) => {
   configuredRows = rows;
   document.querySelector("#summary-total").textContent = rows.length;
@@ -177,8 +255,7 @@ const render = (rows) => {
   }).join("");
   empty.classList.toggle("hidden", rows.length > 0);
   const hasLiveWork = rows.some((row) => ["queued", "scanning", "retry_wait"].includes(row.scan_state?.status));
-  clearTimeout(livePollTimer);
-  if (hasLiveWork) livePollTimer = setTimeout(() => loadPage({silent:true}), 5000);
+  if (hasLiveWork) scheduleLivePageRefresh();
 };
 
 const fillForm = (row) => {
@@ -214,12 +291,24 @@ const loadPage = async ({silent=false}={}) => {
   if (!silent) setBusy(refreshButton, true, "Обновляю…");
   if (!silent) message.textContent = "";
   try {
-    const [rows, feed] = await Promise.all([request("/api/dumping"), request("/api/dumping/feed-status")]);
-    render(rows); renderFeedStatus(feed); authPanel.classList.add("hidden"); page.classList.remove("hidden");
+    const [rows, feed, runtime] = await Promise.all([request("/api/dumping"), request("/api/dumping/feed-status"), request("/api/dumping/runtime")]);
+    render(rows); renderFeedStatus(feed); renderDumpingRuntime(runtime); authPanel.classList.add("hidden"); page.classList.remove("hidden");
   } catch (error) {
     message.textContent = error instanceof Error ? error.message : "Не удалось загрузить демпинг";
     if (!localStorage.getItem(storageKey)) authPanel.classList.remove("hidden");
   } finally { if (!silent) setBusy(refreshButton, false, ""); }
+};
+
+const pollDumpingRuntime = async () => {
+  if (!localStorage.getItem(storageKey) || document.hidden || runtimePollInFlight) return;
+  runtimePollInFlight = true;
+  try {
+    renderDumpingRuntime(await request("/api/dumping/runtime"));
+  } catch {
+    document.querySelector("#dumping-runtime-label").textContent = "Нет свежих данных — повторяем запрос";
+  } finally {
+    runtimePollInFlight = false;
+  }
 };
 
 productSearch.addEventListener("input", () => { clearProductSelection({keepQuery:true}); clearTimeout(searchTimer); searchTimer = setTimeout(searchProducts, 250); });
@@ -266,3 +355,6 @@ list.addEventListener("click", async (event) => {
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); const token=tokenInput.value.trim(); if(!token)return; localStorage.setItem(storageKey,token); tokenInput.value=""; loadPage(); });
 refreshButton.addEventListener("click", () => loadPage());
 loadPage();
+window.setInterval(pollDumpingRuntime, 5000);
+window.setInterval(tickRuntimeDurations, 1000);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) pollDumpingRuntime(); });

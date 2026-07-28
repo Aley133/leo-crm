@@ -112,8 +112,9 @@ def test_monitoring_center_page_is_live_and_operable() -> None:
     assert 'method:"PATCH"' not in script
     assert 'method:"DELETE"' not in script
     assert "/api/browser-agent/agents" in presence
-    assert "/api/kaspi-competitor-agent/agents/status" in presence
-    assert "Ozon/WB и Kaspi подключены" in presence
+    assert "/api/kaspi-competitor-agent/agents/status" not in presence
+    assert "Kaspi" not in presence
+    assert "Kaspi" not in script
 
 
 def test_monitoring_center_formats_runtime_data_for_operators() -> None:

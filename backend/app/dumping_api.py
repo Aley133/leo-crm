@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -25,6 +26,28 @@ class DumpingPolicyUpsert(BaseModel):
     auto_publish_xml: bool = True
     city_id: str = Field(default="750000000", min_length=1, max_length=32)
     zone_id: str = Field(default="Magnum_ZONE1", min_length=1, max_length=64)
+
+
+class DumpingRuntimeRunRow(BaseModel):
+    job_id: int
+    product_id: int
+    kaspi_product_id: str
+    merchant_sku: str | None
+    product_name: str
+    status: str
+    stage: str
+    agent_id: str | None
+    lease_until: datetime | None
+    started_at: datetime
+    updated_at: datetime
+    detail: str
+
+
+class DumpingRuntimeSnapshot(BaseModel):
+    active_runs: list[DumpingRuntimeRunRow]
+    queued_count: int
+    latest_run: DumpingRuntimeRunRow | None
+    checked_at: datetime
 
 
 router = APIRouter(
@@ -75,6 +98,63 @@ def _run_payload(run: DumpingRun | None) -> dict | None:
         "explanation_json": run.explanation_json or {},
         "created_at": run.created_at,
     }
+
+
+def _runtime_datetime(value: object, *, fallback: datetime) -> datetime:
+    if isinstance(value, datetime):
+        result = value
+    elif isinstance(value, str):
+        try:
+            result = datetime.fromisoformat(value)
+        except ValueError:
+            result = fallback
+    else:
+        result = fallback
+    return result if result.tzinfo is not None else result.replace(tzinfo=UTC)
+
+
+def _runtime_status(run: DumpingRun, *, lease_until: datetime | None) -> tuple[str, str]:
+    metadata = run.explanation_json or {}
+    if run.status == "queued_local":
+        return "queued", "Ожидает свободный Kaspi Competitor Agent"
+    if run.status == "leased_local":
+        now = datetime.now(UTC)
+        if lease_until is not None and lease_until < now:
+            return "lease_expired", "Lease истёк — Kaspi Agent не подтвердил завершение"
+        return "processing", "Получает продавцов Kaspi и рассчитывает безопасную цену"
+    if run.status == "succeeded_local":
+        return "succeeded", "Проверка завершена, результат сохранён"
+    error = metadata.get("error_message") or metadata.get("error_code")
+    return "failed", str(error or "Проверка завершилась с ошибкой")
+
+
+def _runtime_row(run: DumpingRun, product: Product) -> DumpingRuntimeRunRow:
+    metadata = run.explanation_json or {}
+    started_at = _runtime_datetime(
+        metadata.get("leased_at"),
+        fallback=_runtime_datetime(run.created_at, fallback=datetime.now(UTC)),
+    )
+    updated_at = _runtime_datetime(metadata.get("updated_at"), fallback=started_at)
+    lease_until = (
+        _runtime_datetime(metadata.get("lease_until"), fallback=started_at)
+        if metadata.get("lease_until")
+        else None
+    )
+    status_value, detail = _runtime_status(run, lease_until=lease_until)
+    return DumpingRuntimeRunRow(
+        job_id=run.id,
+        product_id=product.id,
+        kaspi_product_id=product.kaspi_product_id,
+        merchant_sku=product.merchant_sku,
+        product_name=product.name,
+        status=status_value,
+        stage=str(metadata.get("stage") or status_value),
+        agent_id=metadata.get("agent_id"),
+        lease_until=lease_until,
+        started_at=started_at,
+        updated_at=updated_at,
+        detail=detail,
+    )
 
 
 def _latest_run_or_none(db: Session, product_id: int) -> DumpingRun | None:
@@ -198,6 +278,41 @@ def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
         "generated_at": feed.generated_at,
         "feed_url": "/feeds/kaspi/catalog.xml",
     }
+
+
+@router.get("/runtime", response_model=DumpingRuntimeSnapshot)
+def read_dumping_runtime(db: Session = Depends(get_db)) -> DumpingRuntimeSnapshot:
+    active_rows = db.execute(
+        select(DumpingRun, Product)
+        .join(Product, Product.id == DumpingRun.product_id)
+        .where(DumpingRun.status == "leased_local")
+        .order_by(DumpingRun.id.desc())
+    ).all()
+    queued_count = int(
+        db.scalar(
+            select(func.count())
+            .select_from(DumpingRun)
+            .where(DumpingRun.status == "queued_local")
+        )
+        or 0
+    )
+    latest = db.execute(
+        select(DumpingRun, Product)
+        .join(Product, Product.id == DumpingRun.product_id)
+        .where(
+            DumpingRun.status.in_(
+                ("queued_local", "leased_local", "succeeded_local", "failed_local")
+            )
+        )
+        .order_by(DumpingRun.id.desc())
+        .limit(1)
+    ).first()
+    return DumpingRuntimeSnapshot(
+        active_runs=[_runtime_row(run, product) for run, product in active_rows],
+        queued_count=queued_count,
+        latest_run=None if latest is None else _runtime_row(latest[0], latest[1]),
+        checked_at=datetime.now(UTC),
+    )
 
 
 @router.get("/products/{product_id}")

@@ -11,7 +11,6 @@ from sqlalchemy.orm import Session
 from .auth import require_service_token
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import get_db
-from .dumping_models import DumpingRun
 from .lease_engine import utc_now
 from .models import Product
 from .monitoring import MonitorAttempt, MonitorTarget, SourceHealth
@@ -216,43 +215,6 @@ def list_active_monitoring_runs(db: Session = Depends(get_db)) -> list[ActiveMon
                 lease_until=lease_until,
                 started_at=started_at,
                 updated_at=started_at,
-                detail=detail,
-            )
-        )
-
-    kaspi_rows = db.execute(
-        select(DumpingRun, Product.id, Product.kaspi_product_id, Product.merchant_sku, Product.name)
-        .join(Product, Product.id == DumpingRun.product_id)
-        .where(DumpingRun.status == "leased_local")
-        .order_by(DumpingRun.id.desc())
-    ).all()
-    for job, product_id, kaspi_id, merchant_sku, product_name in kaspi_rows:
-        metadata = job.explanation_json or {}
-        started_at = _runtime_datetime(metadata.get("leased_at"), fallback=job.created_at)
-        lease_until = (
-            _runtime_datetime(metadata.get("lease_until"), fallback=started_at)
-            if metadata.get("lease_until")
-            else None
-        )
-        updated_at = _runtime_datetime(metadata.get("updated_at"), fallback=started_at)
-        run_status, detail = _active_run_status(lease_until)
-        result.append(
-            ActiveMonitoringRunRow(
-                run_key=f"kaspi:{job.id}",
-                job_id=job.id,
-                runtime="kaspi_competitor",
-                status=run_status,
-                product_id=product_id,
-                kaspi_product_id=kaspi_id,
-                merchant_sku=merchant_sku,
-                product_name=product_name,
-                source_code="kaspi",
-                source_name="Kaspi",
-                source_url=None,
-                agent_id=metadata.get("agent_id"),
-                lease_until=lease_until,
-                started_at=started_at,
-                updated_at=updated_at,
                 detail=detail,
             )
         )

@@ -26,3 +26,17 @@ def test_dumping_page_shows_local_competitor_agent_status() -> None:
     assert "/api/kaspi-competitor-agent/agents/status" in script
     assert "Агент ещё не подключался" in script
     assert "Онлайн" in script
+
+
+def test_dumping_page_owns_its_kaspi_runtime_view() -> None:
+    api = (ROOT / "backend" / "app" / "dumping_api.py").read_text(encoding="utf-8")
+    monitoring_api = (ROOT / "backend" / "app" / "monitoring_center_api.py").read_text(encoding="utf-8")
+    page = (ROOT / "backend" / "app" / "static" / "dumping.html").read_text(encoding="utf-8")
+    script = (ROOT / "backend" / "app" / "static" / "dumping.js").read_text(encoding="utf-8")
+
+    assert '@router.get("/runtime"' in api
+    assert 'id="dumping-runtime-body"' in page
+    assert "Ход работы демпинга" in page
+    assert "/api/dumping/runtime" in script
+    assert "setInterval(pollDumpingRuntime, 5000)" in script
+    assert "DumpingRun" not in monitoring_api
