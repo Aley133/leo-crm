@@ -9,6 +9,9 @@ from sqlalchemy.orm import Mapped, mapped_column
 from .db import Base
 
 
+LEGACY_WORKSPACE_ID = 1
+
+
 class DumpingPolicy(Base):
     __tablename__ = "dumping_policies"
     __table_args__ = (UniqueConstraint("product_id", name="uq_dumping_policy_product"),)
@@ -73,6 +76,13 @@ class KaspiXmlFeed(Base):
     __tablename__ = "kaspi_xml_feeds"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=LEGACY_WORKSPACE_ID,
+        server_default=str(LEGACY_WORKSPACE_ID),
+        index=True,
+    )
     merchant_id: Mapped[str | None] = mapped_column(String(128), nullable=True)
     source_filename: Mapped[str | None] = mapped_column(String(255), nullable=True)
     source_xml: Mapped[str] = mapped_column(Text, nullable=False)
