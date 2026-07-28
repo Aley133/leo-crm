@@ -97,34 +97,6 @@ def format_price_drop_message(payload: dict[str, object]) -> str:
     return "\n".join(lines)
 
 
-def format_test_price_alert_message(
-    *,
-    product_name: str,
-    merchant_sku: str | None,
-    kaspi_product_id: str,
-) -> str:
-    identity_parts = []
-    if merchant_sku:
-        identity_parts.append(f"SKU: {escape(merchant_sku)}")
-    if kaspi_product_id:
-        identity_parts.append(f"Kaspi ID: {escape(kaspi_product_id)}")
-    lines = [
-        "✅ <b>Тестовое уведомление LEO CRM</b>",
-        "",
-        f"<b>{escape(product_name)}</b>",
-    ]
-    if identity_parts:
-        lines.append(" · ".join(identity_parts))
-    lines.extend(
-        [
-            "",
-            "Telegram подключён правильно.",
-            "При аномальном падении закупочной цены по включённой карточке уведомление придёт в этот чат.",
-        ]
-    )
-    return "\n".join(lines)
-
-
 async def _send_telegram_message(
     client: httpx.AsyncClient,
     *,
@@ -160,25 +132,6 @@ async def send_price_drop_message(
         client,
         settings=settings,
         text=format_price_drop_message(payload),
-    )
-
-
-async def send_test_price_alert_message(
-    client: httpx.AsyncClient,
-    *,
-    settings: TelegramPriceAlertSettings,
-    product_name: str,
-    merchant_sku: str | None,
-    kaspi_product_id: str,
-) -> None:
-    await _send_telegram_message(
-        client,
-        settings=settings,
-        text=format_test_price_alert_message(
-            product_name=product_name,
-            merchant_sku=merchant_sku,
-            kaspi_product_id=kaspi_product_id,
-        ),
     )
 
 

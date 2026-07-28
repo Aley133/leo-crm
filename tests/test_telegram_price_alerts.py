@@ -16,9 +16,8 @@ from backend.app.telegram_price_alerts import (
     TelegramDeliveryError,
     TelegramPriceAlertSettings,
     format_price_drop_message,
-    format_test_price_alert_message,
     publish_pending_price_alerts,
-    send_test_price_alert_message,
+    send_price_drop_message,
 )
 
 
@@ -72,20 +71,6 @@ def test_environment_requires_both_telegram_values(monkeypatch) -> None:
     assert settings.chat_id == "-100123"
 
 
-def test_test_message_identifies_the_product_and_is_html_safe() -> None:
-    message = format_test_price_alert_message(
-        product_name="Берберин <500 мг>",
-        merchant_sku="BERB&60",
-        kaspi_product_id="101010101",
-    )
-
-    assert "Тестовое уведомление LEO CRM" in message
-    assert "Telegram подключён правильно" in message
-    assert "Берберин &lt;500 мг&gt;" in message
-    assert "SKU: BERB&amp;60" in message
-    assert "Kaspi ID: 101010101" in message
-
-
 def test_telegram_rejection_does_not_expose_the_bot_token() -> None:
     def handler(request: httpx.Request) -> httpx.Response:
         return httpx.Response(
@@ -101,12 +86,10 @@ def test_telegram_rejection_does_not_expose_the_bot_token() -> None:
 
     async def run() -> None:
         async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
-            await send_test_price_alert_message(
+            await send_price_drop_message(
                 client,
                 settings=settings,
-                product_name="Товар",
-                merchant_sku=None,
-                kaspi_product_id="123",
+                payload=_payload(),
             )
 
     try:

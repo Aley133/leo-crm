@@ -50,8 +50,7 @@ def test_product_detail_ui_route_and_assets_are_exposed() -> None:
         'id="revenue-kzt"', 'id="last-ordered-at"', 'id="best-offer"',
         'id="bindings"', 'id="observations-body"', 'id="add-supplier"',
         'id="supplier-dialog"', 'id="supplier-form"', 'id="supplier-url"',
-        'id="price-drop-alert-enabled"', 'id="test-price-alert"',
-        'id="price-alert-result"',
+        'id="price-drop-alert-enabled"', 'id="price-alert-result"',
     ):
         assert element_id in html
     assert '/api/products/${productId}/detail?observation_limit=100' in script
@@ -82,8 +81,9 @@ def test_product_detail_allows_only_explicit_supplier_binding_write() -> None:
     assert 'method:"DELETE"' not in script
 
 
-def test_product_detail_exposes_price_alert_opt_in_and_test_action() -> None:
+def test_product_detail_exposes_price_alert_opt_in() -> None:
     source = (ROOT / "backend" / "app" / "product_detail_api.py").read_text(encoding="utf-8")
+    html = (ROOT / "backend" / "app" / "static" / "product-detail.html").read_text(encoding="utf-8")
     script = (ROOT / "backend" / "app" / "static" / "product-detail.js").read_text(encoding="utf-8")
     migration = (
         ROOT
@@ -94,10 +94,9 @@ def test_product_detail_exposes_price_alert_opt_in_and_test_action() -> None:
 
     assert '@router.patch(' in source
     assert '"/{product_id}/price-drop-alert"' in source
-    assert '@router.post(' in source
-    assert '"/{product_id}/price-drop-alert/test"' in source
-    assert "TelegramPriceAlertSettings.from_environment()" in source
+    assert '"/{product_id}/price-drop-alert/test"' not in source
     assert "sudden_price_alert_enabled" in script
     assert 'method:"PATCH"' in script
-    assert 'method:"POST"' in script
+    assert "test-price-alert" not in html
+    assert "test-price-alert" not in script
     assert "server_default=sa.false()" in migration

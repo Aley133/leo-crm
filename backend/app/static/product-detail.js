@@ -18,7 +18,6 @@ const sourceTypeInput = document.querySelector("#supplier-source-type");
 const onlineFields = document.querySelector("#online-source-fields");
 const fixedFields = document.querySelector("#fixed-source-fields");
 const priceDropAlertToggle = document.querySelector("#price-drop-alert-enabled");
-const testPriceAlertButton = document.querySelector("#test-price-alert");
 const priceAlertResult = document.querySelector("#price-alert-result");
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
@@ -180,27 +179,6 @@ priceDropAlertToggle.addEventListener("change", async () => {
     priceAlertResult.textContent = error instanceof Error ? error.message : "Не удалось сохранить настройку.";
   } finally {
     priceDropAlertToggle.disabled = false;
-  }
-});
-
-testPriceAlertButton.addEventListener("click", async () => {
-  const token = localStorage.getItem(storageKey);
-  testPriceAlertButton.disabled = true;
-  testPriceAlertButton.textContent = "Отправляю…";
-  priceAlertResult.textContent = "";
-  try {
-    const response = await fetch(`/api/products/${productId}/price-drop-alert/test`, {
-      method:"POST",
-      headers:{Authorization:`Bearer ${token}`},
-    });
-    if (!response.ok) throw await responseError(response);
-    const result = await response.json();
-    priceAlertResult.textContent = result.message;
-  } catch (error) {
-    priceAlertResult.textContent = error instanceof Error ? error.message : "Не удалось отправить тестовое уведомление.";
-  } finally {
-    testPriceAlertButton.disabled = false;
-    testPriceAlertButton.textContent = "Отправить тестовое уведомление";
   }
 });
 

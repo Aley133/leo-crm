@@ -3,7 +3,6 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-import httpx
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import func, select
@@ -20,11 +19,6 @@ from .models import MarketplaceOrder, MarketplaceOrderLine, Product
 from .monitoring import MonitorTarget, SupplierOfferObservation, SupplierOfferState
 from .supplier_intelligence import BestOfferEngine, SupplierCandidate, SupplierScore
 from .suppliers import ProductBinding, Supplier, SupplierProduct
-from .telegram_price_alerts import (
-    TelegramDeliveryError,
-    TelegramPriceAlertSettings,
-    send_test_price_alert_message,
-)
 
 
 class ProductDetailHeader(BaseModel):
@@ -144,11 +138,6 @@ class ProductPriceAlertRead(BaseModel):
     enabled: bool
 
 
-class ProductPriceAlertTestRead(BaseModel):
-    delivered: bool
-    message: str
-
-
 router = APIRouter(
     prefix="/api/products",
     tags=["product-detail"],
@@ -187,48 +176,6 @@ def update_product_price_alert(
     product.sudden_price_alert_enabled = payload.enabled
     db.commit()
     return ProductPriceAlertRead(enabled=product.sudden_price_alert_enabled)
-
-
-@router.post(
-    "/{product_id}/price-drop-alert/test",
-    response_model=ProductPriceAlertTestRead,
-)
-async def test_product_price_alert(
-    product_id: int,
-    db: Session = Depends(get_db),
-) -> ProductPriceAlertTestRead:
-    product = db.get(Product, product_id)
-    if product is None:
-        raise HTTPException(status_code=404, detail="Product not found")
-    settings = TelegramPriceAlertSettings.from_environment()
-    if settings is None:
-        raise HTTPException(
-            status_code=503,
-            detail=(
-                "В Render должны быть заданы TELEGRAM_BOT_TOKEN "
-                "и TELEGRAM_CHAT_ID."
-            ),
-        )
-    try:
-        async with httpx.AsyncClient(timeout=15, trust_env=False) as client:
-            await send_test_price_alert_message(
-                client,
-                settings=settings,
-                product_name=product.name,
-                merchant_sku=product.merchant_sku,
-                kaspi_product_id=product.kaspi_product_id,
-            )
-    except TelegramDeliveryError as exc:
-        raise HTTPException(status_code=502, detail=str(exc)) from exc
-    except httpx.RequestError as exc:
-        raise HTTPException(
-            status_code=502,
-            detail="Не удалось соединиться с Telegram API.",
-        ) from exc
-    return ProductPriceAlertTestRead(
-        delivered=True,
-        message="Тестовое уведомление отправлено в Telegram.",
-    )
 
 
 @router.get("/{product_id}/detail", response_model=ProductDetailResponse)
