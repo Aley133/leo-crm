@@ -49,6 +49,7 @@ from .revenue_api import router as revenue_router
 from .supplier_products_api import router as supplier_products_router
 from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
+from .telegram_price_alerts import price_alert_publisher_loop
 from .ui import router as ui_router
 
 APP_VERSION = "0.19.0"
@@ -101,6 +102,11 @@ async def start_background_services() -> None:
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
+    price_alert_stop_event = asyncio.Event()
+    app.state.price_alert_stop_event = price_alert_stop_event
+    app.state.price_alert_task = asyncio.create_task(
+        price_alert_publisher_loop(price_alert_stop_event)
+    )
     # No server-side Kaspi competitor requests are started here. The compatibility
     # hook is intentionally a no-op; local Kaspi Competitor Agent owns scans.
     await start_dumping_competitor_worker()
@@ -117,6 +123,16 @@ async def stop_background_services() -> None:
         task.cancel()
         try:
             await task
+        except asyncio.CancelledError:
+            pass
+    price_alert_stop_event = getattr(app.state, "price_alert_stop_event", None)
+    price_alert_task = getattr(app.state, "price_alert_task", None)
+    if price_alert_stop_event is not None:
+        price_alert_stop_event.set()
+    if price_alert_task is not None:
+        price_alert_task.cancel()
+        try:
+            await price_alert_task
         except asyncio.CancelledError:
             pass
 

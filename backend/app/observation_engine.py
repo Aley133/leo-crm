@@ -14,6 +14,7 @@ from .monitoring import (
     SupplierOfferObservation,
     SupplierOfferState,
 )
+from .price_drop_alerts import enqueue_price_drop_alert
 from .supplier_adapters.base import NormalizedOffer
 from .suppliers import ProductBinding, SupplierProduct
 
@@ -191,6 +192,7 @@ def persist_successful_observation(
         session.add(observation)
         session.flush()
         observation_id = observation.id
+        enqueue_price_drop_alert(session, observation=observation)
 
     return ObservationResult(
         attempt_id=attempt.id,

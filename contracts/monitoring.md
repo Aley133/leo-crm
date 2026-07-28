@@ -295,3 +295,24 @@ Every automatic adapter must pass deterministic mocked tests for:
 - meaningful price, availability or delivery change.
 
 An adapter that cannot classify these cases is manual-review-only and cannot drive automatic pricing.
+
+## 11. Sudden procurement price alert
+
+A successful changed observation may create the transactional outbox event
+`supplier.price_drop_detected`.
+
+The alert is independent from pricing, XML generation, supplier selection and
+purchase demand. It only reports a potential procurement opportunity.
+
+Current detection policy:
+
+- use the median of up to six latest positive, available observations in the
+  same currency as the normal-price baseline;
+- alert when the new available price is at least 50% below that baseline;
+- do not alert for explicit out-of-stock or zero-stock observations;
+- emit once while the price remains in the low-price zone;
+- arm a new alert only after a valid observation returns above the threshold.
+
+Telegram delivery happens after the observation transaction commits. Delivery
+success marks only this outbox event as published; failure leaves it available
+for retry and does not roll back monitoring state.

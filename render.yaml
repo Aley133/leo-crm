@@ -12,3 +12,7 @@ services:
         value: /opt/render/project/src/.cache/playwright
       - key: OZON_CDP_ENDPOINT
         sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false

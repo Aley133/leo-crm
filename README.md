@@ -27,3 +27,13 @@ Open:
 ## Architecture direction
 
 The database will be the source of truth. XML, Telegram and the web interface will be clients or generated outputs of the core platform.
+
+## Telegram procurement price alerts
+
+Set both deployment variables to deliver sudden supplier price-drop events:
+
+- `TELEGRAM_BOT_TOKEN`
+- `TELEGRAM_CHAT_ID`
+
+The alert detector uses the monitoring history and emits when an available
+supplier price falls by at least 50% from its recent median baseline.

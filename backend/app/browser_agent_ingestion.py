@@ -17,6 +17,7 @@ from .monitoring import (
     SupplierOfferObservation,
     SupplierOfferState,
 )
+from .price_drop_alerts import enqueue_price_drop_alert
 from .pricing_service import calculate_product_price
 from .source_health_engine import apply_source_success
 from .supplier_adapters.base import AccessStrategy, NormalizedOffer
@@ -190,29 +191,29 @@ def persist_browser_agent_success(
         session.flush()
 
     if changed:
-        session.add(
-            SupplierOfferObservation(
-                supplier_product_id=supplier_product.id,
-                monitor_attempt_id=attempt.id,
-                price=offer.price,
-                old_price=offer.old_price,
-                currency=offer.currency,
-                available=offer.available,
-                stock=offer.stock,
-                delivery_days=offer.delivery_days,
-                seller=offer.seller,
-                fingerprint=fingerprint,
-                adapter_schema_version=offer.adapter_schema_version,
-                raw_metadata=json.dumps(
-                    offer.raw_metadata,
-                    ensure_ascii=False,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ),
-                observed_at=offer.observed_at,
-            )
+        observation = SupplierOfferObservation(
+            supplier_product_id=supplier_product.id,
+            monitor_attempt_id=attempt.id,
+            price=offer.price,
+            old_price=offer.old_price,
+            currency=offer.currency,
+            available=offer.available,
+            stock=offer.stock,
+            delivery_days=offer.delivery_days,
+            seller=offer.seller,
+            fingerprint=fingerprint,
+            adapter_schema_version=offer.adapter_schema_version,
+            raw_metadata=json.dumps(
+                offer.raw_metadata,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ),
+            observed_at=offer.observed_at,
         )
+        session.add(observation)
         session.flush()
+        enqueue_price_drop_alert(session, observation=observation)
         calculate_product_price(session, product_id=product_id)
         mark_supplier_product_for_dumping_refresh(session, supplier_product.id)
 

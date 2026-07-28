@@ -56,8 +56,11 @@ def test_agent_payload_becomes_normalized_offer_with_audit_metadata() -> None:
 def test_changed_agent_offer_triggers_recommendation_in_same_transaction() -> None:
     source = inspect.getsource(persist_browser_agent_success)
     observation_branch = source.index("if changed:")
+    alert_call = source.index("enqueue_price_drop_alert(session, observation=observation)")
     pricing_call = source.index("calculate_product_price(session, product_id=product_id)")
+    assert alert_call > observation_branch
     assert pricing_call > observation_branch
+    assert alert_call < pricing_call
     assert "session.commit()" not in source
 
 
