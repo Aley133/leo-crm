@@ -19,6 +19,9 @@ from .db import Base
 from .db_types import UTCDateTime
 
 
+LEGACY_WORKSPACE_ID = 1
+
+
 class ProductStatus(StrEnum):
     DRAFT = "draft"
     ACTIVE = "active"
@@ -54,7 +57,14 @@ class Product(Base):
     __tablename__ = "products"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    kaspi_product_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    workspace_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=LEGACY_WORKSPACE_ID,
+        server_default=str(LEGACY_WORKSPACE_ID),
+        index=True,
+    )
+    kaspi_product_id: Mapped[str] = mapped_column(String(64), index=True)
     merchant_sku: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
     name: Mapped[str] = mapped_column(String(500))
     brand: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
@@ -66,10 +76,22 @@ class Product(Base):
 class MarketplaceAccount(Base):
     __tablename__ = "marketplace_accounts"
     __table_args__ = (
-        UniqueConstraint("provider", "external_account_id", name="uq_marketplace_account_provider_external"),
+        UniqueConstraint(
+            "workspace_id",
+            "provider",
+            "external_account_id",
+            name="uq_marketplace_account_workspace_provider_external",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
+    workspace_id: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=LEGACY_WORKSPACE_ID,
+        server_default=str(LEGACY_WORKSPACE_ID),
+        index=True,
+    )
     provider: Mapped[str] = mapped_column(String(32), index=True)
     external_account_id: Mapped[str] = mapped_column(String(128))
     display_name: Mapped[str] = mapped_column(String(255))
