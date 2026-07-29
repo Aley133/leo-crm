@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
+from .commerce.domain import CommerceOrder
 from .commerce.repository import SqlAlchemyCommerceRepository
 from .commerce.service import CommerceService
 from .db import get_db
@@ -39,6 +40,38 @@ def _serialize(snapshot: DailyRevenueSnapshot) -> dict[str, object]:
     }
 
 
+def _append_new_orders(
+    snapshot: DailyRevenueSnapshot,
+    orders: list[CommerceOrder],
+    *,
+    captured_at: datetime,
+) -> bool:
+    saved_order_ids = list(snapshot.order_ids or [])
+    saved_order_id_set = set(saved_order_ids)
+    new_orders = tuple(order for order in orders if order.order_id not in saved_order_id_set)
+    if not new_orders:
+        return False
+
+    added = CommerceService.summarize(new_orders)
+    revenue = (Decimal(snapshot.revenue or 0) + added.revenue).quantize(Decimal("0.01"))
+    net_profit = (
+        Decimal(snapshot.net_profit or 0) + added.confirmed_net_profit
+    ).quantize(Decimal("0.01"))
+
+    snapshot.orders_count = int(snapshot.orders_count or 0) + added.orders_count
+    snapshot.units_count = int(snapshot.units_count or 0) + added.units_count
+    snapshot.revenue = revenue
+    snapshot.net_profit = net_profit
+    snapshot.margin_pct = (
+        (net_profit * Decimal("100") / revenue).quantize(Decimal("0.0001"))
+        if revenue > 0
+        else Decimal("0")
+    )
+    snapshot.order_ids = saved_order_ids + [order.order_id for order in new_orders]
+    snapshot.captured_at = captured_at
+    return True
+
+
 @router.post("/daily/capture")
 def capture_daily_revenue(
     timezone_name: str = Query(default="Asia/Almaty", min_length=1, max_length=64),
@@ -64,20 +97,13 @@ def capture_daily_revenue(
     captured: list[DailyRevenueSnapshot] = []
     now = datetime.now(UTC)
     for account_id, account_orders in grouped.items():
-        account_orders_tuple = tuple(account_orders)
-        summary = CommerceService.summarize(account_orders_tuple)
-        revenue = summary.revenue.quantize(Decimal("0.01"))
-        net_profit = summary.confirmed_net_profit.quantize(Decimal("0.01"))
-        margin_pct = (
-            (net_profit * Decimal("100") / revenue).quantize(Decimal("0.0001"))
-            if revenue > 0
-            else Decimal("0")
-        )
         snapshot = db.scalar(
-            select(DailyRevenueSnapshot).where(
+            select(DailyRevenueSnapshot)
+            .where(
                 DailyRevenueSnapshot.marketplace_account_id == account_id,
                 DailyRevenueSnapshot.business_date == business_date,
             )
+            .with_for_update()
         )
         if snapshot is None:
             snapshot = DailyRevenueSnapshot(
@@ -87,13 +113,7 @@ def capture_daily_revenue(
                 source_stage="assembly",
             )
             db.add(snapshot)
-        snapshot.orders_count = summary.orders_count
-        snapshot.units_count = summary.units_count
-        snapshot.revenue = revenue
-        snapshot.net_profit = net_profit
-        snapshot.margin_pct = margin_pct
-        snapshot.order_ids = [order.order_id for order in account_orders]
-        snapshot.captured_at = now
+        _append_new_orders(snapshot, account_orders, captured_at=now)
         captured.append(snapshot)
 
     db.commit()
