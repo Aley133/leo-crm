@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Демпинг</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
-  <link rel="stylesheet" href="/static/dumping.css?v=20260729-1">
+  <link rel="stylesheet" href="/static/dumping.css?v=20260729-2">
 </head>
 <body>
   <div class="shell">
@@ -35,34 +35,47 @@
             <a class="button secondary" href="https://github.com/Aley133/leo-crm/releases/download/kaspi-competitor-agent-latest/LEO-Kaspi-Competitor-Agent.exe" target="_blank" rel="noopener">Скачать для Windows</a>
           </div>
         </section>
-        <section class="dumping-runtime-panel" aria-live="polite">
-          <div class="dumping-runtime-heading">
+        <details id="dumping-runtime-panel" class="dumping-runtime-panel" open>
+          <summary class="dumping-runtime-heading">
             <div>
               <span class="xml-source-label">KASPI COMPETITOR RUNTIME</span>
               <h2>Ход работы демпинга</h2>
-              <p>Здесь отображаются только проверки конкурентов Kaspi. Ozon и Wildberries работают отдельно в разделе «Мониторинг».</p>
+              <p id="dumping-runtime-summary">Проверяем состояние заданий Kaspi…</p>
             </div>
-            <span id="dumping-runtime-label">Проверяем задания…</span>
-          </div>
-          <div id="dumping-runtime-empty" class="dumping-runtime-idle">
-            <div>
-              <span class="dumping-runtime-dot"></span>
-              <strong id="dumping-runtime-idle-title">Проверяем очередь демпинга…</strong>
-              <p id="dumping-runtime-idle-detail">Получаем состояние Kaspi Competitor Agent.</p>
+            <span class="dumping-runtime-heading-status">
+              <span id="dumping-runtime-label" class="dumping-runtime-summary-badge">Проверяем…</span>
+              <span class="dumping-runtime-chevron" aria-hidden="true"></span>
+            </span>
+          </summary>
+          <div class="dumping-runtime-content" aria-live="polite">
+            <section id="dumping-runtime-active" class="dumping-runtime-group hidden">
+              <div class="dumping-runtime-group-heading">
+                <div><h3>Сейчас проверяется</h3><p>Kaspi Agent получает продавцов и рассчитывает безопасную цену.</p></div>
+                <span id="dumping-runtime-active-count">0</span>
+              </div>
+              <div id="dumping-runtime-body" class="dumping-runtime-items"></div>
+            </section>
+            <section id="dumping-runtime-results" class="dumping-runtime-group hidden">
+              <div class="dumping-runtime-group-heading">
+                <div><h3>Последние результаты</h3><p>Успехи исчезают через 3 минуты, ошибки — через 15 минут.</p></div>
+                <span id="dumping-runtime-result-count">0</span>
+              </div>
+              <div id="dumping-runtime-results-body" class="dumping-runtime-items"></div>
+            </section>
+            <div id="dumping-runtime-empty" class="dumping-runtime-idle">
+              <div>
+                <span class="dumping-runtime-dot"></span>
+                <strong id="dumping-runtime-idle-title">Проверяем очередь демпинга…</strong>
+                <p id="dumping-runtime-idle-detail">Получаем состояние Kaspi Competitor Agent.</p>
+              </div>
+              <dl>
+                <div><dt>В очереди</dt><dd id="dumping-runtime-queue">—</dd></div>
+                <div><dt>Последний запуск</dt><dd id="dumping-runtime-last-time">—</dd></div>
+                <div><dt>Результат</dt><dd id="dumping-runtime-last-result">—</dd></div>
+              </dl>
             </div>
-            <dl>
-              <div><dt>В очереди</dt><dd id="dumping-runtime-queue">—</dd></div>
-              <div><dt>Последний запуск</dt><dd id="dumping-runtime-last-time">—</dd></div>
-              <div><dt>Результат</dt><dd id="dumping-runtime-last-result">—</dd></div>
-            </dl>
           </div>
-          <div id="dumping-runtime-table-wrap" class="dumping-runtime-table-wrap hidden">
-            <table id="dumping-runtime-table">
-              <thead><tr><th>Job</th><th>Товар</th><th>Kaspi Agent</th><th>Lease до</th><th>Выполняется</th></tr></thead>
-              <tbody id="dumping-runtime-body"></tbody>
-            </table>
-          </div>
-        </section>
+        </details>
         <section id="xml-source" class="xml-source-card" aria-live="polite">
           <div>
             <span class="xml-source-label">Источник XML</span>
@@ -105,7 +118,7 @@
       </section>
     </main>
   </div>
-  <script src="/static/dumping.js?v=20260729-2" defer></script>
+  <script src="/static/dumping.js?v=20260729-3" defer></script>
   <script src="/static/dumping-agent-status.js?v=20260729-1" defer></script>
 </body>
 </html>

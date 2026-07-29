@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
@@ -45,6 +45,7 @@ class DumpingRuntimeRunRow(BaseModel):
 
 class DumpingRuntimeSnapshot(BaseModel):
     active_runs: list[DumpingRuntimeRunRow]
+    recent_results: list[DumpingRuntimeRunRow]
     queued_count: int
     latest_run: DumpingRuntimeRunRow | None
     checked_at: datetime
@@ -56,6 +57,11 @@ router = APIRouter(
     dependencies=[Depends(require_service_token)],
 )
 public_router = APIRouter(tags=["dumping-feed"], include_in_schema=True)
+
+RUNTIME_SUCCESS_VISIBLE_FOR = timedelta(minutes=3)
+RUNTIME_ERROR_VISIBLE_FOR = timedelta(minutes=15)
+RUNTIME_RESULT_LIMIT = 12
+RUNTIME_LEASED_SCAN_LIMIT = 100
 
 
 def _policy_payload(policy: DumpingPolicy | None) -> dict | None:
@@ -120,10 +126,25 @@ def _runtime_status(run: DumpingRun, *, lease_until: datetime | None) -> tuple[s
     if run.status == "leased_local":
         now = datetime.now(UTC)
         if lease_until is not None and lease_until < now:
-            return "lease_expired", "Lease истёк — Kaspi Agent не подтвердил завершение"
+            return (
+                "lease_expired",
+                "Проверка прервалась: агент не успел отправить результат. "
+                "Задание будет повторено автоматически.",
+            )
         return "processing", "Получает продавцов Kaspi и рассчитывает безопасную цену"
     if run.status == "succeeded_local":
-        return "succeeded", "Проверка завершена, результат сохранён"
+        result = metadata.get("result") or {}
+        market = result.get("market") or {}
+        decision = result.get("decision") or {}
+        competitor_price = market.get("competitor_price_kzt")
+        target_price = decision.get("target_price_kzt")
+        if competitor_price is not None and target_price is not None:
+            return (
+                "succeeded",
+                f"Конкурент: {competitor_price} ₸ · новая цена: {target_price} ₸. "
+                "XML обновлён.",
+            )
+        return "succeeded", "Проверка завершена успешно. Результат сохранён, XML обновлён."
     error = metadata.get("error_message") or metadata.get("error_code")
     return "failed", str(error or "Проверка завершилась с ошибкой")
 
@@ -155,6 +176,21 @@ def _runtime_row(run: DumpingRun, product: Product) -> DumpingRuntimeRunRow:
         updated_at=updated_at,
         detail=detail,
     )
+
+
+def _runtime_result_is_fresh(
+    row: DumpingRuntimeRunRow,
+    *,
+    checked_at: datetime,
+) -> bool:
+    if row.status == "succeeded":
+        return row.updated_at >= checked_at - RUNTIME_SUCCESS_VISIBLE_FOR
+    if row.status == "failed":
+        return row.updated_at >= checked_at - RUNTIME_ERROR_VISIBLE_FOR
+    if row.status == "lease_expired":
+        expired_at = row.lease_until or row.updated_at
+        return expired_at >= checked_at - RUNTIME_ERROR_VISIBLE_FOR
+    return False
 
 
 def _latest_run_or_none(db: Session, product_id: int) -> DumpingRun | None:
@@ -282,12 +318,26 @@ def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
 
 @router.get("/runtime", response_model=DumpingRuntimeSnapshot)
 def read_dumping_runtime(db: Session = Depends(get_db)) -> DumpingRuntimeSnapshot:
-    active_rows = db.execute(
+    checked_at = datetime.now(UTC)
+    leased_rows = db.execute(
         select(DumpingRun, Product)
         .join(Product, Product.id == DumpingRun.product_id)
         .where(DumpingRun.status == "leased_local")
         .order_by(DumpingRun.id.desc())
+        .limit(RUNTIME_LEASED_SCAN_LIMIT)
     ).all()
+    leased_runtime_rows = [
+        _runtime_row(run, product) for run, product in leased_rows
+    ]
+    active_runs = [
+        row for row in leased_runtime_rows if row.status == "processing"
+    ]
+    expired_results = [
+        row
+        for row in leased_runtime_rows
+        if row.status == "lease_expired"
+        and _runtime_result_is_fresh(row, checked_at=checked_at)
+    ]
     queued_count = int(
         db.scalar(
             select(func.count())
@@ -296,6 +346,27 @@ def read_dumping_runtime(db: Session = Depends(get_db)) -> DumpingRuntimeSnapsho
         )
         or 0
     )
+    completed_rows = db.execute(
+        select(DumpingRun, Product)
+        .join(Product, Product.id == DumpingRun.product_id)
+        .where(DumpingRun.status.in_(("succeeded_local", "failed_local")))
+        .order_by(DumpingRun.id.desc())
+        .limit(RUNTIME_RESULT_LIMIT * 3)
+    ).all()
+    completed_results = [
+        row
+        for run, product in completed_rows
+        if _runtime_result_is_fresh(
+            row := _runtime_row(run, product),
+            checked_at=checked_at,
+        )
+    ]
+    recent_results = sorted(
+        [*expired_results, *completed_results],
+        key=lambda row: (row.updated_at, row.job_id),
+        reverse=True,
+    )[:RUNTIME_RESULT_LIMIT]
+
     latest = db.execute(
         select(DumpingRun, Product)
         .join(Product, Product.id == DumpingRun.product_id)
@@ -307,11 +378,17 @@ def read_dumping_runtime(db: Session = Depends(get_db)) -> DumpingRuntimeSnapsho
         .order_by(DumpingRun.id.desc())
         .limit(1)
     ).first()
+    latest_run = None if latest is None else _runtime_row(latest[0], latest[1])
+    if latest_run is not None and latest_run.status not in {"queued", "processing"}:
+        if not _runtime_result_is_fresh(latest_run, checked_at=checked_at):
+            latest_run = None
+
     return DumpingRuntimeSnapshot(
-        active_runs=[_runtime_row(run, product) for run, product in active_rows],
+        active_runs=active_runs,
+        recent_results=recent_results,
         queued_count=queued_count,
-        latest_run=None if latest is None else _runtime_row(latest[0], latest[1]),
-        checked_at=datetime.now(UTC),
+        latest_run=latest_run,
+        checked_at=checked_at,
     )
 
 

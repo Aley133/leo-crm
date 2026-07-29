@@ -36,7 +36,11 @@ def test_dumping_page_owns_its_kaspi_runtime_view() -> None:
 
     assert '@router.get("/runtime"' in api
     assert 'id="dumping-runtime-body"' in page
+    assert 'id="dumping-runtime-results-body"' in page
+    assert '<details id="dumping-runtime-panel"' in page
     assert "Ход работы демпинга" in page
+    assert "Успехи исчезают через 3 минуты" in page
+    assert "leo_dumping_runtime_open" in script
     assert "/api/dumping/runtime" in script
     assert "setInterval(pollDumpingRuntime, 5000)" in script
     assert "DumpingRun" not in monitoring_api

@@ -26,6 +26,7 @@ router = APIRouter(
 
 LEASE_SECONDS = 180
 AGENT_ONLINE_SECONDS = 45
+LEASE_RECOVERY_SCAN_LIMIT = 100
 _AGENT_HEARTBEATS: dict[str, dict] = {}
 _AGENT_HEARTBEATS_LOCK = Lock()
 
@@ -92,6 +93,44 @@ def _agent_status_payload() -> dict:
         "agents": agents,
         "checked_at": now.isoformat(),
     }
+
+
+def _metadata_datetime(value: object) -> datetime | None:
+    if isinstance(value, datetime):
+        result = value
+    elif isinstance(value, str):
+        try:
+            result = datetime.fromisoformat(value)
+        except ValueError:
+            return None
+    else:
+        return None
+    return result if result.tzinfo is not None else result.replace(tzinfo=UTC)
+
+
+def _claimable_job(db: Session, *, now: datetime) -> tuple[DumpingRun | None, bool]:
+    queued = db.scalar(
+        select(DumpingRun)
+        .where(DumpingRun.status == "queued_local")
+        .order_by(DumpingRun.id)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+    if queued is not None:
+        return queued, False
+
+    leased = db.scalars(
+        select(DumpingRun)
+        .where(DumpingRun.status == "leased_local")
+        .order_by(DumpingRun.id)
+        .with_for_update(skip_locked=True)
+        .limit(LEASE_RECOVERY_SCAN_LIMIT)
+    ).all()
+    for candidate in leased:
+        lease_until = _metadata_datetime((candidate.explanation_json or {}).get("lease_until"))
+        if lease_until is not None and lease_until < now:
+            return candidate, True
+    return None, False
 
 
 def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> DumpingRun:
@@ -162,13 +201,7 @@ def read_agent_status() -> dict:
 def claim_job(payload: AgentClaim, db: Session = Depends(get_db)) -> dict:
     _touch_agent(payload)
     now = _now()
-    job = db.scalar(
-        select(DumpingRun)
-        .where(DumpingRun.status == "queued_local")
-        .order_by(DumpingRun.id)
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    )
+    job, recovered = _claimable_job(db, now=now)
     if job is None:
         return {"job": None}
 
@@ -185,18 +218,29 @@ def claim_job(payload: AgentClaim, db: Session = Depends(get_db)) -> dict:
 
     token = secrets.token_hex(24)
     lease_until = now + timedelta(seconds=LEASE_SECONDS)
+    previous_meta = job.explanation_json or {}
+    lease_attempt = int(previous_meta.get("lease_attempt") or 0) + 1
     job.status = "leased_local"
     job.explanation_json = {
-        **(job.explanation_json or {}),
+        **previous_meta,
         "agent_id": payload.agent_id,
         "hostname": payload.hostname,
         "platform": payload.platform,
         "version": payload.version,
         "lease_token": token,
+        "lease_attempt": lease_attempt,
         "leased_at": now.isoformat(),
         "lease_until": lease_until.isoformat(),
         "stage": "local_scan",
         "updated_at": now.isoformat(),
+        **(
+            {
+                "lease_recovered_at": now.isoformat(),
+                "previous_lease_until": previous_meta.get("lease_until"),
+            }
+            if recovered
+            else {}
+        ),
     }
     db.commit()
     return {

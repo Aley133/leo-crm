@@ -38,14 +38,37 @@ const formatDuration = (milliseconds) => {
 const elapsed = (value) => value ? formatDuration(Math.max(0, Date.now() - new Date(value).getTime())) : "—";
 const runtimeStatusLabel = (status) => ({
   queued:"В очереди",
-  processing:"Выполняется",
-  lease_expired:"Lease истёк",
-  succeeded:"Успешно",
-  failed:"Ошибка",
+  processing:"Проверяется",
+  lease_expired:"Проверка прервана",
+  succeeded:"Проверка завершена",
+  failed:"Не удалось проверить",
 }[status] || status || "Нет данных");
-const runtimeBadge = (status) => {
-  const kind = status === "succeeded" ? "ok" : ["failed", "lease_expired"].includes(status) ? "bad" : "";
-  return `<span class="dumping-runtime-badge ${kind}">${escapeHtml(runtimeStatusLabel(status))}</span>`;
+const runtimeKind = (status) => status === "succeeded" ? "success" : ["failed", "lease_expired"].includes(status) ? "error" : "working";
+const runtimeTechnicalDetails = (row) => `
+  <details class="dumping-runtime-technical">
+    <summary>Технические детали</summary>
+    <span>Job #${row.job_id} · Kaspi Agent ${escapeHtml(row.agent_id || "не указан")}${row.lease_until ? ` · lease до ${shortDateTime(row.lease_until)}` : ""}</span>
+  </details>`;
+const runtimeItem = (row, {result=false}={}) => {
+  const kind = runtimeKind(row.status);
+  const timeLabel = result ? shortDateTime(row.updated_at) : elapsed(row.started_at);
+  const timeAttributes = result ? "" : ` data-started-at="${escapeHtml(row.started_at)}"`;
+  return `
+    <article class="dumping-runtime-item ${kind}">
+      <span class="dumping-runtime-item-indicator" aria-hidden="true"></span>
+      <div class="dumping-runtime-item-main">
+        <div class="dumping-runtime-item-title">
+          <div>
+            <span class="dumping-runtime-badge ${kind}">${escapeHtml(runtimeStatusLabel(row.status))}</span>
+            <a href="/crm/products/${row.product_id}">${escapeHtml(row.product_name)}</a>
+          </div>
+          <strong class="dumping-runtime-elapsed"${timeAttributes}>${timeLabel}</strong>
+        </div>
+        <p>${escapeHtml(row.detail)}</p>
+        <span class="dumping-runtime-meta">${escapeHtml(row.merchant_sku ? `SKU ${row.merchant_sku}` : `Kaspi ID ${row.kaspi_product_id}`)}</span>
+        ${runtimeTechnicalDetails(row)}
+      </div>
+    </article>`;
 };
 
 const request = async (url, options = {}) => {
@@ -154,28 +177,58 @@ const renderFeedStatus = (feed) => {
 
 const renderDumpingRuntime = (snapshot) => {
   const rows = snapshot.active_runs || [];
+  const results = snapshot.recent_results || [];
   const latest = snapshot.latest_run;
   dumpingWorkActive = rows.length > 0 || Number(snapshot.queued_count || 0) > 0;
+  const panel = document.querySelector("#dumping-runtime-panel");
   const body = document.querySelector("#dumping-runtime-body");
-  const tableWrap = document.querySelector("#dumping-runtime-table-wrap");
+  const resultsBody = document.querySelector("#dumping-runtime-results-body");
+  const activeGroup = document.querySelector("#dumping-runtime-active");
+  const resultsGroup = document.querySelector("#dumping-runtime-results");
   const idle = document.querySelector("#dumping-runtime-empty");
-  body.innerHTML = rows.map((row) => `
-    <tr class="${row.status === "lease_expired" ? "dumping-runtime-stalled" : ""}">
-      <td><strong>#${row.job_id}</strong><span class="dumping-runtime-meta">Kaspi</span></td>
-      <td><a href="/crm/products/${row.product_id}">${escapeHtml(row.product_name)}</a><span class="dumping-runtime-meta">${escapeHtml(row.merchant_sku ? `SKU ${row.merchant_sku}` : `Kaspi ID ${row.kaspi_product_id}`)}</span></td>
-      <td>${escapeHtml(row.agent_id || "—")}</td>
-      <td>${shortDateTime(row.lease_until)}</td>
-      <td>${runtimeBadge(row.status)}<strong class="dumping-runtime-elapsed" data-started-at="${escapeHtml(row.started_at)}">${elapsed(row.started_at)}</strong><span class="dumping-runtime-detail">${escapeHtml(row.detail)}</span></td>
-    </tr>`).join("");
-  tableWrap.classList.toggle("hidden", rows.length === 0);
-  idle.classList.toggle("hidden", rows.length > 0);
+  const successCount = results.filter((row) => row.status === "succeeded").length;
+  const errorCount = results.length - successCount;
+  const queuedCount = Number(snapshot.queued_count || 0);
 
-  const stalled = rows.filter((row) => row.status === "lease_expired").length;
-  document.querySelector("#dumping-runtime-label").textContent = rows.length
-    ? stalled
-      ? `${rows.length} в работе · ${stalled} требует внимания`
-      : `${rows.length} в работе · автообновление`
-    : `${snapshot.queued_count || 0} в очереди · автообновление`;
+  body.innerHTML = rows.map((row) => runtimeItem(row)).join("");
+  resultsBody.innerHTML = results.map((row) => runtimeItem(row, {result:true})).join("");
+  activeGroup.classList.toggle("hidden", rows.length === 0);
+  resultsGroup.classList.toggle("hidden", results.length === 0);
+  idle.classList.toggle("hidden", rows.length > 0 || results.length > 0);
+  document.querySelector("#dumping-runtime-active-count").textContent = rows.length;
+  document.querySelector("#dumping-runtime-result-count").textContent = results.length;
+
+  const label = document.querySelector("#dumping-runtime-label");
+  label.className = "dumping-runtime-summary-badge";
+  if (errorCount) {
+    label.textContent = `${errorCount} требует внимания`;
+    label.classList.add("error");
+  } else if (rows.length || queuedCount) {
+    const parts = [];
+    if (rows.length) parts.push(`${rows.length} проверяется`);
+    if (queuedCount) parts.push(`${queuedCount} в очереди`);
+    label.textContent = parts.join(" · ");
+    label.classList.add("working");
+  } else if (successCount) {
+    label.textContent = `${successCount} успешно`;
+    label.classList.add("success");
+  } else {
+    label.textContent = "Заданий нет";
+    label.classList.add("idle");
+  }
+
+  const summary = document.querySelector("#dumping-runtime-summary");
+  summary.textContent = errorCount
+    ? "Есть свежая ошибка. Раскройте панель, чтобы увидеть товар и причину."
+    : rows.length || queuedCount
+      ? "Kaspi Competitor Agent работает — список обновляется автоматически."
+      : successCount
+        ? "Последние проверки завершены успешно."
+        : "Kaspi Competitor Agent ожидает следующую проверку.";
+  panel.classList.toggle("has-error", errorCount > 0);
+  panel.classList.toggle("has-work", !errorCount && (rows.length > 0 || queuedCount > 0));
+  panel.classList.toggle("has-success", !errorCount && !rows.length && !queuedCount && successCount > 0);
+
   document.querySelector("#dumping-runtime-queue").textContent = snapshot.queued_count || 0;
   document.querySelector("#dumping-runtime-last-time").textContent = latest ? shortDateTime(latest.updated_at) : "Нет данных";
   document.querySelector("#dumping-runtime-last-result").textContent = latest ? runtimeStatusLabel(latest.status) : "Нет данных";
@@ -185,12 +238,9 @@ const renderDumpingRuntime = (snapshot) => {
   if (snapshot.queued_count) {
     idleTitle.textContent = "Очередь ждёт Kaspi Competitor Agent";
     idleDetail.textContent = `Ожидают проверки: ${snapshot.queued_count}. Агент заберёт следующую карточку при свободном потоке.`;
-  } else if (latest?.status === "failed" || latest?.status === "lease_expired") {
-    idleTitle.textContent = "Последняя проверка требует внимания";
-    idleDetail.textContent = latest.detail || "Kaspi Agent вернул ошибку.";
   } else {
     idleTitle.textContent = "Сейчас активных проверок нет";
-    idleDetail.textContent = "Очередь демпинга пуста. Kaspi Competitor Agent ожидает следующую карточку.";
+    idleDetail.textContent = "Свежих результатов и ошибок нет. Kaspi Competitor Agent ожидает следующую карточку.";
   }
 
 };
@@ -355,6 +405,10 @@ list.addEventListener("click", async (event) => {
 
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); const token=tokenInput.value.trim(); if(!token)return; localStorage.setItem(storageKey,token); tokenInput.value=""; loadPage(); });
 refreshButton.addEventListener("click", () => loadPage());
+const runtimePanel = document.querySelector("#dumping-runtime-panel");
+const savedRuntimePanelState = localStorage.getItem("leo_dumping_runtime_open");
+if (savedRuntimePanelState !== null) runtimePanel.open = savedRuntimePanelState === "true";
+runtimePanel.addEventListener("toggle", () => localStorage.setItem("leo_dumping_runtime_open", String(runtimePanel.open)));
 loadPage();
 window.setInterval(pollDumpingRuntime, 5000);
 window.setInterval(tickRuntimeDurations, 1000);

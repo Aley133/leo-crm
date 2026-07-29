@@ -2,8 +2,17 @@ from __future__ import annotations
 
 from datetime import timedelta
 
+import pytest
+from fastapi import HTTPException
+
 from backend.app.dumping_api import read_dumping_runtime
-from backend.app.dumping_models import DumpingRun
+from backend.app.dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
+from backend.app.kaspi_competitor_agent_api import (
+    AgentClaim,
+    AgentComplete,
+    claim_job,
+    complete_job,
+)
 from backend.app.lease_engine import utc_now
 from backend.app.models import Product
 
@@ -58,6 +67,7 @@ def test_dumping_runtime_isolated_from_supplier_monitoring(db_session) -> None:
 
     assert snapshot.queued_count == 1
     assert len(snapshot.active_runs) == 1
+    assert snapshot.recent_results == []
     row = snapshot.active_runs[0]
     assert row.job_id == active.id
     assert row.status == "processing"
@@ -92,5 +102,134 @@ def test_dumping_runtime_marks_expired_kaspi_lease(db_session) -> None:
 
     snapshot = read_dumping_runtime(db_session)
 
-    assert snapshot.active_runs[0].status == "lease_expired"
-    assert "не подтвердил завершение" in snapshot.active_runs[0].detail
+    assert snapshot.active_runs == []
+    assert snapshot.recent_results[0].status == "lease_expired"
+    assert "будет повторено автоматически" in snapshot.recent_results[0].detail
+
+
+def test_dumping_runtime_shows_fresh_success_then_clears_it(db_session) -> None:
+    now = utc_now()
+    fresh_product = _product(
+        db_session,
+        kaspi_id="121212121",
+        name="Свежий успешный результат",
+    )
+    old_product = _product(
+        db_session,
+        kaspi_id="343434343",
+        name="Старый успешный результат",
+    )
+    db_session.add_all([
+        DumpingRun(
+            product_id=fresh_product.id,
+            status="succeeded_local",
+            published=True,
+            explanation_json={
+                "updated_at": (now - timedelta(minutes=1)).isoformat(),
+            },
+        ),
+        DumpingRun(
+            product_id=old_product.id,
+            status="succeeded_local",
+            published=True,
+            explanation_json={
+                "updated_at": (now - timedelta(minutes=4)).isoformat(),
+            },
+        ),
+    ])
+    db_session.commit()
+
+    snapshot = read_dumping_runtime(db_session)
+
+    assert [row.product_name for row in snapshot.recent_results] == [
+        "Свежий успешный результат"
+    ]
+    assert snapshot.recent_results[0].status == "succeeded"
+    assert "XML обновлён" in snapshot.recent_results[0].detail
+
+
+def test_dumping_runtime_drops_old_expired_leases_from_live_panel(db_session) -> None:
+    now = utc_now()
+    product = _product(
+        db_session,
+        kaspi_id="565656565",
+        name="Давно прерванная проверка",
+    )
+    db_session.add(
+        DumpingRun(
+            product_id=product.id,
+            status="leased_local",
+            published=False,
+            explanation_json={
+                "leased_at": (now - timedelta(hours=2)).isoformat(),
+                "lease_until": (now - timedelta(hours=1)).isoformat(),
+                "updated_at": (now - timedelta(hours=1)).isoformat(),
+            },
+        )
+    )
+    db_session.commit()
+
+    snapshot = read_dumping_runtime(db_session)
+
+    assert snapshot.active_runs == []
+    assert snapshot.recent_results == []
+    assert snapshot.latest_run is None
+
+
+def test_kaspi_agent_reclaims_expired_job_and_can_finish_it(db_session) -> None:
+    now = utc_now()
+    product = _product(
+        db_session,
+        kaspi_id="787878787",
+        name="Проверка после восстановления lease",
+    )
+    policy = DumpingPolicy(product_id=product.id, enabled=True)
+    feed = KaspiXmlFeed(
+        merchant_id="merchant-1",
+        source_filename="catalog.xml",
+        source_xml="<kaspi_catalog/>",
+        generated_xml="<kaspi_catalog/>",
+        active=True,
+    )
+    run = DumpingRun(
+        product_id=product.id,
+        status="leased_local",
+        published=False,
+        explanation_json={
+            "agent_id": "offline-agent-w1",
+            "lease_token": "old-token-that-is-now-stale",
+            "lease_attempt": 1,
+            "leased_at": (now - timedelta(minutes=5)).isoformat(),
+            "lease_until": (now - timedelta(minutes=2)).isoformat(),
+            "updated_at": (now - timedelta(minutes=2)).isoformat(),
+        },
+    )
+    db_session.add_all([policy, feed, run])
+    db_session.commit()
+
+    response = claim_job(
+        AgentClaim(agent_id="online-agent-w1", hostname="BARWORK"),
+        db_session,
+    )
+    db_session.refresh(run)
+
+    assert response["job"]["id"] == run.id
+    assert response["job"]["lease_token"] != "old-token"
+    assert run.status == "leased_local"
+    assert run.explanation_json["agent_id"] == "online-agent-w1"
+    assert run.explanation_json["lease_attempt"] == 2
+    assert run.explanation_json["previous_lease_until"]
+    assert run.explanation_json["lease_recovered_at"]
+
+    with pytest.raises(HTTPException) as stale_completion:
+        complete_job(
+            run.id,
+            AgentComplete(
+                lease_token="old-token-that-is-now-stale",
+                status="failed",
+                error_message="Запоздалый результат старого потока",
+            ),
+            db_session,
+        )
+
+    assert stale_completion.value.status_code == 409
