@@ -108,6 +108,19 @@ def _metadata_datetime(value: object) -> datetime | None:
     return result if result.tzinfo is not None else result.replace(tzinfo=UTC)
 
 
+def _json_compatible(value: object) -> object:
+    """Convert exact domain values before persisting them in a JSON column."""
+    if isinstance(value, Decimal):
+        return format(value, "f")
+    if isinstance(value, datetime):
+        return value.isoformat()
+    if isinstance(value, dict):
+        return {str(key): _json_compatible(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_compatible(item) for item in value]
+    return value
+
+
 def _claimable_job(db: Session, *, now: datetime) -> tuple[DumpingRun | None, bool]:
     queued = db.scalar(
         select(DumpingRun)
@@ -278,13 +291,32 @@ def complete_job(job_id: int, payload: AgentComplete, db: Session = Depends(get_
             seller_count=payload.seller_count,
             product_url=payload.product_url or "",
         )
-        result = apply_competitor_snapshot(db, product_id=job.product_id, market=market)
+        try:
+            with db.begin_nested():
+                result = apply_competitor_snapshot(
+                    db,
+                    product_id=job.product_id,
+                    market=market,
+                )
+        except ValueError as exc:
+            job.status = "failed_local"
+            job.explanation_json = {
+                **meta,
+                "stage": "failed",
+                "error_code": "dumping_decision_rejected",
+                "error_message": str(exc),
+                "updated_at": _now().isoformat(),
+            }
+            db.commit()
+            return {"id": job.id, "status": job.status}
+
+        persisted_result = _json_compatible(result)
         job.status = "succeeded_local"
         job.explanation_json = {
             **meta,
             "stage": "completed",
             "updated_at": _now().isoformat(),
-            "result": result,
+            "result": persisted_result,
         }
     elif payload.status == "failed":
         job.status = "failed_local"

@@ -1,12 +1,16 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from datetime import timedelta
+from decimal import Decimal
 
 import pytest
 from fastapi import HTTPException
+from sqlalchemy import select
 
 from backend.app.dumping_api import read_dumping_runtime
 from backend.app.dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
+from backend.app.inventory_models import InventoryBatch
 from backend.app.kaspi_competitor_agent_api import (
     AgentClaim,
     AgentComplete,
@@ -233,3 +237,139 @@ def test_kaspi_agent_reclaims_expired_job_and_can_finish_it(db_session) -> None:
         )
 
     assert stale_completion.value.status_code == 409
+
+
+def test_kaspi_agent_successfully_persists_decimal_result_in_one_commit(
+    db_session,
+    monkeypatch,
+) -> None:
+    product = _product(
+        db_session,
+        kaspi_id="919191919",
+        name="Успешная проверка с точными ценами",
+    )
+    policy = DumpingPolicy(
+        product_id=product.id,
+        enabled=True,
+        minimum_profit_kzt=Decimal("1000"),
+    )
+    source_xml = """<?xml version='1.0' encoding='utf-8'?>
+    <kaspi_catalog><offers>
+      <offer sku='SKU-919191919'>
+        <cityprices><cityprice cityId='750000000'>9999</cityprice></cityprices>
+        <availability available='yes' preOrder='5'/>
+      </offer>
+    </offers></kaspi_catalog>"""
+    feed = KaspiXmlFeed(
+        merchant_id="merchant-1",
+        source_filename="catalog.xml",
+        source_xml=source_xml,
+        generated_xml=source_xml,
+        active=True,
+    )
+    batch = InventoryBatch(
+        product_id=product.id,
+        received_at=datetime(2026, 7, 29, 10, 0, tzinfo=UTC),
+        quantity_received=2,
+        quantity_remaining=2,
+        unit_cost=Decimal("2300"),
+        source_name="Склад FIFO",
+    )
+    job = DumpingRun(
+        product_id=product.id,
+        dumping_policy_id=None,
+        status="leased_local",
+        published=False,
+        explanation_json={
+            "lease_token": "current-lease-token-123456",
+            "stage": "local_scan",
+        },
+    )
+    db_session.add_all([policy, feed, batch, job])
+    db_session.commit()
+
+    commit_count = 0
+    original_commit = db_session.commit
+
+    def counted_commit() -> None:
+        nonlocal commit_count
+        commit_count += 1
+        original_commit()
+
+    monkeypatch.setattr(db_session, "commit", counted_commit)
+
+    response = complete_job(
+        job.id,
+        AgentComplete(
+            lease_token="current-lease-token-123456",
+            status="succeeded",
+            own_price_kzt=Decimal("9999"),
+            competitor_price_kzt=Decimal("8900"),
+            competitor_name="Другой продавец",
+            own_position=2,
+            seller_count=4,
+            product_url="https://kaspi.kz/shop/p/919191919/",
+        ),
+        db_session,
+    )
+
+    db_session.refresh(job)
+    db_session.refresh(feed)
+    decision_run = db_session.scalar(
+        select(DumpingRun)
+        .where(DumpingRun.id != job.id, DumpingRun.product_id == product.id)
+        .order_by(DumpingRun.id.desc())
+        .limit(1)
+    )
+
+    assert response["status"] == "succeeded_local"
+    assert commit_count == 1
+    assert job.status == "succeeded_local"
+    assert job.explanation_json["result"]["market"]["competitor_price_kzt"] == "8900"
+    assert job.explanation_json["result"]["decision"]["target_price_kzt"] == "8899.00"
+    assert decision_run is not None
+    assert decision_run.target_price_kzt == Decimal("8899.00")
+    assert ">8899<" in feed.generated_xml
+
+
+def test_kaspi_agent_records_pricing_rejection_without_http_500(db_session) -> None:
+    product = _product(
+        db_session,
+        kaspi_id="929292929",
+        name="Товар без источника себестоимости",
+    )
+    policy = DumpingPolicy(product_id=product.id, enabled=True)
+    feed = KaspiXmlFeed(
+        merchant_id="merchant-1",
+        source_filename="catalog.xml",
+        source_xml="<kaspi_catalog/>",
+        generated_xml="<kaspi_catalog/>",
+        active=True,
+    )
+    job = DumpingRun(
+        product_id=product.id,
+        dumping_policy_id=None,
+        status="leased_local",
+        published=False,
+        explanation_json={"lease_token": "pricing-error-token-123456"},
+    )
+    db_session.add_all([policy, feed, job])
+    db_session.commit()
+
+    response = complete_job(
+        job.id,
+        AgentComplete(
+            lease_token="pricing-error-token-123456",
+            status="succeeded",
+            own_price_kzt=Decimal("9999"),
+            competitor_price_kzt=Decimal("8900"),
+            seller_count=2,
+        ),
+        db_session,
+    )
+
+    db_session.refresh(job)
+    assert response == {"id": job.id, "status": "failed_local"}
+    assert job.status == "failed_local"
+    assert job.explanation_json["error_code"] == "dumping_decision_rejected"
+    assert "Нет доступной партии" in job.explanation_json["error_message"]

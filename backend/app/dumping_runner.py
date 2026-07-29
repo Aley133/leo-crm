@@ -49,8 +49,7 @@ def apply_competitor_snapshot(
         "product_url": market.product_url,
         "scan_source": "local_kaspi_competitor_agent",
     }
-    db.commit()
-    db.refresh(run)
+    db.flush()
     return {
         "run_id": run.id,
         "feed_url": "/feeds/kaspi/catalog.xml",

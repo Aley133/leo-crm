@@ -213,7 +213,12 @@ def update_feed_xml(
 
 
 def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, decision: DumpingDecision) -> DumpingRun:
-    feed = db.scalar(select(KaspiXmlFeed).order_by(KaspiXmlFeed.id.desc()).limit(1))
+    feed = db.scalar(
+        select(KaspiXmlFeed)
+        .order_by(KaspiXmlFeed.id.desc())
+        .with_for_update()
+        .limit(1)
+    )
     if feed is None:
         raise ValueError("Сначала импортируйте полный Kaspi XML в разделе Товары")
 

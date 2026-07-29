@@ -41,6 +41,13 @@ def test_feed_update_changes_only_matching_offer_price_and_preorder() -> None:
     assert 'preOrder="2"' in generated
 
 
+def test_feed_publication_locks_the_shared_xml_row() -> None:
+    source = (ROOT / "backend" / "app" / "dumping_service.py").read_text(encoding="utf-8")
+
+    assert "select(KaspiXmlFeed)" in source
+    assert ".with_for_update()" in source
+
+
 def test_dumping_workspace_is_exposed_in_crm_ui() -> None:
     ui = (ROOT / "backend" / "app" / "ui.py").read_text(encoding="utf-8")
     html = (ROOT / "backend" / "app" / "static" / "dumping.html").read_text(encoding="utf-8")
