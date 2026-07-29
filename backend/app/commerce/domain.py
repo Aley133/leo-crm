@@ -46,6 +46,7 @@ class CommerceOrderLine:
     procurement_unit_cost: Decimal | None = None
     procurement_source_name: str | None = None
     inventory_allocated_quantity: int = 0
+    production_completed_quantity: int = 0
     incoming_reserved_quantity: int = 0
 
     @property
@@ -63,6 +64,14 @@ class CommerceOrderLine:
 
     @property
     def procurement_state(self) -> ProcurementState:
+        # "Изготовлено" is a stronger signal than an older purchase workflow:
+        # the product is physically ready for this order even if a stale
+        # purchase request still exists.
+        if (
+            self.production_completed_quantity > 0
+            and self.is_fully_allocated_from_inventory
+        ):
+            return ProcurementState.NOT_REQUIRED
         # An explicit purchase request is authoritative for preorder readiness.
         if self.purchase_request_id is not None:
             if self.purchase_status in {"received", "closed"}:

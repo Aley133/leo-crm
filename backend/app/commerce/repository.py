@@ -7,7 +7,8 @@ from typing import Protocol
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
-from ..inventory_models import InventoryAllocation, InventoryBatch
+from ..inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
+from ..inventory_service import build_incoming_reservations
 from ..kaspi_order_line_display import recover_order_line_title
 from ..models import (
     MarketplaceAccount,
@@ -39,69 +40,9 @@ class SqlAlchemyCommerceRepository:
 
     def _incoming_reservations(self) -> dict[int, int]:
         """Virtually reserve expected stock to preorder lines in order-date FIFO order."""
-        incoming_rows = self._session.execute(
-            select(
-                InventoryBatch.product_id,
-                func.coalesce(func.sum(InventoryBatch.quantity_received), 0),
-            )
-            .where(InventoryBatch.is_received.is_(False))
-            .group_by(InventoryBatch.product_id)
-        ).all()
-        incoming_by_product = {
-            int(product_id): int(quantity or 0)
-            for product_id, quantity in incoming_rows
-            if int(quantity or 0) > 0
-        }
-        if not incoming_by_product:
-            return {}
-
-        candidate_rows = self._session.execute(
-            select(MarketplaceOrderLine, MarketplaceOrder)
-            .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
-            .where(
-                MarketplaceOrderLine.product_id.in_(incoming_by_product),
-                MarketplaceOrder.status.in_(("accepted", "preorder")),
-            )
-            .order_by(
-                MarketplaceOrder.ordered_at.asc().nullsfirst(),
-                MarketplaceOrder.id.asc(),
-                MarketplaceOrderLine.id.asc(),
-            )
-        ).all()
-        if not candidate_rows:
-            return {}
-
-        line_ids = [line.id for line, _order in candidate_rows]
-        allocated_rows = self._session.execute(
-            select(
-                InventoryAllocation.marketplace_order_line_id,
-                func.coalesce(func.sum(InventoryAllocation.quantity), 0),
-            )
-            .where(InventoryAllocation.marketplace_order_line_id.in_(line_ids))
-            .group_by(InventoryAllocation.marketplace_order_line_id)
-        ).all()
-        allocated_by_line = {
-            int(line_id): int(quantity or 0)
-            for line_id, quantity in allocated_rows
-        }
-
-        reserved: dict[int, int] = {}
-        remaining = dict(incoming_by_product)
-        for line, _order in candidate_rows:
-            product_id = line.product_id
-            if product_id is None:
-                continue
-            available = remaining.get(product_id, 0)
-            if available <= 0:
-                continue
-            physical = allocated_by_line.get(line.id, 0)
-            needed = max(int(line.quantity or 0) - physical, 0)
-            if needed <= 0:
-                continue
-            quantity = min(needed, available)
-            if quantity > 0:
-                reserved[line.id] = quantity
-                remaining[product_id] = available - quantity
+        reserved: dict[int, int] = defaultdict(int)
+        for reservation in build_incoming_reservations(self._session):
+            reserved[reservation.order_line_id] += reservation.reserved_quantity
         return reserved
 
     def list_orders(
@@ -180,20 +121,58 @@ class SqlAlchemyCommerceRepository:
         ).all()
         line_ids = [line.id for line, *_purchase in line_rows]
 
-        inventory_by_line: dict[int, tuple[int, Decimal]] = {}
+        inventory_by_line: dict[int, tuple[int, Decimal, str | None, int]] = {}
         if line_ids:
             allocation_rows = self._session.execute(
                 select(
                     InventoryAllocation.marketplace_order_line_id,
+                    InventoryBatch.batch_type,
+                    InventoryBatch.source_name,
                     func.sum(InventoryAllocation.quantity),
                     func.sum(InventoryAllocation.quantity * InventoryAllocation.unit_cost),
                 )
+                .join(
+                    InventoryBatch,
+                    InventoryBatch.id == InventoryAllocation.inventory_batch_id,
+                )
                 .where(InventoryAllocation.marketplace_order_line_id.in_(line_ids))
-                .group_by(InventoryAllocation.marketplace_order_line_id)
+                .group_by(
+                    InventoryAllocation.marketplace_order_line_id,
+                    InventoryBatch.batch_type,
+                    InventoryBatch.source_name,
+                )
             ).all()
+            allocation_totals: dict[int, dict[str, object]] = {}
+            for line_id, batch_type, source_name, quantity, total_cost in allocation_rows:
+                values = allocation_totals.setdefault(
+                    int(line_id),
+                    {
+                        "quantity": 0,
+                        "cost": Decimal("0"),
+                        "sources": [],
+                        "production": 0,
+                    },
+                )
+                values["quantity"] = int(values["quantity"]) + int(quantity or 0)
+                values["cost"] = Decimal(values["cost"]) + Decimal(total_cost or 0)
+                if batch_type == InventoryBatchType.PRODUCTION.value:
+                    values["production"] = int(values["production"]) + int(quantity or 0)
+                source = (
+                    (source_name or "").strip() or "Производство"
+                    if batch_type == InventoryBatchType.PRODUCTION.value
+                    else "Склад FIFO"
+                )
+                sources = values["sources"]
+                if isinstance(sources, list) and source not in sources:
+                    sources.append(source)
             inventory_by_line = {
-                int(line_id): (int(quantity or 0), Decimal(total_cost or 0))
-                for line_id, quantity, total_cost in allocation_rows
+                line_id: (
+                    int(values["quantity"]),
+                    Decimal(values["cost"]),
+                    " + ".join(values["sources"]) if values["sources"] else None,
+                    int(values["production"]),
+                )
+                for line_id, values in allocation_totals.items()
             }
 
         identities: set[str] = set()
@@ -282,12 +261,19 @@ class SqlAlchemyCommerceRepository:
                     title = recovered
 
             effective_product_id = product.id if product is not None else line.product_id
-            inventory_quantity, inventory_total_cost = inventory_by_line.get(line.id, (0, Decimal("0")))
+            (
+                inventory_quantity,
+                inventory_total_cost,
+                inventory_source_name,
+                production_completed_quantity,
+            ) = (
+                inventory_by_line.get(line.id, (0, Decimal("0"), None, 0))
+            )
             procurement_unit_cost = None
             procurement_source_name = None
             if line.quantity > 0 and inventory_quantity >= line.quantity:
                 procurement_unit_cost = (inventory_total_cost / Decimal(line.quantity)).quantize(Decimal("0.01"))
-                procurement_source_name = "Склад FIFO"
+                procurement_source_name = inventory_source_name or "Склад FIFO"
             elif effective_product_id is not None:
                 procurement_unit_cost, procurement_source_name = source_by_product.get(
                     effective_product_id, (None, None)
@@ -309,6 +295,7 @@ class SqlAlchemyCommerceRepository:
                     procurement_unit_cost=procurement_unit_cost,
                     procurement_source_name=procurement_source_name,
                     inventory_allocated_quantity=inventory_quantity,
+                    production_completed_quantity=production_completed_quantity,
                     incoming_reserved_quantity=incoming_reserved_by_line.get(line.id, 0),
                 )
             )

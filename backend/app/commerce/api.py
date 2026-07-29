@@ -163,6 +163,7 @@ def list_commerce_orders(
                         procurement_total_cost=line.procurement_total_cost,
                         procurement_source_name=line.procurement_source_name,
                         inventory_allocated_quantity=line.inventory_allocated_quantity,
+                        production_completed_quantity=line.production_completed_quantity,
                         incoming_reserved_quantity=line.incoming_reserved_quantity,
                         uncovered_quantity=line.uncovered_quantity,
                         gross_margin=line.gross_margin,

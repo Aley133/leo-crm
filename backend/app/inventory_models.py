@@ -2,12 +2,18 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from enum import StrEnum
 
 from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 from .db_types import UTCDateTime
+
+
+class InventoryBatchType(StrEnum):
+    PURCHASE = "purchase"
+    PRODUCTION = "production"
 
 
 class InventoryBatch(Base):
@@ -19,6 +25,10 @@ class InventoryBatch(Base):
             name="ck_inventory_batch_remaining_range",
         ),
         CheckConstraint("unit_cost >= 0", name="ck_inventory_batch_unit_cost_nonnegative"),
+        CheckConstraint(
+            "batch_type IN ('purchase', 'production')",
+            name="ck_inventory_batch_type",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -32,6 +42,13 @@ class InventoryBatch(Base):
     quantity_received: Mapped[int] = mapped_column(Integer)
     quantity_remaining: Mapped[int] = mapped_column(Integer)
     unit_cost: Mapped[Decimal] = mapped_column(Numeric(18, 2))
+    batch_type: Mapped[str] = mapped_column(
+        String(32),
+        nullable=False,
+        default=InventoryBatchType.PURCHASE.value,
+        server_default=InventoryBatchType.PURCHASE.value,
+        index=True,
+    )
     is_received: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,

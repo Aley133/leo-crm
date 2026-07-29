@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections import defaultdict
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -7,7 +8,7 @@ from decimal import Decimal
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
-from .inventory_models import InventoryAllocation, InventoryBatch
+from .inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
 from .models import MarketplaceOrder, MarketplaceOrderLine, MarketplaceOrderStatus, Product
 
 
@@ -15,6 +16,10 @@ _TERMINAL_ORDER_STATUSES = {
     MarketplaceOrderStatus.CANCELLING.value,
     MarketplaceOrderStatus.CANCELLED.value,
     MarketplaceOrderStatus.RETURNED.value,
+}
+_INCOMING_ORDER_STATUSES = {
+    MarketplaceOrderStatus.ACCEPTED.value,
+    "preorder",
 }
 
 
@@ -37,6 +42,29 @@ class AllocationResult:
         return self.remaining_quantity == 0
 
 
+@dataclass(frozen=True, slots=True)
+class IncomingReservation:
+    batch_id: int
+    batch_type: str
+    product_id: int
+    order_id: int
+    order_line_id: int
+    external_code: str | None
+    ordered_at: datetime | None
+    line_quantity: int
+    reserved_quantity: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProductionCompletionResult:
+    batch_id: int
+    order_id: int
+    order_line_id: int
+    external_code: str | None
+    completed_quantity: int
+    order_line_fully_allocated: bool
+
+
 def allocated_quantity_for_line(session: Session, order_line_id: int) -> int:
     return int(
         session.scalar(
@@ -46,6 +74,123 @@ def allocated_quantity_for_line(session: Session, order_line_id: int) -> int:
         )
         or 0
     )
+
+
+def build_incoming_reservations(
+    session: Session,
+    *,
+    product_ids: set[int] | None = None,
+) -> tuple[IncomingReservation, ...]:
+    """Reserve expected purchases and production capacity by batch and order FIFO."""
+    if product_ids is not None and not product_ids:
+        return ()
+
+    batch_query = (
+        select(InventoryBatch)
+        .where(InventoryBatch.is_received.is_(False))
+        .order_by(
+            InventoryBatch.product_id,
+            InventoryBatch.received_at,
+            InventoryBatch.id,
+        )
+    )
+    if product_ids is not None:
+        batch_query = batch_query.where(InventoryBatch.product_id.in_(product_ids))
+    batches = session.scalars(batch_query).all()
+    if not batches:
+        return ()
+
+    batch_ids = [batch.id for batch in batches]
+    allocated_by_batch = {
+        int(batch_id): int(quantity or 0)
+        for batch_id, quantity in session.execute(
+            select(
+                InventoryAllocation.inventory_batch_id,
+                func.coalesce(func.sum(InventoryAllocation.quantity), 0),
+            )
+            .where(InventoryAllocation.inventory_batch_id.in_(batch_ids))
+            .group_by(InventoryAllocation.inventory_batch_id)
+        ).all()
+    }
+
+    expected_product_ids = {int(batch.product_id) for batch in batches}
+    candidate_rows = session.execute(
+        select(MarketplaceOrderLine, MarketplaceOrder)
+        .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
+        .where(
+            MarketplaceOrderLine.product_id.in_(expected_product_ids),
+            MarketplaceOrder.status.in_(_INCOMING_ORDER_STATUSES),
+        )
+        .order_by(
+            MarketplaceOrderLine.product_id,
+            MarketplaceOrder.ordered_at.asc().nullsfirst(),
+            MarketplaceOrder.id,
+            MarketplaceOrderLine.id,
+        )
+    ).all()
+    if not candidate_rows:
+        return ()
+
+    line_ids = [line.id for line, _order in candidate_rows]
+    allocated_by_line = {
+        int(line_id): int(quantity or 0)
+        for line_id, quantity in session.execute(
+            select(
+                InventoryAllocation.marketplace_order_line_id,
+                func.coalesce(func.sum(InventoryAllocation.quantity), 0),
+            )
+            .where(InventoryAllocation.marketplace_order_line_id.in_(line_ids))
+            .group_by(InventoryAllocation.marketplace_order_line_id)
+        ).all()
+    }
+
+    candidates_by_product: dict[int, list[tuple[MarketplaceOrderLine, MarketplaceOrder]]] = (
+        defaultdict(list)
+    )
+    remaining_by_line: dict[int, int] = {}
+    for line, order in candidate_rows:
+        if line.product_id is None:
+            continue
+        candidates_by_product[int(line.product_id)].append((line, order))
+        remaining_by_line[line.id] = max(
+            int(line.quantity or 0) - allocated_by_line.get(line.id, 0),
+            0,
+        )
+
+    reservations: list[IncomingReservation] = []
+    for batch in batches:
+        capacity = int(batch.quantity_received)
+        if batch.batch_type == InventoryBatchType.PRODUCTION.value:
+            capacity -= allocated_by_batch.get(batch.id, 0)
+        capacity = max(capacity, 0)
+        if capacity <= 0:
+            continue
+
+        for line, order in candidates_by_product.get(int(batch.product_id), ()):
+            needed = remaining_by_line.get(line.id, 0)
+            if needed <= 0:
+                continue
+            quantity = min(needed, capacity)
+            if quantity <= 0:
+                continue
+            reservations.append(
+                IncomingReservation(
+                    batch_id=batch.id,
+                    batch_type=batch.batch_type,
+                    product_id=int(batch.product_id),
+                    order_id=order.id,
+                    order_line_id=line.id,
+                    external_code=order.external_code,
+                    ordered_at=order.ordered_at,
+                    line_quantity=int(line.quantity or 0),
+                    reserved_quantity=quantity,
+                )
+            )
+            remaining_by_line[line.id] = needed - quantity
+            capacity -= quantity
+            if capacity <= 0:
+                break
+    return tuple(reservations)
 
 
 def allocate_order_line_fifo(
@@ -71,6 +216,7 @@ def allocate_order_line_fifo(
         select(InventoryBatch)
         .where(
             InventoryBatch.product_id == order_line.product_id,
+            InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
             InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
         )
@@ -152,7 +298,10 @@ def rebuild_product_fifo(
     product_id: int,
     allocated_at: datetime | None = None,
 ) -> int:
-    batch_ids = select(InventoryBatch.id).where(InventoryBatch.product_id == product_id)
+    batch_ids = select(InventoryBatch.id).where(
+        InventoryBatch.product_id == product_id,
+        InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
+    )
     session.execute(
         delete(InventoryAllocation).where(
             InventoryAllocation.inventory_batch_id.in_(batch_ids)
@@ -166,7 +315,14 @@ def rebuild_product_fifo(
         .with_for_update()
     ).all()
     for batch in batches:
-        batch.quantity_remaining = batch.quantity_received if batch.is_received else 0
+        batch.quantity_remaining = (
+            batch.quantity_received
+            if (
+                batch.batch_type == InventoryBatchType.PURCHASE.value
+                and batch.is_received
+            )
+            else 0
+        )
     session.flush()
 
     rows = session.execute(
@@ -205,20 +361,34 @@ def create_inventory_batch(
     note: str | None = None,
     reconcile_existing_orders: bool = True,
     is_received: bool = True,
+    batch_type: InventoryBatchType | str = InventoryBatchType.PURCHASE,
 ) -> tuple[InventoryBatch, int]:
     if quantity <= 0:
         raise ValueError("quantity must be positive")
     cost = Decimal(unit_cost)
     if cost < 0:
         raise ValueError("unit_cost must not be negative")
+    try:
+        resolved_batch_type = InventoryBatchType(batch_type)
+    except ValueError as exc:
+        raise ValueError("unknown inventory batch type") from exc
+    if resolved_batch_type is InventoryBatchType.PRODUCTION and is_received:
+        raise ValueError(
+            "production batch cannot be received as stock; complete its orders individually"
+        )
 
     received = received_at if received_at.tzinfo is not None else received_at.replace(tzinfo=UTC)
     batch = InventoryBatch(
         product_id=product.id,
         received_at=received,
         quantity_received=quantity,
-        quantity_remaining=quantity if is_received else 0,
+        quantity_remaining=(
+            quantity
+            if is_received and resolved_batch_type is InventoryBatchType.PURCHASE
+            else 0
+        ),
         unit_cost=cost,
+        batch_type=resolved_batch_type.value,
         is_received=is_received,
         source_name=(source_name or "").strip() or None,
         reference=(reference or "").strip() or None,
@@ -228,7 +398,11 @@ def create_inventory_batch(
     session.flush()
 
     allocated = 0
-    if is_received and reconcile_existing_orders:
+    if (
+        resolved_batch_type is InventoryBatchType.PURCHASE
+        and is_received
+        and reconcile_existing_orders
+    ):
         allocated = reconcile_product_orders_from_batch(session, batch=batch)
     return batch, allocated
 
@@ -239,6 +413,10 @@ def mark_inventory_batch_received(
     batch: InventoryBatch,
     received_at: datetime | None = None,
 ) -> int:
+    if batch.batch_type == InventoryBatchType.PRODUCTION.value:
+        raise ValueError(
+            "production batch is completed per order with the Manufactured action"
+        )
     if batch.is_received:
         return 0
     batch.is_received = True
@@ -246,3 +424,87 @@ def mark_inventory_batch_received(
     batch.quantity_remaining = batch.quantity_received
     session.flush()
     return reconcile_product_orders_from_batch(session, batch=batch)
+
+
+def complete_production_order(
+    session: Session,
+    *,
+    batch: InventoryBatch,
+    order_line: MarketplaceOrderLine,
+    completed_at: datetime | None = None,
+) -> ProductionCompletionResult:
+    if batch.batch_type != InventoryBatchType.PRODUCTION.value:
+        raise ValueError("inventory batch is not a production batch")
+    if batch.is_received:
+        raise ValueError("production batch must not be received as warehouse stock")
+    if order_line.product_id != batch.product_id:
+        raise ValueError("order line belongs to another product")
+
+    order = session.get(MarketplaceOrder, order_line.marketplace_order_id)
+    if order is None:
+        raise ValueError("order not found")
+    if order.status not in _INCOMING_ORDER_STATUSES:
+        raise ValueError("order is no longer active in the production queue")
+
+    existing = session.scalar(
+        select(InventoryAllocation)
+        .where(
+            InventoryAllocation.inventory_batch_id == batch.id,
+            InventoryAllocation.marketplace_order_line_id == order_line.id,
+        )
+        .with_for_update()
+    )
+    allocated_before = allocated_quantity_for_line(session, order_line.id)
+    if allocated_before >= int(order_line.quantity or 0):
+        return ProductionCompletionResult(
+            batch_id=batch.id,
+            order_id=order.id,
+            order_line_id=order_line.id,
+            external_code=order.external_code,
+            completed_quantity=0,
+            order_line_fully_allocated=True,
+        )
+
+    reservation = next(
+        (
+            row
+            for row in build_incoming_reservations(
+                session,
+                product_ids={int(batch.product_id)},
+            )
+            if row.batch_id == batch.id and row.order_line_id == order_line.id
+        ),
+        None,
+    )
+    if reservation is None:
+        raise ValueError("order is not reserved by this production batch")
+
+    completed_quantity = int(reservation.reserved_quantity)
+    if completed_quantity <= 0:
+        raise ValueError("production reservation is empty")
+
+    now = completed_at or datetime.now(UTC)
+    if existing is None:
+        session.add(
+            InventoryAllocation(
+                inventory_batch_id=batch.id,
+                marketplace_order_line_id=order_line.id,
+                quantity=completed_quantity,
+                unit_cost=Decimal(batch.unit_cost),
+                allocated_at=now,
+            )
+        )
+    else:
+        existing.quantity += completed_quantity
+        existing.allocated_at = now
+    session.flush()
+
+    allocated_after = allocated_quantity_for_line(session, order_line.id)
+    return ProductionCompletionResult(
+        batch_id=batch.id,
+        order_id=order.id,
+        order_line_id=order_line.id,
+        external_code=order.external_code,
+        completed_quantity=completed_quantity,
+        order_line_fully_allocated=allocated_after >= int(order_line.quantity or 0),
+    )

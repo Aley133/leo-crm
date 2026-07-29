@@ -24,6 +24,7 @@ class CommerceOrderLineRead(BaseModel):
     procurement_total_cost: Decimal | None
     procurement_source_name: str | None
     inventory_allocated_quantity: int
+    production_completed_quantity: int
     incoming_reserved_quantity: int
     uncovered_quantity: int
     gross_margin: Decimal | None

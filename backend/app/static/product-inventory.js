@@ -7,6 +7,9 @@
   const body = document.querySelector("#inventory-batches-body");
   const empty = document.querySelector("#inventory-empty");
   const dialogTitle = dialog?.querySelector("h2");
+  const batchTypeInput = document.querySelector("#inventory-batch-type");
+  const receivedCheck = document.querySelector("#inventory-is-received");
+  const reconcileCheck = document.querySelector("#inventory-reconcile");
   let editingBatchId = null;
   let batchesById = new Map();
 
@@ -23,7 +26,30 @@
     const onHand = document.querySelector("#inventory-on-hand");
     const summary = document.querySelector("#inventory-summary");
     if (onHand) onHand.textContent = Number(inventory.on_hand || 0).toLocaleString("ru-RU");
-    if (summary) summary.textContent = `на складе: ${Number(inventory.on_hand || 0)} · ожидается: ${Number(inventory.expected_total || 0)} · списано: ${Number(inventory.allocated_total || 0)}`;
+    if (summary) {
+      const production = Number(inventory.production_remaining_total || 0);
+      const expectedPurchase = Math.max(Number(inventory.expected_total || 0) - production, 0);
+      summary.textContent = `на складе: ${Number(inventory.on_hand || 0)} · ожидается закупка: ${expectedPurchase} · в производстве: ${production} · списано/изготовлено: ${Number(inventory.allocated_total || 0)}`;
+    }
+  };
+
+  const renderProductionOrders = (batch) => {
+    const orders = batch.production_orders || [];
+    const content = orders.length
+      ? orders.map((order) => {
+          const code = order.external_code || order.order_id;
+          return `<div class="production-order">
+            <div><strong>Заказ №${escapeHtml(code)}</strong><span>Создан ${dateTime(order.ordered_at)}</span></div>
+            <div><strong>${Number(order.reserved_quantity || 0).toLocaleString("ru-RU")} шт.</strong><span>закреплено из ${Number(order.order_quantity || 0).toLocaleString("ru-RU")} шт. в заказе</span></div>
+            <div><strong>Предзаказ</strong><span>ожидает изготовления</span></div>
+            <button class="button manufacture-order" type="button" data-batch-id="${Number(batch.id)}" data-line-id="${Number(order.order_line_id)}" data-order-code="${escapeHtml(code)}">Изготовлено</button>
+          </div>`;
+        }).join("")
+      : '<div class="production-order-empty">Активных заказов для изготовления сейчас нет.</div>';
+    return `<tr class="production-orders-row"><td colspan="7"><div class="production-orders">
+      <div class="production-orders-title"><strong>Активные заказы этой партии</strong><span>В «Упаковку» заказ перейдёт только после подтверждения изготовления</span></div>
+      ${content}
+    </div></td></tr>`;
   };
 
   const render = (inventory) => {
@@ -32,26 +58,50 @@
     batchesById = new Map(batches.map((batch) => [Number(batch.id), batch]));
     body.innerHTML = batches.map((batch) => {
       const received = batch.is_received === true;
-      const status = received ? '<span class="badge ok">Прибыло</span>' : '<span class="badge warn">Ожидается</span>';
-      const receiveButton = received ? "" : `<button class="button receive-inventory-batch" type="button" data-batch-id="${Number(batch.id)}">Отметить прибытие</button>`;
-      return `
+      const production = batch.batch_type === "production";
+      const status = production
+        ? '<span class="badge warn">В производстве</span>'
+        : received
+          ? '<span class="badge ok">Прибыло</span>'
+          : '<span class="badge warn">Ожидается</span>';
+      const receiveButton = batch.can_receive ? `<button class="button receive-inventory-batch" type="button" data-batch-id="${Number(batch.id)}">Отметить прибытие</button>` : "";
+      const editButton = batch.can_edit ? `<button class="button secondary edit-inventory-batch" type="button" data-batch-id="${Number(batch.id)}">Редактировать</button>` : "";
+      const deleteButton = batch.can_delete ? `<button class="button secondary delete-inventory-batch" type="button" data-batch-id="${Number(batch.id)}">Удалить</button>` : "";
+      const lockedLabel = !batch.can_edit && production ? '<span class="muted">Есть изготовленные заказы</span>' : "";
+      const row = `
       <tr>
         <td>${status}${dateTime(batch.received_at)}${batch.reference ? `<span class="muted">${escapeHtml(batch.reference)}</span>` : ""}</td>
         <td>${escapeHtml(batch.source_name || "Не указан")}${batch.note ? `<span class="muted">${escapeHtml(batch.note)}</span>` : ""}</td>
         <td>${money(batch.unit_cost)}</td>
-        <td>${received ? Number(batch.quantity_received).toLocaleString("ru-RU") : "—"}</td>
-        <td>${received ? Number(batch.quantity_allocated).toLocaleString("ru-RU") : "—"}</td>
-        <td><strong>${received ? Number(batch.quantity_remaining).toLocaleString("ru-RU") : "0"}</strong></td>
+        <td>${production || received ? Number(batch.quantity_received).toLocaleString("ru-RU") : "—"}</td>
+        <td>${production || received ? Number(batch.quantity_allocated).toLocaleString("ru-RU") : "—"}</td>
+        <td><strong>${production || received ? Number(batch.quantity_remaining).toLocaleString("ru-RU") : "0"}</strong></td>
         <td>
           <div class="batch-actions">
             ${receiveButton}
-            <button class="button secondary edit-inventory-batch" type="button" data-batch-id="${Number(batch.id)}">Редактировать</button>
-            <button class="button secondary delete-inventory-batch" type="button" data-batch-id="${Number(batch.id)}">Удалить</button>
+            ${editButton}
+            ${deleteButton}
+            ${lockedLabel}
           </div>
         </td>
       </tr>`;
+      return production ? row + renderProductionOrders(batch) : row;
     }).join("");
     empty.classList.toggle("hidden", batches.length > 0);
+  };
+
+  const syncBatchTypeControls = () => {
+    const production = batchTypeInput?.value === "production";
+    receivedCheck?.closest("label")?.classList.toggle("hidden", production || Boolean(editingBatchId));
+    reconcileCheck?.closest("label")?.classList.toggle("hidden", production || Boolean(editingBatchId));
+    const dateLabel = document.querySelector("#inventory-date-label");
+    if (dateLabel) dateLabel.textContent = production ? "Плановая дата производства" : "Ожидаемая / фактическая дата поступления";
+    if (production) {
+      receivedCheck.checked = false;
+      reconcileCheck.checked = false;
+      const source = document.querySelector("#inventory-source-name");
+      if (!source.value.trim()) source.value = "Производство";
+    }
   };
 
   const loadInventory = async () => {
@@ -72,39 +122,85 @@
   const openCreateDialog = () => {
     editingBatchId = null;
     form.reset();
-    result.textContent = "Ожидаемая партия не попадёт в остаток и FIFO, пока вы не отметите её прибытие.";
+    result.textContent = "Выберите «Производство», если каждый заказ должен подтверждаться кнопкой «Изготовлено».";
     if (dialogTitle) dialogTitle.textContent = "Добавить партию товара";
     document.querySelector("#save-inventory").textContent = "Сохранить партию";
     document.querySelector("#inventory-received-at").value = localDateTimeValue();
-    document.querySelector("#inventory-is-received").checked = false;
-    document.querySelector("#inventory-is-received").closest("label")?.classList.remove("hidden");
-    document.querySelector("#inventory-reconcile").checked = true;
-    document.querySelector("#inventory-reconcile").closest("label")?.classList.remove("hidden");
+    batchTypeInput.value = "purchase";
+    receivedCheck.checked = false;
+    reconcileCheck.checked = true;
+    syncBatchTypeControls();
     dialog.showModal();
   };
 
   const openEditDialog = (batch) => {
     editingBatchId = Number(batch.id);
     form.reset();
-    result.textContent = batch.is_received ? "После сохранения FIFO и прибыль связанных заказов будут пересчитаны." : "Ожидаемая партия останется недоступной до подтверждения прибытия.";
+    result.textContent = batch.batch_type === "production"
+      ? "Производственная партия не является готовым складским остатком."
+      : batch.is_received
+        ? "После сохранения FIFO и прибыль связанных заказов будут пересчитаны."
+        : "Ожидаемая партия останется недоступной до подтверждения прибытия.";
     if (dialogTitle) dialogTitle.textContent = "Редактировать партию товара";
     document.querySelector("#save-inventory").textContent = "Сохранить изменения";
+    batchTypeInput.value = batch.batch_type || "purchase";
     document.querySelector("#inventory-quantity").value = Number(batch.quantity_received);
     document.querySelector("#inventory-unit-cost").value = Number(batch.unit_cost);
     document.querySelector("#inventory-received-at").value = localDateTimeValue(batch.received_at);
     document.querySelector("#inventory-source-name").value = batch.source_name || "";
     document.querySelector("#inventory-reference").value = batch.reference || "";
     document.querySelector("#inventory-note").value = batch.note || "";
-    document.querySelector("#inventory-is-received").closest("label")?.classList.add("hidden");
-    document.querySelector("#inventory-reconcile").closest("label")?.classList.add("hidden");
+    syncBatchTypeControls();
     dialog.showModal();
   };
 
   document.querySelector("#add-inventory-batch")?.addEventListener("click", openCreateDialog);
   document.querySelector("#close-inventory-dialog")?.addEventListener("click", () => dialog.close());
   document.querySelector("#cancel-inventory")?.addEventListener("click", () => dialog.close());
+  batchTypeInput?.addEventListener("change", () => {
+    syncBatchTypeControls();
+    result.textContent = batchTypeInput.value === "production"
+      ? "Количество — это план производства. Заказы останутся в «Предзаказе», пока вы не нажмёте «Изготовлено» у каждого."
+      : "Ожидаемая закупка не попадёт в остаток и FIFO, пока вы не отметите её прибытие.";
+  });
 
   body?.addEventListener("click", async (event) => {
+    const manufactureButton = event.target.closest(".manufacture-order");
+    if (manufactureButton) {
+      const batchId = Number(manufactureButton.dataset.batchId);
+      const lineId = Number(manufactureButton.dataset.lineId);
+      const orderCode = manufactureButton.dataset.orderCode || lineId;
+      if (!confirm(`Подтвердить изготовление товара для заказа №${orderCode}? После этого заказ перейдёт в «Упаковку», если остальные его позиции тоже готовы.`)) return;
+      manufactureButton.disabled = true;
+      manufactureButton.textContent = "Сохраняю…";
+      try {
+        const token = localStorage.getItem(storageKey);
+        const response = await fetch(`/api/products/${productId}/inventory/batches/${batchId}/orders/${lineId}/manufacture`, {
+          method: "POST",
+          headers: {Authorization: `Bearer ${token}`},
+        });
+        if (!response.ok) {
+          let detail = `API вернул ошибку ${response.status}`;
+          try { const payload = await response.json(); if (payload.detail) detail = String(payload.detail); } catch {}
+          throw new Error(detail);
+        }
+        const data = await response.json();
+        const pageMessage = document.querySelector("#message");
+        if (pageMessage) {
+          pageMessage.textContent = data.order_line_fully_allocated
+            ? `Заказ №${orderCode}: изготовлено ${Number(data.completed_quantity || 0).toLocaleString("ru-RU")} шт. Товар готов к упаковке.`
+            : `Заказ №${orderCode}: изготовлено ${Number(data.completed_quantity || 0).toLocaleString("ru-RU")} шт. Остальная часть заказа ещё ожидается.`;
+        }
+        await loadInventory();
+        document.querySelector("#refresh")?.click();
+      } catch (error) {
+        alert(error instanceof Error ? error.message : "Не удалось подтвердить изготовление.");
+        manufactureButton.disabled = false;
+        manufactureButton.textContent = "Изготовлено";
+      }
+      return;
+    }
+
     const receiveButton = event.target.closest(".receive-inventory-batch");
     if (receiveButton) {
       const batchId = Number(receiveButton.dataset.batchId);
@@ -165,8 +261,16 @@
     const token = localStorage.getItem(storageKey);
     const save = document.querySelector("#save-inventory");
     save.disabled = true;
-    const physicallyReceived = document.querySelector("#inventory-is-received").checked;
-    result.textContent = editingBatchId ? "Сохраняю изменения…" : physicallyReceived ? "Принимаю партию и выполняю FIFO-списание…" : "Сохраняю ожидаемую партию…";
+    const batchType = batchTypeInput.value;
+    const production = batchType === "production";
+    const physicallyReceived = !production && receivedCheck.checked;
+    result.textContent = editingBatchId
+      ? "Сохраняю изменения…"
+      : production
+        ? "Создаю производственную очередь…"
+        : physicallyReceived
+          ? "Принимаю партию и выполняю FIFO-списание…"
+          : "Сохраняю ожидаемую партию…";
     try {
       const receivedValue = document.querySelector("#inventory-received-at").value;
       const payload = {
@@ -176,10 +280,11 @@
         source_name: document.querySelector("#inventory-source-name").value.trim() || null,
         reference: document.querySelector("#inventory-reference").value.trim() || null,
         note: document.querySelector("#inventory-note").value.trim() || null,
+        batch_type: batchType,
       };
       if (!editingBatchId) {
         payload.is_received = physicallyReceived;
-        payload.reconcile_existing_orders = document.querySelector("#inventory-reconcile").checked;
+        payload.reconcile_existing_orders = !production && reconcileCheck.checked;
       }
 
       const url = editingBatchId
@@ -198,7 +303,9 @@
       const data = await response.json();
       result.textContent = editingBatchId
         ? `Партия обновлена. FIFO пересчитан: ${Number(data.reallocated_quantity || 0)} ед.`
-        : physicallyReceived
+        : production
+          ? "Производственная партия сохранена. Активные заказы закреплены по дате и ждут кнопки «Изготовлено»."
+          : physicallyReceived
           ? `Партия принята. На активные заказы списано: ${Number(data.allocated_to_existing_orders || 0)}.`
           : "Ожидаемая партия сохранена. Заказы останутся в предзаказах до подтверждения прибытия.";
       await loadInventory();
