@@ -55,6 +55,12 @@ class RemoteBrowser:
         self.closed = True
 
 
+class DelayedContextBrowser(RemoteBrowser):
+    def __init__(self) -> None:
+        self.contexts = []
+        self.closed = False
+
+
 class FakePlaywright:
     def __init__(self) -> None:
         self.stopped = False
@@ -93,6 +99,38 @@ def test_cdp_mode_reuses_profile_but_closes_each_page_only() -> None:
     assert context.closed is False
     assert browser.closed is False
     assert playwright.stopped is True
+
+
+def test_cdp_mode_waits_for_profile_context_created_after_connection() -> None:
+    async def exercise():
+        context = SharedContext()
+        browser = DelayedContextBrowser()
+        playwright = FakePlaywright()
+
+        async def launcher():
+            return playwright, browser
+
+        async def expose_context():
+            await asyncio.sleep(0.05)
+            browser.contexts.append(context)
+
+        pool = PlaywrightBrowserPool(
+            launcher=launcher,
+            cdp_endpoint="http://127.0.0.1:9222",
+            reuse_default_context=True,
+            concurrency=1,
+        )
+        expose_task = asyncio.create_task(expose_context())
+        result = await pool.fetch_html("https://www.ozon.kz/product/1", timeout_seconds=5)
+        await expose_task
+        await pool.close()
+        return result, context
+
+    result, context = asyncio.run(exercise())
+
+    assert result.title == "Ozon product"
+    assert len(context.pages) == 1
+    assert context.pages[0].closed is True
 
 
 def test_cdp_endpoint_rejects_unsafe_scheme() -> None:

@@ -27,6 +27,7 @@ class PlaywrightNavigationTimeout(PlaywrightPoolError):
 
 
 BrowserLauncher = Callable[[], Awaitable[tuple[Any, Any]]]
+DEFAULT_CONTEXT_WAIT_SECONDS = 10.0
 
 
 class PlaywrightBrowserPool:
@@ -123,10 +124,14 @@ class PlaywrightBrowserPool:
                 raise PlaywrightPoolError("Chromium is not available")
 
             if self._reuse_default_context:
+                deadline = monotonic() + DEFAULT_CONTEXT_WAIT_SECONDS
                 contexts = list(self._browser.contexts)
+                while not contexts and monotonic() < deadline:
+                    await asyncio.sleep(0.25)
+                    contexts = list(self._browser.contexts)
                 if not contexts:
                     raise PlaywrightPoolError(
-                        "CDP Chrome has no default browser context; open Chrome with a user profile"
+                        "CDP Chrome has no default browser context after waiting for the profile page"
                     )
                 context = contexts[0]
                 page = await context.new_page()

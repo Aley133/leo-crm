@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import ctypes
+import json
 import os
 import subprocess
 import sys
@@ -12,6 +13,7 @@ from ctypes import wintypes
 from pathlib import Path
 from tkinter import Tk, messagebox, simpledialog
 from urllib.error import HTTPError, URLError
+from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import tools.browser_agent as browser_agent_module
@@ -22,7 +24,8 @@ browser_agent_module.WildberriesBrowserAccessAdapter = WildberriesDeliveryAwareA
 
 API_URL = "https://leo-crm-api.onrender.com"
 CDP_ENDPOINT = "http://127.0.0.1:9222"
-APP_VERSION = "0.2.0"
+PROFILE_START_URL = "https://www.ozon.kz/"
+APP_VERSION = "0.2.1"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
 TOKEN_FILE = APP_DIR / "agent-token.dat"
 LOG_FILE = APP_DIR / "agent.log"
@@ -139,15 +142,57 @@ def _find_browser() -> Path:
 
 def _cdp_ready() -> bool:
     try:
-        with urlopen(f"{CDP_ENDPOINT}/json/version", timeout=2):
-            return True
-    except (URLError, TimeoutError, OSError):
+        with urlopen(f"{CDP_ENDPOINT}/json/version", timeout=2) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+        return isinstance(payload, dict) and bool(payload.get("webSocketDebuggerUrl"))
+    except (json.JSONDecodeError, URLError, TimeoutError, OSError):
         return False
+
+
+def _cdp_has_page() -> bool:
+    try:
+        with urlopen(f"{CDP_ENDPOINT}/json/list", timeout=2) as response:
+            targets = json.loads(response.read().decode("utf-8"))
+        return any(
+            isinstance(target, dict) and str(target.get("type") or "").casefold() == "page"
+            for target in targets
+        )
+    except (json.JSONDecodeError, TypeError, URLError, TimeoutError, OSError):
+        return False
+
+
+def _open_profile_page() -> None:
+    encoded_url = quote(PROFILE_START_URL, safe="")
+    request = Request(f"{CDP_ENDPOINT}/json/new?{encoded_url}", method="PUT")
+    with urlopen(request, timeout=5) as response:
+        response.read()
+
+
+def _wait_for_profile_page(*, timeout_seconds: float) -> bool:
+    deadline = time.monotonic() + timeout_seconds
+    next_page_request_at = 0.0
+    while time.monotonic() < deadline:
+        if _cdp_has_page():
+            return True
+        now = time.monotonic()
+        if _cdp_ready() and now >= next_page_request_at:
+            try:
+                _open_profile_page()
+            except (HTTPError, URLError, TimeoutError, OSError):
+                pass
+            next_page_request_at = now + 2.0
+        time.sleep(0.25)
+    return _cdp_has_page()
 
 
 def _start_browser() -> None:
     if _cdp_ready():
-        return
+        if _wait_for_profile_page(timeout_seconds=10):
+            return
+        raise RuntimeError(
+            "Chrome отвечает на порту 9222, но профильное окно не создаётся. "
+            "Закройте все процессы Chrome и запустите LEO Browser Agent снова."
+        )
     browser = _find_browser()
     profile = APP_DIR / "chrome-profile"
     profile.mkdir(parents=True, exist_ok=True)
@@ -159,15 +204,13 @@ def _start_browser() -> None:
             f"--user-data-dir={profile}",
             "--no-first-run",
             "--no-default-browser-check",
-            "https://www.ozon.kz/",
+            PROFILE_START_URL,
         ],
         creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
     )
-    for _ in range(30):
-        if _cdp_ready():
-            return
-        time.sleep(1)
-    raise RuntimeError("Браузер запущен, но порт 9222 не отвечает")
+    if _wait_for_profile_page(timeout_seconds=30):
+        return
+    raise RuntimeError("Браузер запущен, но профиль Chrome на порту 9222 не готов")
 
 
 def _browser_watchdog() -> None:
@@ -177,6 +220,11 @@ def _browser_watchdog() -> None:
                 print("Browser watchdog: CDP unavailable, restarting browser")
                 _start_browser()
                 print("Browser watchdog: CDP restored")
+            elif not _cdp_has_page():
+                print("Browser watchdog: profile page unavailable, recreating it")
+                if not _wait_for_profile_page(timeout_seconds=10):
+                    raise RuntimeError("Chrome CDP is available but has no profile page")
+                print("Browser watchdog: profile page restored")
         except Exception as exc:
             print(f"Browser watchdog error: {exc!r}")
         time.sleep(10)
