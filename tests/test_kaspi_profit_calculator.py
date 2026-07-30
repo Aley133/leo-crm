@@ -27,7 +27,7 @@ def test_kaspi_logistics_tariff_boundaries(price: str, expected: str) -> None:
     assert kaspi_logistics_per_unit(Decimal(price)) == Decimal(expected)
 
 
-def test_line_economics_uses_12_5_percent_commission_and_3_percent_tax() -> None:
+def test_line_economics_uses_12_percent_commission_and_3_percent_tax() -> None:
     result = calculate_line_economics(
         unit_sale_price=Decimal("1499"),
         quantity=1,
@@ -36,11 +36,11 @@ def test_line_economics_uses_12_5_percent_commission_and_3_percent_tax() -> None
 
     assert result.revenue == Decimal("1499.00")
     assert result.procurement_cost == Decimal("700.00")
-    assert result.kaspi_commission == Decimal("187.38")
+    assert result.kaspi_commission == Decimal("179.88")
     assert result.tax == Decimal("44.97")
     assert result.logistics == Decimal("173.00")
-    assert result.net_profit == Decimal("393.65")
-    assert result.net_margin_pct == Decimal("26.26")
+    assert result.net_profit == Decimal("401.15")
+    assert result.net_margin_pct == Decimal("26.76")
 
 
 def test_logistics_is_charged_per_unit() -> None:

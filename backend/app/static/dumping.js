@@ -266,7 +266,7 @@ const render = (rows) => {
     const competitorName = explanation.competitor_name || state.competitor_name || "—";
     const ownPosition = explanation.own_position ?? state.own_position;
     const sellerCount = explanation.seller_count ?? state.seller_count;
-    const safeFloor = run.safe_floor_kzt ?? preview.safe_floor_kzt;
+    const safeFloor = preview.safe_floor_kzt ?? run.safe_floor_kzt;
     const targetPrice = run.target_price_kzt ?? state.target_price_kzt;
     const preorderDays = run.preorder_days ?? preview.preorder_days;
     return `

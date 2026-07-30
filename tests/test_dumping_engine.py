@@ -11,14 +11,21 @@ def test_safe_floor_preserves_requested_profit_across_logistics_band() -> None:
     assert calculate_safe_floor(
         unit_cost_kzt=Decimal("2300"),
         minimum_profit_kzt=Decimal("1000"),
-    ) == Decimal("4179.00")
+    ) == Decimal("4155.00")
 
 
 def test_safe_floor_uses_higher_logistics_band_when_required() -> None:
     assert calculate_safe_floor(
         unit_cost_kzt=Decimal("5640"),
         minimum_profit_kzt=Decimal("1000"),
-    ) == Decimal("8956.00")
+    ) == Decimal("8903.00")
+
+
+def test_safe_floor_matches_owner_reference_case() -> None:
+    assert calculate_safe_floor(
+        unit_cost_kzt=Decimal("9862"),
+        minimum_profit_kzt=Decimal("2000"),
+    ) == Decimal("15729.00")
 
 
 def test_feed_update_changes_only_matching_offer_price_and_preorder() -> None:

@@ -1,10 +1,14 @@
 from decimal import Decimal
+from pathlib import Path
 
 from backend.app.dumping_api import list_dumping_products
 from backend.app.dumping_competitor_worker import state_for_product
 from backend.app.dumping_models import DumpingRun
 from backend.app.dumping_models import DumpingPolicy
 from backend.app.models import Product
+
+
+ROOT = Path(__file__).resolve().parents[1]
 
 
 def test_dumping_workspace_is_json_safe_after_first_policy(db_session) -> None:
@@ -89,3 +93,14 @@ def test_dumping_workspace_reuses_request_session_for_scan_state(
 
     assert rows[0]["scan_state"]["status"] == "queued"
     assert state_for_product(product.id, db=db_session)["job_id"] == run.id
+
+
+def test_dumping_ui_prefers_current_floor_over_stale_run_floor() -> None:
+    source = (ROOT / "backend" / "app" / "static" / "dumping.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert (
+        "const safeFloor = preview.safe_floor_kzt ?? run.safe_floor_kzt;"
+        in source
+    )

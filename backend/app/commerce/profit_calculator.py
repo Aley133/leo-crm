@@ -6,7 +6,7 @@ from decimal import Decimal, ROUND_HALF_UP
 
 MONEY = Decimal("0.01")
 PERCENT = Decimal("0.01")
-KASPI_COMMISSION_RATE = Decimal("0.125")
+KASPI_COMMISSION_RATE = Decimal("0.12")
 TAX_RATE = Decimal("0.03")
 
 
