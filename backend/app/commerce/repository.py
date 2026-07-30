@@ -4,7 +4,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Protocol
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from ..inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
@@ -32,6 +32,69 @@ class CommerceRepository(Protocol):
         status: str | None = None,
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...]]: ...
+
+
+def _latest_order_raw_payloads(
+    session: Session,
+    *,
+    order_keys: set[tuple[int, str]],
+) -> dict[tuple[int, str], dict]:
+    """Load one newest JSON snapshot for each visible marketplace order.
+
+    Order synchronization keeps immutable source snapshots for audit purposes.
+    Fetching that complete history for the 200-row Orders screen made response
+    memory grow with every synchronization cycle. Rank the lightweight row IDs
+    in SQL first and deserialize only the newest JSON document per order.
+    """
+    if not order_keys:
+        return {}
+
+    ranked = (
+        select(
+            MarketplaceRawPayload.id.label("raw_payload_id"),
+            MarketplaceRawPayload.marketplace_account_id.label(
+                "marketplace_account_id"
+            ),
+            MarketplaceRawPayload.external_object_id.label("external_object_id"),
+            func.row_number()
+            .over(
+                partition_by=(
+                    MarketplaceRawPayload.marketplace_account_id,
+                    MarketplaceRawPayload.external_object_id,
+                ),
+                order_by=(
+                    MarketplaceRawPayload.received_at.desc(),
+                    MarketplaceRawPayload.id.desc(),
+                ),
+            )
+            .label("raw_payload_rank"),
+        )
+        .where(
+            MarketplaceRawPayload.payload_type == "order",
+            tuple_(
+                MarketplaceRawPayload.marketplace_account_id,
+                MarketplaceRawPayload.external_object_id,
+            ).in_(sorted(order_keys)),
+        )
+        .subquery("ranked_order_raw_payloads")
+    )
+    rows = session.execute(
+        select(
+            ranked.c.marketplace_account_id,
+            ranked.c.external_object_id,
+            MarketplaceRawPayload.payload_json,
+        )
+        .join(
+            MarketplaceRawPayload,
+            MarketplaceRawPayload.id == ranked.c.raw_payload_id,
+        )
+        .where(ranked.c.raw_payload_rank == 1)
+    ).all()
+    return {
+        (int(account_id), str(external_object_id)): payload_json
+        for account_id, external_object_id, payload_json in rows
+        if isinstance(payload_json, dict)
+    }
 
 
 class SqlAlchemyCommerceRepository:
@@ -87,31 +150,14 @@ class SqlAlchemyCommerceRepository:
 
         incoming_reserved_by_line = self._incoming_reservations()
         order_ids = [order.id for order, _account in order_rows]
-        external_order_ids = [order.external_order_id for order, _account in order_rows]
-        raw_payload_by_external_id: dict[str, dict] = {}
-        raw_rows = self._session.execute(
-            select(
-                MarketplaceRawPayload.external_object_id,
-                MarketplaceRawPayload.payload_json,
-                MarketplaceRawPayload.received_at,
-                MarketplaceRawPayload.id,
-            )
-            .where(
-                MarketplaceRawPayload.payload_type == "order",
-                MarketplaceRawPayload.external_object_id.in_(external_order_ids),
-            )
-            .order_by(
-                MarketplaceRawPayload.external_object_id,
-                MarketplaceRawPayload.received_at.desc(),
-                MarketplaceRawPayload.id.desc(),
-            )
-        ).all()
-        for external_object_id, payload_json, _received_at, _raw_id in raw_rows:
-            raw_payload_by_external_id.setdefault(external_object_id, payload_json)
-
-        order_external_by_id = {
-            order.id: order.external_order_id for order, _account in order_rows
+        order_key_by_id = {
+            order.id: (account.id, order.external_order_id)
+            for order, account in order_rows
         }
+        raw_payload_by_order_key = _latest_order_raw_payloads(
+            self._session,
+            order_keys=set(order_key_by_id.values()),
+        )
         line_rows = self._session.execute(
             select(MarketplaceOrderLine, PurchaseRequest.id, PurchaseRequest.status, PurchaseRequest.version)
             .outerjoin(PurchaseRequestLine, PurchaseRequestLine.marketplace_order_line_id == MarketplaceOrderLine.id)
@@ -246,8 +292,8 @@ class SqlAlchemyCommerceRepository:
 
             title = product.name if product is not None else line.title
             if not title or title.strip().lower() == "unknown product":
-                payload = raw_payload_by_external_id.get(
-                    order_external_by_id[line.marketplace_order_id]
+                payload = raw_payload_by_order_key.get(
+                    order_key_by_id[line.marketplace_order_id]
                 )
                 recovered = recover_order_line_title(
                     payload,

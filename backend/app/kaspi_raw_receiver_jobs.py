@@ -239,24 +239,34 @@ def _history_record(
     marketplace_account_id: int,
     external_order_id: str,
 ) -> dict[str, Any] | None:
+    delivery_cost = MarketplaceRawPayload.payload_json["attributes"][
+        "deliveryCostForSeller"
+    ].as_float()
     rows = session.execute(
-        select(MarketplaceRawPayload.payload_json, MarketplaceRawPayload.received_at)
+        select(delivery_cost, MarketplaceRawPayload.received_at)
         .where(
             MarketplaceRawPayload.marketplace_account_id == marketplace_account_id,
             MarketplaceRawPayload.payload_type == "order",
             MarketplaceRawPayload.external_object_id == external_order_id,
         )
         .order_by(MarketplaceRawPayload.received_at.asc(), MarketplaceRawPayload.id.asc())
-    ).all()
+        .execution_options(yield_per=50)
+    )
     previous_cost = 0.0
-    for payload, received_at in rows:
-        current_cost = _delivery_cost(payload if isinstance(payload, dict) else {})
-        if current_cost > 0 and previous_cost <= 0:
-            return {
-                "transfer_started_at": received_at.isoformat(),
-                "transfer_started_source": "delivery_cost_transition",
-            }
-        previous_cost = current_cost
+    try:
+        for raw_cost, received_at in rows:
+            try:
+                current_cost = float(raw_cost or 0)
+            except (TypeError, ValueError):
+                current_cost = 0.0
+            if current_cost > 0 and previous_cost <= 0:
+                return {
+                    "transfer_started_at": received_at.isoformat(),
+                    "transfer_started_source": "delivery_cost_transition",
+                }
+            previous_cost = current_cost
+    finally:
+        rows.close()
     return None
 
 

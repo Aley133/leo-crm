@@ -3,7 +3,7 @@ services:
     name: leo-crm-api
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt && alembic upgrade head && python -m tools.ensure_browser_agent_schema
+    buildCommand: pip install -r requirements-render.txt && alembic upgrade head && python -m tools.ensure_browser_agent_schema
     startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeploy: true
