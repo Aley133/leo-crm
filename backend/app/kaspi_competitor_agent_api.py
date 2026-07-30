@@ -147,6 +147,14 @@ def _claimable_job(db: Session, *, now: datetime) -> tuple[DumpingRun | None, bo
 
 
 def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> DumpingRun:
+    policy = db.scalar(
+        select(DumpingPolicy)
+        .where(DumpingPolicy.product_id == product_id)
+        .with_for_update()
+    )
+    if policy is None or not policy.enabled:
+        raise ValueError("Демпинг для товара не подключён")
+
     existing = db.scalar(
         select(DumpingRun)
         .where(
@@ -158,9 +166,6 @@ def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> Dumpin
     )
     if existing is not None:
         return existing
-    policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
-    if policy is None or not policy.enabled:
-        raise ValueError("Демпинг для товара не подключён")
     job = DumpingRun(
         product_id=product_id,
         dumping_policy_id=policy.id,

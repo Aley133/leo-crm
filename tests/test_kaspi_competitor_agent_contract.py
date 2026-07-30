@@ -15,11 +15,14 @@ def test_local_competitor_agent_is_isolated_from_supplier_browser_agent() -> Non
     assert "CHROME_CDP_ENDPOINT" not in source
 
 
-def test_render_competitor_worker_is_a_noop_and_queues_local_jobs() -> None:
+def test_render_competitor_worker_only_schedules_local_jobs() -> None:
     source = (ROOT / "backend" / "app" / "dumping_competitor_worker.py").read_text(encoding="utf-8")
 
     assert "queue_competitor_job" in source
-    assert "Server worker intentionally disabled" in source
+    assert "queue_due_competitor_jobs" in source
+    assert "dispatch_due_competitor_jobs" in source
+    assert "asyncio.to_thread(dispatch_due_competitor_jobs)" in source
+    assert "local agent still owns Kaspi scanning" in source
     assert "execute_dumping_for_product" not in source
     assert "httpx" not in source
     assert "browser_agent_jobs" not in source

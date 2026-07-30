@@ -1,11 +1,16 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
+from sqlalchemy import func, or_, select
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
+from .dumping_models import DumpingPolicy, DumpingRun
 
 # Legacy compatibility constants. Render no longer performs Kaspi HTTP scans;
 # the local Kaspi Competitor Agent owns network access. Keeping these names
@@ -14,6 +19,19 @@ from .db import SessionLocal
 MIN_REQUEST_INTERVAL_SECONDS = 8.0
 PERIODIC_REFRESH_SECONDS = 10 * 60
 MAX_BACKOFF_SECONDS = 5 * 60
+SCHEDULER_POLL_SECONDS = 30.0
+SCHEDULER_BATCH_LIMIT = 100
+
+_LOCAL_JOB_STATUSES = (
+    "queued_local",
+    "leased_local",
+    "succeeded_local",
+    "failed_local",
+)
+_ACTIVE_LOCAL_JOB_STATUSES = ("queued_local", "leased_local")
+_SCHEDULER_STOP_EVENT: asyncio.Event | None = None
+_SCHEDULER_TASK: asyncio.Task | None = None
+_LOGGER = logging.getLogger(__name__)
 
 
 _STATUS_MAP = {
@@ -82,6 +100,120 @@ def enqueue_competitor_scan(product_id: int, *, reason: str = "manual") -> bool:
             raise
 
 
+def build_due_competitor_policies_statement(
+    *,
+    now: datetime,
+    refresh_seconds: int = PERIODIC_REFRESH_SECONDS,
+    limit: int = SCHEDULER_BATCH_LIMIT,
+):
+    """Select enabled policies whose local Kaspi scan is due.
+
+    Render only creates durable queue rows. The Windows Kaspi Competitor Agent
+    remains the sole owner of all Kaspi HTTP work.
+    """
+    if refresh_seconds < 1:
+        raise ValueError("refresh_seconds must be positive")
+    if limit < 1 or limit > 1000:
+        raise ValueError("limit must be between 1 and 1000")
+
+    latest_scan_at = (
+        select(func.max(DumpingRun.created_at))
+        .where(
+            DumpingRun.product_id == DumpingPolicy.product_id,
+            DumpingRun.status.in_(_LOCAL_JOB_STATUSES),
+        )
+        .correlate(DumpingPolicy)
+        .scalar_subquery()
+    )
+    active_job_exists = (
+        select(DumpingRun.id)
+        .where(
+            DumpingRun.product_id == DumpingPolicy.product_id,
+            DumpingRun.status.in_(_ACTIVE_LOCAL_JOB_STATUSES),
+        )
+        .exists()
+    )
+    due_before = now - timedelta(seconds=refresh_seconds)
+    return (
+        select(DumpingPolicy)
+        .where(
+            DumpingPolicy.enabled.is_(True),
+            DumpingPolicy.auto_publish_xml.is_(True),
+            ~active_job_exists,
+            or_(latest_scan_at.is_(None), latest_scan_at <= due_before),
+        )
+        .order_by(DumpingPolicy.id)
+        .with_for_update(skip_locked=True)
+        .limit(limit)
+    )
+
+
+def queue_due_competitor_jobs(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    refresh_seconds: int = PERIODIC_REFRESH_SECONDS,
+    limit: int = SCHEDULER_BATCH_LIMIT,
+) -> tuple[int, ...]:
+    """Create one durable local-agent job for every due dumping policy."""
+    current = now or datetime.now(UTC)
+    policies = db.scalars(
+        build_due_competitor_policies_statement(
+            now=current,
+            refresh_seconds=refresh_seconds,
+            limit=limit,
+        )
+    ).all()
+    jobs = [
+        DumpingRun(
+            product_id=policy.product_id,
+            dumping_policy_id=policy.id,
+            status="queued_local",
+            published=False,
+            explanation_json={
+                "reason": "periodic_refresh",
+                "agent_type": "kaspi_competitor",
+                "scheduled_at": current.isoformat(),
+            },
+            created_at=current,
+        )
+        for policy in policies
+    ]
+    db.add_all(jobs)
+    db.flush()
+    return tuple(job.id for job in jobs)
+
+
+def dispatch_due_competitor_jobs() -> tuple[int, ...]:
+    """Run one short queue-only scheduling transaction."""
+    with SessionLocal() as db:
+        try:
+            job_ids = queue_due_competitor_jobs(db)
+            db.commit()
+            return job_ids
+        except Exception:
+            db.rollback()
+            raise
+
+
+async def _scheduler_loop(stop_event: asyncio.Event) -> None:
+    while not stop_event.is_set():
+        try:
+            await asyncio.to_thread(dispatch_due_competitor_jobs)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            _LOGGER.exception("Kaspi competitor queue dispatch failed")
+
+        try:
+            await asyncio.wait_for(
+                stop_event.wait(),
+                timeout=SCHEDULER_POLL_SECONDS,
+            )
+        except asyncio.TimeoutError:
+            continue
+
+
 # Historical server-worker contract retained as documentation only:
 # exc.response.status_code == 429
 # status="retry_wait"
@@ -90,9 +222,26 @@ def enqueue_competitor_scan(product_id: int, *, reason: str = "manual") -> bool:
 
 
 async def start_dumping_competitor_worker() -> None:
-    """Server worker intentionally disabled; local agent owns Kaspi scanning."""
-    return None
+    """Start the queue-only scheduler; local agent still owns Kaspi scanning."""
+    global _SCHEDULER_STOP_EVENT, _SCHEDULER_TASK
+    if _SCHEDULER_TASK is not None and not _SCHEDULER_TASK.done():
+        return
+    _SCHEDULER_STOP_EVENT = asyncio.Event()
+    _SCHEDULER_TASK = asyncio.create_task(
+        _scheduler_loop(_SCHEDULER_STOP_EVENT),
+        name="kaspi-competitor-queue-scheduler",
+    )
 
 
 async def stop_dumping_competitor_worker() -> None:
-    return None
+    global _SCHEDULER_STOP_EVENT, _SCHEDULER_TASK
+    if _SCHEDULER_STOP_EVENT is not None:
+        _SCHEDULER_STOP_EVENT.set()
+    if _SCHEDULER_TASK is not None:
+        _SCHEDULER_TASK.cancel()
+        try:
+            await _SCHEDULER_TASK
+        except asyncio.CancelledError:
+            pass
+    _SCHEDULER_STOP_EVENT = None
+    _SCHEDULER_TASK = None
