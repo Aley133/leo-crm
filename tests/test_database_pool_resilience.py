@@ -4,12 +4,15 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_postgres_pool_keeps_approved_small_connection_budget() -> None:
+def test_postgres_pool_is_bounded_and_fails_fast_under_pressure() -> None:
     source = (ROOT / "backend" / "app" / "db.py").read_text(encoding="utf-8")
 
-    assert '"pool_size": 2' in source
-    assert '"max_overflow": 1' in source
-    assert '"pool_timeout": 10' in source
+    assert '"DB_POOL_SIZE"' in source
+    assert "default=5" in source
+    assert '"DB_MAX_OVERFLOW"' in source
+    assert "default=2" in source
+    assert '"DB_POOL_TIMEOUT_SECONDS"' in source
+    assert '"pool_use_lifo": True' in source
     assert "finally:\n        db.close()" in source
 
 
@@ -51,6 +54,26 @@ def test_liveness_does_not_acquire_database_connection() -> None:
 
     assert "engine.connect" not in health_block
     assert '"database": "not_checked"' in health_block
+    assert '"memory_rss_mb": _process_rss_mb()' in health_block
+    assert '"database_pool": _database_pool_snapshot()' in health_block
+
+
+def test_pool_timeout_is_returned_as_retryable_overload() -> None:
+    source = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+
+    assert "@app.exception_handler(SQLAlchemyTimeoutError)" in source
+    assert 'status_code=503' in source
+    assert 'headers={"Retry-After": "2"}' in source
+    assert '"error_code": "database_pool_busy"' in source
+
+
+def test_api_thread_pool_is_bounded_for_render_memory_limit() -> None:
+    source = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
+
+    assert 'os.getenv("API_THREAD_LIMIT"' in source
+    assert "requested = int(raw) if raw else 12" in source
+    assert "current_default_thread_limiter().total_tokens = limit" in source
+    assert "app.state.thread_pool_limit = _configure_thread_pool()" in source
 
 
 def test_readiness_checks_database_without_crashing_process() -> None:

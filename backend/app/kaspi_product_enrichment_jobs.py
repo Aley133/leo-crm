@@ -17,6 +17,17 @@ from .product_identity_service import ensure_marketplace_listing_for_order_line
 
 JOBS: dict[str, dict[str, Any]] = {}
 _UNKNOWN_TITLES = {"", "unknown product", "название не получено"}
+JOB_HISTORY_LIMIT = 32
+
+
+def _prune_job_registry() -> None:
+    terminal_ids = [
+        job_id
+        for job_id, job in JOBS.items()
+        if job.get("status") not in {"queued", "running"}
+    ]
+    while len(JOBS) >= JOB_HISTORY_LIMIT and terminal_ids:
+        JOBS.pop(terminal_ids.pop(0), None)
 
 
 def _data(body: Any) -> list[dict[str, Any]]:
@@ -183,6 +194,7 @@ def normalize_entry(
 def create_job(*, days: int = 31) -> str:
     if days < 1 or days > 31:
         raise ValueError("days must be between 1 and 31")
+    _prune_job_registry()
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {
         "id": job_id,
@@ -231,6 +243,125 @@ def _match_line(
     return None
 
 
+def _load_unresolved_orders(since: datetime) -> list[tuple[int, str, str | None, int]]:
+    with SessionLocal() as session:
+        unresolved_order_ids = (
+            select(MarketplaceOrderLine.marketplace_order_id)
+            .where(
+                or_(
+                    func.lower(func.trim(MarketplaceOrderLine.title)).in_(
+                        tuple(_UNKNOWN_TITLES)
+                    ),
+                    func.trim(func.coalesce(MarketplaceOrderLine.merchant_sku, "")) == "",
+                )
+            )
+            .distinct()
+        )
+        rows = session.execute(
+            select(
+                MarketplaceOrder.id,
+                MarketplaceOrder.external_order_id,
+                MarketplaceOrder.external_code,
+                MarketplaceOrder.marketplace_account_id,
+            )
+            .where(
+                MarketplaceOrder.ordered_at >= since,
+                MarketplaceOrder.id.in_(unresolved_order_ids),
+            )
+            .order_by(MarketplaceOrder.ordered_at.desc(), MarketplaceOrder.id.desc())
+        ).all()
+    return [
+        (
+            int(order_id),
+            str(external_order_id or ""),
+            None if external_code is None else str(external_code),
+            int(account_id),
+        )
+        for order_id, external_order_id, external_code, account_id in rows
+    ]
+
+
+def _persist_enriched_order(
+    *,
+    order_id: int,
+    account_id: int,
+    order_key: str,
+    normalized_items: list[dict[str, Any]],
+) -> tuple[int, int, int, list[dict[str, Any]]]:
+    local_updated = 0
+    local_linked = 0
+    local_allocated = 0
+    errors: list[dict[str, Any]] = []
+
+    with SessionLocal() as session:
+        with session.begin():
+            stored_order = session.get(MarketplaceOrder, order_id)
+            if stored_order is None:
+                return 0, 0, 0, errors
+            lines = list(
+                session.scalars(
+                    select(MarketplaceOrderLine)
+                    .where(MarketplaceOrderLine.marketplace_order_id == order_id)
+                    .order_by(MarketplaceOrderLine.id)
+                ).all()
+            )
+            for normalized in normalized_items:
+                stored = _match_line(
+                    lines,
+                    normalized,
+                    normalized_count=len(normalized_items),
+                )
+                if stored is None:
+                    errors.append(
+                        {
+                            "order": order_key,
+                            "entry": normalized.get("entry_id"),
+                            "step": "persist",
+                            "error": "matching_order_line_not_found",
+                        }
+                    )
+                    continue
+
+                changed = False
+                title = str(normalized.get("name") or "").strip()
+                if title.casefold() not in _UNKNOWN_TITLES and stored.title != title:
+                    stored.title = title
+                    changed = True
+                sku = _text(normalized.get("sku"))
+                if sku and stored.merchant_sku != sku:
+                    stored.merchant_sku = sku
+                    changed = True
+                external_product_id = _text(normalized.get("external_product_id"))
+                if external_product_id and stored.external_product_id != external_product_id:
+                    stored.external_product_id = external_product_id
+                    changed = True
+                entry_id = _text(normalized.get("entry_id"))
+                if entry_id and stored.external_line_id != entry_id:
+                    stored.external_line_id = entry_id
+                    changed = True
+
+                before_product_id = stored.product_id
+                ensure_marketplace_listing_for_order_line(
+                    session,
+                    marketplace_account_id=account_id,
+                    order_line=stored,
+                )
+                if before_product_id is None and stored.product_id is not None:
+                    local_linked += 1
+
+                allocation = allocate_order_line_fifo(
+                    session,
+                    order_line=stored,
+                    order=stored_order,
+                    allocated_at=datetime.now(UTC),
+                )
+                local_allocated += allocation.newly_allocated_quantity
+                if changed:
+                    local_updated += 1
+
+    return local_updated, local_linked, local_allocated, errors
+
+
 async def run_job(job_id: str) -> None:
     job = JOBS[job_id]
     job["status"] = "running"
@@ -240,32 +371,7 @@ async def run_job(job_id: str) -> None:
     try:
         settings = KaspiHttpSettings.from_environment()
         since = datetime.now(UTC) - timedelta(days=int(job["days"]))
-        with SessionLocal() as session:
-            unresolved_order_ids = (
-                select(MarketplaceOrderLine.marketplace_order_id)
-                .where(
-                    or_(
-                        func.lower(func.trim(MarketplaceOrderLine.title)).in_(
-                            tuple(_UNKNOWN_TITLES)
-                        ),
-                        func.trim(func.coalesce(MarketplaceOrderLine.merchant_sku, "")) == "",
-                    )
-                )
-                .distinct()
-            )
-            orders = session.execute(
-                select(
-                    MarketplaceOrder.id,
-                    MarketplaceOrder.external_order_id,
-                    MarketplaceOrder.external_code,
-                    MarketplaceOrder.marketplace_account_id,
-                )
-                .where(
-                    MarketplaceOrder.ordered_at >= since,
-                    MarketplaceOrder.id.in_(unresolved_order_ids),
-                )
-                .order_by(MarketplaceOrder.ordered_at.desc(), MarketplaceOrder.id.desc())
-            ).all()
+        orders = await asyncio.to_thread(_load_unresolved_orders, since)
         job["total"] = len(orders)
 
         headers = {
@@ -275,6 +381,7 @@ async def run_job(job_id: str) -> None:
             "User-Agent": "leo-crm-product-enrichment/archive-v1.1.0",
         }
         request_semaphore = asyncio.Semaphore(3)
+        database_write_semaphore = asyncio.Semaphore(1)
         counter_lock = asyncio.Lock()
         merchant_cache_lock = asyncio.Lock()
         merchant_cache: dict[str, dict[str, Any] | None] = {}
@@ -437,80 +544,25 @@ async def run_job(job_id: str) -> None:
                 normalized_items = await asyncio.gather(
                     *(enrich_entry(entry) for entry in entries)
                 )
-                local_updated = 0
-                local_linked = 0
-                local_allocated = 0
-
-                with SessionLocal() as session:
-                    with session.begin():
-                        stored_order = session.get(MarketplaceOrder, order_id)
-                        if stored_order is None:
-                            return
-                        lines = list(
-                            session.scalars(
-                                select(MarketplaceOrderLine)
-                                .where(MarketplaceOrderLine.marketplace_order_id == order_id)
-                                .order_by(MarketplaceOrderLine.id)
-                            ).all()
-                        )
-                        for normalized in normalized_items:
-                            stored = _match_line(
-                                lines,
-                                normalized,
-                                normalized_count=len(normalized_items),
-                            )
-                            if stored is None:
-                                job["errors"].append(
-                                    {
-                                        "order": order_key,
-                                        "entry": normalized.get("entry_id"),
-                                        "step": "persist",
-                                        "error": "matching_order_line_not_found",
-                                    }
-                                )
-                                continue
-
-                            changed = False
-                            title = str(normalized.get("name") or "").strip()
-                            if title.casefold() not in _UNKNOWN_TITLES and stored.title != title:
-                                stored.title = title
-                                changed = True
-                            sku = _text(normalized.get("sku"))
-                            if sku and stored.merchant_sku != sku:
-                                stored.merchant_sku = sku
-                                changed = True
-                            external_product_id = _text(normalized.get("external_product_id"))
-                            if external_product_id and stored.external_product_id != external_product_id:
-                                stored.external_product_id = external_product_id
-                                changed = True
-                            entry_id = _text(normalized.get("entry_id"))
-                            if entry_id and stored.external_line_id != entry_id:
-                                stored.external_line_id = entry_id
-                                changed = True
-
-                            before_product_id = stored.product_id
-                            ensure_marketplace_listing_for_order_line(
-                                session,
-                                marketplace_account_id=account_id,
-                                order_line=stored,
-                            )
-                            if before_product_id is None and stored.product_id is not None:
-                                local_linked += 1
-
-                            allocation = allocate_order_line_fifo(
-                                session,
-                                order_line=stored,
-                                order=stored_order,
-                                allocated_at=datetime.now(UTC),
-                            )
-                            local_allocated += allocation.newly_allocated_quantity
-                            if changed:
-                                local_updated += 1
+                async with database_write_semaphore:
+                    (
+                        local_updated,
+                        local_linked,
+                        local_allocated,
+                        persistence_errors,
+                    ) = await asyncio.to_thread(
+                        _persist_enriched_order,
+                        order_id=int(order_id),
+                        account_id=int(account_id),
+                        order_key=order_key,
+                        normalized_items=normalized_items,
+                    )
 
                 async with counter_lock:
                     job["updated"] += local_updated
                     job["linked"] += local_linked
                     job["allocated"] += local_allocated
+                    job["errors"].extend(persistence_errors)
 
             async def worker() -> None:
                 while True:

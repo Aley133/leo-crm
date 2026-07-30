@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
 import secrets
+import time
 from datetime import timedelta
+from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -62,6 +65,43 @@ router = APIRouter(
     tags=["browser-agent"],
     dependencies=[Depends(require_service_token)],
 )
+
+
+def _dispatch_min_interval_seconds() -> float:
+    try:
+        value = float(os.getenv("BROWSER_DISPATCH_MIN_INTERVAL_SECONDS") or "15")
+    except ValueError:
+        return 15.0
+    return max(5.0, min(60.0, value))
+
+
+DISPATCH_MIN_INTERVAL_SECONDS = _dispatch_min_interval_seconds()
+_DISPATCH_LAST_AT: dict[str, float] = {}
+_DISPATCH_LOCK = Lock()
+
+
+def _acquire_dispatch_slot(
+    supplier_code: str,
+    *,
+    now: float | None = None,
+) -> tuple[bool, float]:
+    """Allow one due-target scan per supplier in a short shared window.
+
+    Every Browser Agent can safely claim work, but having every connected
+    machine scan the same due-target table every three seconds creates needless
+    database contention. This in-process gate keeps failover automatic while
+    collapsing duplicate dispatcher calls.
+    """
+    normalized = supplier_code.strip().casefold()
+    current = time.monotonic() if now is None else now
+    with _DISPATCH_LOCK:
+        previous = _DISPATCH_LAST_AT.get(normalized)
+        if previous is not None:
+            elapsed = current - previous
+            if elapsed < DISPATCH_MIN_INTERVAL_SECONDS:
+                return False, max(DISPATCH_MIN_INTERVAL_SECONDS - elapsed, 0.0)
+        _DISPATCH_LAST_AT[normalized] = current
+    return True, 0.0
 
 
 def _job_envelope(job: BrowserAgentJob):
@@ -198,13 +238,25 @@ def list_browser_agents(db: Session = Depends(get_db)):
 
 @router.post("/dispatch-due")
 def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_db)):
+    acquired, retry_after = _acquire_dispatch_slot(payload.supplier_code)
+    if not acquired:
+        return {
+            "queued_count": 0,
+            "job_ids": [],
+            "throttled": True,
+            "retry_after_seconds": round(retry_after, 1),
+        }
     try:
         result = dispatch_due_browser_targets(db, limit=payload.limit, supplier_code=payload.supplier_code)
         db.commit()
     except Exception:
         db.rollback()
         raise
-    return {"queued_count": result.queued_count, "job_ids": list(result.queued_job_ids)}
+    return {
+        "queued_count": result.queued_count,
+        "job_ids": list(result.queued_job_ids),
+        "throttled": False,
+    }
 
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)

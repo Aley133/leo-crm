@@ -3,13 +3,11 @@ services:
     name: leo-crm-api
     runtime: python
     plan: free
-    buildCommand: pip install -r requirements.txt && PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.cache/playwright python -m playwright install chromium && alembic upgrade head && python -m tools.ensure_browser_agent_schema
-    startCommand: PLAYWRIGHT_BROWSERS_PATH=/opt/render/project/src/.cache/playwright uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
+    buildCommand: pip install -r requirements.txt && alembic upgrade head && python -m tools.ensure_browser_agent_schema
+    startCommand: uvicorn backend.app.main:app --host 0.0.0.0 --port $PORT
     healthCheckPath: /health
     autoDeploy: true
     envVars:
-      - key: PLAYWRIGHT_BROWSERS_PATH
-        value: /opt/render/project/src/.cache/playwright
       - key: OZON_CDP_ENDPOINT
         sync: false
       - key: TELEGRAM_BOT_TOKEN

@@ -18,6 +18,7 @@ from .kaspi_raw_receiver_jobs import (
 
 
 POLL_INTERVAL_SECONDS = 600
+STARTUP_DELAY_SECONDS = 30
 FULL_REFRESH_EVERY = 6
 LAST_RUN: dict[str, Any] = {
     "status": "idle",
@@ -45,6 +46,18 @@ def polling_interval_seconds() -> int:
     except ValueError:
         return POLL_INTERVAL_SECONDS
     return max(60, value)
+
+
+def polling_startup_delay_seconds() -> float:
+    raw = os.getenv(
+        "KASPI_ORDER_POLL_STARTUP_DELAY_SECONDS",
+        str(STARTUP_DELAY_SECONDS),
+    ).strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(STARTUP_DELAY_SECONDS)
+    return max(0.0, min(300.0, value))
 
 
 async def run_poll_cycle(*, days: int) -> None:
@@ -101,6 +114,17 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
     if not polling_enabled():
         LAST_RUN["message"] = "Kaspi polling disabled or KASPI_API_TOKEN is missing"
         return
+
+    startup_delay = polling_startup_delay_seconds()
+    if startup_delay:
+        LAST_RUN["message"] = (
+            f"Kaspi polling will start after {startup_delay:g} second startup grace period"
+        )
+        try:
+            await asyncio.wait_for(stop_event.wait(), timeout=startup_delay)
+            return
+        except TimeoutError:
+            pass
 
     cycle = 0
     while not stop_event.is_set():

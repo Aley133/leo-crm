@@ -34,11 +34,24 @@ KASPI_STATES: tuple[str, ...] = (
 # the state matrix. The state-filtered requests remain the compatibility path.
 _ALL_STATES = "__ALL__"
 JOBS: dict[str, dict[str, Any]] = {}
+JOB_HISTORY_LIMIT = 32
+ORDER_PERSIST_BATCH_SIZE = 25
+
+
+def _prune_job_registry() -> None:
+    terminal_ids = [
+        job_id
+        for job_id, job in JOBS.items()
+        if job.get("status") not in {"queued", "running", "enriching_products"}
+    ]
+    while len(JOBS) >= JOB_HISTORY_LIMIT and terminal_ids:
+        JOBS.pop(terminal_ids.pop(0), None)
 
 
 def create_job(*, days: int, timezone_name: str = "Asia/Almaty") -> str:
     if days < 1 or days > 31:
         raise ValueError("days must be between 1 and 31")
+    _prune_job_registry()
     job_id = uuid.uuid4().hex
     now = datetime.now(UTC)
     start = now - timedelta(days=days)
@@ -302,6 +315,32 @@ def _persist_orders(orders: list[dict[str, Any]], *, timezone_name: str) -> tupl
     return imported, updated
 
 
+async def _persist_orders_in_batches(
+    orders: list[dict[str, Any]],
+    *,
+    timezone_name: str,
+) -> tuple[int, int]:
+    """Persist bounded transactions and yield between them.
+
+    A full refresh previously held one PostgreSQL connection for the complete
+    order set. Small idempotent batches return the connection regularly so agent
+    claims and the CRM UI cannot be starved by automatic synchronization.
+    """
+    imported = 0
+    updated = 0
+    for start in range(0, len(orders), ORDER_PERSIST_BATCH_SIZE):
+        batch = orders[start : start + ORDER_PERSIST_BATCH_SIZE]
+        batch_imported, batch_updated = await asyncio.to_thread(
+            _persist_orders,
+            batch,
+            timezone_name=timezone_name,
+        )
+        imported += batch_imported
+        updated += batch_updated
+        await asyncio.sleep(0)
+    return imported, updated
+
+
 def _creation_ms(item: dict[str, Any]) -> int:
     value = _attrs(item).get("creationDate")
     try:
@@ -468,8 +507,7 @@ async def run_job(job_id: str) -> None:
         orders = sorted(unique.values(), key=_creation_ms, reverse=True)
         state_counts = Counter(_state_name(item) for item in orders)
         latest_ms = max((_creation_ms(item) for item in orders), default=0)
-        imported, updated = await asyncio.to_thread(
-            _persist_orders,
+        imported, updated = await _persist_orders_in_batches(
             orders,
             timezone_name=str(job["timezone"]),
         )

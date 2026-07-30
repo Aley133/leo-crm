@@ -1,19 +1,10 @@
 from pathlib import Path
 
 
-BROWSER_PATH = "/opt/render/project/src/.cache/playwright"
-
-
-def test_render_uses_one_persistent_playwright_path_for_build_and_runtime() -> None:
+def test_render_web_service_does_not_install_or_start_server_side_browser() -> None:
     config = Path("render.yaml").read_text(encoding="utf-8")
 
-    assert (
-        f"PLAYWRIGHT_BROWSERS_PATH={BROWSER_PATH} "
-        "python -m playwright install chromium"
-    ) in config
-    assert (
-        f"startCommand: PLAYWRIGHT_BROWSERS_PATH={BROWSER_PATH} "
-        "uvicorn backend.app.main:app"
-    ) in config
-    assert "- key: PLAYWRIGHT_BROWSERS_PATH" in config
-    assert f"value: {BROWSER_PATH}" in config
+    assert "python -m playwright install chromium" not in config
+    assert "PLAYWRIGHT_BROWSERS_PATH" not in config
+    assert "startCommand: uvicorn backend.app.main:app" in config
+    assert "alembic upgrade head" in config

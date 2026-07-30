@@ -194,7 +194,11 @@ async def publish_pending_price_alerts(
     client: httpx.AsyncClient | None = None,
     limit: int = PUBLISH_BATCH_SIZE,
 ) -> tuple[int, int]:
-    events = _pending_events(session_factory, limit=limit)
+    events = await asyncio.to_thread(
+        _pending_events,
+        session_factory,
+        limit=limit,
+    )
     sent = 0
     failed = 0
     owns_client = client is None
@@ -209,14 +213,16 @@ async def publish_pending_price_alerts(
                 )
             except Exception as exc:
                 failed += 1
-                _record_publish_result(
+                await asyncio.to_thread(
+                    _record_publish_result,
                     session_factory,
                     event_id=event_id,
                     error=f"{type(exc).__name__}: {exc}"[:2000],
                 )
             else:
                 sent += 1
-                _record_publish_result(
+                await asyncio.to_thread(
+                    _record_publish_result,
                     session_factory,
                     event_id=event_id,
                     error=None,

@@ -1,14 +1,16 @@
 from __future__ import annotations
 
 import asyncio
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 
-from fastapi import FastAPI
+import anyio
+from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
-from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
 from . import legacy_workspace_scope as _legacy_workspace_scope  # noqa: F401
 from .action_api import router as action_router
@@ -97,8 +99,68 @@ app.include_router(purchase_router)
 app.include_router(revenue_router)
 
 
+def _process_rss_mb() -> float | None:
+    """Read current RSS without allocating a database connection."""
+    try:
+        resident_pages = int(Path("/proc/self/statm").read_text(encoding="ascii").split()[1])
+        return round(resident_pages * os.sysconf("SC_PAGE_SIZE") / (1024 * 1024), 1)
+    except (IndexError, OSError, TypeError, ValueError):
+        return None
+
+
+def _database_pool_snapshot() -> dict[str, int | None]:
+    """Expose local pool pressure without contacting PostgreSQL."""
+    pool = engine.pool
+
+    def metric(name: str) -> int | None:
+        value = getattr(pool, name, None)
+        if not callable(value):
+            return None
+        try:
+            return int(value())
+        except (TypeError, ValueError):
+            return None
+
+    return {
+        "size": metric("size"),
+        "checked_out": metric("checkedout"),
+        "overflow": metric("overflow"),
+    }
+
+
+def _configure_thread_pool() -> int:
+    """Bound synchronous request workers for a 512 MB Render instance."""
+    raw = os.getenv("API_THREAD_LIMIT", "").strip()
+    try:
+        requested = int(raw) if raw else 12
+    except ValueError:
+        requested = 12
+    limit = max(4, min(32, requested))
+    anyio.to_thread.current_default_thread_limiter().total_tokens = limit
+    return limit
+
+
+@app.exception_handler(SQLAlchemyTimeoutError)
+async def database_pool_timeout(
+    _request: Request,
+    _error: SQLAlchemyTimeoutError,
+) -> JSONResponse:
+    # Local agents already retry transient HTTP failures. Returning an explicit
+    # short-lived overload response avoids a 500 traceback and prevents another
+    # long queue of blocked requests from accumulating in the web process.
+    return JSONResponse(
+        status_code=503,
+        headers={"Retry-After": "2"},
+        content={
+            "detail": "CRM database is busy; retry shortly",
+            "error_code": "database_pool_busy",
+        },
+    )
+
+
 @app.on_event("startup")
 async def start_background_services() -> None:
+    app.state.thread_pool_limit = _configure_thread_pool()
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
@@ -156,6 +218,9 @@ async def health() -> dict[str, object]:
     return {
         "status": "ok",
         "database": "not_checked",
+        "memory_rss_mb": _process_rss_mb(),
+        "database_pool": _database_pool_snapshot(),
+        "thread_pool_limit": getattr(app.state, "thread_pool_limit", None),
         "version": APP_VERSION,
         "deployment_marker": DEPLOYMENT_MARKER,
         "timestamp": datetime.now(UTC).isoformat(),

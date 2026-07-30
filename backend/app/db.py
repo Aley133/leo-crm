@@ -7,6 +7,21 @@ from sqlalchemy.orm import DeclarativeBase, sessionmaker
 from sqlalchemy.pool import StaticPool
 
 
+def _bounded_int_setting(
+    name: str,
+    *,
+    default: int,
+    minimum: int,
+    maximum: int,
+) -> int:
+    raw = os.getenv(name, "").strip()
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        return default
+    return max(minimum, min(maximum, value))
+
+
 def _database_url() -> str:
     value = os.getenv("DATABASE_URL", "").strip()
     if not value:
@@ -21,9 +36,10 @@ def _database_url() -> str:
 def _engine_options(database_url: str) -> dict[str, Any]:
     """Return safe engine settings for the selected database dialect.
 
-    PostgreSQL keeps the deliberately small pool approved for the Supabase
-    connection budget. Application code must avoid opening more concurrent
-    request sessions than this contract permits.
+    PostgreSQL uses a bounded pool sized for the API, two local agents and one
+    background order synchronizer. A short timeout prevents a traffic burst
+    from retaining dozens of blocked request threads until Render exhausts its
+    memory limit.
     """
 
     url = make_url(database_url)
@@ -40,9 +56,25 @@ def _engine_options(database_url: str) -> dict[str, Any]:
 
     options.update(
         {
-            "pool_size": 2,
-            "max_overflow": 1,
-            "pool_timeout": 10,
+            "pool_size": _bounded_int_setting(
+                "DB_POOL_SIZE",
+                default=5,
+                minimum=1,
+                maximum=10,
+            ),
+            "max_overflow": _bounded_int_setting(
+                "DB_MAX_OVERFLOW",
+                default=2,
+                minimum=0,
+                maximum=5,
+            ),
+            "pool_timeout": _bounded_int_setting(
+                "DB_POOL_TIMEOUT_SECONDS",
+                default=2,
+                minimum=1,
+                maximum=10,
+            ),
+            "pool_use_lifo": True,
         }
     )
     return options

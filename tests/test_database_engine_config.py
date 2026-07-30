@@ -17,9 +17,25 @@ def test_sqlite_memory_uses_static_pool_without_queue_pool_arguments() -> None:
     assert "pool_timeout" not in options
 
 
-def test_postgresql_uses_explicit_small_connection_pool() -> None:
+def test_postgresql_uses_bounded_runtime_connection_pool(monkeypatch) -> None:
+    monkeypatch.delenv("DB_POOL_SIZE", raising=False)
+    monkeypatch.delenv("DB_MAX_OVERFLOW", raising=False)
+    monkeypatch.delenv("DB_POOL_TIMEOUT_SECONDS", raising=False)
     options = _engine_options("postgresql://user:pass@example.test:5432/leo")
 
-    assert options["pool_size"] == 2
-    assert options["max_overflow"] == 1
-    assert options["pool_timeout"] == 10
+    assert options["pool_size"] == 5
+    assert options["max_overflow"] == 2
+    assert options["pool_timeout"] == 2
+    assert options["pool_use_lifo"] is True
+
+
+def test_postgresql_pool_settings_are_configurable_and_bounded(monkeypatch) -> None:
+    monkeypatch.setenv("DB_POOL_SIZE", "99")
+    monkeypatch.setenv("DB_MAX_OVERFLOW", "-4")
+    monkeypatch.setenv("DB_POOL_TIMEOUT_SECONDS", "invalid")
+
+    options = _engine_options("postgresql://user:pass@example.test:5432/leo")
+
+    assert options["pool_size"] == 10
+    assert options["max_overflow"] == 0
+    assert options["pool_timeout"] == 2
