@@ -10,8 +10,15 @@ from backend.app.inventory_service import (
     allocate_order_line_fifo,
     create_inventory_batch,
     mark_inventory_batch_received,
+    release_cancelled_order_inventory,
 )
-from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderLine, Product
+from backend.app.models import (
+    MarketplaceAccount,
+    MarketplaceOrder,
+    MarketplaceOrderEvent,
+    MarketplaceOrderLine,
+    Product,
+)
 
 
 def _product(db_session) -> Product:
@@ -213,3 +220,84 @@ def test_cancelled_order_does_not_consume_stock(db_session) -> None:
 
     assert result.newly_allocated_quantity == 0
     assert batch.quantity_remaining == 3
+
+
+def test_confirmed_cancellation_restores_exact_fifo_batches_once(db_session) -> None:
+    product = _product(db_session)
+    first, _ = create_inventory_batch(
+        db_session,
+        product=product,
+        quantity=1,
+        unit_cost=Decimal("500"),
+        received_at=datetime(2026, 7, 23, 8, 0, tzinfo=UTC),
+        reconcile_existing_orders=False,
+    )
+    second, _ = create_inventory_batch(
+        db_session,
+        product=product,
+        quantity=2,
+        unit_cost=Decimal("600"),
+        received_at=datetime(2026, 7, 23, 9, 0, tzinfo=UTC),
+        reconcile_existing_orders=False,
+    )
+    order, line = _order_line(
+        db_session,
+        product,
+        code="1004",
+        ordered_at=datetime(2026, 7, 23, 10, 0, tzinfo=UTC),
+        quantity=2,
+    )
+    allocate_order_line_fifo(db_session, order_line=line, order=order)
+    assert first.quantity_remaining == 0
+    assert second.quantity_remaining == 1
+
+    order.status = "cancelled"
+    order.version = 2
+    released = release_cancelled_order_inventory(db_session, order=order)
+    repeated = release_cancelled_order_inventory(db_session, order=order)
+
+    assert released.released_quantity == 2
+    assert released.affected_batch_ids == (first.id, second.id)
+    assert repeated.released_quantity == 0
+    assert first.quantity_remaining == 1
+    assert second.quantity_remaining == 2
+    assert db_session.scalars(select(InventoryAllocation)).all() == []
+    release_events = db_session.scalars(
+        select(MarketplaceOrderEvent).where(
+            MarketplaceOrderEvent.marketplace_order_id == order.id,
+            MarketplaceOrderEvent.event_type == "inventory_released",
+        )
+    ).all()
+    assert len(release_events) == 1
+    assert release_events[0].metadata_json["released_quantity"] == 2
+
+
+def test_cancelling_or_returned_order_does_not_restore_physical_stock(
+    db_session,
+) -> None:
+    product = _product(db_session)
+    batch, _ = create_inventory_batch(
+        db_session,
+        product=product,
+        quantity=2,
+        unit_cost=Decimal("800"),
+        received_at=datetime(2026, 7, 23, 8, 0, tzinfo=UTC),
+        reconcile_existing_orders=False,
+    )
+    order, line = _order_line(
+        db_session,
+        product,
+        code="1005",
+        ordered_at=datetime(2026, 7, 23, 10, 0, tzinfo=UTC),
+    )
+    allocate_order_line_fifo(db_session, order_line=line, order=order)
+
+    order.status = "cancelling"
+    cancelling = release_cancelled_order_inventory(db_session, order=order)
+    order.status = "returned"
+    returned = release_cancelled_order_inventory(db_session, order=order)
+
+    assert cancelling.released_quantity == 0
+    assert returned.released_quantity == 0
+    assert batch.quantity_remaining == 1
+    assert len(db_session.scalars(select(InventoryAllocation)).all()) == 1

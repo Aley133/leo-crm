@@ -9,7 +9,13 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from .inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
-from .models import MarketplaceOrder, MarketplaceOrderLine, MarketplaceOrderStatus, Product
+from .models import (
+    MarketplaceOrder,
+    MarketplaceOrderEvent,
+    MarketplaceOrderLine,
+    MarketplaceOrderStatus,
+    Product,
+)
 
 
 _TERMINAL_ORDER_STATUSES = {
@@ -43,6 +49,12 @@ class AllocationResult:
 
 
 @dataclass(frozen=True, slots=True)
+class InventoryReleaseResult:
+    released_quantity: int
+    affected_batch_ids: tuple[int, ...]
+
+
+@dataclass(frozen=True, slots=True)
 class IncomingReservation:
     batch_id: int
     batch_type: str
@@ -73,6 +85,114 @@ def allocated_quantity_for_line(session: Session, order_line_id: int) -> int:
             )
         )
         or 0
+    )
+
+
+def release_cancelled_order_inventory(
+    session: Session,
+    *,
+    order: MarketplaceOrder,
+    released_at: datetime | None = None,
+) -> InventoryReleaseResult:
+    """Return pre-handover cancellation allocations to their original batches.
+
+    Kaspi's final ``CANCELLED`` state means the order did not complete the
+    warehouse-to-courier handoff. Post-handoff returns use the separate
+    ``RETURNED`` state and deliberately remain allocated until a physical return
+    is accepted by the warehouse.
+
+    Deleting the allocation and restoring ``quantity_remaining`` in one caller-
+    owned transaction makes the operation idempotent: a repeated observation of
+    the same cancelled order finds no allocations and cannot add stock twice.
+    """
+    if order.status != MarketplaceOrderStatus.CANCELLED.value:
+        return InventoryReleaseResult(0, ())
+
+    rows = session.execute(
+        select(InventoryAllocation, InventoryBatch)
+        .join(
+            InventoryBatch,
+            InventoryBatch.id == InventoryAllocation.inventory_batch_id,
+        )
+        .join(
+            MarketplaceOrderLine,
+            MarketplaceOrderLine.id
+            == InventoryAllocation.marketplace_order_line_id,
+        )
+        .where(
+            MarketplaceOrderLine.marketplace_order_id == order.id,
+            InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
+        )
+        .order_by(InventoryBatch.id, InventoryAllocation.id)
+        .with_for_update()
+    ).all()
+    if not rows:
+        return InventoryReleaseResult(0, ())
+
+    released_by_batch: dict[int, int] = defaultdict(int)
+    audit_allocations: list[dict[str, int | str]] = []
+    batches_by_id: dict[int, InventoryBatch] = {}
+    for allocation, batch in rows:
+        quantity = int(allocation.quantity or 0)
+        if quantity <= 0:
+            continue
+        batch_id = int(batch.id)
+        released_by_batch[batch_id] += quantity
+        batches_by_id[batch_id] = batch
+        audit_allocations.append(
+            {
+                "allocation_id": int(allocation.id),
+                "batch_id": batch_id,
+                "order_line_id": int(allocation.marketplace_order_line_id),
+                "quantity": quantity,
+                "unit_cost": str(Decimal(allocation.unit_cost)),
+            }
+        )
+
+    released_quantity = sum(released_by_batch.values())
+    if released_quantity <= 0:
+        return InventoryReleaseResult(0, ())
+
+    for batch_id, quantity in released_by_batch.items():
+        batch = batches_by_id[batch_id]
+        restored_remaining = int(batch.quantity_remaining) + quantity
+        if restored_remaining > int(batch.quantity_received):
+            raise ValueError(
+                "inventory cancellation release would exceed received batch quantity"
+            )
+        batch.quantity_remaining = restored_remaining
+
+    for allocation, _batch in rows:
+        session.delete(allocation)
+
+    now = released_at or datetime.now(UTC)
+    event_key = f"inventory_released:cancelled:v{order.version}"
+    existing_event = session.scalar(
+        select(MarketplaceOrderEvent).where(
+            MarketplaceOrderEvent.marketplace_order_id == order.id,
+            MarketplaceOrderEvent.source_event_key == event_key,
+        )
+    )
+    if existing_event is None:
+        order.events.append(
+            MarketplaceOrderEvent(
+                source_event_key=event_key,
+                event_type="inventory_released",
+                previous_status=MarketplaceOrderStatus.CANCELLED.value,
+                current_status=MarketplaceOrderStatus.CANCELLED.value,
+                occurred_at=now,
+                metadata_json={
+                    "reason": "order_cancelled_before_courier_handoff",
+                    "released_quantity": released_quantity,
+                    "allocations": audit_allocations,
+                },
+            )
+        )
+
+    session.flush()
+    return InventoryReleaseResult(
+        released_quantity=released_quantity,
+        affected_batch_ids=tuple(sorted(released_by_batch)),
     )
 
 

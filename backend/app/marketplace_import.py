@@ -402,6 +402,15 @@ def import_kaspi_order(
                 )
             )
 
+    # A confirmed cancellation before courier handoff is also a warehouse
+    # event. Keep status persistence and the reverse FIFO movement in the same
+    # transaction so a repeated Kaspi observation cannot restore stock twice.
+    if normalized.status == MarketplaceOrderStatus.CANCELLED.value:
+        from .inventory_service import release_cancelled_order_inventory
+
+        session.flush()
+        release_cancelled_order_inventory(session, order=order)
+
     checkpoint = session.scalar(
         select(MarketplaceImportCheckpoint).where(
             MarketplaceImportCheckpoint.marketplace_account_id == marketplace_account_id,

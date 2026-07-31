@@ -101,3 +101,84 @@ def test_raw_receiver_persists_order_and_allocates_existing_fifo_stock(
         assert allocations[0].quantity == 1
         assert persisted_batch is not None
         assert persisted_batch.quantity_remaining == 11
+
+
+def test_raw_receiver_restores_fifo_stock_after_confirmed_cancellation(
+    db_session,
+    monkeypatch,
+) -> None:
+    account = MarketplaceAccount(
+        provider="kaspi",
+        external_account_id="11843018",
+        display_name="Kaspi",
+        timezone="Asia/Almaty",
+    )
+    product = Product(
+        kaspi_product_id="102656018_307802943",
+        merchant_sku="102656018_307802943",
+        name="GLS Magnesium",
+        status="active",
+    )
+    db_session.add_all([account, product])
+    db_session.flush()
+    batch = InventoryBatch(
+        product_id=product.id,
+        received_at=datetime(2026, 7, 21, 10, 0, tzinfo=UTC),
+        quantity_received=1,
+        quantity_remaining=1,
+        unit_cost=Decimal("2300"),
+        source_name="OZON",
+    )
+    db_session.add(batch)
+    db_session.commit()
+
+    account_id = account.id
+    batch_id = batch.id
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    monkeypatch.setattr(kaspi_raw_receiver_jobs, "SessionLocal", factory)
+    monkeypatch.setattr(
+        kaspi_raw_receiver_jobs,
+        "ensure_kaspi_marketplace_account",
+        lambda session: session.get(MarketplaceAccount, account_id),
+    )
+
+    payload = {
+        "id": "order-cancelled-before-courier",
+        "attributes": {
+            "code": "1008415720",
+            "state": "KASPI_DELIVERY",
+            "status": "ACCEPTED_BY_MERCHANT",
+            "preOrder": True,
+            "creationDate": int(
+                datetime(2026, 7, 23, 8, 0, tzinfo=UTC).timestamp() * 1000
+            ),
+            "totalPrice": "3600",
+            "currency": "KZT",
+            "entries": [
+                {
+                    "id": "entry-cancelled-before-courier",
+                    "attributes": {
+                        "offerCode": "102656018_307802943",
+                        "productId": "102656018_307802943",
+                        "name": "GLS Magnesium",
+                        "quantity": 1,
+                        "basePrice": "3600",
+                        "totalPrice": "3600",
+                    },
+                }
+            ],
+        },
+    }
+
+    kaspi_raw_receiver_jobs._persist_orders([payload], timezone_name="Asia/Almaty")
+    with factory() as session:
+        assert session.get(InventoryBatch, batch_id).quantity_remaining == 0
+        assert len(session.scalars(select(InventoryAllocation)).all()) == 1
+
+    payload["attributes"]["status"] = "CANCELLED"
+    kaspi_raw_receiver_jobs._persist_orders([payload], timezone_name="Asia/Almaty")
+    kaspi_raw_receiver_jobs._persist_orders([payload], timezone_name="Asia/Almaty")
+
+    with factory() as session:
+        assert session.get(InventoryBatch, batch_id).quantity_remaining == 1
+        assert session.scalars(select(InventoryAllocation)).all() == []
