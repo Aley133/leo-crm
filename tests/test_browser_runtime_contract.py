@@ -231,6 +231,59 @@ def test_ozon_browser_adapter_extracts_meta_price_fallback() -> None:
     assert offer.raw_metadata["source"] == "browser_meta"
 
 
+def test_ozon_browser_adapter_treats_structured_out_of_stock_as_success() -> None:
+    html = """
+    <html><head>
+      <script type="application/ld+json">
+      {
+        "@type": "Product",
+        "name": "Нет в наличии",
+        "offers": {
+          "priceCurrency": "RUB",
+          "availability": "https://schema.org/OutOfStock"
+        }
+      }
+      </script>
+    </head></html>
+    """
+    request = AdapterRequest(
+        supplier_product_id=21,
+        url="https://www.ozon.ru/product/example-21/",
+        external_id="example-21",
+    )
+    offer = asyncio.run(
+        OzonBrowserAdapter(
+            StubPool(BrowserPageResult(request.url, html, 25))
+        ).fetch(request)
+    )
+
+    assert offer.price is None
+    assert offer.available is False
+    assert offer.raw_metadata["business_state"] == "out_of_stock"
+    assert offer.raw_metadata["source"] == "browser_json_ld"
+
+
+def test_ozon_browser_adapter_treats_visible_current_product_stock_loss_as_success() -> None:
+    request = AdapterRequest(
+        supplier_product_id=22,
+        url="https://www.ozon.ru/product/example-22/",
+        external_id="example-22",
+    )
+    response = BrowserPageResult(
+        request.url,
+        '<html><div data-widget="webOutOfStock">Товар закончился</div></html>',
+        25,
+        title="Ozon",
+        body_text="Товар закончился",
+    )
+    offer = asyncio.run(OzonBrowserAdapter(StubPool(response)).fetch(request))
+
+    assert offer.price is None
+    assert offer.available is False
+    assert offer.stock == 0
+    assert offer.raw_metadata["source"] == "browser_visible_out_of_stock"
+
+
 def test_ozon_browser_adapter_parse_error_contains_bounded_page_fingerprint() -> None:
     request = AdapterRequest(
         supplier_product_id=20,

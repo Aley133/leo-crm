@@ -138,6 +138,7 @@ const searchProducts = async () => {
 const scanLabel = (row) => {
   const state = row.scan_state;
   if (!row.policy.enabled) return '<span class="badge-off">Отключён</span>';
+  if (!row.source) return '<span class="badge-limited">Приостановлен</span>';
   if (state?.status === "queued") return '<span class="badge-off">В очереди</span>';
   if (state?.status === "scanning") return '<span class="badge-ready">Проверяется</span>';
   if (state?.status === "retry_wait") return '<span class="badge-limited">Автоповтор</span>';
@@ -150,6 +151,9 @@ const scanLabel = (row) => {
 
 const scanMeta = (row) => {
   const state = row.scan_state;
+  if (row.policy.enabled && !row.source) {
+    return "Нет доступного поставщика или складского остатка. Товар закрыт в XML; мониторинг поставщика продолжается.";
+  }
   if (!state) return "Отдельная очередь конкурентов готова";
   if (state.status === "retry_wait") return `${state.last_error || "Kaspi временно ограничил запросы"}. Попытка №${state.attempts || 1}; следующий запуск: ${dateTime(state.next_retry_at)}`;
   if (state.status === "queued") return `Ожидает выполнения. В очереди сейчас: ${state.queue_size ?? 0}`;
@@ -266,21 +270,25 @@ const render = (rows) => {
     const competitorName = explanation.competitor_name || state.competitor_name || "—";
     const ownPosition = explanation.own_position ?? state.own_position;
     const sellerCount = explanation.seller_count ?? state.seller_count;
-    const safeFloor = preview.safe_floor_kzt ?? run.safe_floor_kzt;
-    const targetPrice = run.target_price_kzt ?? state.target_price_kzt;
-    const preorderDays = run.preorder_days ?? preview.preorder_days;
+    const sourceAvailable = Boolean(row.source);
+    const safeFloor = sourceAvailable ? (preview.safe_floor_kzt ?? run.safe_floor_kzt) : null;
+    const targetPrice = sourceAvailable ? (run.target_price_kzt ?? state.target_price_kzt) : null;
+    const preorderDays = sourceAvailable ? (run.preorder_days ?? preview.preorder_days) : null;
+    const runButton = sourceAvailable
+      ? '<button class="button run-now" type="button">Проверить сейчас</button>'
+      : '<button class="button run-now" type="button" disabled title="Нет доступного источника закупки">Нет источника</button>';
     return `
     <article class="dumping-card" data-product-id="${row.product_id}">
       <div class="dumping-head">
         <div class="dumping-title"><h2>${escapeHtml(row.name)}</h2><span>Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}</span></div>
-        <div class="dumping-actions"><button class="button secondary edit-policy" type="button">Настроить</button><button class="button run-now" type="button">Проверить сейчас</button></div>
+        <div class="dumping-actions"><button class="button secondary edit-policy" type="button">Настроить</button>${runButton}</div>
       </div>
       <div class="dumping-grid">
         <div><span>Статус проверки</span><strong>${scanLabel(row)}</strong><small>${escapeHtml(scanMeta(row))}</small></div>
         <div><span>Источник себестоимости</span><strong>${escapeHtml(row.source?.name || "Нет источника")}</strong><small>${escapeHtml(row.source?.kind || "—")}</small></div>
         <div><span>Себестоимость</span><strong>${money(row.source?.unit_cost_kzt)}</strong></div>
         <div><span>Безопасный порог</span><strong>${money(safeFloor)}</strong></div>
-        <div><span>Целевая цена XML</span><strong>${money(targetPrice)}</strong></div>
+        <div><span>Целевая цена XML</span><strong>${sourceAvailable ? money(targetPrice) : "Товар закрыт"}</strong></div>
       </div>
       <div class="dumping-grid">
         <div><span>Наша цена</span><strong>${money(ownPrice)}</strong></div>

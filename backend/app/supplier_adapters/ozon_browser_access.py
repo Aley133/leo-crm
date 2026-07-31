@@ -14,7 +14,7 @@ from .playwright_pool import BrowserPageResult
 class OzonBrowserAccessAdapter(OzonBrowserAdapter):
     """Ozon browser adapter with anti-bot and scoped delivery semantics."""
 
-    code = "ozon-browser-v12"
+    code = "ozon-browser-v13"
     _DIAGNOSTIC_LIMIT = 4000
 
     async def fetch(self, request: AdapterRequest) -> NormalizedOffer:
@@ -24,6 +24,15 @@ class OzonBrowserAccessAdapter(OzonBrowserAdapter):
         metadata = dict(offer.raw_metadata)
         metadata["base_delivery_days"] = base_delivery_days
         offer = replace(offer, currency=currency, raw_metadata=metadata)
+        if offer.available is False:
+            metadata["delivery_diagnostic_status"] = "skipped_out_of_stock"
+            metadata["delivery_source"] = "not_applicable"
+            return replace(
+                offer,
+                delivery_days=None,
+                adapter_schema_version=self.code,
+                raw_metadata=metadata,
+            )
 
         # Structured Ozon payloads can contain unrelated timing values. The
         # current product's visible add-to-cart promise is authoritative when

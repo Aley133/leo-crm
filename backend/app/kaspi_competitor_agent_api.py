@@ -154,6 +154,17 @@ def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> Dumpin
     )
     if policy is None or not policy.enabled:
         raise ValueError("Демпинг для товара не подключён")
+    from .dumping_service import resolve_cost_source
+
+    source = resolve_cost_source(
+        db,
+        product_id=product_id,
+        inventory_first=policy.inventory_first,
+    )
+    if source is None:
+        raise ValueError(
+            "Нет доступного источника закупки; демпинг приостановлен, товар закрыт в XML"
+        )
 
     existing = db.scalar(
         select(DumpingRun)
@@ -304,6 +315,22 @@ def complete_job(job_id: int, payload: AgentComplete, db: Session = Depends(get_
                     market=market,
                 )
         except ValueError as exc:
+            if "Нет доступной партии или актуального предложения поставщика" in str(exc):
+                from .dumping_service import suspend_product_without_cost_source
+
+                product = db.get(Product, job.product_id)
+                policy = db.scalar(
+                    select(DumpingPolicy).where(
+                        DumpingPolicy.product_id == job.product_id
+                    )
+                )
+                if product is not None and policy is not None:
+                    suspend_product_without_cost_source(
+                        db,
+                        product=product,
+                        policy=policy,
+                        reason="dumping_decision_lost_cost_source",
+                    )
             job.status = "failed_local"
             job.explanation_json = {
                 **meta,

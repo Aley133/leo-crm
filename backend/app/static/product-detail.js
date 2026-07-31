@@ -40,6 +40,14 @@ const setText = (id, value) => { const element = document.querySelector(`#${id}`
 const setLoading = (loading) => { detailPage.setAttribute("aria-busy", String(loading)); refreshButton.disabled = loading; refreshButton.textContent = loading ? "Обновление…" : "Обновить"; };
 const availabilityBadge = (available) => available === true ? '<span class="badge ok">В наличии</span>' : available === false ? '<span class="badge bad">Нет в наличии</span>' : '<span class="badge">Неизвестно</span>';
 const monitorBadge = (binding) => isFixedSource(binding) ? '<span class="badge">Без мониторинга</span>' : binding.consecutive_failures > 0 ? '<span class="badge bad">Ошибка</span>' : binding.monitor_status === "active" ? '<span class="badge ok">Активен</span>' : binding.monitor_status ? `<span class="badge warn">${escapeHtml(binding.monitor_status)}</span>` : '<span class="badge">Не настроен</span>';
+const monitorSchedule = (binding) => {
+  if (isFixedSource(binding)) return "цена изменяется вручную";
+  const checked = `проверено ${dateTime(binding.last_checked_at)}`;
+  if (binding.consecutive_failures > 0 && binding.next_check_at) {
+    return `${checked} · автоповтор ${dateTime(binding.next_check_at)}`;
+  }
+  return checked;
+};
 const scoreByBinding = (scores) => new Map((scores || []).map((score) => [Number(score.binding_id), score]));
 const supplierLink = (binding, label = "Открыть поставщика") => isFixedSource(binding) ? `<span class="muted">${fixedSourceLabel(binding)}</span>` : `<a href="${escapeHtml(binding.supplier_product_url)}" target="_blank" rel="noreferrer">${label}</a>`;
 
@@ -85,7 +93,7 @@ const renderBindings = (bindings, supplierScores) => {
     const score = scores.get(Number(binding.binding_id));
     const rank = rankByBinding.get(Number(binding.binding_id));
     const scoreHtml = score ? `<span class="muted">${rank ? `Место ${rank} · ` : ""}Рейтинг ${Number(score.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}${score.eligible ? "" : " · не участвует"}</span>` : "";
-    return `<article class="binding-card"><div class="binding-head"><h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3>${supplierLink(binding, "Открыть карточку поставщика")}<span class="muted">${isFixedSource(binding) ? fixedSourceLabel(binding) : escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span>${scoreHtml}</div><div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div><div><span class="label">Получение</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "источник не указан")}</span></div><div><span class="label">Наличие</span>${availabilityBadge(binding.available)}${binding.stock != null ? `<span class="muted">остаток ${binding.stock}</span>` : ""}</div><div><span class="label">Мониторинг</span>${monitorBadge(binding)}<span class="muted">${isFixedSource(binding) ? "цена изменяется вручную" : `проверено ${dateTime(binding.last_checked_at)}`}</span></div></article>`;
+    return `<article class="binding-card"><div class="binding-head"><h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3>${supplierLink(binding, "Открыть карточку поставщика")}<span class="muted">${isFixedSource(binding) ? fixedSourceLabel(binding) : escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span>${scoreHtml}</div><div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div><div><span class="label">Получение</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "источник не указан")}</span></div><div><span class="label">Наличие</span>${availabilityBadge(binding.available)}${binding.stock != null ? `<span class="muted">остаток ${binding.stock}</span>` : ""}</div><div><span class="label">Мониторинг</span>${monitorBadge(binding)}<span class="muted">${escapeHtml(monitorSchedule(binding))}</span></div></article>`;
   }).join("");
   document.querySelector("#bindings-empty").classList.toggle("hidden", bindings.length > 0);
 };

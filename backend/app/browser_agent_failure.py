@@ -12,6 +12,9 @@ from .supplier_adapters.base import AccessStrategy
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
+MAX_BROWSER_FAILURE_RETRY_SECONDS = 30 * 60
+
+
 def _failure_outcome(error_code: str | None) -> AttemptOutcome:
     normalized = (error_code or "").casefold()
     if "captcha" in normalized:
@@ -35,7 +38,13 @@ def persist_browser_agent_failure(
     error_message: str | None,
     finished_at: datetime,
 ) -> int | None:
-    """Record one failed local-browser check and reschedule only its target."""
+    """Record one failed local-browser check and keep its target retryable.
+
+    Technical failures must never make a supplier card disappear from regular
+    monitoring. Backoff remains exponential to protect Ozon/WB and the local
+    browser, but it is capped at 30 minutes so a single bad load cannot leave a
+    sellable card unchecked for hours.
+    """
     if job.monitor_target_id is None:
         return None
 
@@ -82,7 +91,9 @@ def persist_browser_agent_failure(
     target.consecutive_failures += 1
     base_delay = max(60, target.interval_seconds)
     multiplier = 2 ** min(target.consecutive_failures - 1, 5)
-    target.next_check_at = finished_at + timedelta(seconds=min(base_delay * multiplier, 21_600))
+    target.next_check_at = finished_at + timedelta(
+        seconds=min(base_delay * multiplier, MAX_BROWSER_FAILURE_RETRY_SECONDS)
+    )
 
     if supplier_id is not None:
         apply_source_failure(

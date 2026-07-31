@@ -73,18 +73,7 @@ def calculate_product_price(session: Session, *, product_id: int) -> PriceCalcul
         session.flush()
         return calculation
 
-    if offer is None or offer.price is None:
-        calculation = PriceCalculation(
-            product_id=product_id,
-            pricing_policy_id=policy.id,
-            status=PriceCalculationStatus.OFFER_MISSING.value,
-            explanation_json={**explanation, "reason": "supplier offer state or price is missing"},
-        )
-        session.add(calculation)
-        session.flush()
-        return calculation
-
-    if offer.available is False:
+    if offer is not None and offer.available is False:
         calculation = PriceCalculation(
             product_id=product_id,
             pricing_policy_id=policy.id,
@@ -93,6 +82,17 @@ def calculate_product_price(session: Session, *, product_id: int) -> PriceCalcul
             supplier_price=offer.price,
             supplier_currency=offer.currency,
             explanation_json={**explanation, "reason": "supplier offer is unavailable"},
+        )
+        session.add(calculation)
+        session.flush()
+        return calculation
+
+    if offer is None or offer.price is None:
+        calculation = PriceCalculation(
+            product_id=product_id,
+            pricing_policy_id=policy.id,
+            status=PriceCalculationStatus.OFFER_MISSING.value,
+            explanation_json={**explanation, "reason": "supplier offer state or price is missing"},
         )
         session.add(calculation)
         session.flush()

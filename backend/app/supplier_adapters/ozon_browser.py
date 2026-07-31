@@ -45,6 +45,10 @@ _CANONICAL_RE = re.compile(
 )
 _SCRIPT_RE = re.compile(r"<script\b", re.IGNORECASE)
 _META_RE = re.compile(r"<meta\b", re.IGNORECASE)
+_OUT_OF_STOCK_WIDGET_RE = re.compile(
+    r'data-widget=["\'][^"\']*(?:out.?of.?stock|sold.?out)[^"\']*["\']',
+    re.IGNORECASE,
+)
 _OZON_ROOT_DOMAINS = ("ozon.ru", "ozon.kz")
 _CAPTCHA_MARKERS = (
     "captcha",
@@ -75,6 +79,23 @@ _DELIVERY_KEYS = (
     "minDeliveryDays",
     "deliveryPeriod",
     "deliveryTime",
+)
+_OUT_OF_STOCK_TEXT_MARKERS = (
+    "товар закончился",
+    "закончился",
+    "раскупили",
+    "этого товара нет в наличии",
+    "товара нет в наличии",
+    "нет в наличии",
+    "сейчас этого товара нет",
+    "out of stock",
+    "currently unavailable",
+)
+_PURCHASE_TEXT_MARKERS = (
+    "добавить в корзину",
+    "купить сейчас",
+    "add to cart",
+    "buy now",
 )
 
 
@@ -111,10 +132,24 @@ class OzonBrowserAdapter:
         self._classify_page(response)
         extracted = self._extract_structured_offer(response.content)
         if extracted is None:
-            raise AdapterParseError(
-                "Ozon browser page did not contain reliable structured offer data; "
-                + self._diagnostic_summary(response)
-            )
+            if self._explicit_out_of_stock(response):
+                extracted = (
+                    {
+                        "price": None,
+                        "old_price": None,
+                        "available": False,
+                        "stock": 0,
+                        "delivery_days": None,
+                        "seller": None,
+                        "currency": None,
+                    },
+                    "browser_visible_out_of_stock",
+                )
+            else:
+                raise AdapterParseError(
+                    "Ozon browser page did not contain reliable structured offer data; "
+                    + self._diagnostic_summary(response)
+                )
         offer, source = extracted
 
         return NormalizedOffer(
@@ -133,6 +168,9 @@ class OzonBrowserAdapter:
                 "response_url": response.final_url,
                 "duration_ms": response.duration_ms,
                 "context_isolation": "fresh_per_check",
+                "business_state": (
+                    "out_of_stock" if offer["available"] is False else "available"
+                ),
             },
         )
 
@@ -244,10 +282,10 @@ class OzonBrowserAdapter:
         if not isinstance(offers, dict):
             return None
 
-        price = cls._parse_money(offers.get("price") or offers.get("lowPrice"))
-        if price is None:
-            return None
         availability = cls._availability(offers.get("availability"))
+        price = cls._parse_money(offers.get("price") or offers.get("lowPrice"))
+        if price is None and availability is not False:
+            return None
         seller_value = offers.get("seller")
         seller: str | None = None
         if isinstance(seller_value, dict):
@@ -268,13 +306,16 @@ class OzonBrowserAdapter:
 
     @classmethod
     def _extract_embedded_offer(cls, node: dict[str, Any]) -> dict[str, Any] | None:
+        available = cls._availability(
+            node.get("availability", node.get("isAvailable", node.get("available")))
+        )
         price = None
         for key in _PRICE_KEYS:
             if key in node:
                 price = cls._parse_money(node.get(key))
                 if price is not None:
                     break
-        if price is None:
+        if price is None and available is not False:
             return None
 
         keys = {str(key).casefold() for key in node}
@@ -303,9 +344,6 @@ class OzonBrowserAdapter:
                 old_price = cls._parse_money(node.get(key))
                 if old_price is not None:
                     break
-        available = cls._availability(
-            node.get("availability", node.get("isAvailable", node.get("available")))
-        )
         seller = (
             node.get("sellerName")
             or node.get("seller")
@@ -400,11 +438,45 @@ class OzonBrowserAdapter:
         if isinstance(value, bool):
             return value
         text = str(value or "").casefold()
+        if any(
+            marker in text
+            for marker in (
+                "outofstock",
+                "out_of_stock",
+                "soldout",
+                "sold_out",
+                "unavailable",
+                "not_available",
+                "false",
+            )
+        ):
+            return False
         if any(marker in text for marker in ("instock", "in_stock", "available", "true")):
             return True
-        if any(marker in text for marker in ("outofstock", "out_of_stock", "soldout", "false")):
-            return False
         return None
+
+    @classmethod
+    def _explicit_out_of_stock(cls, response: BrowserPageResult) -> bool:
+        """Recognize a business state without confusing it with a parse failure.
+
+        Ozon can remove every price node when the current offer sells out. A
+        dedicated PDP widget is authoritative. The text fallback is accepted
+        only when the current page has an explicit stock message and no visible
+        purchase wording, which prevents recommendation cards from disabling a
+        live product.
+        """
+        if _OUT_OF_STOCK_WIDGET_RE.search(response.content):
+            return True
+        visible_text = " ".join(
+            f"{response.title}\n{response.body_text}".casefold().split()
+        )
+        has_out_of_stock_text = any(
+            marker in visible_text for marker in _OUT_OF_STOCK_TEXT_MARKERS
+        )
+        has_purchase_text = any(
+            marker in visible_text for marker in _PURCHASE_TEXT_MARKERS
+        )
+        return has_out_of_stock_text and not has_purchase_text
 
     @staticmethod
     def _clean_diagnostic_text(value: str, *, limit: int) -> str:

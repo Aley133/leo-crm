@@ -8,7 +8,12 @@ from sqlalchemy.orm import Session
 from .db import SessionLocal
 from .dumping_competitor_worker import enqueue_competitor_scan
 from .dumping_models import DumpingPolicy, KaspiXmlFeed
-from .dumping_service import decide_dumping_price, publish_decision
+from .dumping_service import (
+    decide_dumping_price,
+    publish_decision,
+    resolve_cost_source,
+    suspend_product_without_cost_source,
+)
 from .kaspi_offer_competitor import KaspiCompetitorSnapshot, scan_kaspi_competitors
 from .models import Product
 from .suppliers import ProductBinding
@@ -100,12 +105,21 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
 
 
 def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
-    """Queue enabled products after a committed supplier observation."""
+    """Apply supplier availability before queuing the next Kaspi price scan.
+
+    A confirmed loss of the final procurement source is a safety event: close
+    the XML offer immediately and keep the policy ready for automatic recovery.
+    If inventory or another supplier is available, normal competitor scanning
+    continues with that source.
+    """
     with SessionLocal() as db:
-        product_ids = list(
+        product_ids = tuple(
             db.scalars(
                 select(ProductBinding.product_id)
-                .join(DumpingPolicy, DumpingPolicy.product_id == ProductBinding.product_id)
+                .join(
+                    DumpingPolicy,
+                    DumpingPolicy.product_id == ProductBinding.product_id,
+                )
                 .where(
                     ProductBinding.supplier_product_id == supplier_product_id,
                     ProductBinding.status.in_(("active", "confirmed", "degraded")),
@@ -117,4 +131,30 @@ def refresh_dumping_for_supplier_product(supplier_product_id: int) -> None:
         )
 
     for product_id in product_ids:
+        with SessionLocal() as db:
+            product = db.get(Product, product_id)
+            policy = db.scalar(
+                select(DumpingPolicy)
+                .where(DumpingPolicy.product_id == product_id)
+                .with_for_update()
+            )
+            if product is None or policy is None or not policy.enabled:
+                continue
+            source = resolve_cost_source(
+                db,
+                product_id=product_id,
+                inventory_first=policy.inventory_first,
+            )
+            if source is None:
+                try:
+                    suspend_product_without_cost_source(
+                        db,
+                        product=product,
+                        policy=policy,
+                    )
+                    db.commit()
+                except Exception:
+                    db.rollback()
+                    raise
+                continue
         enqueue_competitor_scan(product_id, reason="supplier_snapshot_changed")

@@ -23,7 +23,7 @@ def test_product_detail_contract_contains_sales_bindings_and_history() -> None:
         "kaspi_product_id", "merchant_sku", "created_at", "updated_at", "sales",
         "orders_count", "units_sold", "revenue_kzt", "last_ordered_at", "bindings",
         "observations", "supplier_product_url", "monitor_status", "consecutive_failures",
-        "price", "currency", "available", "delivery_days", "observed_at",
+        "price", "currency", "available", "delivery_days", "observed_at", "next_check_at",
         "sudden_price_alert_enabled",
     ):
         assert field in source

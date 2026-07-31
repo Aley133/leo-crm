@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from .db import SessionLocal
 from .dumping_models import DumpingPolicy, DumpingRun
+from .dumping_service import resolve_cost_source
 
 # Legacy compatibility constants. Render no longer performs Kaspi HTTP scans;
 # the local Kaspi Competitor Agent owns network access. Keeping these names
@@ -164,21 +165,29 @@ def queue_due_competitor_jobs(
             limit=limit,
         )
     ).all()
-    jobs = [
-        DumpingRun(
+    jobs = []
+    for policy in policies:
+        source = resolve_cost_source(
+            db,
             product_id=policy.product_id,
-            dumping_policy_id=policy.id,
-            status="queued_local",
-            published=False,
-            explanation_json={
-                "reason": "periodic_refresh",
-                "agent_type": "kaspi_competitor",
-                "scheduled_at": current.isoformat(),
-            },
-            created_at=current,
+            inventory_first=policy.inventory_first,
         )
-        for policy in policies
-    ]
+        if source is None:
+            continue
+        jobs.append(
+            DumpingRun(
+                product_id=policy.product_id,
+                dumping_policy_id=policy.id,
+                status="queued_local",
+                published=False,
+                explanation_json={
+                    "reason": "periodic_refresh",
+                    "agent_type": "kaspi_competitor",
+                    "scheduled_at": current.isoformat(),
+                },
+                created_at=current,
+            )
+        )
     db.add_all(jobs)
     db.flush()
     return tuple(job.id for job in jobs)

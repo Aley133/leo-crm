@@ -116,7 +116,11 @@ def _supplier_source(db: Session, product_id: int) -> DumpingCostSource | None:
                 unit_cost_kzt=Decimal(state.price),
                 delivery_days=max(int(state.delivery_days or 0), 0),
             )
-        if supplier_product.current_price is not None and supplier_product.in_stock is not False:
+        if (
+            state is None
+            and supplier_product.current_price is not None
+            and supplier_product.in_stock is not False
+        ):
             return DumpingCostSource(
                 kind="supplier",
                 name=supplier.name,
@@ -210,6 +214,111 @@ def update_feed_xml(
     availability.set("preOrder", str(max(int(preorder_days), 0)))
 
     return ElementTree.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def set_feed_offer_availability(
+    xml_text: str,
+    *,
+    sku_candidates: set[str],
+    available: bool,
+) -> str:
+    """Open or close one offer without deleting its recoverable XML identity."""
+    root = ElementTree.fromstring(xml_text.encode("utf-8"))
+    offer = _matching_offer(root, {value for value in sku_candidates if value})
+    if offer is None:
+        raise ValueError("Товар не найден в сохранённом XML по SKU/Kaspi ID")
+
+    availability = next(
+        (node for node in offer.iter() if _local_name(node.tag) == "availability"),
+        None,
+    )
+    if availability is None:
+        availability = ElementTree.SubElement(offer, "availability")
+    availability.set("available", "yes" if available else "no")
+    if not available:
+        availability.set("preOrder", "0")
+    return ElementTree.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def suspend_product_without_cost_source(
+    db: Session,
+    *,
+    product: Product,
+    policy: DumpingPolicy,
+    reason: str = "no_available_procurement_source",
+) -> DumpingRun:
+    """Stop XML sales while preserving the policy for automatic recovery.
+
+    The policy remains enabled so supplier monitoring can resume dumping as
+    soon as any bound source becomes available again. Only executable Kaspi
+    competitor jobs are cancelled; a currently leased job may finish, but its
+    decision will still be rejected because there is no cost source.
+    """
+    feed = db.scalar(
+        select(KaspiXmlFeed)
+        .order_by(KaspiXmlFeed.id.desc())
+        .with_for_update()
+        .limit(1)
+    )
+    if feed is None:
+        raise ValueError("Сначала импортируйте полный Kaspi XML в разделе Товары")
+
+    xml_availability = "no"
+    try:
+        feed.generated_xml = set_feed_offer_availability(
+            feed.generated_xml or feed.source_xml,
+            sku_candidates={product.merchant_sku or "", product.kaspi_product_id},
+            available=False,
+        )
+    except ValueError as exc:
+        if str(exc) != "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+            raise
+        # Absence from the feed is already a safe non-sellable state.
+        xml_availability = "offer_absent"
+    feed.active = True
+    feed.generated_at = func.now()
+
+    queued_jobs = db.scalars(
+        select(DumpingRun)
+        .where(
+            DumpingRun.product_id == product.id,
+            DumpingRun.status == "queued_local",
+        )
+        .with_for_update()
+    ).all()
+    for job in queued_jobs:
+        job.status = "failed_local"
+        job.explanation_json = {
+            **(job.explanation_json or {}),
+            "stage": "cancelled_no_source",
+            "error_code": "no_available_procurement_source",
+            "error_message": "Нет доступного источника закупки; товар закрыт в XML",
+        }
+
+    latest = db.scalar(
+        select(DumpingRun)
+        .where(DumpingRun.product_id == product.id)
+        .order_by(DumpingRun.id.desc())
+        .limit(1)
+    )
+    if latest is not None and latest.status == "suspended_no_source":
+        return latest
+
+    run = DumpingRun(
+        product_id=product.id,
+        dumping_policy_id=policy.id,
+        status="suspended_no_source",
+        published=True,
+        explanation_json={
+            "reason": reason,
+            "business_state": "out_of_stock",
+            "xml_availability": xml_availability,
+            "automatic_recovery": True,
+        },
+    )
+    db.add(run)
+    db.flush()
+    return run
 
 
 def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, decision: DumpingDecision) -> DumpingRun:

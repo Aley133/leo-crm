@@ -119,13 +119,54 @@ def _normalize_known_business_outcome(
     observed_at,
 ) -> BrowserAgentResult:
     message = (payload.error_message or "").strip()
-    host_is_wildberries = "wildberries.ru" in job.url.casefold() or "wb.ru" in job.url.casefold()
+    normalized_message = message.casefold()
+    normalized_url = job.url.casefold()
+    host_is_wildberries = "wildberries.ru" in normalized_url or "wb.ru" in normalized_url
+    host_is_ozon = "ozon.ru" in normalized_url or "ozon.kz" in normalized_url
+    wildberries_out_of_stock = (
+        host_is_wildberries
+        and message == "Wildberries product is out of stock"
+    )
+    ozon_out_of_stock = (
+        host_is_ozon
+        and any(
+            marker in normalized_message
+            for marker in (
+                "товар закончился",
+                "закончился",
+                "раскупили",
+                "этого товара нет в наличии",
+                "товара нет в наличии",
+                "нет в наличии",
+                "сейчас этого товара нет",
+                "ozon product is out of stock",
+            )
+        )
+        and not any(
+            marker in normalized_message
+            for marker in (
+                "добавить в корзину",
+                "купить сейчас",
+                "add to cart",
+                "buy now",
+            )
+        )
+    )
     if (
         payload.status == BrowserAgentJobStatus.FAILED.value
         and payload.error_code == "AdapterParseError"
-        and host_is_wildberries
-        and message == "Wildberries product is out of stock"
+        and (wildberries_out_of_stock or ozon_out_of_stock)
     ):
+        source = (
+            "wb_browser_verified"
+            if wildberries_out_of_stock
+            else "ozon_browser_visible_out_of_stock"
+        )
+        schema_version = (
+            "wildberries-browser-verified-v5"
+            if wildberries_out_of_stock
+            else "ozon-browser-v13"
+        )
         return BrowserAgentResult(
             lease_token=payload.lease_token,
             status=BrowserAgentJobStatus.SUCCEEDED.value,
@@ -137,10 +178,10 @@ def _normalize_known_business_outcome(
                 "stock": 0,
                 "delivery_days": None,
                 "seller": None,
-                "adapter_schema_version": "wildberries-browser-verified-v5",
+                "adapter_schema_version": schema_version,
                 "observed_at": observed_at.isoformat(),
                 "raw_metadata": {
-                    "source": "wb_browser_verified",
+                    "source": source,
                     "business_state": "out_of_stock",
                     "normalized_from_legacy_error": True,
                 },

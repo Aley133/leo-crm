@@ -12,6 +12,9 @@ from backend.app.browser_agent_ingestion import (
     persist_browser_agent_success,
 )
 from backend.app.browser_agent_models import BrowserAgentJob
+from backend.app.models import Product
+from backend.app.monitoring import MonitorTarget, SupplierOfferState
+from backend.app.suppliers import ProductBinding, Supplier, SupplierProduct
 
 
 def _job():
@@ -86,3 +89,81 @@ def test_agent_payload_rejects_negative_money() -> None:
                 "observed_at": datetime.now(UTC).isoformat(),
             },
         )
+
+
+def test_out_of_stock_agent_result_updates_current_and_legacy_supplier_state(
+    db_session,
+) -> None:
+    observed_at = datetime(2026, 7, 31, 9, 0, tzinfo=UTC)
+    supplier = Supplier(code="ozon", name="Ozon")
+    product = Product(
+        kaspi_product_id="123123123",
+        merchant_sku="SKU-123123123",
+        name="Проверка отсутствия",
+        status="active",
+    )
+    db_session.add_all([supplier, product])
+    db_session.flush()
+    supplier_product = SupplierProduct(
+        supplier_id=supplier.id,
+        external_id="ozon-123123123",
+        title="Карточка Ozon",
+        url="https://www.ozon.ru/product/ozon-123123123/",
+        current_price="4998",
+        delivery_days=8,
+        in_stock=True,
+    )
+    db_session.add(supplier_product)
+    db_session.flush()
+    binding = ProductBinding(
+        product_id=product.id,
+        supplier_product_id=supplier_product.id,
+        status="active",
+    )
+    db_session.add(binding)
+    db_session.flush()
+    target = MonitorTarget(
+        product_binding_id=binding.id,
+        status="active",
+        interval_seconds=300,
+        next_check_at=observed_at,
+    )
+    db_session.add(target)
+    db_session.flush()
+    job = BrowserAgentJob(
+        monitor_target_id=target.id,
+        supplier_product_id=supplier_product.id,
+        url=supplier_product.url,
+        status="leased",
+        created_at=observed_at,
+    )
+    db_session.add(job)
+    db_session.flush()
+
+    _attempt_id, changed = persist_browser_agent_success(
+        db_session,
+        job=job,
+        payload={
+            "price": None,
+            "old_price": None,
+            "currency": None,
+            "available": False,
+            "stock": 0,
+            "delivery_days": None,
+            "seller": None,
+            "adapter_schema_version": "ozon-browser-v13",
+            "observed_at": observed_at.isoformat(),
+            "raw_metadata": {"business_state": "out_of_stock"},
+        },
+        finished_at=observed_at,
+    )
+
+    state = db_session.query(SupplierOfferState).filter_by(
+        supplier_product_id=supplier_product.id
+    ).one()
+    assert changed is True
+    assert state.available is False
+    assert state.price is None
+    assert supplier_product.in_stock is False
+    assert supplier_product.current_price is None
+    assert supplier_product.delivery_days is None

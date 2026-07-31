@@ -101,6 +101,8 @@ def test_dumping_ui_prefers_current_floor_over_stale_run_floor() -> None:
     )
 
     assert (
-        "const safeFloor = preview.safe_floor_kzt ?? run.safe_floor_kzt;"
+        "const safeFloor = sourceAvailable ? (preview.safe_floor_kzt ?? run.safe_floor_kzt) : null;"
         in source
     )
+    assert "Товар закрыт" in source
+    assert "мониторинг поставщика продолжается" in source

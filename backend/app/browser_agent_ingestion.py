@@ -128,6 +128,10 @@ def persist_browser_agent_success(
     supplier_product, supplier_id, product_id = row
 
     offer = normalized_offer_from_agent(job, payload)
+    supplier_product.current_price = offer.price
+    supplier_product.delivery_days = offer.delivery_days
+    supplier_product.in_stock = offer.available
+    supplier_product.last_checked_at = finished_at
     started_at = job.created_at
     if started_at.tzinfo is None and finished_at.tzinfo is not None:
         started_at = started_at.replace(tzinfo=finished_at.tzinfo)
@@ -215,6 +219,7 @@ def persist_browser_agent_success(
         session.flush()
         enqueue_price_drop_alert(session, observation=observation)
         calculate_product_price(session, product_id=product_id)
+    if changed or offer.available is False:
         mark_supplier_product_for_dumping_refresh(session, supplier_product.id)
 
     target.last_checked_at = finished_at

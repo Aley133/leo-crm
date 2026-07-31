@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
@@ -12,6 +13,7 @@ from backend.app.dumping_competitor_worker import (
     queue_due_competitor_jobs,
 )
 from backend.app.dumping_models import DumpingPolicy, DumpingRun
+from backend.app.inventory_models import InventoryBatch
 from backend.app.models import Product
 
 
@@ -24,6 +26,7 @@ def _policy(
     kaspi_product_id: str,
     enabled: bool = True,
     auto_publish_xml: bool = True,
+    with_source: bool = True,
 ) -> DumpingPolicy:
     product = Product(
         kaspi_product_id=kaspi_product_id,
@@ -40,6 +43,18 @@ def _policy(
     )
     db_session.add(policy)
     db_session.flush()
+    if with_source:
+        db_session.add(
+            InventoryBatch(
+                product_id=product.id,
+                received_at=NOW - timedelta(days=1),
+                quantity_received=1,
+                quantity_remaining=1,
+                unit_cost=Decimal("1000"),
+                source_name="Тестовый склад",
+            )
+        )
+        db_session.flush()
     return policy
 
 
@@ -77,6 +92,11 @@ def test_periodic_dispatch_queues_only_due_enabled_policies_once(db_session) -> 
         db_session,
         kaspi_product_id="100000006",
         auto_publish_xml=False,
+    )
+    no_procurement_source = _policy(
+        db_session,
+        kaspi_product_id="100000007",
+        with_source=False,
     )
     _run(
         db_session,
@@ -121,6 +141,9 @@ def test_periodic_dispatch_queues_only_due_enabled_policies_once(db_session) -> 
     assert recent_check.product_id not in {run.product_id for run in newly_queued}
     assert disabled.product_id not in {run.product_id for run in newly_queued}
     assert no_auto_publish.product_id not in {run.product_id for run in newly_queued}
+    assert no_procurement_source.product_id not in {
+        run.product_id for run in newly_queued
+    }
 
 
 def test_queue_scheduler_dispatches_immediately_without_scanning_kaspi(

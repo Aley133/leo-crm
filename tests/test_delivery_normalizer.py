@@ -81,7 +81,7 @@ def test_ozon_adapter_waits_reads_and_records_delivery_evidence() -> None:
         encoding="utf-8",
     ).read()
 
-    assert 'code = "ozon-browser-v12"' in source
+    assert 'code = "ozon-browser-v13"' in source
     assert "OzonDeliveryExtractor.from_candidates(" in source
     assert 'document.querySelectorAll(\'[data-widget="webAddToCart"]\')' in source
     assert 'metadata["delivery_source"] = "ozon_current_product_dom"' in source

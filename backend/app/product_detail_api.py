@@ -62,6 +62,7 @@ class ProductBindingDetail(BaseModel):
     seller: str | None
     observed_at: datetime | None
     last_checked_at: datetime | None
+    next_check_at: datetime | None
 
 
 class ProductObservationRead(BaseModel):
@@ -275,6 +276,7 @@ def get_product_detail(
                 seller=None if state is None else state.seller,
                 observed_at=None if state is None else state.observed_at,
                 last_checked_at=None if state is None else state.last_checked_at,
+                next_check_at=None if monitor_target is None else monitor_target.next_check_at,
             )
         )
         candidates.append(
