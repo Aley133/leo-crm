@@ -85,7 +85,10 @@ def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryR
         .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
         .outerjoin(SupplierOfferState, SupplierOfferState.supplier_product_id == SupplierProduct.id)
         .outerjoin(MonitorTarget, MonitorTarget.product_binding_id == ProductBinding.id)
-        .where(ProductBinding.product_id.in_(ids))
+        .where(
+            ProductBinding.product_id.in_(ids),
+            ProductBinding.status.in_(("active", "confirmed", "degraded")),
+        )
         .order_by(ProductBinding.product_id, ProductBinding.is_primary.desc(), ProductBinding.priority)
     ).all()
 

@@ -112,7 +112,11 @@ def get_product_economics(
         candidate: Decimal | None = None
         if state is not None and state.price is not None and state.available is not False:
             candidate = Decimal(state.price)
-        elif supplier_product.current_price is not None and supplier_product.in_stock is not False:
+        elif (
+            state is None
+            and supplier_product.current_price is not None
+            and supplier_product.in_stock is not False
+        ):
             candidate = Decimal(supplier_product.current_price)
         if candidate is not None:
             current_source_cost = candidate

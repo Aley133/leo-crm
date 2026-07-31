@@ -3,10 +3,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import StrEnum
 
-from sqlalchemy import select
+from datetime import timedelta
+
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
+from .browser_agent_failure import MAX_BROWSER_FAILURE_RETRY_SECONDS
 from .lease_engine import utc_now
 from .monitoring import MonitorStatus, MonitorTarget
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -61,6 +64,13 @@ def build_due_browser_targets_statement(*, limit: int, supplier_code: str):
         )
     )
 
+    now = utc_now()
+    legacy_failure_due = and_(
+        MonitorTarget.consecutive_failures > 0,
+        MonitorTarget.last_checked_at.is_not(None),
+        MonitorTarget.last_checked_at
+        <= now - timedelta(seconds=MAX_BROWSER_FAILURE_RETRY_SECONDS),
+    )
     return (
         select(MonitorTarget, SupplierProduct.id, SupplierProduct.url)
         .join(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
@@ -68,7 +78,10 @@ def build_due_browser_targets_statement(*, limit: int, supplier_code: str):
         .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
         .where(
             MonitorTarget.status == MonitorStatus.ACTIVE.value,
-            MonitorTarget.next_check_at <= utc_now(),
+            or_(
+                MonitorTarget.next_check_at <= now,
+                legacy_failure_due,
+            ),
             Supplier.code == normalized_supplier,
             MonitorTarget.id.not_in(active_job_target_ids),
         )

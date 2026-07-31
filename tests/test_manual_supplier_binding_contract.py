@@ -1,5 +1,7 @@
 from pathlib import Path
 
+from backend.app.product_supplier_binding_api import _source_from_url
+
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -32,12 +34,13 @@ def test_manual_supplier_binding_command_is_registered_and_atomic() -> None:
 def test_manual_supplier_binding_accepts_supported_marketplaces_and_ozon_kz() -> None:
     source = (ROOT / "backend" / "app" / "product_supplier_binding_api.py").read_text(encoding="utf-8")
 
-    assert 'OZON_HOSTS = {"ozon.ru", "ozon.kz"}' in source
-    assert 'WB_HOSTS = {"wildberries.ru", "wb.ru"}' in source
-    assert 'return "ozon", "Ozon"' in source
-    assert 'return "wb", "Wildberries"' in source
-    assert "ozon.kz" in source
-    assert "Поддерживаются ссылки Ozon" in source
+    assert _source_from_url(
+        "https://www.ozon.kz/product/arginin-51853964/?from=share"
+    ) == ("ozon", "Ozon", "51853964")
+    assert _source_from_url(
+        "https://www.wildberries.ru/catalog/833814189/detail.aspx"
+    ) == ("wb", "Wildberries", "833814189")
+    assert "parse_supplier_url" in source
     assert "created_supplier_product" in source
     assert "created_binding" in source
     assert "queued_initial_check" in source

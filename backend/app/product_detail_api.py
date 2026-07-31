@@ -16,7 +16,12 @@ from .decision_timeline import (
     TimelineObservation,
 )
 from .models import MarketplaceOrder, MarketplaceOrderLine, Product
-from .monitoring import MonitorTarget, SupplierOfferObservation, SupplierOfferState
+from .monitoring import (
+    BindingStatus,
+    MonitorTarget,
+    SupplierOfferObservation,
+    SupplierOfferState,
+)
 from .supplier_intelligence import BestOfferEngine, SupplierCandidate, SupplierScore
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
@@ -279,6 +284,12 @@ def get_product_detail(
                 next_check_at=None if monitor_target is None else monitor_target.next_check_at,
             )
         )
+        if binding.status not in {
+            BindingStatus.ACTIVE.value,
+            BindingStatus.CONFIRMED.value,
+            BindingStatus.DEGRADED.value,
+        }:
+            continue
         candidates.append(
             SupplierCandidate(
                 binding_id=binding.id,

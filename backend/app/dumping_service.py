@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import UTC, datetime
 from decimal import Decimal, ROUND_CEILING
 from xml.etree import ElementTree
 
@@ -12,6 +13,7 @@ from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from .inventory_models import InventoryBatch
 from .models import Product
 from .monitoring import SupplierOfferState
+from .supplier_identity import canonical_supplier_product_identity
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
@@ -108,7 +110,62 @@ def _supplier_source(db: Session, product_id: int) -> DumpingCostSource | None:
             SupplierOfferState.observed_at.desc().nullslast(),
         )
     ).all()
-    for _binding, supplier_product, supplier, state in rows:
+    grouped_rows: dict[
+        tuple[int, str],
+        list[
+            tuple[
+                ProductBinding,
+                SupplierProduct,
+                Supplier,
+                SupplierOfferState | None,
+            ]
+        ],
+    ] = {}
+    for binding, supplier_product, supplier, state in rows:
+        identity = canonical_supplier_product_identity(
+            supplier_code=supplier.code,
+            external_id=supplier_product.external_id,
+            url=supplier_product.url,
+        )
+        grouped_rows.setdefault((supplier.id, identity), []).append(
+            (binding, supplier_product, supplier, state)
+        )
+
+    def freshness(
+        row: tuple[
+            ProductBinding,
+            SupplierProduct,
+            Supplier,
+            SupplierOfferState | None,
+        ],
+    ) -> tuple[datetime, bool, bool, int, int]:
+        binding, supplier_product, _supplier, state = row
+        checked_at = (
+            state.last_checked_at
+            if state is not None
+            else supplier_product.last_checked_at
+        )
+        if checked_at is None:
+            checked_at = supplier_product.created_at
+        if checked_at is None:
+            checked_at = datetime.min.replace(tzinfo=UTC)
+        elif checked_at.tzinfo is None:
+            checked_at = checked_at.replace(tzinfo=UTC)
+        else:
+            checked_at = checked_at.astimezone(UTC)
+        return (
+            checked_at,
+            state is not None,
+            binding.is_primary,
+            -binding.priority,
+            binding.id,
+        )
+
+    for duplicate_rows in grouped_rows.values():
+        _binding, supplier_product, supplier, state = max(
+            duplicate_rows,
+            key=freshness,
+        )
         if state is not None and state.price is not None and state.available is not False:
             return DumpingCostSource(
                 kind="supplier",

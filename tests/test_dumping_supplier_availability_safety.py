@@ -152,3 +152,81 @@ def test_available_source_reopens_xml_through_normal_dumping_publication(
 
     assert 'available="yes"' in feed.generated_xml
     assert 'preOrder="9"' in feed.generated_xml
+
+
+def test_newest_duplicate_supplier_state_overrides_stale_available_price(
+    db_session,
+) -> None:
+    old_checked = datetime(2026, 7, 30, 2, 45, tzinfo=UTC)
+    new_checked = datetime(2026, 7, 31, 13, 59, tzinfo=UTC)
+    product = Product(
+        kaspi_product_id="151877903",
+        merchant_sku="151877903_110734483",
+        name="GLS Pharmaceuticals Аргинин",
+        status="active",
+    )
+    supplier = Supplier(code="ozon", name="Ozon")
+    db_session.add_all([product, supplier])
+    db_session.flush()
+    stale = SupplierProduct(
+        supplier_id=supplier.id,
+        external_id="legacy-arginin",
+        title="Аргинин Ozon",
+        url="https://www.ozon.ru/product/arginin-51853964/",
+        current_price=Decimal("4998"),
+        in_stock=True,
+        last_checked_at=old_checked,
+    )
+    fresh = SupplierProduct(
+        supplier_id=supplier.id,
+        external_id="51853964",
+        title="Аргинин Ozon",
+        url="https://www.ozon.kz/product/arginin-51853964/",
+        current_price=None,
+        in_stock=False,
+        last_checked_at=new_checked,
+    )
+    db_session.add_all([stale, fresh])
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProductBinding(
+                product_id=product.id,
+                supplier_product_id=stale.id,
+                status="active",
+                is_primary=False,
+                priority=0,
+            ),
+            ProductBinding(
+                product_id=product.id,
+                supplier_product_id=fresh.id,
+                status="active",
+                is_primary=True,
+                priority=0,
+            ),
+            SupplierOfferState(
+                supplier_product_id=stale.id,
+                price=Decimal("4998"),
+                currency="KZT",
+                available=True,
+                fingerprint="1" * 64,
+                adapter_schema_version="ozon-browser-v12",
+                observed_at=old_checked,
+                last_checked_at=old_checked,
+            ),
+            SupplierOfferState(
+                supplier_product_id=fresh.id,
+                price=None,
+                currency="KZT",
+                available=False,
+                stock=0,
+                fingerprint="2" * 64,
+                adapter_schema_version="ozon-browser-v13",
+                observed_at=new_checked,
+                last_checked_at=new_checked,
+            ),
+        ]
+    )
+    db_session.flush()
+
+    assert resolve_cost_source(db_session, product_id=product.id) is None

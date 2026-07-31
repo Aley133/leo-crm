@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import re
 from datetime import UTC, datetime
-from urllib.parse import urlparse
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, HttpUrl
@@ -10,10 +8,21 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
+from .browser_agent_dispatch import queue_browser_target_now
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import get_db
 from .models import Product
-from .monitoring import BindingStatus, MonitorStatus, MonitorTarget
+from .monitoring import (
+    BindingStatus,
+    MonitorStatus,
+    MonitorTarget,
+    SupplierOfferState,
+)
+from .supplier_identity import (
+    UnsupportedSupplierUrl,
+    canonical_supplier_product_identity,
+    parse_supplier_url,
+)
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
@@ -43,37 +52,129 @@ router = APIRouter(
 )
 
 
-OZON_HOSTS = {"ozon.ru", "ozon.kz"}
-WB_HOSTS = {"wildberries.ru", "wb.ru"}
-
-
-def _host_matches(host: str, supported_hosts: set[str]) -> bool:
-    return any(host == item or host.endswith(f".{item}") for item in supported_hosts)
-
-
 def _source_from_url(url: str) -> tuple[str, str, str]:
-    parsed = urlparse(url)
-    host = (parsed.hostname or "").lower().removeprefix("www.")
-    path = parsed.path.rstrip("/")
-
-    if _host_matches(host, OZON_HOSTS):
-        match = re.search(r"(?:product|context/detail/id)/(?:[^/]*-)?(\d+)(?:/|$)", path)
-        external_id = match.group(1) if match else path.split("/")[-1]
-        if not external_id:
-            raise HTTPException(status_code=422, detail="Не удалось определить Ozon ID из ссылки")
-        return "ozon", "Ozon", external_id
-
-    if _host_matches(host, WB_HOSTS):
-        match = re.search(r"/catalog/(\d+)(?:/|$)", path)
-        external_id = match.group(1) if match else path.split("/")[-1]
-        if not external_id:
-            raise HTTPException(status_code=422, detail="Не удалось определить WB ID из ссылки")
-        return "wb", "Wildberries", external_id
-
-    raise HTTPException(
-        status_code=422,
-        detail="Поддерживаются ссылки Ozon (ozon.ru, ozon.kz) и Wildberries",
+    try:
+        identity = parse_supplier_url(url)
+    except UnsupportedSupplierUrl as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return (
+        identity.supplier_code,
+        identity.supplier_name,
+        identity.external_id,
     )
+
+
+def _checked_timestamp(
+    state: SupplierOfferState | None,
+    supplier_product: SupplierProduct,
+) -> datetime:
+    checked_at = (
+        state.last_checked_at
+        if state is not None
+        else supplier_product.last_checked_at
+    )
+    if checked_at is None:
+        checked_at = supplier_product.created_at
+    if checked_at is None:
+        return datetime.min.replace(tzinfo=UTC)
+    if checked_at.tzinfo is None:
+        return checked_at.replace(tzinfo=UTC)
+    return checked_at.astimezone(UTC)
+
+
+def _matching_supplier_products(
+    db: Session,
+    *,
+    supplier: Supplier,
+    external_id: str,
+) -> list[tuple[SupplierProduct, SupplierOfferState | None]]:
+    rows = db.execute(
+        select(SupplierProduct, SupplierOfferState)
+        .outerjoin(
+            SupplierOfferState,
+            SupplierOfferState.supplier_product_id == SupplierProduct.id,
+        )
+        .where(SupplierProduct.supplier_id == supplier.id)
+        .with_for_update(of=SupplierProduct)
+    ).all()
+    matches = [
+        (supplier_product, state)
+        for supplier_product, state in rows
+        if canonical_supplier_product_identity(
+            supplier_code=supplier.code,
+            external_id=supplier_product.external_id,
+            url=supplier_product.url,
+        )
+        == external_id.casefold()
+    ]
+    return sorted(
+        matches,
+        key=lambda row: (
+            _checked_timestamp(row[1], row[0]),
+            row[0].external_id == external_id,
+            row[0].id,
+        ),
+        reverse=True,
+    )
+
+
+def _disable_duplicate_bindings(
+    db: Session,
+    *,
+    product_id: int,
+    supplier: Supplier,
+    external_id: str,
+    winner_supplier_product_id: int,
+) -> None:
+    rows = db.execute(
+        select(ProductBinding, SupplierProduct, MonitorTarget)
+        .join(
+            SupplierProduct,
+            SupplierProduct.id == ProductBinding.supplier_product_id,
+        )
+        .outerjoin(
+            MonitorTarget,
+            MonitorTarget.product_binding_id == ProductBinding.id,
+        )
+        .where(
+            ProductBinding.product_id == product_id,
+            SupplierProduct.supplier_id == supplier.id,
+            SupplierProduct.id != winner_supplier_product_id,
+        )
+        .with_for_update(of=ProductBinding)
+    ).all()
+    duplicate_target_ids: list[int] = []
+    for binding, supplier_product, target in rows:
+        identity = canonical_supplier_product_identity(
+            supplier_code=supplier.code,
+            external_id=supplier_product.external_id,
+            url=supplier_product.url,
+        )
+        if identity != external_id.casefold():
+            continue
+        binding.status = BindingStatus.DISABLED.value
+        binding.is_primary = False
+        if target is not None:
+            target.status = MonitorStatus.DISABLED.value
+            duplicate_target_ids.append(target.id)
+
+    if not duplicate_target_ids:
+        return
+    jobs = db.scalars(
+        select(BrowserAgentJob)
+        .where(
+            BrowserAgentJob.monitor_target_id.in_(duplicate_target_ids),
+            BrowserAgentJob.status == BrowserAgentJobStatus.QUEUED.value,
+        )
+        .with_for_update()
+    ).all()
+    for job in jobs:
+        job.status = BrowserAgentJobStatus.FAILED.value
+        job.error_code = "duplicate_supplier_binding"
+        job.error_message = (
+            "Задание отменено: источник объединён с канонической привязкой"
+        )
+        job.finished_at = datetime.now(UTC)
 
 
 @router.post(
@@ -99,14 +200,12 @@ def create_manual_supplier_binding(
         db.add(supplier)
         db.flush()
 
-    supplier_product = db.scalar(
-        select(SupplierProduct)
-        .where(
-            SupplierProduct.supplier_id == supplier.id,
-            SupplierProduct.external_id == external_id,
-        )
-        .with_for_update()
+    matching_products = _matching_supplier_products(
+        db,
+        supplier=supplier,
+        external_id=external_id,
     )
+    supplier_product = matching_products[0][0] if matching_products else None
     created_supplier_product = supplier_product is None
     if supplier_product is None:
         supplier_product = SupplierProduct(
@@ -118,6 +217,16 @@ def create_manual_supplier_binding(
         db.add(supplier_product)
         db.flush()
     else:
+        exact_identity_owner = next(
+            (
+                item
+                for item, _state in matching_products
+                if item.external_id == external_id
+            ),
+            None,
+        )
+        if exact_identity_owner is None:
+            supplier_product.external_id = external_id
         supplier_product.url = url
         if payload.title:
             supplier_product.title = payload.title.strip()
@@ -152,6 +261,14 @@ def create_manual_supplier_binding(
             binding.is_primary = True
             binding.priority = 0
 
+    _disable_duplicate_bindings(
+        db,
+        product_id=product.id,
+        supplier=supplier,
+        external_id=external_id,
+        winner_supplier_product_id=supplier_product.id,
+    )
+
     if payload.is_primary:
         other_bindings = db.scalars(
             select(ProductBinding).where(
@@ -183,14 +300,13 @@ def create_manual_supplier_binding(
 
     job: BrowserAgentJob | None = None
     if payload.run_initial_check:
-        job = BrowserAgentJob(
-            monitor_target_id=monitor_target.id,
-            supplier_product_id=supplier_product.id,
-            url=supplier_product.url,
-            status=BrowserAgentJobStatus.QUEUED.value,
+        queue_result = queue_browser_target_now(
+            db,
+            target_id=monitor_target.id,
+            supplier_code=supplier.code,
         )
-        db.add(job)
-        db.flush()
+        if queue_result.job_id is not None:
+            job = db.get(BrowserAgentJob, queue_result.job_id)
 
     db.commit()
 
