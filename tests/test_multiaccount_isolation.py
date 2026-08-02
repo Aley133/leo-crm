@@ -29,8 +29,10 @@ from backend.app.dumping_api import (
     read_public_kaspi_feed,
     read_workspace_kaspi_feed,
 )
-from backend.app.dumping_models import DumpingPolicy, KaspiXmlFeed
+from backend.app.dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
+from backend.app.dumping_runner import apply_competitor_snapshot
 from backend.app.inventory_models import InventoryBatch
+from backend.app.kaspi_offer_competitor import KaspiCompetitorSnapshot
 from backend.app.legacy_workspace_scope import WorkspaceIsolationError
 from backend.app.kaspi_credentials_crypto import decrypt_api_token
 from backend.app.main import app
@@ -239,6 +241,73 @@ def test_public_xml_has_one_stable_url_per_workspace(db_session) -> None:
 
     assert legacy.body == b"<catalog>1</catalog>"
     assert second.body == b"<catalog>2</catalog>"
+
+
+def test_unscoped_competitor_completion_updates_only_job_workspace_xml(
+    db_session,
+) -> None:
+    first = _seed_workspace(db_session, 1, "barwork")
+    second = _seed_workspace(db_session, 2, "leoxpress")
+    db_session.commit()
+
+    barwork_xml = """<?xml version='1.0' encoding='utf-8'?>
+    <kaspi_catalog><offers><offer sku='same-sku'>
+      <cityprices><cityprice cityId='750000000'>8000</cityprice></cityprices>
+      <availability available='no' preOrder='0' stockCount='0'/>
+    </offer></offers></kaspi_catalog>"""
+    leoxpress_xml = """<?xml version='1.0' encoding='utf-8'?>
+    <kaspi_catalog><offers><offer sku='same-sku'>
+      <cityprices><cityprice cityId='750000000'>9000</cityprice></cityprices>
+      <availability available='yes' preOrder='0' stockCount='2'/>
+    </offer></offers></kaspi_catalog>"""
+
+    db_session.info["include_all_workspaces"] = True
+    try:
+        barwork_feed = db_session.get(KaspiXmlFeed, first["feed_id"])
+        leoxpress_feed = db_session.get(KaspiXmlFeed, second["feed_id"])
+        barwork_feed.source_xml = barwork_feed.generated_xml = barwork_xml
+        leoxpress_feed.source_xml = leoxpress_feed.generated_xml = leoxpress_xml
+
+        policy = db_session.scalar(
+            select(DumpingPolicy).where(
+                DumpingPolicy.product_id == first["product_id"]
+            )
+        )
+        db_session.add(
+            DumpingRun(
+                workspace_id=1,
+                product_id=first["product_id"],
+                dumping_policy_id=policy.id,
+                status="ready",
+                own_price_kzt=Decimal("8000"),
+                published=True,
+                explanation_json={},
+            )
+        )
+        db_session.commit()
+
+        with workspace_context(1):
+            result = apply_competitor_snapshot(
+                db_session,
+                product_id=first["product_id"],
+                market=KaspiCompetitorSnapshot(
+                    own_price_kzt=None,
+                    competitor_price_kzt=Decimal("7500"),
+                    competitor_name="Competitor",
+                    own_position=None,
+                    seller_count=1,
+                    product_url="https://kaspi.kz/shop/p/test/",
+                ),
+            )
+        db_session.commit()
+
+        assert result["decision"]["status"] != "suspended_seller_removed"
+        assert policy.enabled is True
+        assert 'cityId="750000000">7499</' in barwork_feed.generated_xml
+        assert 'stockCount="1"' in barwork_feed.generated_xml
+        assert leoxpress_feed.generated_xml == leoxpress_xml
+    finally:
+        db_session.info.pop("include_all_workspaces", None)
 
 
 def test_existing_pages_share_one_account_context_script() -> None:

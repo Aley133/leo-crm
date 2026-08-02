@@ -20,7 +20,7 @@ from .dumping_service import (
 from .kaspi_offer_competitor import KaspiCompetitorSnapshot, scan_kaspi_competitors
 from .models import Product
 from .suppliers import ProductBinding
-from .workspace_context import workspace_context
+from .workspace_context import current_workspace_id, workspace_context
 
 
 def apply_competitor_snapshot(
@@ -44,7 +44,10 @@ def apply_competitor_snapshot(
 
     feed = db.scalar(
         select(KaspiXmlFeed)
-        .where(KaspiXmlFeed.active.is_(True))
+        .where(
+            KaspiXmlFeed.workspace_id == current_workspace_id(),
+            KaspiXmlFeed.active.is_(True),
+        )
         .order_by(KaspiXmlFeed.id.desc())
         .limit(1)
     )
@@ -148,7 +151,12 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     if policy is None or not policy.enabled:
         raise ValueError("Демпинг для товара не подключён")
-    feed = db.scalar(select(KaspiXmlFeed).order_by(KaspiXmlFeed.id.desc()).limit(1))
+    feed = db.scalar(
+        select(KaspiXmlFeed)
+        .where(KaspiXmlFeed.workspace_id == current_workspace_id())
+        .order_by(KaspiXmlFeed.id.desc())
+        .limit(1)
+    )
     if feed is None or not feed.merchant_id:
         raise ValueError("Импортируйте полный XML с merchantid")
 

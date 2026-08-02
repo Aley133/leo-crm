@@ -417,7 +417,10 @@ def feed_offer_is_expected_active(
 def _latest_feed_for_update(db: Session) -> KaspiXmlFeed | None:
     return db.scalar(
         select(KaspiXmlFeed)
-        .where(KaspiXmlFeed.active.is_(True))
+        .where(
+            KaspiXmlFeed.workspace_id == current_workspace_id(),
+            KaspiXmlFeed.active.is_(True),
+        )
         .order_by(KaspiXmlFeed.id.desc())
         .with_for_update()
         .limit(1)
