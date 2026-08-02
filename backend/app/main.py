@@ -62,8 +62,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.21.1"
-DEPLOYMENT_MARKER = "workspace-isolated-kaspi-xml-hotfix"
+APP_VERSION = "0.21.2"
+DEPLOYMENT_MARKER = "instant-kaspi-order-product-linking"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

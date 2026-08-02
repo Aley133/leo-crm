@@ -3,7 +3,11 @@ from __future__ import annotations
 import asyncio
 from types import SimpleNamespace
 
-from backend.app import kaspi_order_polling, kaspi_raw_receiver_jobs
+from backend.app import (
+    kaspi_order_polling,
+    kaspi_product_enrichment_jobs,
+    kaspi_raw_receiver_jobs,
+)
 
 
 def test_fast_raw_job_reads_only_recent_active_order_window() -> None:
@@ -19,6 +23,16 @@ def test_fast_raw_job_reads_only_recent_active_order_window() -> None:
     assert job["states"] == kaspi_order_polling.FAST_ORDER_STATES
     assert job["to_ms"] - job["from_ms"] == 20 * 60 * 1000
     assert job["progress"]["total"] == len(kaspi_order_polling.FAST_ORDER_STATES) + 1
+
+
+def test_fast_enrichment_job_reads_only_the_same_recent_window() -> None:
+    kaspi_product_enrichment_jobs.JOBS.clear()
+    job_id = kaspi_product_enrichment_jobs.create_job(
+        days=1,
+        lookback_minutes=kaspi_order_polling.FAST_LOOKBACK_MINUTES,
+    )
+
+    assert kaspi_product_enrichment_jobs.JOBS[job_id]["lookback_minutes"] == 20
 
 
 def test_polling_runs_fast_each_minute_and_full_reconciliation_every_tenth_cycle(
@@ -41,6 +55,7 @@ def test_polling_runs_fast_each_minute_and_full_reconciliation_every_tenth_cycle
 
     assert all(call["mode"] == "fast" for call in calls[:9])
     assert all(call["lookback_minutes"] == 20 for call in calls[:9])
+    assert all(call["enrich_products"] is True for call in calls[:9])
     assert calls[9] == {"days": 1, "mode": "full", "enrich_products": True}
 
 
@@ -80,12 +95,12 @@ def test_fast_polling_applies_the_same_cycle_to_every_kaspi_workspace(monkeypatc
             days=1,
             mode="fast",
             lookback_minutes=20,
-            enrich_products=False,
+            enrich_products=True,
         )
     )
 
     assert observed == [
-        (1, 1, "fast", 20, False),
-        (2, 1, "fast", 20, False),
+        (1, 1, "fast", 20, True),
+        (2, 1, "fast", 20, True),
     ]
     assert [item["workspace_id"] for item in kaspi_order_polling.LAST_RUN["accounts"]] == [1, 2]

@@ -13,7 +13,10 @@ from .db import SessionLocal
 from .inventory_service import allocate_order_line_fifo
 from .kaspi_http_transport import KaspiHttpSettings
 from .kaspi_integration import ensure_kaspi_marketplace_account
-from .kaspi_order_payload import canonicalize_kaspi_order_payload
+from .kaspi_order_payload import (
+    canonicalize_kaspi_order_payload,
+    canonicalize_kaspi_product_id,
+)
 from .marketplace_import import import_kaspi_order
 from .models import MarketplaceAccount, MarketplaceOrder, MarketplaceRawPayload
 from .product_identity_service import ensure_marketplace_listing_for_order_line
@@ -179,7 +182,7 @@ def _flatten_entry(
     if sku is not None:
         attrs["offerCode"] = sku
     if external_product_id is not None:
-        attrs["productId"] = str(external_product_id)
+        attrs["productId"] = canonicalize_kaspi_product_id(external_product_id)
     result["attributes"] = attrs
     return result
 

@@ -8,6 +8,7 @@ from urllib.parse import parse_qs, urlparse
 
 import httpx
 
+from .kaspi_order_payload import canonicalize_kaspi_product_id
 from .marketplace_transport import MarketplaceOrderPage
 
 DEFAULT_KASPI_API_BASE_URL = "https://kaspi.kz/shop/api/v2"
@@ -356,7 +357,7 @@ class KaspiHttpTransport:
         if merchant_sku is not None:
             attrs["offerCode"] = merchant_sku
         if external_product_id is not None:
-            attrs["productId"] = str(external_product_id)
+            attrs["productId"] = canonicalize_kaspi_product_id(external_product_id)
         flattened["attributes"] = attrs
         return flattened
 

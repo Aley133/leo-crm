@@ -116,6 +116,7 @@ async def _run_account_cycle(
                 days=days,
                 marketplace_account_id=connection.account_id,
                 workspace_id=connection.workspace_id,
+                lookback_minutes=lookback_minutes if mode == "fast" else None,
             )
             await run_enrichment_job(
                 enrichment_job_id,
@@ -249,7 +250,7 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
                     days=1,
                     mode="fast",
                     lookback_minutes=FAST_LOOKBACK_MINUTES,
-                    enrich_products=False,
+                    enrich_products=True,
                 )
         except asyncio.CancelledError:
             raise

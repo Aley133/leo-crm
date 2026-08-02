@@ -11,6 +11,7 @@ from sqlalchemy import func, or_, select
 from .db import SessionLocal
 from .inventory_service import allocate_order_line_fifo
 from .kaspi_http_transport import KaspiHttpSettings
+from .kaspi_order_payload import canonicalize_kaspi_product_id
 from .models import MarketplaceOrder, MarketplaceOrderLine
 from .product_identity_service import ensure_marketplace_listing_for_order_line
 from .workspace_context import current_workspace_id
@@ -173,12 +174,14 @@ def normalize_entry(
         entry_attrs.get("code"),
         entry_attrs.get("sku"),
     )
-    external_product_id = _text(
-        (product or {}).get("id"),
-        _relationship_id(entry, "product", "masterProduct"),
-        merchant_attrs.get("productId"),
-        entry_attrs.get("productId"),
-        entry_attrs.get("externalProductId"),
+    external_product_id = canonicalize_kaspi_product_id(
+        _text(
+            (product or {}).get("id"),
+            _relationship_id(entry, "product", "masterProduct"),
+            merchant_attrs.get("productId"),
+            entry_attrs.get("productId"),
+            entry_attrs.get("externalProductId"),
+        )
     )
 
     return {
@@ -197,9 +200,12 @@ def create_job(
     days: int = 31,
     marketplace_account_id: int | None = None,
     workspace_id: int | None = None,
+    lookback_minutes: int | None = None,
 ) -> str:
     if days < 1 or days > 31:
         raise ValueError("days must be between 1 and 31")
+    if lookback_minutes is not None and not 1 <= lookback_minutes <= 24 * 60:
+        raise ValueError("lookback_minutes must be between 1 and 1440")
     _prune_job_registry()
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {
@@ -208,6 +214,7 @@ def create_job(
         "marketplace_account_id": marketplace_account_id,
         "status": "queued",
         "days": days,
+        "lookback_minutes": lookback_minutes,
         "processed": 0,
         "total": 0,
         "updated": 0,
@@ -422,7 +429,12 @@ async def run_job(
             if marketplace_account_id is not None
             else job.get("marketplace_account_id")
         )
-        since = datetime.now(UTC) - timedelta(days=int(job["days"]))
+        lookback_minutes = job.get("lookback_minutes")
+        since = datetime.now(UTC) - (
+            timedelta(minutes=int(lookback_minutes))
+            if lookback_minutes is not None
+            else timedelta(days=int(job["days"]))
+        )
         if selected_account_id is None:
             orders = await asyncio.to_thread(_load_unresolved_orders, since)
         else:

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import base64
+import binascii
 from datetime import datetime
 from typing import Any
 
@@ -17,6 +19,33 @@ _IMPORT_TOKEN_BY_STAGE = {
     "returned": "RETURNED",
     "unknown": "UNKNOWN",
 }
+
+
+def canonicalize_kaspi_product_id(value: Any) -> str | None:
+    """Return Kaspi's stable numeric product id when JSON:API encodes it.
+
+    Newly created order entries can expose a relationship id such as
+    ``MTA1NTc5OTQx`` while the seller XML and product registry use ``105579941``.
+    Kaspi later returns the decoded id from the product endpoint, which used to
+    leave the order as ``Unknown product`` until the slower enrichment cycle.
+
+    Decode only strict Base64 values whose ASCII payload is a plausible numeric
+    Kaspi id. Opaque JSON:API ids remain byte-for-byte unchanged.
+    """
+
+    if value is None:
+        return None
+    raw = str(value).strip()
+    if not raw or raw.isdigit():
+        return raw or None
+    try:
+        padded = raw + ("=" * (-len(raw) % 4))
+        decoded = base64.b64decode(padded, validate=True).decode("ascii").strip()
+    except (binascii.Error, UnicodeDecodeError, ValueError):
+        return raw
+    if decoded.isdigit() and 6 <= len(decoded) <= 18:
+        return decoded
+    return raw
 
 
 def canonicalize_kaspi_order_payload(
