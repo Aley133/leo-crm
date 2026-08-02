@@ -144,6 +144,6 @@ def validate_kaspi_connection(api_token: str) -> None:
         KaspiHttpSettings.from_environment_defaults(api_token, initial_lookback_days=1)
     )
     try:
-        transport.fetch_orders(cursor="0", updated_after=None, limit=1)
+        transport.fetch_orders(cursor="1", updated_after=None, limit=1)
     finally:
         transport.close()

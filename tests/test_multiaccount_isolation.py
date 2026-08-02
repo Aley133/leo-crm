@@ -33,6 +33,7 @@ from backend.app.main import app
 from backend.app.models import MarketplaceAccount, MarketplaceOrder, Product
 from backend.app.suppliers import Supplier
 from backend.app.workspace_context import workspace_context
+from backend.app.workspace_kaspi import validate_kaspi_connection
 from backend.app.workspace_models import KaspiAccountCredential, Workspace
 
 
@@ -321,6 +322,39 @@ def test_second_kaspi_account_is_created_without_exposing_token(db_session, monk
     assert credential is not None
     assert credential.api_token_encrypted != "secret-second-token"
     assert decrypt_api_token(credential.api_token_encrypted) == "secret-second-token"
+
+
+def test_kaspi_connection_validation_starts_from_first_valid_page(monkeypatch) -> None:
+    observed: dict[str, object] = {}
+
+    class FakeTransport:
+        def __init__(self, settings):
+            observed["api_token"] = settings.api_token
+
+        def fetch_orders(self, *, cursor, updated_after, limit):
+            observed.update(
+                cursor=cursor,
+                updated_after=updated_after,
+                limit=limit,
+            )
+
+        def close(self):
+            observed["closed"] = True
+
+    monkeypatch.setattr(
+        "backend.app.workspace_kaspi.KaspiHttpTransport",
+        FakeTransport,
+    )
+
+    validate_kaspi_connection("secret-token")
+
+    assert observed == {
+        "api_token": "secret-token",
+        "cursor": "1",
+        "updated_after": None,
+        "limit": 1,
+        "closed": True,
+    }
 
 
 def test_multiaccount_migration_covers_runtime_tables() -> None:
