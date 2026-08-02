@@ -11,11 +11,12 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
-from .db import get_db
+from .db import get_db, get_unscoped_db
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from .dumping_runner import apply_competitor_snapshot
 from .kaspi_offer_competitor import KaspiCompetitorSnapshot
 from .models import Product
+from .workspace_context import workspace_context
 
 
 router = APIRouter(
@@ -227,7 +228,7 @@ def read_agent_status() -> dict:
 
 
 @router.post("/claim")
-def claim_job(payload: AgentClaim, db: Session = Depends(get_db)) -> dict:
+def claim_job(payload: AgentClaim, db: Session = Depends(get_unscoped_db)) -> dict:
     _touch_agent(payload)
     now = _now()
     job, recovered = _claimable_job(db, now=now)
@@ -237,7 +238,13 @@ def claim_job(payload: AgentClaim, db: Session = Depends(get_db)) -> dict:
     product = db.get(Product, job.product_id)
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == job.product_id))
     feed = db.scalar(
-        select(KaspiXmlFeed).where(KaspiXmlFeed.active.is_(True)).order_by(KaspiXmlFeed.id.desc()).limit(1)
+        select(KaspiXmlFeed)
+        .where(
+            KaspiXmlFeed.workspace_id == job.workspace_id,
+            KaspiXmlFeed.active.is_(True),
+        )
+        .order_by(KaspiXmlFeed.id.desc())
+        .limit(1)
     )
     if product is None or policy is None or feed is None or not feed.merchant_id:
         job.status = "failed_local"
@@ -290,7 +297,7 @@ def claim_job(payload: AgentClaim, db: Session = Depends(get_db)) -> dict:
 
 
 @router.post("/jobs/{job_id}/complete")
-def complete_job(job_id: int, payload: AgentComplete, db: Session = Depends(get_db)) -> dict:
+def complete_job(job_id: int, payload: AgentComplete, db: Session = Depends(get_unscoped_db)) -> dict:
     job = db.scalar(select(DumpingRun).where(DumpingRun.id == job_id).with_for_update())
     if job is None:
         raise HTTPException(status_code=404, detail="Competitor job not found")
@@ -308,29 +315,31 @@ def complete_job(job_id: int, payload: AgentComplete, db: Session = Depends(get_
             product_url=payload.product_url or "",
         )
         try:
-            with db.begin_nested():
-                result = apply_competitor_snapshot(
-                    db,
-                    product_id=job.product_id,
-                    market=market,
-                )
+            with workspace_context(job.workspace_id):
+                with db.begin_nested():
+                    result = apply_competitor_snapshot(
+                        db,
+                        product_id=job.product_id,
+                        market=market,
+                    )
         except ValueError as exc:
             if "Нет доступной партии или актуального предложения поставщика" in str(exc):
                 from .dumping_service import suspend_product_without_cost_source
 
-                product = db.get(Product, job.product_id)
-                policy = db.scalar(
-                    select(DumpingPolicy).where(
-                        DumpingPolicy.product_id == job.product_id
+                with workspace_context(job.workspace_id):
+                    product = db.get(Product, job.product_id)
+                    policy = db.scalar(
+                        select(DumpingPolicy).where(
+                            DumpingPolicy.product_id == job.product_id
+                        )
                     )
-                )
-                if product is not None and policy is not None:
-                    suspend_product_without_cost_source(
-                        db,
-                        product=product,
-                        policy=policy,
-                        reason="dumping_decision_lost_cost_source",
-                    )
+                    if product is not None and policy is not None:
+                        suspend_product_without_cost_source(
+                            db,
+                            product=product,
+                            policy=policy,
+                            reason="dumping_decision_lost_cost_source",
+                        )
             job.status = "failed_local"
             job.explanation_json = {
                 **meta,

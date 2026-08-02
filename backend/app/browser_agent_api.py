@@ -19,8 +19,11 @@ from .browser_agent_ingestion import BrowserAgentResultError, persist_browser_ag
 from .browser_agent_job_contract import BrowserAgentJobType, decode_browser_agent_job, serialize_claim_payload
 from .browser_agent_models import BrowserAgent, BrowserAgentJob, BrowserAgentJobStatus
 from .browser_agent_presence import record_browser_agent_heartbeat
-from .db import get_db
+from .db import get_db, get_unscoped_db
 from .lease_engine import utc_now
+from .monitoring import MonitorTarget
+from .suppliers import SupplierProduct
+from .workspace_context import workspace_context
 
 
 class BrowserAgentJobCreate(BaseModel):
@@ -233,7 +236,7 @@ def _upsert_agent(
 
 
 @router.post("/heartbeat")
-def heartbeat_browser_agent(payload: BrowserAgentHeartbeat, db: Session = Depends(get_db)):
+def heartbeat_browser_agent(payload: BrowserAgentHeartbeat, db: Session = Depends(get_unscoped_db)):
     agent = _upsert_agent(
         db,
         agent_id=payload.agent_id,
@@ -257,7 +260,7 @@ def heartbeat_browser_agent(payload: BrowserAgentHeartbeat, db: Session = Depend
 
 
 @router.get("/agents")
-def list_browser_agents(db: Session = Depends(get_db)):
+def list_browser_agents(db: Session = Depends(get_unscoped_db)):
     cutoff = utc_now() - timedelta(seconds=30)
     agents = db.scalars(select(BrowserAgent).order_by(BrowserAgent.agent_id)).all()
     return [
@@ -278,7 +281,7 @@ def list_browser_agents(db: Session = Depends(get_db)):
 
 
 @router.post("/dispatch-due")
-def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_db)):
+def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_unscoped_db)):
     acquired, retry_after = _acquire_dispatch_slot(payload.supplier_code)
     if not acquired:
         return {
@@ -302,6 +305,13 @@ def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_d
 
 @router.post("/jobs", status_code=status.HTTP_201_CREATED)
 def create_browser_agent_job(payload: BrowserAgentJobCreate, db: Session = Depends(get_db)):
+    supplier_product = db.get(SupplierProduct, payload.supplier_product_id)
+    if supplier_product is None:
+        raise HTTPException(status_code=404, detail="Supplier product not found")
+    if payload.monitor_target_id is not None:
+        target = db.get(MonitorTarget, payload.monitor_target_id)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Monitor target not found")
     job = BrowserAgentJob(
         monitor_target_id=payload.monitor_target_id,
         supplier_product_id=payload.supplier_product_id,
@@ -315,7 +325,7 @@ def create_browser_agent_job(payload: BrowserAgentJobCreate, db: Session = Depen
 
 
 @router.post("/claim")
-def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(get_db)):
+def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(get_unscoped_db)):
     agent = _upsert_agent(
         db,
         agent_id=payload.agent_id,
@@ -375,7 +385,7 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
 
 
 @router.post("/jobs/{job_id}/complete")
-def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Session = Depends(get_db)):
+def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Session = Depends(get_unscoped_db)):
     job = db.scalar(select(BrowserAgentJob).where(BrowserAgentJob.id == job_id).with_for_update())
     if job is None:
         raise HTTPException(status_code=404, detail="Browser agent job not found")
@@ -392,23 +402,37 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
         raise HTTPException(status_code=422, detail="status must be succeeded or failed")
     if succeeded and payload.payload is None:
         raise HTTPException(status_code=422, detail="successful browser agent result requires payload")
+    if job.monitor_target_id is not None:
+        target = db.get(MonitorTarget, job.monitor_target_id)
+        supplier_product = db.get(SupplierProduct, job.supplier_product_id)
+        if (
+            target is None
+            or supplier_product is None
+            or target.workspace_id != job.workspace_id
+            or supplier_product.workspace_id != job.workspace_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail="Browser agent job ownership is inconsistent",
+            )
 
     agent_id = job.lease_owner
     attempt_id: int | None = None
     changed: bool | None = None
     try:
-        if succeeded and job.monitor_target_id is not None:
-            attempt_id, changed = persist_browser_agent_success(
-                db, job=job, payload=payload.payload or {}, finished_at=now
-            )
-        elif not succeeded and job.monitor_target_id is not None:
-            attempt_id = persist_browser_agent_failure(
-                db,
-                job=job,
-                error_code=payload.error_code,
-                error_message=payload.error_message,
-                finished_at=now,
-            )
+        with workspace_context(job.workspace_id):
+            if succeeded and job.monitor_target_id is not None:
+                attempt_id, changed = persist_browser_agent_success(
+                    db, job=job, payload=payload.payload or {}, finished_at=now
+                )
+            elif not succeeded and job.monitor_target_id is not None:
+                attempt_id = persist_browser_agent_failure(
+                    db,
+                    job=job,
+                    error_code=payload.error_code,
+                    error_message=payload.error_message,
+                    finished_at=now,
+                )
 
         job.status = payload.status
         job.result_payload = json.dumps(payload.payload, ensure_ascii=False, sort_keys=True) if payload.payload is not None else None

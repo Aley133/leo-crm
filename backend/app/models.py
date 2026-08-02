@@ -18,6 +18,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 from .db_types import UTCDateTime
+from .workspace_context import WorkspaceOwned
 
 
 LEGACY_WORKSPACE_ID = 1
@@ -109,7 +110,7 @@ class MarketplaceAccount(Base):
     orders: Mapped[list["MarketplaceOrder"]] = relationship(back_populates="account")
 
 
-class MarketplaceImportExecution(Base):
+class MarketplaceImportExecution(WorkspaceOwned, Base):
     __tablename__ = "marketplace_import_executions"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -123,7 +124,7 @@ class MarketplaceImportExecution(Base):
     error_summary: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
-class MarketplaceImportCheckpoint(Base):
+class MarketplaceImportCheckpoint(WorkspaceOwned, Base):
     __tablename__ = "marketplace_import_checkpoints"
     __table_args__ = (
         UniqueConstraint("marketplace_account_id", "stream_name", name="uq_marketplace_checkpoint_account_stream"),
@@ -137,7 +138,7 @@ class MarketplaceImportCheckpoint(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class MarketplaceOrder(Base):
+class MarketplaceOrder(WorkspaceOwned, Base):
     __tablename__ = "marketplace_orders"
     __table_args__ = (
         UniqueConstraint("marketplace_account_id", "external_order_id", name="uq_marketplace_order_account_external"),
@@ -165,7 +166,7 @@ class MarketplaceOrder(Base):
     events: Mapped[list["MarketplaceOrderEvent"]] = relationship(back_populates="order", cascade="all, delete-orphan")
 
 
-class MarketplaceOrderLine(Base):
+class MarketplaceOrderLine(WorkspaceOwned, Base):
     __tablename__ = "marketplace_order_lines"
     __table_args__ = (
         UniqueConstraint("marketplace_order_id", "external_line_id", name="uq_marketplace_order_line_external"),
@@ -186,7 +187,7 @@ class MarketplaceOrderLine(Base):
     order: Mapped[MarketplaceOrder] = relationship(back_populates="lines")
 
 
-class MarketplaceOrderEvent(Base):
+class MarketplaceOrderEvent(WorkspaceOwned, Base):
     __tablename__ = "marketplace_order_events"
     __table_args__ = (
         UniqueConstraint("marketplace_order_id", "source_event_key", name="uq_marketplace_order_event_source_key"),
@@ -205,7 +206,7 @@ class MarketplaceOrderEvent(Base):
     order: Mapped[MarketplaceOrder] = relationship(back_populates="events")
 
 
-class MarketplaceRawPayload(Base):
+class MarketplaceRawPayload(WorkspaceOwned, Base):
     __tablename__ = "marketplace_raw_payloads"
     __table_args__ = (
         UniqueConstraint("marketplace_account_id", "payload_type", "external_object_id", "content_hash", name="uq_marketplace_raw_payload_identity"),
@@ -221,7 +222,7 @@ class MarketplaceRawPayload(Base):
     received_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class OutboxEvent(Base):
+class OutboxEvent(WorkspaceOwned, Base):
     __tablename__ = "outbox_events"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)

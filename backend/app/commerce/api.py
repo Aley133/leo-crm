@@ -16,6 +16,7 @@ from ..kaspi_product_enrichment_jobs import (
 )
 from ..kaspi_raw_receiver_jobs import JOBS as RAW_JOBS
 from ..kaspi_raw_receiver_jobs import create_job, public_job, run_job
+from ..workspace_kaspi import load_workspace_kaspi_connection
 from .repository import SqlAlchemyCommerceRepository
 from .schemas import CommerceOrderLineRead, CommerceOrderRead, CommerceOrdersResponse, CommerceSummaryRead
 from .service import CommerceService
@@ -23,16 +24,33 @@ from .service import CommerceService
 router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depends(require_service_token)])
 
 
-async def _run_full_kaspi_rebuild(job_id: str, *, days: int) -> None:
-    await run_job(job_id)
+async def _run_full_kaspi_rebuild(
+    job_id: str,
+    *,
+    days: int,
+    api_token: str,
+    marketplace_account_id: int,
+) -> None:
+    await run_job(
+        job_id,
+        api_token=api_token,
+        marketplace_account_id=marketplace_account_id,
+    )
     raw_job = RAW_JOBS.get(job_id)
     if raw_job is None or raw_job.get("status") == "failed":
         return
-    enrichment_job_id = create_product_enrichment_job(days=days)
+    enrichment_job_id = create_product_enrichment_job(
+        days=days,
+        marketplace_account_id=marketplace_account_id,
+    )
     raw_job["status"] = "enriching_products"
     raw_job["enrichment_job_id"] = enrichment_job_id
     raw_job["message"] = "Заказы загружены. Получаем точные названия, артикулы и выполняем складское списание"
-    await run_product_enrichment_job(enrichment_job_id)
+    await run_product_enrichment_job(
+        enrichment_job_id,
+        api_token=api_token,
+        marketplace_account_id=marketplace_account_id,
+    )
     enrichment = public_product_enrichment_job(enrichment_job_id) or {}
     enrichment_status = str(enrichment.get("status") or "failed")
     enrichment_errors = list(enrichment.get("errors") or [])
@@ -60,13 +78,31 @@ async def _run_full_kaspi_rebuild(job_id: str, *, days: int) -> None:
 @router.post("/orders/rebuild", status_code=status.HTTP_202_ACCEPTED)
 async def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
     with SessionLocal() as session:
+        connection = load_workspace_kaspi_connection(session)
+        if connection is None:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Kaspi API is not configured for the selected account",
+            )
         session.execute(delete(BrowserAgentJob).where(BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%")))
         session.commit()
     try:
-        job_id = create_job(days=days)
+        job_id = create_job(
+            days=days,
+            timezone_name=connection.timezone,
+            marketplace_account_id=connection.account_id,
+            workspace_id=connection.workspace_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    asyncio.create_task(_run_full_kaspi_rebuild(job_id, days=days))
+    asyncio.create_task(
+        _run_full_kaspi_rebuild(
+            job_id,
+            days=days,
+            api_token=connection.api_token,
+            marketplace_account_id=connection.account_id,
+        )
+    )
     return {"job_id": job_id, "status": "queued", "days": days, "message": "Kaspi full order rebuild queued"}
 
 
@@ -80,11 +116,28 @@ def read_rebuild_job(job_id: str) -> dict[str, object]:
 
 @router.post("/orders/enrich-products", status_code=status.HTTP_202_ACCEPTED)
 async def enrich_kaspi_order_products(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
+    with SessionLocal() as session:
+        connection = load_workspace_kaspi_connection(session)
+    if connection is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Kaspi API is not configured for the selected account",
+        )
     try:
-        job_id = create_product_enrichment_job(days=days)
+        job_id = create_product_enrichment_job(
+            days=days,
+            marketplace_account_id=connection.account_id,
+            workspace_id=connection.workspace_id,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_422_UNPROCESSABLE_ENTITY, detail=str(exc)) from exc
-    asyncio.create_task(run_product_enrichment_job(job_id))
+    asyncio.create_task(
+        run_product_enrichment_job(
+            job_id,
+            api_token=connection.api_token,
+            marketplace_account_id=connection.account_id,
+        )
+    )
     return {"job_id": job_id, "status": "queued", "days": days, "message": "Kaspi product enrichment job queued"}
 
 

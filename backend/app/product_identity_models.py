@@ -7,6 +7,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, JSON, String, Text, Unique
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .workspace_context import WorkspaceOwned
 
 
 class MarketplaceListingStatus(StrEnum):
@@ -34,7 +35,7 @@ class MarketplaceListingEventType(StrEnum):
     UNRESOLVED = "unresolved"
 
 
-class MarketplaceListing(Base):
+class MarketplaceListing(WorkspaceOwned, Base):
     __tablename__ = "marketplace_listings"
     __table_args__ = (
         UniqueConstraint(
@@ -76,7 +77,7 @@ class MarketplaceListing(Base):
     )
 
 
-class MarketplaceListingIssue(Base):
+class MarketplaceListingIssue(WorkspaceOwned, Base):
     __tablename__ = "marketplace_listing_issues"
     __table_args__ = (
         UniqueConstraint(
@@ -109,7 +110,7 @@ class MarketplaceListingIssue(Base):
     )
 
 
-class MarketplaceListingEvent(Base):
+class MarketplaceListingEvent(WorkspaceOwned, Base):
     __tablename__ = "marketplace_listing_events"
 
     id: Mapped[int] = mapped_column(primary_key=True)

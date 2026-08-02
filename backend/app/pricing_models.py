@@ -7,6 +7,7 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, St
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .workspace_context import WorkspaceOwned
 
 
 class PriceCalculationStatus(StrEnum):
@@ -19,7 +20,7 @@ class PriceCalculationStatus(StrEnum):
     INVALID_POLICY = "invalid_policy"
 
 
-class PricingPolicy(Base):
+class PricingPolicy(WorkspaceOwned, Base):
     __tablename__ = "pricing_policies"
     __table_args__ = (UniqueConstraint("product_id", name="uq_pricing_policy_product"),)
 
@@ -53,7 +54,7 @@ class FxRateSnapshot(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class PriceCalculation(Base):
+class PriceCalculation(WorkspaceOwned, Base):
     __tablename__ = "price_calculations"
 
     id: Mapped[int] = mapped_column(primary_key=True)

@@ -18,6 +18,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 from .db_types import UTCDateTime
+from .workspace_context import WorkspaceOwned
 
 
 class PurchaseOrigin(StrEnum):
@@ -35,7 +36,7 @@ class PurchaseStatus(StrEnum):
     CLOSED = "closed"
 
 
-class PurchaseRequest(Base):
+class PurchaseRequest(WorkspaceOwned, Base):
     __tablename__ = "purchase_requests"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -70,7 +71,7 @@ class PurchaseRequest(Base):
     )
 
 
-class PurchaseRequestLine(Base):
+class PurchaseRequestLine(WorkspaceOwned, Base):
     __tablename__ = "purchase_request_lines"
     __table_args__ = (
         CheckConstraint("quantity > 0", name="ck_purchase_request_line_quantity_positive"),
@@ -106,7 +107,7 @@ class PurchaseRequestLine(Base):
     )
 
 
-class PurchaseEvent(Base):
+class PurchaseEvent(WorkspaceOwned, Base):
     __tablename__ = "purchase_events"
     __table_args__ = (
         UniqueConstraint(
@@ -133,7 +134,7 @@ class PurchaseEvent(Base):
     purchase_request: Mapped[PurchaseRequest] = relationship(back_populates="events")
 
 
-class PurchaseReceipt(Base):
+class PurchaseReceipt(WorkspaceOwned, Base):
     __tablename__ = "purchase_receipts"
 
     id: Mapped[UUID] = mapped_column(primary_key=True, default=uuid4)
@@ -153,7 +154,7 @@ class PurchaseReceipt(Base):
     )
 
 
-class PurchaseReceiptLine(Base):
+class PurchaseReceiptLine(WorkspaceOwned, Base):
     __tablename__ = "purchase_receipt_lines"
     __table_args__ = (
         UniqueConstraint(

@@ -101,3 +101,13 @@ def get_db():
         yield db
     finally:
         db.close()
+
+
+def get_unscoped_db():
+    """Yield a session for cross-workspace infrastructure workers only."""
+    db = SessionLocal()
+    db.info["include_all_workspaces"] = True
+    try:
+        yield db
+    finally:
+        db.close()

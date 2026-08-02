@@ -8,6 +8,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from .attempt_contracts import AttemptOutcome
 from .db import Base
 from .offer_contracts import offer_fingerprint
+from .workspace_context import WorkspaceOwned
 
 
 class BindingStatus(StrEnum):
@@ -37,7 +38,7 @@ class SourceHealthStatus(StrEnum):
     DISABLED = "disabled"
 
 
-class MonitorTarget(Base):
+class MonitorTarget(WorkspaceOwned, Base):
     __tablename__ = "monitor_targets"
     __table_args__ = (UniqueConstraint("product_binding_id", name="uq_monitor_target_binding"),)
 
@@ -58,7 +59,7 @@ class MonitorTarget(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class MonitorAttempt(Base):
+class MonitorAttempt(WorkspaceOwned, Base):
     __tablename__ = "monitor_attempts"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -78,7 +79,7 @@ class MonitorAttempt(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class SupplierOfferState(Base):
+class SupplierOfferState(WorkspaceOwned, Base):
     __tablename__ = "supplier_offer_states"
     __table_args__ = (UniqueConstraint("supplier_product_id", name="uq_supplier_offer_state_product"),)
 
@@ -101,7 +102,7 @@ class SupplierOfferState(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class SupplierOfferObservation(Base):
+class SupplierOfferObservation(WorkspaceOwned, Base):
     __tablename__ = "supplier_offer_observations"
     __table_args__ = (
         UniqueConstraint("monitor_attempt_id", name="uq_supplier_observation_attempt"),
@@ -128,7 +129,7 @@ class SupplierOfferObservation(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class SourceHealth(Base):
+class SourceHealth(WorkspaceOwned, Base):
     __tablename__ = "source_health"
     __table_args__ = (
         UniqueConstraint("supplier_id", "access_strategy", name="uq_source_health_supplier_strategy"),

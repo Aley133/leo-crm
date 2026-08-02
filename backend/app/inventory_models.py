@@ -9,6 +9,7 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 from .db_types import UTCDateTime
+from .workspace_context import WorkspaceOwned
 
 
 class InventoryBatchType(StrEnum):
@@ -16,7 +17,7 @@ class InventoryBatchType(StrEnum):
     PRODUCTION = "production"
 
 
-class InventoryBatch(Base):
+class InventoryBatch(WorkspaceOwned, Base):
     __tablename__ = "inventory_batches"
     __table_args__ = (
         CheckConstraint("quantity_received > 0", name="ck_inventory_batch_received_positive"),
@@ -67,7 +68,7 @@ class InventoryBatch(Base):
     )
 
 
-class InventoryAllocation(Base):
+class InventoryAllocation(WorkspaceOwned, Base):
     __tablename__ = "inventory_allocations"
     __table_args__ = (
         UniqueConstraint(

@@ -7,9 +7,10 @@ from sqlalchemy import Date, DateTime, ForeignKey, Integer, JSON, Numeric, Strin
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .workspace_context import WorkspaceOwned
 
 
-class DailyRevenueSnapshot(Base):
+class DailyRevenueSnapshot(WorkspaceOwned, Base):
     __tablename__ = "daily_revenue_snapshots"
     __table_args__ = (
         UniqueConstraint(

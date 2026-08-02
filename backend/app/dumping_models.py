@@ -7,12 +7,13 @@ from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, St
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .workspace_context import WorkspaceOwned
 
 
 LEGACY_WORKSPACE_ID = 1
 
 
-class DumpingPolicy(Base):
+class DumpingPolicy(WorkspaceOwned, Base):
     __tablename__ = "dumping_policies"
     __table_args__ = (UniqueConstraint("product_id", name="uq_dumping_policy_product"),)
 
@@ -41,7 +42,7 @@ class DumpingPolicy(Base):
     )
 
 
-class DumpingRun(Base):
+class DumpingRun(WorkspaceOwned, Base):
     __tablename__ = "dumping_runs"
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

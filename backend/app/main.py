@@ -20,7 +20,7 @@ from .browser_agent_registry_api import router as browser_agent_registry_router
 from .catalog_api import router as catalog_router
 from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
-from .db import engine
+from .db import SessionLocal, engine
 from .dumping_api import public_router as dumping_public_router
 from .dumping_api import router as dumping_router
 from .dumping_competitor_worker import (
@@ -53,6 +53,14 @@ from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
 from .telegram_price_alerts import price_alert_publisher_loop
 from .ui import router as ui_router
+from .workspace_api import router as workspace_router
+from .workspace_context import (
+    LEGACY_WORKSPACE_ID,
+    WORKSPACE_HEADER,
+    reset_current_workspace_id,
+    set_current_workspace_id,
+)
+from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
 APP_VERSION = "0.19.0"
 DEPLOYMENT_MARKER = "manual-dumping-engine-v1"
@@ -63,6 +71,30 @@ app = FastAPI(
     version=APP_VERSION,
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
 )
+
+
+@app.middleware("http")
+async def select_workspace(request: Request, call_next):
+    raw_workspace_id = request.headers.get(WORKSPACE_HEADER, "").strip()
+    try:
+        workspace_id = (
+            LEGACY_WORKSPACE_ID
+            if not raw_workspace_id
+            else int(raw_workspace_id)
+        )
+        if workspace_id < 1:
+            raise ValueError
+    except ValueError:
+        return JSONResponse(
+            status_code=400,
+            content={"detail": f"{WORKSPACE_HEADER} must be a positive integer"},
+        )
+
+    token = set_current_workspace_id(workspace_id)
+    try:
+        return await call_next(request)
+    finally:
+        reset_current_workspace_id(token)
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
@@ -97,6 +129,7 @@ app.include_router(commerce_router)
 app.include_router(product_identity_router)
 app.include_router(purchase_router)
 app.include_router(revenue_router)
+app.include_router(workspace_router)
 
 
 def _process_rss_mb() -> float | None:
@@ -161,6 +194,9 @@ async def database_pool_timeout(
 @app.on_event("startup")
 async def start_background_services() -> None:
     app.state.thread_pool_limit = _configure_thread_pool()
+    with SessionLocal() as session:
+        with session.begin():
+            bootstrap_legacy_workspace_connection(session)
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))

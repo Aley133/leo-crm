@@ -19,7 +19,7 @@
     <main>
       <header class="topbar">
         <div><p class="eyebrow">PRICING ENGINE</p><h1>Демпинг</h1><p class="subtitle">Ручное подключение карточек, безопасный порог прибыли и автоматическая публикация полного Kaspi XML.</p></div>
-        <div><a class="button secondary" href="/feeds/kaspi/catalog.xml" target="_blank" rel="noopener">Открыть XML-feed</a><button id="refresh" class="button" type="button">Обновить</button></div>
+        <div><a id="public-feed-link" class="button secondary" href="/feeds/kaspi/catalog.xml" target="_blank" rel="noopener">Открыть XML-feed</a><button id="refresh" class="button" type="button">Обновить</button></div>
       </header>
       <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
       <div id="message" class="message" role="status"></div>
@@ -88,7 +88,7 @@
           <article class="metric"><span>Подключено</span><strong id="summary-total">0</strong><small>карточек</small></article>
           <article class="metric"><span>Активно</span><strong id="summary-enabled">0</strong><small>политик</small></article>
           <article class="metric"><span>Ограничено порогом</span><strong id="summary-limited">0</strong><small>конкурент ниже пола</small></article>
-          <article class="metric"><span>Публичный XML</span><strong class="feed-status">HTTPS</strong><small>/feeds/kaspi/catalog.xml</small></article>
+          <article class="metric"><span>Публичный XML</span><strong class="feed-status">HTTPS</strong><small id="public-feed-path">/feeds/kaspi/catalog.xml</small></article>
         </section>
         <section class="connect-card">
           <div><h2>Подключить товар вручную</h2><p>Введи название, артикул или Kaspi ID, затем выбери найденную карточку.</p></div>
@@ -118,6 +118,7 @@
       </section>
     </main>
   </div>
+  <script src="/static/workspace-context.js?v=20260731-1"></script>
   <script src="/static/dumping.js?v=20260729-3" defer></script>
   <script src="/static/dumping-agent-status.js?v=20260729-1" defer></script>
 </body>

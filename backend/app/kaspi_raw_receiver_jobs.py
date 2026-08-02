@@ -15,8 +15,9 @@ from .kaspi_http_transport import KaspiHttpSettings
 from .kaspi_integration import ensure_kaspi_marketplace_account
 from .kaspi_order_payload import canonicalize_kaspi_order_payload
 from .marketplace_import import import_kaspi_order
-from .models import MarketplaceOrder, MarketplaceRawPayload
+from .models import MarketplaceAccount, MarketplaceOrder, MarketplaceRawPayload
 from .product_identity_service import ensure_marketplace_listing_for_order_line
+from .workspace_context import current_workspace_id
 
 
 KASPI_STATES: tuple[str, ...] = (
@@ -48,7 +49,13 @@ def _prune_job_registry() -> None:
         JOBS.pop(terminal_ids.pop(0), None)
 
 
-def create_job(*, days: int, timezone_name: str = "Asia/Almaty") -> str:
+def create_job(
+    *,
+    days: int,
+    timezone_name: str = "Asia/Almaty",
+    marketplace_account_id: int | None = None,
+    workspace_id: int | None = None,
+) -> str:
     if days < 1 or days > 31:
         raise ValueError("days must be between 1 and 31")
     _prune_job_registry()
@@ -58,6 +65,8 @@ def create_job(*, days: int, timezone_name: str = "Asia/Almaty") -> str:
     ranges_per_day = len(KASPI_STATES) + 1
     JOBS[job_id] = {
         "id": job_id,
+        "workspace_id": current_workspace_id() if workspace_id is None else int(workspace_id),
+        "marketplace_account_id": marketplace_account_id,
         "status": "queued",
         "days": days,
         "timezone": timezone_name,
@@ -80,7 +89,9 @@ def create_job(*, days: int, timezone_name: str = "Asia/Almaty") -> str:
 
 def public_job(job_id: str) -> dict[str, Any] | None:
     job = JOBS.get(job_id)
-    return dict(job) if job is not None else None
+    if job is None or int(job.get("workspace_id") or 1) != current_workspace_id():
+        return None
+    return dict(job)
 
 
 def _attrs(item: dict[str, Any]) -> dict[str, Any]:
@@ -270,13 +281,24 @@ def _history_record(
     return None
 
 
-def _persist_orders(orders: list[dict[str, Any]], *, timezone_name: str) -> tuple[int, int]:
+def _persist_orders(
+    orders: list[dict[str, Any]],
+    *,
+    timezone_name: str,
+    marketplace_account_id: int | None = None,
+) -> tuple[int, int]:
     imported = 0
     updated = 0
     observed_at = datetime.now(UTC)
     with SessionLocal() as session:
         with session.begin():
-            account = ensure_kaspi_marketplace_account(session)
+            account = (
+                session.get(MarketplaceAccount, marketplace_account_id)
+                if marketplace_account_id is not None
+                else ensure_kaspi_marketplace_account(session)
+            )
+            if account is None:
+                raise RuntimeError("Kaspi marketplace account is missing")
             for source_payload in orders:
                 external_order_id = str(
                     source_payload.get("id") or _attrs(source_payload).get("code") or ""
@@ -329,6 +351,7 @@ async def _persist_orders_in_batches(
     orders: list[dict[str, Any]],
     *,
     timezone_name: str,
+    marketplace_account_id: int | None = None,
 ) -> tuple[int, int]:
     """Persist bounded transactions and yield between them.
 
@@ -340,10 +363,13 @@ async def _persist_orders_in_batches(
     updated = 0
     for start in range(0, len(orders), ORDER_PERSIST_BATCH_SIZE):
         batch = orders[start : start + ORDER_PERSIST_BATCH_SIZE]
+        persistence_options: dict[str, Any] = {"timezone_name": timezone_name}
+        if marketplace_account_id is not None:
+            persistence_options["marketplace_account_id"] = marketplace_account_id
         batch_imported, batch_updated = await asyncio.to_thread(
             _persist_orders,
             batch,
-            timezone_name=timezone_name,
+            **persistence_options,
         )
         imported += batch_imported
         updated += batch_updated
@@ -363,14 +389,28 @@ def _state_name(item: dict[str, Any]) -> str:
     return str(_attrs(item).get("state") or "UNKNOWN").strip().upper() or "UNKNOWN"
 
 
-async def run_job(job_id: str) -> None:
+async def run_job(
+    job_id: str,
+    *,
+    api_token: str | None = None,
+    marketplace_account_id: int | None = None,
+) -> None:
     job = JOBS[job_id]
     job["status"] = "running"
     job["started_at"] = datetime.now(UTC).isoformat()
     job["message"] = "Загрузка заказов из Kaspi"
 
     try:
-        settings = KaspiHttpSettings.from_environment()
+        settings = (
+            KaspiHttpSettings.from_environment()
+            if api_token is None
+            else KaspiHttpSettings.from_environment_defaults(api_token)
+        )
+        selected_account_id = (
+            marketplace_account_id
+            if marketplace_account_id is not None
+            else job.get("marketplace_account_id")
+        )
         day_ms = 24 * 60 * 60 * 1000
         min_split_ms = 60 * 60 * 1000
         base_chunks: list[tuple[str, int, int]] = []
@@ -520,6 +560,9 @@ async def run_job(job_id: str) -> None:
         imported, updated = await _persist_orders_in_batches(
             orders,
             timezone_name=str(job["timezone"]),
+            marketplace_account_id=(
+                None if selected_account_id is None else int(selected_account_id)
+            ),
         )
         job["orders_count"] = len(orders)
         job["imported_count"] = imported

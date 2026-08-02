@@ -7,6 +7,7 @@ from sqlalchemy import DateTime, ForeignKey, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
+from .workspace_context import WorkspaceOwned
 
 
 class BrowserAgentJobStatus(StrEnum):
@@ -36,7 +37,7 @@ class BrowserAgent(Base):
     )
 
 
-class BrowserAgentJob(Base):
+class BrowserAgentJob(WorkspaceOwned, Base):
     __tablename__ = "browser_agent_jobs"
 
     id: Mapped[int] = mapped_column(primary_key=True)

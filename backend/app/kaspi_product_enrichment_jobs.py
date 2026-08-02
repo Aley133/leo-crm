@@ -13,6 +13,7 @@ from .inventory_service import allocate_order_line_fifo
 from .kaspi_http_transport import KaspiHttpSettings
 from .models import MarketplaceOrder, MarketplaceOrderLine
 from .product_identity_service import ensure_marketplace_listing_for_order_line
+from .workspace_context import current_workspace_id
 
 
 JOBS: dict[str, dict[str, Any]] = {}
@@ -191,13 +192,20 @@ def normalize_entry(
     }
 
 
-def create_job(*, days: int = 31) -> str:
+def create_job(
+    *,
+    days: int = 31,
+    marketplace_account_id: int | None = None,
+    workspace_id: int | None = None,
+) -> str:
     if days < 1 or days > 31:
         raise ValueError("days must be between 1 and 31")
     _prune_job_registry()
     job_id = uuid.uuid4().hex
     JOBS[job_id] = {
         "id": job_id,
+        "workspace_id": current_workspace_id() if workspace_id is None else int(workspace_id),
+        "marketplace_account_id": marketplace_account_id,
         "status": "queued",
         "days": days,
         "processed": 0,
@@ -216,7 +224,9 @@ def create_job(*, days: int = 31) -> str:
 
 def public_job(job_id: str) -> dict[str, Any] | None:
     job = JOBS.get(job_id)
-    return dict(job) if job is not None else None
+    if job is None or int(job.get("workspace_id") or 1) != current_workspace_id():
+        return None
+    return dict(job)
 
 
 def _match_line(
@@ -243,7 +253,10 @@ def _match_line(
     return None
 
 
-def _load_unresolved_orders(since: datetime) -> list[tuple[int, str, str | None, int]]:
+def _load_unresolved_orders(
+    since: datetime,
+    marketplace_account_id: int | None = None,
+) -> list[tuple[int, str, str | None, int]]:
     with SessionLocal() as session:
         unresolved_order_ids = (
             select(MarketplaceOrderLine.marketplace_order_id)
@@ -257,7 +270,7 @@ def _load_unresolved_orders(since: datetime) -> list[tuple[int, str, str | None,
             )
             .distinct()
         )
-        rows = session.execute(
+        statement = (
             select(
                 MarketplaceOrder.id,
                 MarketplaceOrder.external_order_id,
@@ -269,7 +282,12 @@ def _load_unresolved_orders(since: datetime) -> list[tuple[int, str, str | None,
                 MarketplaceOrder.id.in_(unresolved_order_ids),
             )
             .order_by(MarketplaceOrder.ordered_at.desc(), MarketplaceOrder.id.desc())
-        ).all()
+        )
+        if marketplace_account_id is not None:
+            statement = statement.where(
+                MarketplaceOrder.marketplace_account_id == marketplace_account_id
+            )
+        rows = session.execute(statement).all()
     return [
         (
             int(order_id),
@@ -362,16 +380,37 @@ def _persist_enriched_order(
     return local_updated, local_linked, local_allocated, errors
 
 
-async def run_job(job_id: str) -> None:
+async def run_job(
+    job_id: str,
+    *,
+    api_token: str | None = None,
+    marketplace_account_id: int | None = None,
+) -> None:
     job = JOBS[job_id]
     job["status"] = "running"
     job["started_at"] = datetime.now(UTC).isoformat()
     job["message"] = "Загружаем состав заказов по модели архива v1.1.0"
 
     try:
-        settings = KaspiHttpSettings.from_environment()
+        settings = (
+            KaspiHttpSettings.from_environment()
+            if api_token is None
+            else KaspiHttpSettings.from_environment_defaults(api_token)
+        )
+        selected_account_id = (
+            marketplace_account_id
+            if marketplace_account_id is not None
+            else job.get("marketplace_account_id")
+        )
         since = datetime.now(UTC) - timedelta(days=int(job["days"]))
-        orders = await asyncio.to_thread(_load_unresolved_orders, since)
+        if selected_account_id is None:
+            orders = await asyncio.to_thread(_load_unresolved_orders, since)
+        else:
+            orders = await asyncio.to_thread(
+                _load_unresolved_orders,
+                since,
+                int(selected_account_id),
+            )
         job["total"] = len(orders)
 
         headers = {

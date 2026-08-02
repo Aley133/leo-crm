@@ -13,6 +13,7 @@ from .dumping_service import (
     publish_decision,
     resolve_cost_source,
     suspend_product_without_cost_source,
+    workspace_feed_url,
 )
 from .kaspi_offer_competitor import KaspiCompetitorSnapshot, scan_kaspi_competitors
 from .models import Product
@@ -57,7 +58,7 @@ def apply_competitor_snapshot(
     db.flush()
     return {
         "run_id": run.id,
-        "feed_url": "/feeds/kaspi/catalog.xml",
+        "feed_url": workspace_feed_url(db),
         "market": {
             "own_price_kzt": market.own_price_kzt,
             "competitor_price_kzt": market.competitor_price_kzt,

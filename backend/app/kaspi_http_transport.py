@@ -47,6 +47,18 @@ class KaspiHttpSettings:
         token = os.getenv("KASPI_API_TOKEN", "").strip()
         if not token:
             raise KaspiConfigurationError("KASPI_API_TOKEN is not configured")
+        return cls.from_environment_defaults(token)
+
+    @classmethod
+    def from_environment_defaults(
+        cls,
+        api_token: str,
+        *,
+        initial_lookback_days: int | None = None,
+    ) -> "KaspiHttpSettings":
+        token = api_token.strip()
+        if not token:
+            raise KaspiConfigurationError("Kaspi API token is empty")
         base_url = os.getenv("KASPI_API_BASE_URL", DEFAULT_KASPI_API_BASE_URL).strip().rstrip("/")
         if not base_url:
             raise KaspiConfigurationError("KASPI_API_BASE_URL must not be empty")
@@ -61,15 +73,18 @@ class KaspiHttpSettings:
             raise KaspiConfigurationError("KASPI_API_TIMEOUT_SECONDS must be numeric") from exc
         if timeout <= 0 or timeout > 180:
             raise KaspiConfigurationError("KASPI_API_TIMEOUT_SECONDS must be between 0 and 180")
-        try:
-            lookback_days = int(
-                os.getenv(
-                    "KASPI_INITIAL_LOOKBACK_DAYS",
-                    str(DEFAULT_KASPI_INITIAL_LOOKBACK_DAYS),
-                ).strip()
-            )
-        except ValueError as exc:
-            raise KaspiConfigurationError("KASPI_INITIAL_LOOKBACK_DAYS must be an integer") from exc
+        if initial_lookback_days is None:
+            try:
+                lookback_days = int(
+                    os.getenv(
+                        "KASPI_INITIAL_LOOKBACK_DAYS",
+                        str(DEFAULT_KASPI_INITIAL_LOOKBACK_DAYS),
+                    ).strip()
+                )
+            except ValueError as exc:
+                raise KaspiConfigurationError("KASPI_INITIAL_LOOKBACK_DAYS must be an integer") from exc
+        else:
+            lookback_days = int(initial_lookback_days)
         if lookback_days < 1 or lookback_days > 90:
             raise KaspiConfigurationError("KASPI_INITIAL_LOOKBACK_DAYS must be between 1 and 90")
         return cls(token, base_url, timeout, lookback_days)

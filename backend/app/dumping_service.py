@@ -15,10 +15,23 @@ from .models import Product
 from .monitoring import SupplierOfferState
 from .supplier_identity import canonical_supplier_product_identity
 from .suppliers import ProductBinding, Supplier, SupplierProduct
+from .workspace_context import current_workspace_id
+from .workspace_models import Workspace
 
 
 MONEY = Decimal("0.01")
 ONE = Decimal("1")
+
+
+def workspace_feed_url(db: Session) -> str:
+    slug = db.scalar(
+        select(Workspace.slug).where(Workspace.id == current_workspace_id())
+    )
+    return (
+        f"/feeds/kaspi/{slug}/catalog.xml"
+        if slug
+        else "/feeds/kaspi/catalog.xml"
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -417,7 +430,7 @@ def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, de
             "undercut_step_kzt": int(policy.undercut_step_kzt),
             "supplier_delivery_buffer_days": int(policy.supplier_delivery_buffer_days),
             "logistics_kzt": str(kaspi_logistics_per_unit(decision.target_price_kzt)),
-            "feed_url": "/feeds/kaspi/catalog.xml",
+            "feed_url": workspace_feed_url(db),
         },
     )
     db.add(run)

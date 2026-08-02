@@ -136,6 +136,7 @@ def queue_browser_target_now(
         )
 
     job = BrowserAgentJob(
+        workspace_id=target.workspace_id,
         monitor_target_id=target.id,
         supplier_product_id=supplier_product_id,
         url=url,
@@ -165,6 +166,7 @@ def dispatch_due_browser_targets(
     jobs: list[BrowserAgentJob] = []
     for target, supplier_product_id, url in rows:
         job = BrowserAgentJob(
+            workspace_id=target.workspace_id,
             monitor_target_id=target.id,
             supplier_product_id=supplier_product_id,
             url=url,

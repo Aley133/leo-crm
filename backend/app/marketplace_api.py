@@ -4,9 +4,10 @@ from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError, ProgrammingError
 
 from .auth import require_service_token
-from .db import SessionLocal
+from .db import SessionLocal, get_db
 from .kaspi_http_transport import KaspiConfigurationError, KaspiTransportError
 from .kaspi_integration import (
     build_kaspi_order_transport,
@@ -17,6 +18,8 @@ from .marketplace_full_sync import sync_kaspi_orders
 from .marketplace_import import normalize_kaspi_order
 from .marketplace_sync import sync_kaspi_order_page
 from .models import MarketplaceImportCheckpoint
+from sqlalchemy.orm import Session
+from .workspace_kaspi import load_workspace_kaspi_connection
 
 
 router = APIRouter(
@@ -27,8 +30,8 @@ router = APIRouter(
 
 
 @router.get("/status")
-def kaspi_status() -> dict[str, str | bool]:
-    integration = get_kaspi_integration_status()
+def kaspi_status(db: Session = Depends(get_db)) -> dict[str, str | bool]:
+    integration = get_kaspi_integration_status(db)
     return {
         "configured": integration.configured,
         "state": integration.state,
@@ -37,8 +40,15 @@ def kaspi_status() -> dict[str, str | bool]:
 
 
 def _bootstrap_live_import():
-    transport = build_kaspi_order_transport()
     with SessionLocal() as session:
+        try:
+            connection = load_workspace_kaspi_connection(session)
+        except (OperationalError, ProgrammingError):
+            session.rollback()
+            connection = None
+        if connection is not None:
+            return connection.transport(), connection.account_id
+        transport = build_kaspi_order_transport()
         with session.begin():
             account = ensure_kaspi_marketplace_account(session)
             marketplace_account_id = account.id

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from .auth import require_service_token
 from .db import get_db
 from .dumping_models import KaspiXmlFeed
+from .dumping_service import workspace_feed_url
 from .kaspi_xml_import import KaspiXmlProduct, parse_kaspi_products
 from .models import Product, ProductStatus
 from .order_line_product_linking import link_all_matching_order_lines_for_products
@@ -232,5 +233,5 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
         "linked_order_lines": linked_order_lines,
         "warning_count": len(warnings),
         "warnings": warnings,
-        "feed_url": "/feeds/kaspi/catalog.xml",
+        "feed_url": workspace_feed_url(db),
     }

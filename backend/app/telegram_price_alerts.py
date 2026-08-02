@@ -139,8 +139,11 @@ def _pending_events(
     session_factory: SessionFactory,
     *,
     limit: int,
+    include_all_workspaces: bool = False,
 ) -> list[tuple[object, dict[str, object]]]:
     with session_factory() as session:
+        if include_all_workspaces:
+            session.info["include_all_workspaces"] = True
         events = session.scalars(
             select(OutboxEvent)
             .where(
@@ -175,8 +178,11 @@ def _record_publish_result(
     *,
     event_id: object,
     error: str | None,
+    include_all_workspaces: bool = False,
 ) -> None:
     with session_factory() as session:
+        if include_all_workspaces:
+            session.info["include_all_workspaces"] = True
         event = session.get(OutboxEvent, event_id)
         if event is None or event.published_at is not None:
             return
@@ -193,11 +199,13 @@ async def publish_pending_price_alerts(
     session_factory: SessionFactory = SessionLocal,
     client: httpx.AsyncClient | None = None,
     limit: int = PUBLISH_BATCH_SIZE,
+    include_all_workspaces: bool = False,
 ) -> tuple[int, int]:
     events = await asyncio.to_thread(
         _pending_events,
         session_factory,
         limit=limit,
+        include_all_workspaces=include_all_workspaces,
     )
     sent = 0
     failed = 0
@@ -218,6 +226,7 @@ async def publish_pending_price_alerts(
                     session_factory,
                     event_id=event_id,
                     error=f"{type(exc).__name__}: {exc}"[:2000],
+                    include_all_workspaces=include_all_workspaces,
                 )
             else:
                 sent += 1
@@ -226,6 +235,7 @@ async def publish_pending_price_alerts(
                     session_factory,
                     event_id=event_id,
                     error=None,
+                    include_all_workspaces=include_all_workspaces,
                 )
     finally:
         if owns_client:
@@ -244,6 +254,7 @@ async def price_alert_publisher_loop(stop_event: asyncio.Event) -> None:
                 await publish_pending_price_alerts(
                     settings=settings,
                     client=client,
+                    include_all_workspaces=True,
                 )
             except asyncio.CancelledError:
                 raise

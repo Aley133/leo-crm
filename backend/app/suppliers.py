@@ -10,19 +10,23 @@ from sqlalchemy.orm import Mapped, Session, mapped_column
 from .auth import require_service_token
 from .db import Base, get_db
 from .monitoring import BindingStatus
+from .workspace_context import WorkspaceOwned
 
 
-class Supplier(Base):
+class Supplier(WorkspaceOwned, Base):
     __tablename__ = "suppliers"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "code", name="uq_suppliers_workspace_code"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    code: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    code: Mapped[str] = mapped_column(String(64), index=True)
     name: Mapped[str] = mapped_column(String(255))
     is_active: Mapped[bool] = mapped_column(Boolean, default=True, server_default="true", index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
 
 
-class SupplierProduct(Base):
+class SupplierProduct(WorkspaceOwned, Base):
     __tablename__ = "supplier_products"
     __table_args__ = (UniqueConstraint("supplier_id", "external_id", name="uq_supplier_product_external"),)
 
@@ -39,7 +43,7 @@ class SupplierProduct(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 
 
-class ProductBinding(Base):
+class ProductBinding(WorkspaceOwned, Base):
     __tablename__ = "product_bindings"
     __table_args__ = (UniqueConstraint("product_id", "supplier_product_id", name="uq_product_binding"),)
 

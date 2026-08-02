@@ -164,6 +164,10 @@ const scanMeta = (row) => {
 };
 
 const renderFeedStatus = (feed) => {
+  const feedLink = document.querySelector("#public-feed-link");
+  const feedPath = document.querySelector("#public-feed-path");
+  if (feedLink && feed.feed_url) feedLink.href = feed.feed_url;
+  if (feedPath && feed.feed_url) feedPath.textContent = feed.feed_url;
   xmlSource.classList.toggle("ready", Boolean(feed.ready));
   xmlSource.classList.toggle("missing", !feed.configured);
   if (!feed.configured) {

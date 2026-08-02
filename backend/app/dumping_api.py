@@ -15,6 +15,8 @@ from .dumping_competitor_worker import enqueue_competitor_scan, state_for_produc
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from .dumping_service import calculate_safe_floor, resolve_cost_source
 from .models import Product
+from .workspace_context import LEGACY_WORKSPACE_ID, current_workspace_id, workspace_context
+from .workspace_models import Workspace
 
 
 class DumpingPolicyUpsert(BaseModel):
@@ -62,6 +64,14 @@ RUNTIME_SUCCESS_VISIBLE_FOR = timedelta(minutes=3)
 RUNTIME_ERROR_VISIBLE_FOR = timedelta(minutes=15)
 RUNTIME_RESULT_LIMIT = 12
 RUNTIME_LEASED_SCAN_LIMIT = 100
+
+
+def _feed_url(db: Session, workspace_id: int | None = None) -> str:
+    selected = current_workspace_id() if workspace_id is None else int(workspace_id)
+    slug = db.scalar(select(Workspace.slug).where(Workspace.id == selected))
+    if not slug:
+        return "/feeds/kaspi/catalog.xml"
+    return f"/feeds/kaspi/{slug}/catalog.xml"
 
 
 def _policy_payload(policy: DumpingPolicy | None) -> dict | None:
@@ -301,7 +311,7 @@ def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
             "merchant_id": None,
             "imported_at": None,
             "generated_at": None,
-            "feed_url": "/feeds/kaspi/catalog.xml",
+            "feed_url": _feed_url(db),
         }
     return {
         "configured": True,
@@ -312,7 +322,7 @@ def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
         "merchant_id": feed.merchant_id,
         "imported_at": feed.imported_at,
         "generated_at": feed.generated_at,
-        "feed_url": "/feeds/kaspi/catalog.xml",
+        "feed_url": _feed_url(db),
     }
 
 
@@ -459,12 +469,38 @@ def queue_dumping_run(product_id: int, db: Session = Depends(get_db)) -> dict:
 
 @public_router.get("/feeds/kaspi/catalog.xml", response_class=Response)
 def read_public_kaspi_feed(db: Session = Depends(get_db)) -> Response:
-    feed = db.scalar(
-        select(KaspiXmlFeed)
-        .where(KaspiXmlFeed.active.is_(True))
-        .order_by(KaspiXmlFeed.id.desc())
-        .limit(1)
+    with workspace_context(LEGACY_WORKSPACE_ID):
+        feed = db.scalar(
+            select(KaspiXmlFeed)
+            .where(KaspiXmlFeed.active.is_(True))
+            .order_by(KaspiXmlFeed.id.desc())
+            .limit(1)
+        )
+    if feed is None or not feed.generated_xml:
+        raise HTTPException(status_code=404, detail="Kaspi XML feed is not configured")
+    return Response(content=feed.generated_xml, media_type="application/xml; charset=utf-8")
+
+
+@public_router.get("/feeds/kaspi/{workspace_slug}/catalog.xml", response_class=Response)
+def read_workspace_kaspi_feed(
+    workspace_slug: str,
+    db: Session = Depends(get_db),
+) -> Response:
+    workspace = db.scalar(
+        select(Workspace).where(
+            Workspace.slug == workspace_slug,
+            Workspace.is_active.is_(True),
+        )
     )
+    if workspace is None:
+        raise HTTPException(status_code=404, detail="Kaspi XML feed is not configured")
+    with workspace_context(workspace.id):
+        feed = db.scalar(
+            select(KaspiXmlFeed)
+            .where(KaspiXmlFeed.active.is_(True))
+            .order_by(KaspiXmlFeed.id.desc())
+            .limit(1)
+        )
     if feed is None or not feed.generated_xml:
         raise HTTPException(status_code=404, detail="Kaspi XML feed is not configured")
     return Response(content=feed.generated_xml, media_type="application/xml; charset=utf-8")

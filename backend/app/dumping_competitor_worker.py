@@ -176,6 +176,7 @@ def queue_due_competitor_jobs(
             continue
         jobs.append(
             DumpingRun(
+                workspace_id=policy.workspace_id,
                 product_id=policy.product_id,
                 dumping_policy_id=policy.id,
                 status="queued_local",
@@ -196,6 +197,7 @@ def queue_due_competitor_jobs(
 def dispatch_due_competitor_jobs() -> tuple[int, ...]:
     """Run one short queue-only scheduling transaction."""
     with SessionLocal() as db:
+        db.info["include_all_workspaces"] = True
         try:
             job_ids = queue_due_competitor_jobs(db)
             db.commit()

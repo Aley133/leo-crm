@@ -19,6 +19,7 @@ from .product_identity_models import (
     MarketplaceListingIssueStatus,
     MarketplaceListingStatus,
 )
+from .workspace_context import current_workspace_id
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +84,7 @@ def _ensure_missing_identity_issue(
     order_line: MarketplaceOrderLine,
 ) -> MarketplaceListingIssue:
     statement = _dialect_insert(session, MarketplaceListingIssue).values(
+        workspace_id=current_workspace_id(),
         marketplace_order_line_id=order_line.id,
         reason=MarketplaceListingIssueReason.MISSING_IDENTITY.value,
         status=MarketplaceListingIssueStatus.OPEN.value,
@@ -150,6 +152,7 @@ def ensure_marketplace_listing_for_order_line(
         )
 
     values = {
+        "workspace_id": current_workspace_id(),
         "marketplace_account_id": marketplace_account_id,
         "identity_kind": identity.kind,
         "identity_key": identity.identity_key,
