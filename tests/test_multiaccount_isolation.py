@@ -334,3 +334,7 @@ def test_multiaccount_migration_covers_runtime_tables() -> None:
         assert f'"{table_name}"' in source
     assert 'down_revision: str | None = "20260731_0027"' in source
     assert '"uq_suppliers_workspace_code"' in source
+    assert 'dialect.name == "postgresql"' in source
+    assert "autocommit_block" in source
+    assert "CREATE INDEX CONCURRENTLY" in source
+    assert "NOT VALID" in source
