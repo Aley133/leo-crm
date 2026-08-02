@@ -29,6 +29,33 @@ _INCOMING_ORDER_STATUSES = {
 }
 
 
+def _sync_product_inventory_to_feed(
+    session: Session,
+    *,
+    product_id: int,
+    reason: str,
+) -> None:
+    # Lazy import avoids commerce -> inventory -> dumping -> commerce during
+    # application startup while keeping the inventory transaction authoritative.
+    from .dumping_service import sync_product_inventory_to_feed
+
+    sync_product_inventory_to_feed(
+        session,
+        product_id=product_id,
+        reason=reason,
+    )
+
+
+def _close_untracked_order_offer(
+    session: Session,
+    *,
+    sku_candidates: set[str],
+) -> None:
+    from .dumping_service import close_untracked_order_offer
+
+    close_untracked_order_offer(session, sku_candidates=sku_candidates)
+
+
 @dataclass(frozen=True, slots=True)
 class AllocationResult:
     requested_quantity: int
@@ -190,6 +217,12 @@ def release_cancelled_order_inventory(
         )
 
     session.flush()
+    for product_id in sorted({int(batch.product_id) for _allocation, batch in rows}):
+        _sync_product_inventory_to_feed(
+            session,
+            product_id=product_id,
+            reason="cancelled_order_inventory_released",
+        )
     return InventoryReleaseResult(
         released_quantity=released_quantity,
         affected_batch_ids=tuple(sorted(released_by_batch)),
@@ -319,15 +352,24 @@ def allocate_order_line_fifo(
     order_line: MarketplaceOrderLine,
     order: MarketplaceOrder | None = None,
     allocated_at: datetime | None = None,
+    sync_feed: bool = True,
 ) -> AllocationResult:
     requested = max(int(order_line.quantity or 0), 0)
     previous = allocated_quantity_for_line(session, order_line.id)
     needed = max(requested - previous, 0)
-    if needed == 0 or order_line.product_id is None:
-        return AllocationResult(requested, previous, 0)
-
     resolved_order = order or session.get(MarketplaceOrder, order_line.marketplace_order_id)
     if resolved_order is None or resolved_order.status in _TERMINAL_ORDER_STATUSES:
+        return AllocationResult(requested, previous, 0)
+    if order_line.product_id is None:
+        _close_untracked_order_offer(
+            session,
+            sku_candidates={
+                order_line.merchant_sku or "",
+                order_line.external_product_id or "",
+            },
+        )
+        return AllocationResult(requested, previous, 0)
+    if needed == 0:
         return AllocationResult(requested, previous, 0)
 
     now = allocated_at or datetime.now(UTC)
@@ -376,6 +418,12 @@ def allocate_order_line_fifo(
         newly_allocated += quantity
 
     session.flush()
+    if sync_feed:
+        _sync_product_inventory_to_feed(
+            session,
+            product_id=int(order_line.product_id),
+            reason="order_inventory_allocated",
+        )
     return AllocationResult(requested, previous, newly_allocated)
 
 
@@ -405,6 +453,7 @@ def reconcile_product_orders_from_batch(
             order_line=line,
             order=order,
             allocated_at=allocated_at,
+            sync_feed=False,
         )
         allocated += result.newly_allocated_quantity
         if batch.quantity_remaining <= 0:
@@ -463,9 +512,15 @@ def rebuild_product_fifo(
             order_line=line,
             order=order,
             allocated_at=now,
+            sync_feed=False,
         )
         allocated += result.newly_allocated_quantity
     session.flush()
+    _sync_product_inventory_to_feed(
+        session,
+        product_id=product_id,
+        reason="fifo_rebuilt",
+    )
     return allocated
 
 
@@ -524,6 +579,11 @@ def create_inventory_batch(
         and reconcile_existing_orders
     ):
         allocated = reconcile_product_orders_from_batch(session, batch=batch)
+    _sync_product_inventory_to_feed(
+        session,
+        product_id=product.id,
+        reason="inventory_batch_created",
+    )
     return batch, allocated
 
 
@@ -543,7 +603,13 @@ def mark_inventory_batch_received(
     batch.received_at = received_at or datetime.now(UTC)
     batch.quantity_remaining = batch.quantity_received
     session.flush()
-    return reconcile_product_orders_from_batch(session, batch=batch)
+    allocated = reconcile_product_orders_from_batch(session, batch=batch)
+    _sync_product_inventory_to_feed(
+        session,
+        product_id=int(batch.product_id),
+        reason="inventory_batch_received",
+    )
+    return allocated
 
 
 def complete_production_order(

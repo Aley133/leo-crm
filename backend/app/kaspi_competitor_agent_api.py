@@ -155,6 +155,18 @@ def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> Dumpin
     )
     if policy is None or not policy.enabled:
         raise ValueError("Демпинг для товара не подключён")
+    awaiting_supplier = db.scalar(
+        select(DumpingRun.id)
+        .where(
+            DumpingRun.product_id == product_id,
+            DumpingRun.status == "awaiting_supplier_refresh",
+        )
+        .limit(1)
+    )
+    if awaiting_supplier is not None:
+        raise ValueError(
+            "Ожидается свежая проверка поставщика после исчерпания склада"
+        )
     from .dumping_service import resolve_cost_source
 
     source = resolve_cost_source(

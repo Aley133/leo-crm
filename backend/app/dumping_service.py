@@ -8,11 +8,12 @@ from xml.etree import ElementTree
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
+from .browser_agent_dispatch import queue_browser_target_now
 from .commerce.profit_calculator import KASPI_COMMISSION_RATE, TAX_RATE, kaspi_logistics_per_unit
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
-from .inventory_models import InventoryBatch
+from .inventory_models import InventoryBatch, InventoryBatchType
 from .models import Product
-from .monitoring import SupplierOfferState
+from .monitoring import MonitorStatus, MonitorTarget, SupplierOfferState
 from .supplier_identity import canonical_supplier_product_identity
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 from .workspace_context import current_workspace_id
@@ -51,6 +52,7 @@ class DumpingDecision:
     competitor_price_kzt: Decimal | None
     own_price_kzt: Decimal | None
     target_price_kzt: Decimal
+    stock_count: int
     status: str
 
 
@@ -89,6 +91,8 @@ def _inventory_source(db: Session, product_id: int) -> DumpingCostSource | None:
         select(InventoryBatch)
         .where(
             InventoryBatch.product_id == product_id,
+            InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
+            InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
         )
         .order_by(InventoryBatch.received_at, InventoryBatch.id)
@@ -201,9 +205,24 @@ def _supplier_source(db: Session, product_id: int) -> DumpingCostSource | None:
 
 
 def resolve_cost_source(db: Session, *, product_id: int, inventory_first: bool = True) -> DumpingCostSource | None:
-    if inventory_first:
-        return _inventory_source(db, product_id) or _supplier_source(db, product_id)
-    return _supplier_source(db, product_id) or _inventory_source(db, product_id)
+    # Physical stock is authoritative regardless of a legacy policy toggle.
+    # Selling a supplier preorder while warehouse units are still available
+    # would make XML quantity and FIFO accounting disagree.
+    return _inventory_source(db, product_id) or _supplier_source(db, product_id)
+
+
+def physical_stock_count(db: Session, *, product_id: int) -> int:
+    """Return sellable on-hand units from received purchase batches only."""
+    return int(
+        db.scalar(
+            select(func.coalesce(func.sum(InventoryBatch.quantity_remaining), 0)).where(
+                InventoryBatch.product_id == product_id,
+                InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
+                InventoryBatch.is_received.is_(True),
+            )
+        )
+        or 0
+    )
 
 
 def decide_dumping_price(
@@ -240,6 +259,7 @@ def decide_dumping_price(
         competitor_price_kzt=None if competitor_price_kzt is None else _money(Decimal(competitor_price_kzt)),
         own_price_kzt=None if own_price_kzt is None else _money(Decimal(own_price_kzt)),
         target_price_kzt=_money(target),
+        stock_count=physical_stock_count(db, product_id=product.id),
         status=status,
     )
 
@@ -264,6 +284,7 @@ def update_feed_xml(
     sku_candidates: set[str],
     price_kzt: Decimal,
     preorder_days: int,
+    stock_count: int,
 ) -> str:
     root = ElementTree.fromstring(xml_text.encode("utf-8"))
     offer = _matching_offer(root, {value for value in sku_candidates if value})
@@ -282,6 +303,7 @@ def update_feed_xml(
         availability = ElementTree.SubElement(offer, "availability")
     availability.set("available", "yes")
     availability.set("preOrder", str(max(int(preorder_days), 0)))
+    availability.set("stockCount", str(max(int(stock_count), 0)))
 
     return ElementTree.tostring(root, encoding="unicode", xml_declaration=True)
 
@@ -291,8 +313,10 @@ def set_feed_offer_availability(
     *,
     sku_candidates: set[str],
     available: bool,
+    stock_count: int | None = None,
+    preorder_days: int | None = None,
 ) -> str:
-    """Open or close one offer without deleting its recoverable XML identity."""
+    """Synchronize one offer without deleting its recoverable XML identity."""
     root = ElementTree.fromstring(xml_text.encode("utf-8"))
     offer = _matching_offer(root, {value for value in sku_candidates if value})
     if offer is None:
@@ -305,9 +329,312 @@ def set_feed_offer_availability(
     if availability is None:
         availability = ElementTree.SubElement(offer, "availability")
     availability.set("available", "yes" if available else "no")
+    if stock_count is not None:
+        availability.set("stockCount", str(max(int(stock_count), 0)))
     if not available:
         availability.set("preOrder", "0")
+        availability.set("stockCount", "0")
+    elif preorder_days is not None:
+        availability.set("preOrder", str(max(int(preorder_days), 0)))
     return ElementTree.tostring(root, encoding="unicode", xml_declaration=True)
+
+
+def feed_offer_is_expected_active(
+    xml_text: str,
+    *,
+    sku_candidates: set[str],
+) -> bool | None:
+    """Return whether our XML currently expects Kaspi to show the offer."""
+    root = ElementTree.fromstring(xml_text.encode("utf-8"))
+    offer = _matching_offer(root, {value for value in sku_candidates if value})
+    if offer is None:
+        return None
+    availability = next(
+        (node for node in offer.iter() if _local_name(node.tag) == "availability"),
+        None,
+    )
+    if availability is None:
+        return True
+    return str(availability.attrib.get("available") or "yes").strip().casefold() != "no"
+
+
+def _latest_feed_for_update(db: Session) -> KaspiXmlFeed | None:
+    return db.scalar(
+        select(KaspiXmlFeed)
+        .where(KaspiXmlFeed.active.is_(True))
+        .order_by(KaspiXmlFeed.id.desc())
+        .with_for_update()
+        .limit(1)
+    )
+
+
+def _sku_candidates(product: Product) -> set[str]:
+    return {product.merchant_sku or "", product.kaspi_product_id}
+
+
+def _latest_run(db: Session, *, product_id: int) -> DumpingRun | None:
+    return db.scalar(
+        select(DumpingRun)
+        .where(DumpingRun.product_id == product_id)
+        .order_by(DumpingRun.id.desc())
+        .limit(1)
+    )
+
+
+def _seller_removal_is_latched(
+    db: Session,
+    *,
+    product_id: int,
+    policy: DumpingPolicy | None,
+) -> bool:
+    if policy is None or policy.enabled:
+        return False
+    latest = _latest_run(db, product_id=product_id)
+    return latest is not None and latest.status == "suspended_seller_removed"
+
+
+def _queue_fresh_supplier_snapshot(
+    db: Session,
+    *,
+    product_id: int,
+) -> tuple[int | None, int | None]:
+    rows = db.execute(
+        select(MonitorTarget.id, Supplier.code, SupplierProduct.id)
+        .join(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
+        .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
+        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+        .where(
+            ProductBinding.product_id == product_id,
+            ProductBinding.status.in_(("active", "confirmed", "degraded")),
+            MonitorTarget.status == MonitorStatus.ACTIVE.value,
+            Supplier.is_active.is_(True),
+        )
+        .order_by(
+            ProductBinding.is_primary.desc(),
+            ProductBinding.priority,
+            MonitorTarget.id,
+        )
+    ).all()
+    for target_id, supplier_code, supplier_product_id in rows:
+        queued = queue_browser_target_now(
+            db,
+            target_id=int(target_id),
+            supplier_code=str(supplier_code),
+        )
+        if queued.job_id is not None:
+            return int(queued.job_id), int(supplier_product_id)
+    return None, None
+
+
+def _mark_waiting_runs(
+    db: Session,
+    *,
+    product_id: int,
+    status: str,
+) -> None:
+    waiting = db.scalars(
+        select(DumpingRun)
+        .where(
+            DumpingRun.product_id == product_id,
+            DumpingRun.status.in_((
+                "awaiting_supplier_refresh",
+                "supplier_refresh_ready",
+            )),
+        )
+        .with_for_update()
+    ).all()
+    for run in waiting:
+        run.status = status
+
+
+def sync_product_inventory_to_feed(
+    db: Session,
+    *,
+    product_id: int,
+    reason: str,
+) -> dict[str, int | str | None]:
+    """Atomically project authoritative FIFO stock into the active Kaspi XML.
+
+    Stock sales never wait for the periodic dumping cycle. When the last unit
+    is reserved, the offer is closed first and a fresh supplier observation is
+    queued. Only that fresh observation may reopen it as a preorder.
+    """
+    product = db.get(Product, product_id)
+    if product is None:
+        return {"stock_count": 0, "xml_state": "product_missing", "supplier_job_id": None}
+    feed = _latest_feed_for_update(db)
+    if feed is None:
+        return {"stock_count": 0, "xml_state": "feed_missing", "supplier_job_id": None}
+
+    stock_count = physical_stock_count(db, product_id=product_id)
+    policy = db.scalar(
+        select(DumpingPolicy)
+        .where(DumpingPolicy.product_id == product_id)
+        .with_for_update()
+    )
+    seller_removal_latched = _seller_removal_is_latched(
+        db,
+        product_id=product_id,
+        policy=policy,
+    )
+    try:
+        feed.generated_xml = set_feed_offer_availability(
+            feed.generated_xml or feed.source_xml,
+            sku_candidates=_sku_candidates(product),
+            available=stock_count > 0 and not seller_removal_latched,
+            stock_count=stock_count,
+            preorder_days=0,
+        )
+    except ValueError as exc:
+        if str(exc) == "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+            return {
+                "stock_count": stock_count,
+                "xml_state": "offer_absent",
+                "supplier_job_id": None,
+            }
+        raise
+    feed.generated_at = func.now()
+
+    if seller_removal_latched:
+        return {
+            "stock_count": stock_count,
+            "xml_state": "seller_removed",
+            "supplier_job_id": None,
+        }
+    if stock_count > 0:
+        _mark_waiting_runs(
+            db,
+            product_id=product_id,
+            status="inventory_restocked",
+        )
+        return {
+            "stock_count": stock_count,
+            "xml_state": "stock",
+            "supplier_job_id": None,
+        }
+    if policy is None or not policy.enabled or not policy.auto_publish_xml:
+        return {
+            "stock_count": 0,
+            "xml_state": "closed_without_preorder_policy",
+            "supplier_job_id": None,
+        }
+
+    supplier_job_id, supplier_product_id = _queue_fresh_supplier_snapshot(
+        db,
+        product_id=product_id,
+    )
+    latest = _latest_run(db, product_id=product_id)
+    if latest is None or latest.status != "awaiting_supplier_refresh":
+        db.add(
+            DumpingRun(
+                product_id=product_id,
+                dumping_policy_id=policy.id,
+                status="awaiting_supplier_refresh",
+                published=True,
+                preorder_days=0,
+                explanation_json={
+                    "reason": reason,
+                    "business_state": "stock_depleted",
+                    "stock_count": 0,
+                    "xml_availability": "no",
+                    "supplier_refresh_job_id": supplier_job_id,
+                    "supplier_product_id": supplier_product_id,
+                    "automatic_recovery": supplier_job_id is not None,
+                },
+            )
+        )
+        db.flush()
+    return {
+        "stock_count": 0,
+        "xml_state": "awaiting_supplier_refresh",
+        "supplier_job_id": supplier_job_id,
+    }
+
+
+def close_untracked_order_offer(
+    db: Session,
+    *,
+    sku_candidates: set[str],
+) -> bool:
+    """Fail closed when an active order cannot yet be linked to a CRM product."""
+    feed = _latest_feed_for_update(db)
+    if feed is None:
+        return False
+    try:
+        feed.generated_xml = set_feed_offer_availability(
+            feed.generated_xml or feed.source_xml,
+            sku_candidates=sku_candidates,
+            available=False,
+            stock_count=0,
+        )
+    except ValueError as exc:
+        if str(exc) == "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+            return False
+        raise
+    feed.generated_at = func.now()
+    return True
+
+
+def suspend_product_removed_from_seller(
+    db: Session,
+    *,
+    product: Product,
+    policy: DumpingPolicy,
+) -> DumpingRun:
+    """Latch a manual Kaspi Seller removal until the owner re-enables it."""
+    feed = _latest_feed_for_update(db)
+    xml_availability = "no"
+    if feed is not None:
+        try:
+            feed.generated_xml = set_feed_offer_availability(
+                feed.generated_xml or feed.source_xml,
+                sku_candidates=_sku_candidates(product),
+                available=False,
+                stock_count=0,
+            )
+        except ValueError as exc:
+            if str(exc) != "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+                raise
+            xml_availability = "offer_absent"
+        feed.generated_at = func.now()
+
+    policy.enabled = False
+    queued_jobs = db.scalars(
+        select(DumpingRun)
+        .where(
+            DumpingRun.product_id == product.id,
+            DumpingRun.status == "queued_local",
+        )
+        .with_for_update()
+    ).all()
+    for job in queued_jobs:
+        job.status = "failed_local"
+        job.explanation_json = {
+            **(job.explanation_json or {}),
+            "stage": "cancelled_seller_removed",
+            "error_code": "seller_offer_removed",
+            "error_message": "Карточка снята владельцем в Kaspi Seller",
+        }
+
+    latest = _latest_run(db, product_id=product.id)
+    if latest is not None and latest.status == "suspended_seller_removed":
+        return latest
+    run = DumpingRun(
+        product_id=product.id,
+        dumping_policy_id=policy.id,
+        status="suspended_seller_removed",
+        published=True,
+        explanation_json={
+            "reason": "own_offer_absent_while_xml_expected_active",
+            "business_state": "owner_removed_from_kaspi_seller",
+            "xml_availability": xml_availability,
+            "automatic_recovery": False,
+            "resume_action": "explicitly_enable_dumping_policy",
+        },
+    )
+    db.add(run)
+    db.flush()
+    return run
 
 
 def suspend_product_without_cost_source(
@@ -324,12 +651,7 @@ def suspend_product_without_cost_source(
     competitor jobs are cancelled; a currently leased job may finish, but its
     decision will still be rejected because there is no cost source.
     """
-    feed = db.scalar(
-        select(KaspiXmlFeed)
-        .order_by(KaspiXmlFeed.id.desc())
-        .with_for_update()
-        .limit(1)
-    )
+    feed = _latest_feed_for_update(db)
     if feed is None:
         raise ValueError("Сначала импортируйте полный Kaspi XML в разделе Товары")
 
@@ -337,8 +659,9 @@ def suspend_product_without_cost_source(
     try:
         feed.generated_xml = set_feed_offer_availability(
             feed.generated_xml or feed.source_xml,
-            sku_candidates={product.merchant_sku or "", product.kaspi_product_id},
+            sku_candidates=_sku_candidates(product),
             available=False,
+            stock_count=0,
         )
     except ValueError as exc:
         if str(exc) != "Товар не найден в сохранённом XML по SKU/Kaspi ID":
@@ -347,6 +670,11 @@ def suspend_product_without_cost_source(
         xml_availability = "offer_absent"
     feed.active = True
     feed.generated_at = func.now()
+    _mark_waiting_runs(
+        db,
+        product_id=product.id,
+        status="supplier_refresh_unavailable",
+    )
 
     queued_jobs = db.scalars(
         select(DumpingRun)
@@ -392,24 +720,25 @@ def suspend_product_without_cost_source(
 
 
 def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, decision: DumpingDecision) -> DumpingRun:
-    feed = db.scalar(
-        select(KaspiXmlFeed)
-        .order_by(KaspiXmlFeed.id.desc())
-        .with_for_update()
-        .limit(1)
-    )
+    feed = _latest_feed_for_update(db)
     if feed is None:
         raise ValueError("Сначала импортируйте полный Kaspi XML в разделе Товары")
 
     generated = update_feed_xml(
         feed.generated_xml or feed.source_xml,
-        sku_candidates={product.merchant_sku or "", product.kaspi_product_id},
+        sku_candidates=_sku_candidates(product),
         price_kzt=decision.target_price_kzt,
         preorder_days=decision.preorder_days,
+        stock_count=decision.stock_count,
     )
     feed.generated_xml = generated
     feed.active = True
     feed.generated_at = func.now()
+    _mark_waiting_runs(
+        db,
+        product_id=product.id,
+        status="supplier_refresh_applied",
+    )
 
     run = DumpingRun(
         product_id=product.id,
@@ -429,6 +758,7 @@ def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, de
             "minimum_profit_kzt": str(policy.minimum_profit_kzt),
             "undercut_step_kzt": int(policy.undercut_step_kzt),
             "supplier_delivery_buffer_days": int(policy.supplier_delivery_buffer_days),
+            "stock_count": decision.stock_count,
             "logistics_kzt": str(kaspi_logistics_per_unit(decision.target_price_kzt)),
             "feed_url": workspace_feed_url(db),
         },

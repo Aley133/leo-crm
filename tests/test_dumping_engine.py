@@ -40,10 +40,12 @@ def test_feed_update_changes_only_matching_offer_price_and_preorder() -> None:
         sku_candidates={"SKU-1"},
         price_kzt=Decimal("8956"),
         preorder_days=4,
+        stock_count=6,
     )
 
     assert "8956" in generated
     assert 'preOrder="4"' in generated
+    assert 'stockCount="6"' in generated
     assert "7777" in generated
     assert 'preOrder="2"' in generated
 

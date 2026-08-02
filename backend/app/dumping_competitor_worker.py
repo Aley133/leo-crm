@@ -134,6 +134,14 @@ def build_due_competitor_policies_statement(
         )
         .exists()
     )
+    supplier_refresh_pending = (
+        select(DumpingRun.id)
+        .where(
+            DumpingRun.product_id == DumpingPolicy.product_id,
+            DumpingRun.status == "awaiting_supplier_refresh",
+        )
+        .exists()
+    )
     due_before = now - timedelta(seconds=refresh_seconds)
     return (
         select(DumpingPolicy)
@@ -141,6 +149,7 @@ def build_due_competitor_policies_statement(
             DumpingPolicy.enabled.is_(True),
             DumpingPolicy.auto_publish_xml.is_(True),
             ~active_job_exists,
+            ~supplier_refresh_pending,
             or_(latest_scan_at.is_(None), latest_scan_at <= due_before),
         )
         .order_by(DumpingPolicy.id)

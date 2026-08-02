@@ -13,7 +13,11 @@ from .auth import require_service_token
 from .db import get_db
 from .dumping_competitor_worker import enqueue_competitor_scan, state_for_product
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
-from .dumping_service import calculate_safe_floor, resolve_cost_source
+from .dumping_service import (
+    calculate_safe_floor,
+    resolve_cost_source,
+    sync_product_inventory_to_feed,
+)
 from .models import Product
 from .workspace_context import LEGACY_WORKSPACE_ID, current_workspace_id, workspace_context
 from .workspace_models import Workspace
@@ -439,6 +443,13 @@ def upsert_dumping_policy(
         db.add(policy)
     for field, value in payload.model_dump().items():
         setattr(policy, field, value)
+    db.flush()
+    if policy.enabled:
+        sync_product_inventory_to_feed(
+            db,
+            product_id=product_id,
+            reason="dumping_policy_enabled",
+        )
     db.commit()
     db.refresh(policy)
     return {

@@ -9,6 +9,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .browser_agent_models import BrowserAgentJob
+from .dumping_models import DumpingRun
 from .dumping_events import mark_supplier_product_for_dumping_refresh
 from .monitoring import (
     AttemptOutcome,
@@ -219,7 +220,15 @@ def persist_browser_agent_success(
         session.flush()
         enqueue_price_drop_alert(session, observation=observation)
         calculate_product_price(session, product_id=product_id)
-    if changed or offer.available is False:
+    awaiting_stock_transition = session.scalar(
+        select(DumpingRun.id)
+        .where(
+            DumpingRun.product_id == product_id,
+            DumpingRun.status == "awaiting_supplier_refresh",
+        )
+        .limit(1)
+    )
+    if changed or offer.available is False or awaiting_stock_transition is not None:
         mark_supplier_product_for_dumping_refresh(session, supplier_product.id)
 
     target.last_checked_at = finished_at

@@ -98,6 +98,16 @@ def test_periodic_dispatch_queues_only_due_enabled_policies_once(db_session) -> 
         kaspi_product_id="100000007",
         with_source=False,
     )
+    awaiting_supplier_refresh = _policy(
+        db_session,
+        kaspi_product_id="100000008",
+    )
+    _run(
+        db_session,
+        policy=awaiting_supplier_refresh,
+        status="awaiting_supplier_refresh",
+        created_at=NOW - timedelta(minutes=30),
+    )
     _run(
         db_session,
         policy=old_check,
@@ -144,6 +154,9 @@ def test_periodic_dispatch_queues_only_due_enabled_policies_once(db_session) -> 
     assert no_procurement_source.product_id not in {
         run.product_id for run in newly_queued
     }
+    assert awaiting_supplier_refresh.product_id not in {
+        run.product_id for run in newly_queued
+    }
 
 
 def test_queue_scheduler_dispatches_immediately_without_scanning_kaspi(
@@ -183,3 +196,4 @@ def test_periodic_dispatch_uses_postgresql_skip_locked_and_active_job_guard() ->
     assert "NOT (EXISTS" in sql
     assert "QUEUED_LOCAL" in sql
     assert "LEASED_LOCAL" in sql
+    assert "AWAITING_SUPPLIER_REFRESH" in sql
