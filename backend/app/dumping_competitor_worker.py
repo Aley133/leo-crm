@@ -82,6 +82,24 @@ def state_for_product(
             return None
 
 
+def states_for_products(
+    product_ids: set[int],
+    *,
+    db: Session,
+) -> dict[int, dict[str, Any]]:
+    from .kaspi_competitor_agent_api import states_for_products as read_states
+
+    try:
+        return {
+            product_id: normalized
+            for product_id, state in read_states(db, product_ids).items()
+            if (normalized := _normalized_state(state)) is not None
+        }
+    except (OperationalError, ProgrammingError):
+        db.rollback()
+        return {}
+
+
 def enqueue_competitor_scan(product_id: int, *, reason: str = "manual") -> bool:
     """Create a durable job for the local Kaspi Competitor Agent.
 

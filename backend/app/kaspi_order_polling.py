@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+from time import monotonic
 from datetime import UTC, datetime
 from typing import Any
 
@@ -23,15 +24,27 @@ from .workspace_kaspi import (
 )
 
 
-POLL_INTERVAL_SECONDS = 600
+POLL_INTERVAL_SECONDS = 60
 STARTUP_DELAY_SECONDS = 30
-FULL_REFRESH_EVERY = 6
+FAST_LOOKBACK_MINUTES = 20
+FULL_REFRESH_EVERY = 10
+DEEP_REFRESH_EVERY = 60
+FAST_ORDER_STATES = (
+    "NEW",
+    "SIGN_REQUIRED",
+    "PICKUP",
+    "DELIVERY",
+    "KASPI_DELIVERY",
+)
 LAST_RUN: dict[str, Any] = {
     "status": "idle",
     "cycle": 0,
     "started_at": None,
     "finished_at": None,
     "days": None,
+    "mode": None,
+    "lookback_minutes": None,
+    "poll_interval_seconds": POLL_INTERVAL_SECONDS,
     "raw_job_id": None,
     "enrichment_job_id": None,
     "message": "Kaspi polling has not started",
@@ -49,7 +62,7 @@ def polling_interval_seconds() -> int:
         value = int(raw)
     except ValueError:
         return POLL_INTERVAL_SECONDS
-    return max(60, value)
+    return max(30, value)
 
 
 def polling_startup_delay_seconds() -> float:
@@ -68,6 +81,9 @@ async def _run_account_cycle(
     connection: WorkspaceKaspiConnection,
     *,
     days: int,
+    mode: str,
+    lookback_minutes: int | None,
+    enrich_products: bool,
 ) -> dict[str, Any]:
     with workspace_context(connection.workspace_id):
         raw_job_id = create_raw_job(
@@ -75,6 +91,8 @@ async def _run_account_cycle(
             timezone_name=connection.timezone,
             marketplace_account_id=connection.account_id,
             workspace_id=connection.workspace_id,
+            lookback_minutes=lookback_minutes,
+            states=FAST_ORDER_STATES if mode == "fast" else None,
         )
         await run_raw_job(
             raw_job_id,
@@ -91,23 +109,27 @@ async def _run_account_cycle(
                 "message": str(raw_job.get("message") or "Kaspi raw import failed"),
             }
 
-        enrichment_job_id = create_enrichment_job(
-            days=days,
-            marketplace_account_id=connection.account_id,
-            workspace_id=connection.workspace_id,
-        )
-        await run_enrichment_job(
-            enrichment_job_id,
-            api_token=connection.api_token,
-            marketplace_account_id=connection.account_id,
-        )
-        enrichment = public_enrichment_job(enrichment_job_id) or {}
+        enrichment_job_id = None
+        enrichment: dict[str, Any] = {}
+        if enrich_products:
+            enrichment_job_id = create_enrichment_job(
+                days=days,
+                marketplace_account_id=connection.account_id,
+                workspace_id=connection.workspace_id,
+            )
+            await run_enrichment_job(
+                enrichment_job_id,
+                api_token=connection.api_token,
+                marketplace_account_id=connection.account_id,
+            )
+            enrichment = public_enrichment_job(enrichment_job_id) or {}
         raw_errors = list(raw_job.get("errors") or [])
         enrichment_errors = list(enrichment.get("errors") or [])
         has_errors = bool(raw_errors or enrichment_errors)
         return {
             "workspace_id": connection.workspace_id,
             "account_id": connection.account_id,
+            "mode": mode,
             "status": "completed_with_errors" if has_errors else "completed",
             "raw_job_id": raw_job_id,
             "enrichment_job_id": enrichment_job_id,
@@ -121,14 +143,26 @@ async def _run_account_cycle(
         }
 
 
-async def run_poll_cycle(*, days: int) -> None:
+async def run_poll_cycle(
+    *,
+    days: int,
+    mode: str = "full",
+    lookback_minutes: int | None = None,
+    enrich_products: bool = True,
+) -> None:
     LAST_RUN.update(
         {
             "status": "running",
             "started_at": datetime.now(UTC).isoformat(),
             "finished_at": None,
             "days": days,
-            "message": f"Kaspi order polling started for {days} day(s)",
+            "mode": mode,
+            "lookback_minutes": lookback_minutes,
+            "poll_interval_seconds": polling_interval_seconds(),
+            "message": (
+                f"Kaspi order polling started: mode={mode}, "
+                f"lookback={lookback_minutes or days * 24 * 60} minute(s)"
+            ),
         }
     )
 
@@ -147,7 +181,15 @@ async def run_poll_cycle(*, days: int) -> None:
 
     results: list[dict[str, Any]] = []
     for connection in connections:
-        results.append(await _run_account_cycle(connection, days=days))
+        results.append(
+            await _run_account_cycle(
+                connection,
+                days=days,
+                mode=mode,
+                lookback_minutes=lookback_minutes,
+                enrich_products=enrich_products,
+            )
+        )
     has_failures = any(item["status"] == "failed" for item in results)
     has_errors = any(item["status"] == "completed_with_errors" for item in results)
     totals = {
@@ -166,7 +208,7 @@ async def run_poll_cycle(*, days: int) -> None:
             "finished_at": datetime.now(UTC).isoformat(),
             "accounts": results,
             "message": (
-                f"Kaspi polling completed for {len(results)} account(s): "
+                f"Kaspi polling {mode} completed for {len(results)} account(s): "
                 f"orders={totals['orders']}, imported={totals['imported']}, "
                 f"updated={totals['updated']}, product_lines={totals['product_lines']}, "
                 f"linked={totals['linked']}, allocated={totals['allocated']}, "
@@ -194,11 +236,21 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
 
     cycle = 0
     while not stop_event.is_set():
+        cycle_started = monotonic()
         cycle += 1
         LAST_RUN["cycle"] = cycle
-        days = 7 if cycle % FULL_REFRESH_EVERY == 0 else 1
         try:
-            await run_poll_cycle(days=days)
+            if cycle % DEEP_REFRESH_EVERY == 0:
+                await run_poll_cycle(days=7, mode="deep", enrich_products=True)
+            elif cycle % FULL_REFRESH_EVERY == 0:
+                await run_poll_cycle(days=1, mode="full", enrich_products=True)
+            else:
+                await run_poll_cycle(
+                    days=1,
+                    mode="fast",
+                    lookback_minutes=FAST_LOOKBACK_MINUTES,
+                    enrich_products=False,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -210,7 +262,9 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
                 }
             )
 
+        elapsed = monotonic() - cycle_started
+        wait_seconds = max(0.1, polling_interval_seconds() - elapsed)
         try:
-            await asyncio.wait_for(stop_event.wait(), timeout=polling_interval_seconds())
+            await asyncio.wait_for(stop_event.wait(), timeout=wait_seconds)
         except TimeoutError:
             continue

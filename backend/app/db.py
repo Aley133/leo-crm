@@ -59,7 +59,7 @@ def _engine_options(database_url: str) -> dict[str, Any]:
             "pool_size": _bounded_int_setting(
                 "DB_POOL_SIZE",
                 default=5,
-                minimum=1,
+                minimum=3,
                 maximum=10,
             ),
             "max_overflow": _bounded_int_setting(

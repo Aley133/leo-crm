@@ -86,29 +86,47 @@ def calculate_safe_floor(*, unit_cost_kzt: Decimal, minimum_profit_kzt: Decimal)
     raise RuntimeError("Unable to calculate dumping floor")
 
 
-def _inventory_source(db: Session, product_id: int) -> DumpingCostSource | None:
-    batch = db.scalar(
+def _inventory_sources(
+    db: Session,
+    product_ids: set[int],
+) -> dict[int, DumpingCostSource]:
+    if not product_ids:
+        return {}
+    batches = db.scalars(
         select(InventoryBatch)
         .where(
-            InventoryBatch.product_id == product_id,
+            InventoryBatch.product_id.in_(product_ids),
             InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
             InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
         )
-        .order_by(InventoryBatch.received_at, InventoryBatch.id)
-        .limit(1)
-    )
-    if batch is None:
-        return None
-    return DumpingCostSource(
-        kind="inventory",
-        name=batch.source_name or "Склад FIFO",
-        unit_cost_kzt=Decimal(batch.unit_cost),
-        delivery_days=0,
-    )
+        .order_by(
+            InventoryBatch.product_id,
+            InventoryBatch.received_at,
+            InventoryBatch.id,
+        )
+    ).all()
+    result: dict[int, DumpingCostSource] = {}
+    for batch in batches:
+        product_id = int(batch.product_id)
+        result.setdefault(
+            product_id,
+            DumpingCostSource(
+                kind="inventory",
+                name=batch.source_name or "Склад FIFO",
+                unit_cost_kzt=Decimal(batch.unit_cost),
+                delivery_days=0,
+            ),
+        )
+    return result
 
 
-def _supplier_source(db: Session, product_id: int) -> DumpingCostSource | None:
+def _supplier_sources(
+    db: Session,
+    product_ids: set[int],
+) -> dict[int, DumpingCostSource]:
+    if not product_ids:
+        return {}
     rows = db.execute(
         select(ProductBinding, SupplierProduct, Supplier, SupplierOfferState)
         .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
@@ -118,17 +136,18 @@ def _supplier_source(db: Session, product_id: int) -> DumpingCostSource | None:
             SupplierOfferState.supplier_product_id == SupplierProduct.id,
         )
         .where(
-            ProductBinding.product_id == product_id,
+            ProductBinding.product_id.in_(product_ids),
             ProductBinding.status.in_(("active", "confirmed", "degraded")),
         )
         .order_by(
+            ProductBinding.product_id,
             ProductBinding.is_primary.desc(),
             ProductBinding.priority,
             SupplierOfferState.observed_at.desc().nullslast(),
         )
     ).all()
     grouped_rows: dict[
-        tuple[int, str],
+        tuple[int, int, str],
         list[
             tuple[
                 ProductBinding,
@@ -144,7 +163,7 @@ def _supplier_source(db: Session, product_id: int) -> DumpingCostSource | None:
             external_id=supplier_product.external_id,
             url=supplier_product.url,
         )
-        grouped_rows.setdefault((supplier.id, identity), []).append(
+        grouped_rows.setdefault((binding.product_id, supplier.id, identity), []).append(
             (binding, supplier_product, supplier, state)
         )
 
@@ -178,51 +197,88 @@ def _supplier_source(db: Session, product_id: int) -> DumpingCostSource | None:
             binding.id,
         )
 
-    for duplicate_rows in grouped_rows.values():
+    result: dict[int, DumpingCostSource] = {}
+    for (product_id, _supplier_id, _identity), duplicate_rows in grouped_rows.items():
+        if product_id in result:
+            continue
         _binding, supplier_product, supplier, state = max(
             duplicate_rows,
             key=freshness,
         )
         if state is not None and state.price is not None and state.available is not False:
-            return DumpingCostSource(
+            result[product_id] = DumpingCostSource(
                 kind="supplier",
                 name=supplier.name,
                 unit_cost_kzt=Decimal(state.price),
                 delivery_days=max(int(state.delivery_days or 0), 0),
             )
-        if (
+        elif (
             state is None
             and supplier_product.current_price is not None
             and supplier_product.in_stock is not False
         ):
-            return DumpingCostSource(
+            result[product_id] = DumpingCostSource(
                 kind="supplier",
                 name=supplier.name,
                 unit_cost_kzt=Decimal(supplier_product.current_price),
                 delivery_days=max(int(supplier_product.delivery_days or 0), 0),
             )
-    return None
+    return result
+
+
+def resolve_cost_sources(
+    db: Session,
+    *,
+    product_ids: set[int],
+) -> dict[int, DumpingCostSource | None]:
+    """Resolve pricing inputs for a page in a bounded number of SQL reads."""
+    normalized = {int(product_id) for product_id in product_ids}
+    if not normalized:
+        return {}
+    inventory = _inventory_sources(db, normalized)
+    missing = normalized.difference(inventory)
+    suppliers = _supplier_sources(db, missing)
+    return {
+        product_id: inventory.get(product_id) or suppliers.get(product_id)
+        for product_id in normalized
+    }
 
 
 def resolve_cost_source(db: Session, *, product_id: int, inventory_first: bool = True) -> DumpingCostSource | None:
     # Physical stock is authoritative regardless of a legacy policy toggle.
     # Selling a supplier preorder while warehouse units are still available
     # would make XML quantity and FIFO accounting disagree.
-    return _inventory_source(db, product_id) or _supplier_source(db, product_id)
+    return resolve_cost_sources(db, product_ids={product_id}).get(product_id)
+
+
+def physical_stock_counts(
+    db: Session,
+    *,
+    product_ids: set[int],
+) -> dict[int, int]:
+    """Return authoritative on-hand stock for several products in one query."""
+    normalized = {int(product_id) for product_id in product_ids}
+    if not normalized:
+        return {}
+    rows = db.execute(
+        select(
+            InventoryBatch.product_id,
+            func.coalesce(func.sum(InventoryBatch.quantity_remaining), 0),
+        )
+        .where(
+            InventoryBatch.product_id.in_(normalized),
+            InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
+            InventoryBatch.is_received.is_(True),
+        )
+        .group_by(InventoryBatch.product_id)
+    ).all()
+    counted = {int(product_id): int(quantity or 0) for product_id, quantity in rows}
+    return {product_id: counted.get(product_id, 0) for product_id in normalized}
 
 
 def physical_stock_count(db: Session, *, product_id: int) -> int:
     """Return sellable on-hand units from received purchase batches only."""
-    return int(
-        db.scalar(
-            select(func.coalesce(func.sum(InventoryBatch.quantity_remaining), 0)).where(
-                InventoryBatch.product_id == product_id,
-                InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
-                InventoryBatch.is_received.is_(True),
-            )
-        )
-        or 0
-    )
+    return physical_stock_counts(db, product_ids={product_id}).get(product_id, 0)
 
 
 def decide_dumping_price(

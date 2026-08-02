@@ -1,4 +1,9 @@
+import asyncio
 from pathlib import Path
+
+import pytest
+
+from tools import kaspi_competitor_agent
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -44,3 +49,65 @@ def test_dumping_page_owns_its_kaspi_runtime_view() -> None:
     assert "/api/dumping/runtime" in script
     assert "setInterval(pollDumpingRuntime, 5000)" in script
     assert "DumpingRun" not in monitoring_api
+
+
+def test_competitor_agent_retries_transient_crm_overload(monkeypatch) -> None:
+    attempts = 0
+    delays: list[float] = []
+
+    def post_json(_url, _token, _payload):
+        nonlocal attempts
+        attempts += 1
+        if attempts < 3:
+            raise kaspi_competitor_agent.CRMRequestError(
+                "database_pool_busy",
+                retryable=True,
+                retry_after=2,
+            )
+        return {"job": None}
+
+    async def sleep(delay):
+        delays.append(delay)
+
+    monkeypatch.setattr(kaspi_competitor_agent, "_post_json", post_json)
+    monkeypatch.setattr(kaspi_competitor_agent.asyncio, "sleep", sleep)
+    monkeypatch.setattr(kaspi_competitor_agent, "_log", lambda _message: None)
+
+    result = asyncio.run(
+        kaspi_competitor_agent._post_json_with_retry(
+            "https://crm.test/claim",
+            "token",
+            {},
+            operation="Получение задания",
+        )
+    )
+
+    assert result == {"job": None}
+    assert attempts == 3
+    assert delays == [2, 2]
+
+
+def test_competitor_agent_does_not_retry_permanent_crm_error(monkeypatch) -> None:
+    attempts = 0
+
+    def post_json(_url, _token, _payload):
+        nonlocal attempts
+        attempts += 1
+        raise kaspi_competitor_agent.CRMRequestError(
+            "unauthorized",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(kaspi_competitor_agent, "_post_json", post_json)
+
+    with pytest.raises(kaspi_competitor_agent.CRMRequestError, match="unauthorized"):
+        asyncio.run(
+            kaspi_competitor_agent._post_json_with_retry(
+                "https://crm.test/claim",
+                "bad-token",
+                {},
+                operation="Получение задания",
+            )
+        )
+
+    assert attempts == 1

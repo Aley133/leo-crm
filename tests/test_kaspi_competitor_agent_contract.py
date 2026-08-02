@@ -13,6 +13,10 @@ def test_local_competitor_agent_is_isolated_from_supplier_browser_agent() -> Non
     assert "tools.browser_agent" not in source
     assert "Playwright" not in source
     assert "CHROME_CDP_ENDPOINT" not in source
+    assert 'VERSION = "1.4.0"' in source
+    assert "_post_json_with_retry" in source
+    assert "TRANSIENT_HTTP_STATUSES" in source
+    assert "CRM временно занята" in source
 
 
 def test_render_competitor_worker_only_schedules_local_jobs() -> None:

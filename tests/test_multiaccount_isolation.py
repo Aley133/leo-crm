@@ -24,7 +24,11 @@ from backend.app import (  # noqa: F401
 )
 from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.db import Base, get_db
-from backend.app.dumping_api import read_public_kaspi_feed, read_workspace_kaspi_feed
+from backend.app.dumping_api import (
+    list_dumping_products,
+    read_public_kaspi_feed,
+    read_workspace_kaspi_feed,
+)
 from backend.app.dumping_models import DumpingPolicy, KaspiXmlFeed
 from backend.app.inventory_models import InventoryBatch
 from backend.app.legacy_workspace_scope import WorkspaceIsolationError
@@ -180,6 +184,26 @@ def test_two_workspaces_are_invisible_to_each_other(db_session) -> None:
         db_session.info.pop("include_all_workspaces", None)
     assert feed_states[first["feed_id"]] is False
     assert feed_states[second["feed_id"]] is True
+
+
+def test_dumping_inventory_cards_are_isolated_between_accounts(db_session) -> None:
+    _seed_workspace(db_session, 1, "barwork")
+    _seed_workspace(db_session, 2, "leoxpress")
+    db_session.commit()
+    db_session.expunge_all()
+
+    with workspace_context(1):
+        barwork = list_dumping_products(db_session)
+    db_session.expunge_all()
+    with workspace_context(2):
+        leoxpress = list_dumping_products(db_session)
+
+    assert [(row["name"], row["inventory_on_hand"]) for row in barwork] == [
+        ("Product 1", 1)
+    ]
+    assert [(row["name"], row["inventory_on_hand"]) for row in leoxpress] == [
+        ("Product 2", 2)
+    ]
 
 
 def test_cross_workspace_write_is_rejected(db_session) -> None:

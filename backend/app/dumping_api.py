@@ -11,11 +11,17 @@ from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .db import get_db
-from .dumping_competitor_worker import enqueue_competitor_scan, state_for_product
+from .dumping_competitor_worker import (
+    enqueue_competitor_scan,
+    state_for_product,
+    states_for_products,
+)
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from .dumping_service import (
     calculate_safe_floor,
+    physical_stock_counts,
     resolve_cost_source,
+    resolve_cost_sources,
     sync_product_inventory_to_feed,
 )
 from .models import Product
@@ -256,6 +262,38 @@ def _source_payload(db: Session, policy: DumpingPolicy) -> tuple[dict | None, st
     }, None
 
 
+def _resolved_source_payload(source) -> dict | None:
+    if source is None:
+        return None
+    return {
+        "kind": source.kind,
+        "name": source.name,
+        "unit_cost_kzt": source.unit_cost_kzt,
+        "delivery_days": source.delivery_days,
+    }
+
+
+def _latest_runs_for_products(
+    db: Session,
+    product_ids: set[int],
+) -> dict[int, DumpingRun]:
+    if not product_ids:
+        return {}
+    latest_ids = (
+        select(
+            DumpingRun.product_id.label("product_id"),
+            func.max(DumpingRun.id).label("run_id"),
+        )
+        .where(DumpingRun.product_id.in_(product_ids))
+        .group_by(DumpingRun.product_id)
+        .subquery()
+    )
+    runs = db.scalars(
+        select(DumpingRun).join(latest_ids, DumpingRun.id == latest_ids.c.run_id)
+    ).all()
+    return {int(run.product_id): run for run in runs}
+
+
 def _pricing_preview(policy: DumpingPolicy, source: dict | None) -> dict | None:
     if source is None:
         return None
@@ -277,10 +315,20 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
         .join(Product, Product.id == DumpingPolicy.product_id)
         .order_by(DumpingPolicy.updated_at.desc(), DumpingPolicy.id.desc())
     ).all()
+    product_ids = {int(product.id) for _policy, product in rows}
+    latest_runs = _latest_runs_for_products(db, product_ids)
+    source_error = None
+    try:
+        sources = resolve_cost_sources(db, product_ids=product_ids)
+    except Exception as exc:
+        sources = {}
+        source_error = str(exc)
+    stock_counts = physical_stock_counts(db, product_ids=product_ids)
+    scan_states = states_for_products(product_ids, db=db)
     result: list[dict] = []
     for policy, product in rows:
-        latest = _latest_run_or_none(db, product.id)
-        source, source_error = _source_payload(db, policy)
+        latest = latest_runs.get(int(product.id))
+        source = _resolved_source_payload(sources.get(int(product.id)))
         result.append({
             "product_id": product.id,
             "name": product.name,
@@ -289,9 +337,10 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
             "policy": _policy_payload(policy),
             "source": source,
             "source_error": source_error,
+            "inventory_on_hand": stock_counts.get(int(product.id), 0),
             "pricing_preview": _pricing_preview(policy, source),
             "latest_run": _run_payload(latest),
-            "scan_state": state_for_product(product.id, db=db),
+            "scan_state": scan_states.get(int(product.id)),
         })
     return result
 

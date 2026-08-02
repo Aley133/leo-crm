@@ -7,7 +7,7 @@ from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -202,16 +202,7 @@ def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> Dumpin
     return job
 
 
-def state_for_product(db: Session, product_id: int) -> dict | None:
-    job = db.scalar(
-        select(DumpingRun)
-        .where(
-            DumpingRun.product_id == product_id,
-            DumpingRun.status.in_(("queued_local", "leased_local", "failed_local", "succeeded_local")),
-        )
-        .order_by(DumpingRun.id.desc())
-        .limit(1)
-    )
+def _state_payload(job: DumpingRun | None) -> dict | None:
     if job is None:
         return None
     meta = job.explanation_json or {}
@@ -226,6 +217,121 @@ def state_for_product(db: Session, product_id: int) -> dict | None:
         "last_error": meta.get("error_message"),
         "updated_at": meta.get("updated_at") or job.created_at,
     }
+
+
+def state_for_product(db: Session, product_id: int) -> dict | None:
+    job = db.scalar(
+        select(DumpingRun)
+        .where(
+            DumpingRun.product_id == product_id,
+            DumpingRun.status.in_(("queued_local", "leased_local", "failed_local", "succeeded_local")),
+        )
+        .order_by(DumpingRun.id.desc())
+        .limit(1)
+    )
+    return _state_payload(job)
+
+
+def states_for_products(db: Session, product_ids: set[int]) -> dict[int, dict]:
+    """Load the latest local-agent state for a dumping page in one query."""
+    normalized = {int(product_id) for product_id in product_ids}
+    if not normalized:
+        return {}
+    latest_ids = (
+        select(
+            DumpingRun.product_id.label("product_id"),
+            func.max(DumpingRun.id).label("run_id"),
+        )
+        .where(
+            DumpingRun.product_id.in_(normalized),
+            DumpingRun.status.in_(
+                ("queued_local", "leased_local", "failed_local", "succeeded_local")
+            ),
+        )
+        .group_by(DumpingRun.product_id)
+        .subquery()
+    )
+    jobs = db.scalars(
+        select(DumpingRun).join(latest_ids, DumpingRun.id == latest_ids.c.run_id)
+    ).all()
+    return {
+        int(job.product_id): payload
+        for job in jobs
+        if (payload := _state_payload(job)) is not None
+    }
+
+
+def _leased_job_for_agent(
+    db: Session,
+    *,
+    agent_id: str,
+    now: datetime,
+) -> DumpingRun | None:
+    """Resume a claim whose HTTP response was lost without leasing another job."""
+    candidates = db.scalars(
+        select(DumpingRun)
+        .where(DumpingRun.status == "leased_local")
+        .order_by(DumpingRun.id)
+        .limit(LEASE_RECOVERY_SCAN_LIMIT)
+    ).all()
+    for candidate in candidates:
+        metadata = candidate.explanation_json or {}
+        lease_until = _metadata_datetime(metadata.get("lease_until"))
+        if metadata.get("agent_id") == agent_id and lease_until is not None and lease_until >= now:
+            return candidate
+    return None
+
+
+def _serialize_claimed_job(
+    *,
+    job: DumpingRun,
+    product: Product,
+    policy: DumpingPolicy,
+    feed: KaspiXmlFeed,
+) -> dict | None:
+    metadata = job.explanation_json or {}
+    token = str(metadata.get("lease_token") or "")
+    if not feed.merchant_id or not token:
+        return None
+    return {
+        "id": job.id,
+        "product_id": product.id,
+        "name": product.name,
+        "brand": product.brand,
+        "kaspi_product_id": product.kaspi_product_id,
+        "merchant_sku": product.merchant_sku,
+        "own_merchant_id": feed.merchant_id,
+        "city_id": policy.city_id,
+        "zone_id": policy.zone_id,
+        "lease_token": token,
+        "lease_until": metadata.get("lease_until"),
+    }
+
+
+def _claimed_job_payload(
+    db: Session,
+    *,
+    job: DumpingRun,
+) -> dict | None:
+    product = db.get(Product, job.product_id)
+    policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == job.product_id))
+    feed = db.scalar(
+        select(KaspiXmlFeed)
+        .where(
+            KaspiXmlFeed.workspace_id == job.workspace_id,
+            KaspiXmlFeed.active.is_(True),
+        )
+        .order_by(KaspiXmlFeed.id.desc())
+        .limit(1)
+    )
+    if product is None or policy is None or feed is None:
+        return None
+    return _serialize_claimed_job(
+        job=job,
+        product=product,
+        policy=policy,
+        feed=feed,
+    )
 
 
 @router.post("/heartbeat")
@@ -243,6 +349,12 @@ def read_agent_status() -> dict:
 def claim_job(payload: AgentClaim, db: Session = Depends(get_unscoped_db)) -> dict:
     _touch_agent(payload)
     now = _now()
+    job = _leased_job_for_agent(db, agent_id=payload.agent_id, now=now)
+    if job is not None:
+        resumed_payload = _claimed_job_payload(db, job=job)
+        if resumed_payload is not None:
+            return {"job": resumed_payload, "resumed": True}
+
     job, recovered = _claimable_job(db, now=now)
     if job is None:
         return {"job": None}
@@ -292,19 +404,13 @@ def claim_job(payload: AgentClaim, db: Session = Depends(get_unscoped_db)) -> di
     }
     db.commit()
     return {
-        "job": {
-            "id": job.id,
-            "product_id": product.id,
-            "name": product.name,
-            "brand": product.brand,
-            "kaspi_product_id": product.kaspi_product_id,
-            "merchant_sku": product.merchant_sku,
-            "own_merchant_id": feed.merchant_id,
-            "city_id": policy.city_id,
-            "zone_id": policy.zone_id,
-            "lease_token": token,
-            "lease_until": lease_until,
-        }
+        "job": _serialize_claimed_job(
+            job=job,
+            product=product,
+            policy=policy,
+            feed=feed,
+        ),
+        "resumed": False,
     }
 
 
@@ -314,6 +420,14 @@ def complete_job(job_id: int, payload: AgentComplete, db: Session = Depends(get_
     if job is None:
         raise HTTPException(status_code=404, detail="Competitor job not found")
     meta = job.explanation_json or {}
+    if (
+        meta.get("lease_token") == payload.lease_token
+        and job.status in {"succeeded_local", "failed_local"}
+    ):
+        response = {"id": job.id, "status": job.status}
+        if job.status == "succeeded_local":
+            response["result"] = meta.get("result")
+        return response
     if job.status != "leased_local" or meta.get("lease_token") != payload.lease_token:
         raise HTTPException(status_code=409, detail="Competitor job lease is no longer valid")
 

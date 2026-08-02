@@ -9,6 +9,7 @@ def test_postgres_pool_is_bounded_and_fails_fast_under_pressure() -> None:
 
     assert '"DB_POOL_SIZE"' in source
     assert "default=5" in source
+    assert "minimum=3" in source
     assert '"DB_MAX_OVERFLOW"' in source
     assert "default=2" in source
     assert '"DB_POOL_TIMEOUT_SECONDS"' in source

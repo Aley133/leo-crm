@@ -37,10 +37,10 @@ def test_raw_order_persistence_releases_connection_between_bounded_batches(
 
 
 def test_automatic_polling_waits_for_api_startup_grace_period(monkeypatch) -> None:
-    calls: list[int] = []
+    calls: list[dict] = []
 
-    async def run_cycle(*, days):
-        calls.append(days)
+    async def run_cycle(**options):
+        calls.append(options)
         stop_event.set()
 
     stop_event = asyncio.Event()
@@ -60,7 +60,14 @@ def test_automatic_polling_waits_for_api_startup_grace_period(monkeypatch) -> No
 
     asyncio.run(scenario())
 
-    assert calls == [1]
+    assert calls == [
+        {
+            "days": 1,
+            "mode": "fast",
+            "lookback_minutes": kaspi_order_polling.FAST_LOOKBACK_MINUTES,
+            "enrich_products": False,
+        }
+    ]
 
 
 def test_finished_in_memory_job_history_is_bounded(monkeypatch) -> None:

@@ -313,6 +313,7 @@ def _persist_enriched_order(
 
     with SessionLocal() as session:
         with session.begin():
+            products_to_sync: set[int] = set()
             stored_order = session.get(MarketplaceOrder, order_id)
             if stored_order is None:
                 return 0, 0, 0, errors
@@ -372,10 +373,29 @@ def _persist_enriched_order(
                     order_line=stored,
                     order=stored_order,
                     allocated_at=datetime.now(UTC),
+                    sync_feed=False,
                 )
                 local_allocated += allocation.newly_allocated_quantity
+                if stored.product_id is not None and (
+                    allocation.newly_allocated_quantity > 0
+                    or (
+                        allocation.remaining_quantity > 0
+                        and stored_order.status not in {"cancelling", "cancelled", "returned"}
+                    )
+                ):
+                    products_to_sync.add(int(stored.product_id))
                 if changed:
                     local_updated += 1
+
+            if products_to_sync:
+                from .dumping_service import sync_product_inventory_to_feed
+
+                for product_id in sorted(products_to_sync):
+                    sync_product_inventory_to_feed(
+                        session,
+                        product_id=product_id,
+                        reason="enriched_order_inventory_allocated",
+                    )
 
     return local_updated, local_linked, local_allocated, errors
 

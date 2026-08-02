@@ -1,10 +1,14 @@
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+
+from sqlalchemy import event
 
 from backend.app.dumping_api import list_dumping_products
 from backend.app.dumping_competitor_worker import state_for_product
 from backend.app.dumping_models import DumpingRun
 from backend.app.dumping_models import DumpingPolicy
+from backend.app.inventory_models import InventoryBatch
 from backend.app.models import Product
 
 
@@ -93,6 +97,79 @@ def test_dumping_workspace_reuses_request_session_for_scan_state(
 
     assert rows[0]["scan_state"]["status"] == "queued"
     assert state_for_product(product.id, db=db_session)["job_id"] == run.id
+
+
+def test_dumping_workspace_returns_authoritative_fifo_stock_for_each_card(
+    db_session,
+) -> None:
+    product = Product(
+        kaspi_product_id="stock-visible",
+        merchant_sku="SKU-STOCK-VISIBLE",
+        name="Товар с видимым остатком",
+        status="active",
+    )
+    db_session.add(product)
+    db_session.flush()
+    db_session.add_all(
+        [
+            DumpingPolicy(product_id=product.id, enabled=True),
+            InventoryBatch(
+                product_id=product.id,
+                received_at=datetime(2026, 8, 2, tzinfo=UTC),
+                quantity_received=10,
+                quantity_remaining=6,
+                unit_cost=Decimal("4000"),
+                source_name="Склад BARWORK",
+            ),
+        ]
+    )
+    db_session.commit()
+
+    rows = list_dumping_products(db_session)
+
+    assert rows[0]["inventory_on_hand"] == 6
+    assert rows[0]["source"]["kind"] == "inventory"
+    assert rows[0]["source"]["name"] == "Склад BARWORK"
+
+
+def test_dumping_ui_renders_physical_stock_on_each_card() -> None:
+    source = (ROOT / "backend" / "app" / "static" / "dumping.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "row.inventory_on_hand" in source
+    assert "Остаток на складе" in source
+    assert "Физический FIFO-остаток после заказов" in source
+
+
+def test_dumping_workspace_does_not_add_sql_queries_per_card(db_session) -> None:
+    for index in range(12):
+        product = Product(
+            kaspi_product_id=f"batch-{index}",
+            merchant_sku=f"SKU-BATCH-{index}",
+            name=f"Пакетная карточка {index}",
+            status="active",
+        )
+        db_session.add(product)
+        db_session.flush()
+        db_session.add(DumpingPolicy(product_id=product.id, enabled=True))
+    db_session.commit()
+
+    statements = 0
+
+    def count_statement(*_args, **_kwargs) -> None:
+        nonlocal statements
+        statements += 1
+
+    bind = db_session.get_bind()
+    event.listen(bind, "before_cursor_execute", count_statement)
+    try:
+        rows = list_dumping_products(db_session)
+    finally:
+        event.remove(bind, "before_cursor_execute", count_statement)
+
+    assert len(rows) == 12
+    assert statements <= 7
 
 
 def test_dumping_ui_prefers_current_floor_over_stale_run_floor() -> None:

@@ -36,7 +36,7 @@ KASPI_STATES: tuple[str, ...] = (
 _ALL_STATES = "__ALL__"
 JOBS: dict[str, dict[str, Any]] = {}
 JOB_HISTORY_LIMIT = 32
-ORDER_PERSIST_BATCH_SIZE = 25
+ORDER_PERSIST_BATCH_SIZE = 5
 
 
 def _prune_job_registry() -> None:
@@ -55,26 +55,40 @@ def create_job(
     timezone_name: str = "Asia/Almaty",
     marketplace_account_id: int | None = None,
     workspace_id: int | None = None,
+    lookback_minutes: int | None = None,
+    states: tuple[str, ...] | None = None,
 ) -> str:
     if days < 1 or days > 31:
         raise ValueError("days must be between 1 and 31")
+    if lookback_minutes is not None and not 1 <= lookback_minutes <= 24 * 60:
+        raise ValueError("lookback_minutes must be between 1 and 1440")
+    selected_states = tuple(dict.fromkeys(states or KASPI_STATES))
+    if not selected_states or any(state not in KASPI_STATES for state in selected_states):
+        raise ValueError("states must contain supported Kaspi order states")
     _prune_job_registry()
     job_id = uuid.uuid4().hex
     now = datetime.now(UTC)
-    start = now - timedelta(days=days)
-    ranges_per_day = len(KASPI_STATES) + 1
+    start = (
+        now - timedelta(minutes=lookback_minutes)
+        if lookback_minutes is not None
+        else now - timedelta(days=days)
+    )
+    range_count = days if lookback_minutes is None else 1
+    ranges_per_day = len(selected_states) + 1
     JOBS[job_id] = {
         "id": job_id,
         "workspace_id": current_workspace_id() if workspace_id is None else int(workspace_id),
         "marketplace_account_id": marketplace_account_id,
         "status": "queued",
         "days": days,
+        "lookback_minutes": lookback_minutes,
+        "states": selected_states,
         "timezone": timezone_name,
         "from_ms": int(start.timestamp() * 1000),
         "to_ms": int(now.timestamp() * 1000),
         "started_at": None,
         "finished_at": None,
-        "progress": {"completed": 0, "total": days * ranges_per_day, "percent": 0},
+        "progress": {"completed": 0, "total": range_count * ranges_per_day, "percent": 0},
         "request_count": 0,
         "orders_count": 0,
         "imported_count": 0,
@@ -292,6 +306,7 @@ def _persist_orders(
     observed_at = datetime.now(UTC)
     with SessionLocal() as session:
         with session.begin():
+            products_to_sync: set[int] = set()
             account = (
                 session.get(MarketplaceAccount, marketplace_account_id)
                 if marketplace_account_id is not None
@@ -338,12 +353,30 @@ def _persist_orders(
                         # Product identity can be backfilled even for an unchanged
                         # order. Allocate after identity resolution on every manual
                         # rebuild; the FIFO service is idempotent per order line.
-                        allocate_order_line_fifo(
+                        allocation = allocate_order_line_fifo(
                             session,
                             order_line=line,
                             order=order,
                             allocated_at=observed_at,
+                            sync_feed=False,
                         )
+                        if line.product_id is not None and (
+                            allocation.newly_allocated_quantity > 0
+                            or (
+                                allocation.remaining_quantity > 0
+                                and order.status not in {"cancelling", "cancelled", "returned"}
+                            )
+                        ):
+                            products_to_sync.add(int(line.product_id))
+            if products_to_sync:
+                from .dumping_service import sync_product_inventory_to_feed
+
+                for product_id in sorted(products_to_sync):
+                    sync_product_inventory_to_feed(
+                        session,
+                        product_id=product_id,
+                        reason="order_inventory_batch_allocated",
+                    )
     return imported, updated
 
 
@@ -413,12 +446,13 @@ async def run_job(
         )
         day_ms = 24 * 60 * 60 * 1000
         min_split_ms = 60 * 60 * 1000
+        selected_states = tuple(job.get("states") or KASPI_STATES)
         base_chunks: list[tuple[str, int, int]] = []
         cursor = int(job["from_ms"])
         while cursor <= int(job["to_ms"]):
             end = min(cursor + day_ms - 1, int(job["to_ms"]))
             base_chunks.append((_ALL_STATES, cursor, end))
-            for state in KASPI_STATES:
+            for state in selected_states:
                 base_chunks.append((state, cursor, end))
             cursor = end + 1
 

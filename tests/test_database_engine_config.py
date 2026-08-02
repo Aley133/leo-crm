@@ -39,3 +39,13 @@ def test_postgresql_pool_settings_are_configurable_and_bounded(monkeypatch) -> N
     assert options["pool_size"] == 10
     assert options["max_overflow"] == 0
     assert options["pool_timeout"] == 2
+
+
+def test_postgresql_pool_keeps_capacity_for_two_agents_and_order_polling(monkeypatch) -> None:
+    monkeypatch.setenv("DB_POOL_SIZE", "2")
+    monkeypatch.setenv("DB_MAX_OVERFLOW", "1")
+
+    options = _engine_options("postgresql://user:pass@example.test:5432/leo")
+
+    assert options["pool_size"] == 3
+    assert options["max_overflow"] == 1

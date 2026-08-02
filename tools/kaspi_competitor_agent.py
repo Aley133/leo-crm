@@ -17,9 +17,25 @@ from urllib.request import Request, urlopen
 
 from tools.kaspi_competitor_scanner import scan_kaspi_competitors
 
-VERSION = "1.3.0"
+VERSION = "1.4.0"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 15
+CRM_HTTP_TIMEOUT_SECONDS = 30
+CRM_RETRY_ATTEMPTS = 4
+TRANSIENT_HTTP_STATUSES = {408, 425, 429, 502, 503, 504}
+
+
+class CRMRequestError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        *,
+        retryable: bool,
+        retry_after: float | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.retryable = retryable
+        self.retry_after = retry_after
 
 
 def _app_dir() -> Path:
@@ -121,14 +137,55 @@ def _post_json(url: str, token: str, payload: dict) -> dict:
         method="POST",
     )
     try:
-        with urlopen(request, timeout=45) as response:
+        with urlopen(request, timeout=CRM_HTTP_TIMEOUT_SECONDS) as response:
             body = response.read().decode("utf-8")
             return json.loads(body) if body else {}
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
-        raise RuntimeError(f"CRM returned HTTP {exc.code}: {body}") from exc
+        retry_after = None
+        try:
+            raw_retry_after = exc.headers.get("Retry-After") if exc.headers else None
+            retry_after = float(raw_retry_after) if raw_retry_after else None
+        except (TypeError, ValueError):
+            retry_after = None
+        raise CRMRequestError(
+            f"CRM returned HTTP {exc.code}: {body}",
+            retryable=exc.code in TRANSIENT_HTTP_STATUSES,
+            retry_after=retry_after,
+        ) from exc
     except URLError as exc:
-        raise RuntimeError(f"CRM is unavailable: {exc}") from exc
+        raise CRMRequestError(
+            f"CRM is unavailable: {exc}",
+            retryable=True,
+        ) from exc
+    except TimeoutError as exc:
+        raise CRMRequestError(
+            f"CRM request timed out after {CRM_HTTP_TIMEOUT_SECONDS} seconds",
+            retryable=True,
+        ) from exc
+
+
+async def _post_json_with_retry(
+    url: str,
+    token: str,
+    payload: dict,
+    *,
+    operation: str,
+) -> dict:
+    for attempt in range(1, CRM_RETRY_ATTEMPTS + 1):
+        try:
+            return await asyncio.to_thread(_post_json, url, token, payload)
+        except CRMRequestError as exc:
+            if not exc.retryable or attempt >= CRM_RETRY_ATTEMPTS:
+                raise
+            delay = exc.retry_after if exc.retry_after is not None else 2 ** (attempt - 1)
+            delay = min(8.0, max(1.0, delay))
+            _log(
+                f"{operation}: CRM временно занята; повтор "
+                f"{attempt + 1}/{CRM_RETRY_ATTEMPTS} через {delay:g} с"
+            )
+            await asyncio.sleep(delay)
+    raise RuntimeError(f"{operation}: retry loop finished unexpectedly")
 
 
 def _agent_payload(agent_id: str, concurrency: int) -> dict:
@@ -145,11 +202,11 @@ async def _heartbeat(api_url: str, token: str, agent_id: str, concurrency: int) 
     payload = {**_agent_payload(agent_id, concurrency), "status": "online"}
     while True:
         try:
-            await asyncio.to_thread(
-                _post_json,
+            await _post_json_with_retry(
                 f"{api_url}/api/kaspi-competitor-agent/heartbeat",
                 token,
                 payload,
+                operation="Heartbeat",
             )
         except Exception as exc:
             _log(f"Heartbeat: {exc}")
@@ -157,11 +214,11 @@ async def _heartbeat(api_url: str, token: str, agent_id: str, concurrency: int) 
 
 
 async def _claim(api_url: str, token: str, agent_id: str, concurrency: int) -> dict | None:
-    response = await asyncio.to_thread(
-        _post_json,
+    response = await _post_json_with_retry(
         f"{api_url}/api/kaspi-competitor-agent/claim",
         token,
         _agent_payload(agent_id, concurrency),
+        operation="Получение задания",
     )
     return response.get("job")
 
@@ -194,13 +251,22 @@ async def _process_job(api_url: str, token: str, job: dict) -> None:
             "error_code": exc.__class__.__name__,
             "error_message": str(exc)[:4000],
         }
-    result = await asyncio.to_thread(
-        _post_json,
+    result = await _post_json_with_retry(
         f"{api_url}/api/kaspi-competitor-agent/jobs/{job['id']}/complete",
         token,
         payload,
+        operation=f"Сохранение задания #{job['id']}",
     )
-    _log(f"Задание #{job['id']}: {result.get('status')}")
+    decision = (result.get("result") or {}).get("decision") or {}
+    if result.get("status") == "succeeded_local" and decision:
+        _log(
+            f"Задание #{job['id']}: успешно · склад "
+            f"{int(decision.get('stock_count') or 0)} шт. · "
+            f"XML {decision.get('target_price_kzt') or '—'} KZT · "
+            f"preOrder {int(decision.get('preorder_days') or 0)} дн."
+        )
+    else:
+        _log(f"Задание #{job['id']}: {result.get('status')}")
 
 
 async def main(*, once: bool = False) -> int:
@@ -227,11 +293,11 @@ async def main(*, once: bool = False) -> int:
     _log("Автономный режим: DATABASE_URL, SQLAlchemy и Browser Agent не используются.")
 
     try:
-        await asyncio.to_thread(
-            _post_json,
+        await _post_json_with_retry(
             f"{api_url}/api/kaspi-competitor-agent/heartbeat",
             token,
             {**_agent_payload(agent_id, concurrency), "status": "online"},
+            operation="Подключение к CRM",
         )
     except Exception as exc:
         raise RuntimeError(f"Не удалось подключиться к LEO CRM: {exc}") from exc

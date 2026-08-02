@@ -325,3 +325,11 @@
     width: 100%;
   }
 }
+
+@media(min-width:1201px) {
+  .dumping-grid { grid-template-columns: repeat(6, minmax(120px, 1fr)); }
+}
+
+@media(min-width:1001px) and (max-width:1200px) {
+  .dumping-grid { grid-template-columns: repeat(3, minmax(120px, 1fr)); }
+}

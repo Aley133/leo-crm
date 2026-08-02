@@ -274,6 +274,7 @@ const render = (rows) => {
     const competitorName = explanation.competitor_name || state.competitor_name || "—";
     const ownPosition = explanation.own_position ?? state.own_position;
     const sellerCount = explanation.seller_count ?? state.seller_count;
+    const inventoryOnHand = Math.max(0, Number(row.inventory_on_hand || 0));
     const sourceAvailable = Boolean(row.source);
     const safeFloor = sourceAvailable ? (preview.safe_floor_kzt ?? run.safe_floor_kzt) : null;
     const targetPrice = sourceAvailable ? (run.target_price_kzt ?? state.target_price_kzt) : null;
@@ -289,6 +290,7 @@ const render = (rows) => {
       </div>
       <div class="dumping-grid">
         <div><span>Статус проверки</span><strong>${scanLabel(row)}</strong><small>${escapeHtml(scanMeta(row))}</small></div>
+        <div><span>Остаток на складе</span><strong>${inventoryOnHand.toLocaleString("ru-RU")} шт.</strong><small>Физический FIFO-остаток после заказов</small></div>
         <div><span>Источник себестоимости</span><strong>${escapeHtml(row.source?.name || "Нет источника")}</strong><small>${escapeHtml(row.source?.kind || "—")}</small></div>
         <div><span>Себестоимость</span><strong>${money(row.source?.unit_cost_kzt)}</strong></div>
         <div><span>Безопасный порог</span><strong>${money(safeFloor)}</strong></div>

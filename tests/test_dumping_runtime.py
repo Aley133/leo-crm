@@ -239,6 +239,49 @@ def test_kaspi_agent_reclaims_expired_job_and_can_finish_it(db_session) -> None:
     assert stale_completion.value.status_code == 409
 
 
+def test_kaspi_agent_resumes_its_active_lease_after_lost_claim_response(
+    db_session,
+) -> None:
+    now = utc_now()
+    product = _product(
+        db_session,
+        kaspi_id="797979797",
+        name="Повтор безопасного claim",
+    )
+    policy = DumpingPolicy(product_id=product.id, enabled=True)
+    feed = KaspiXmlFeed(
+        merchant_id="merchant-1",
+        source_filename="catalog.xml",
+        source_xml="<kaspi_catalog/>",
+        generated_xml="<kaspi_catalog/>",
+        active=True,
+    )
+    run = DumpingRun(
+        product_id=product.id,
+        status="leased_local",
+        published=False,
+        explanation_json={
+            "agent_id": "stable-agent-w1",
+            "lease_token": "stable-lease-token-123456",
+            "lease_attempt": 1,
+            "leased_at": now.isoformat(),
+            "lease_until": (now + timedelta(minutes=2)).isoformat(),
+        },
+    )
+    db_session.add_all([policy, feed, run])
+    db_session.commit()
+
+    response = claim_job(
+        AgentClaim(agent_id="stable-agent-w1", hostname="BARWORK"),
+        db_session,
+    )
+
+    assert response["resumed"] is True
+    assert response["job"]["id"] == run.id
+    assert response["job"]["lease_token"] == "stable-lease-token-123456"
+    assert run.explanation_json["lease_attempt"] == 1
+
+
 def test_kaspi_agent_successfully_persists_decimal_result_in_one_commit(
     db_session,
     monkeypatch,
@@ -298,20 +341,18 @@ def test_kaspi_agent_successfully_persists_decimal_result_in_one_commit(
 
     monkeypatch.setattr(db_session, "commit", counted_commit)
 
-    response = complete_job(
-        job.id,
-        AgentComplete(
-            lease_token="current-lease-token-123456",
-            status="succeeded",
-            own_price_kzt=Decimal("9999"),
-            competitor_price_kzt=Decimal("8900"),
-            competitor_name="Другой продавец",
-            own_position=2,
-            seller_count=4,
-            product_url="https://kaspi.kz/shop/p/919191919/",
-        ),
-        db_session,
+    completion = AgentComplete(
+        lease_token="current-lease-token-123456",
+        status="succeeded",
+        own_price_kzt=Decimal("9999"),
+        competitor_price_kzt=Decimal("8900"),
+        competitor_name="Другой продавец",
+        own_position=2,
+        seller_count=4,
+        product_url="https://kaspi.kz/shop/p/919191919/",
     )
+    response = complete_job(job.id, completion, db_session)
+    repeated = complete_job(job.id, completion, db_session)
 
     db_session.refresh(job)
     db_session.refresh(feed)
@@ -323,6 +364,7 @@ def test_kaspi_agent_successfully_persists_decimal_result_in_one_commit(
     )
 
     assert response["status"] == "succeeded_local"
+    assert repeated == response
     assert commit_count == 1
     assert job.status == "succeeded_local"
     assert job.explanation_json["result"]["market"]["competitor_price_kzt"] == "8900"
