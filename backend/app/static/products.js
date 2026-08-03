@@ -16,6 +16,8 @@ const resetButton = document.querySelector("#reset");
 const body = document.querySelector("#products-body");
 const empty = document.querySelector("#empty");
 let selectedXmlFile = null;
+let loadAbortController = null;
+let loadGeneration = 0;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency}`;
@@ -78,17 +80,35 @@ const render = (rows) => {
   productsPage.classList.remove("hidden");
 };
 
+const wait = (milliseconds) => new Promise((resolve) => setTimeout(resolve, milliseconds));
+
+const fetchProducts = async (url, options) => {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    const response = await fetch(url, options);
+    if (![502, 503].includes(response.status) || attempt === 1) return response;
+    const retryAfter = Number(response.headers.get("Retry-After") || 0) * 1000;
+    await response.body?.cancel();
+    await wait(Math.max(750, Math.min(retryAfter || 750, 2500)));
+  }
+  throw new Error("Не удалось загрузить товары.");
+};
+
 const loadProducts = async () => {
   const token = localStorage.getItem(storageKey);
   if (!token) { authPanel.classList.remove("hidden"); productsPage.classList.add("hidden"); return; }
+  const generation = ++loadGeneration;
+  loadAbortController?.abort();
+  loadAbortController = new AbortController();
   setLoading(true); message.textContent = "";
   try {
-    const response = await fetch(`/api/product-registry/products?${queryString()}`, {headers:{Authorization:`Bearer ${token}`},cache:"no-store"});
+    const response = await fetchProducts(`/api/product-registry/products?${queryString()}`, {headers:{Authorization:`Bearer ${token}`},cache:"no-store",signal:loadAbortController.signal});
     if (response.status === 401) { localStorage.removeItem(storageKey); authPanel.classList.remove("hidden"); productsPage.classList.add("hidden"); message.textContent = "Токен не принят."; return; }
     if (!response.ok) throw new Error(`API вернул ошибку ${response.status}`);
     render(await response.json());
-  } catch (error) { message.textContent = error instanceof Error ? error.message : "Не удалось загрузить товары."; }
-  finally { setLoading(false); }
+  } catch (error) {
+    if (error?.name !== "AbortError") message.textContent = error instanceof Error ? error.message : "Не удалось загрузить товары.";
+  }
+  finally { if (generation === loadGeneration) setLoading(false); }
 };
 
 const xmlRequest = async (action, file) => {
@@ -96,7 +116,7 @@ const xmlRequest = async (action, file) => {
   const response = await fetch(`/api/product-registry/imports/xml/${action}`, {
     method:"POST",
     headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/xml","X-Filename":encodeURIComponent(file.name)},
-    body:await file.arrayBuffer(),
+    body:file,
   });
   const payload = await response.json().catch(() => ({}));
   if (!response.ok) throw new Error(payload.detail || `Импорт вернул ошибку ${response.status}`);
@@ -116,15 +136,10 @@ const renderXmlPreview = (payload) => {
   xmlWarnings.innerHTML = payload.warnings.map((item) => `<p>${escapeHtml(item)}</p>`).join("");
 };
 
-const retainXmlSource = async (file) => {
-  try {
-    await xmlRequest("retain-source", file);
-  } catch (error) {
-    console.warn("XML source retention failed; commit remains authoritative", error);
-  }
-};
-
 const previewXml = async (file) => {
+  loadAbortController?.abort();
+  loadGeneration += 1;
+  setLoading(false);
   selectedXmlFile = file;
   document.querySelector("#xml-file-name").textContent = `${file.name} · ${(file.size / 1024 / 1024).toLocaleString("ru-RU", {maximumFractionDigits:2})} МБ`;
   xmlPreview.innerHTML = '<div class="empty">Проверяю XML…</div>';
@@ -135,7 +150,6 @@ const previewXml = async (file) => {
     const preview = await xmlRequest("preview", file);
     renderXmlPreview(preview);
     confirmImportButton.disabled = false;
-    void retainXmlSource(file);
   } catch (error) {
     xmlPreview.innerHTML = `<div class="empty">${escapeHtml(error instanceof Error ? error.message : "Не удалось проверить XML")}</div>`;
   }
@@ -143,6 +157,9 @@ const previewXml = async (file) => {
 
 const commitXml = async () => {
   if (!selectedXmlFile) return;
+  loadAbortController?.abort();
+  loadGeneration += 1;
+  setLoading(false);
   confirmImportButton.disabled = true;
   confirmImportButton.textContent = "Импортирую…";
   try {

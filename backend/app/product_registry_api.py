@@ -5,7 +5,7 @@ from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel, Field
-from sqlalchemy import func, or_, select
+from sqlalchemy import exists, func, or_, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -48,6 +48,8 @@ router = APIRouter(
     dependencies=[Depends(require_service_token)],
 )
 
+_VISIBLE_BINDING_STATUSES = ("active", "confirmed", "degraded")
+
 
 def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryRow]:
     if not products:
@@ -87,7 +89,7 @@ def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryR
         .outerjoin(MonitorTarget, MonitorTarget.product_binding_id == ProductBinding.id)
         .where(
             ProductBinding.product_id.in_(ids),
-            ProductBinding.status.in_(("active", "confirmed", "degraded")),
+            ProductBinding.status.in_(_VISIBLE_BINDING_STATUSES),
         )
         .order_by(ProductBinding.product_id, ProductBinding.is_primary.desc(), ProductBinding.priority)
     ).all()
@@ -139,7 +141,7 @@ def list_products(
     offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
 ) -> list[ProductRegistryRow]:
-    statement = select(Product).order_by(Product.id).offset(offset).limit(limit)
+    statement = select(Product)
     if q:
         pattern = f"%{q.strip()}%"
         statement = statement.where(or_(
@@ -151,14 +153,47 @@ def list_products(
     if status is not None:
         statement = statement.where(Product.status == status.value)
 
-    rows = _product_rows(db, list(db.scalars(statement).all()))
+    visible_binding_exists = exists(
+        select(ProductBinding.id).where(
+            ProductBinding.product_id == Product.id,
+            ProductBinding.status.in_(_VISIBLE_BINDING_STATUSES),
+        )
+    )
     if only_without_supplier:
-        rows = [row for row in rows if row.supplier_count == 0]
+        statement = statement.where(~visible_binding_exists)
     if only_failures:
-        rows = [row for row in rows if row.failed_monitor_count > 0]
+        statement = statement.where(
+            exists(
+                select(MonitorTarget.id)
+                .join(
+                    ProductBinding,
+                    ProductBinding.id == MonitorTarget.product_binding_id,
+                )
+                .where(
+                    ProductBinding.product_id == Product.id,
+                    ProductBinding.status.in_(_VISIBLE_BINDING_STATUSES),
+                    MonitorTarget.consecutive_failures > 0,
+                )
+            )
+        )
     if only_monitored:
-        rows = [row for row in rows if row.active_monitor_count > 0]
-    return rows
+        statement = statement.where(
+            exists(
+                select(MonitorTarget.id)
+                .join(
+                    ProductBinding,
+                    ProductBinding.id == MonitorTarget.product_binding_id,
+                )
+                .where(
+                    ProductBinding.product_id == Product.id,
+                    ProductBinding.status.in_(_VISIBLE_BINDING_STATUSES),
+                    MonitorTarget.status == "active",
+                )
+            )
+        )
+
+    statement = statement.order_by(Product.id).offset(offset).limit(limit)
+    return _product_rows(db, list(db.scalars(statement).all()))
 
 
 @router.get("/products/{product_id}", response_model=ProductRegistryRow)

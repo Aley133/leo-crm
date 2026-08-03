@@ -1,4 +1,5 @@
 import asyncio
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
@@ -10,7 +11,8 @@ from backend.app.dumping_models import DumpingPolicy, KaspiXmlFeed
 from backend.app.inventory_models import InventoryBatch
 from backend.app.kaspi_xml_import import parse_kaspi_products
 from backend.app.models import Product
-from backend.app.product_xml_import_api import commit_xml_import
+from backend.app.product_xml_import_api import _commit_xml_import
+from backend.app import product_xml_import_api
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -79,9 +81,30 @@ def test_product_registry_exposes_preview_and_commit_import_endpoints() -> None:
     assert 'prefix="/api/product-registry/imports/xml"' in source
     assert '@router.post("/preview")' in source
     assert '@router.post("/commit")' in source
-    assert "db.commit()" not in source.split('@router.post("/preview")', 1)[1].split('@router.post("/commit")', 1)[0]
+    preview_route = source.split('@router.post("/preview")', 1)[1].split(
+        "def _commit_xml_import",
+        1,
+    )[0]
+    assert "db.commit()" not in preview_route
     assert "product_xml_import_router" in main
     assert "app.include_router(product_xml_import_router)" in main
+
+
+def test_xml_commit_does_not_block_the_async_web_loop(monkeypatch) -> None:
+    def slow_worker(_operation):
+        time.sleep(0.08)
+        return {"committed": True}
+
+    monkeypatch.setattr(product_xml_import_api, "_with_session", slow_worker)
+
+    async def scenario() -> None:
+        request = _XmlRequest(b"<kaspi_catalog><offers/></kaspi_catalog>")
+        task = asyncio.create_task(product_xml_import_api.commit_xml_import(request))
+        await asyncio.sleep(0.01)
+        assert task.done() is False
+        assert await task == {"committed": True}
+
+    asyncio.run(scenario())
 
 
 def test_xml_commit_links_order_lines_in_one_bulk_pass() -> None:
@@ -92,6 +115,9 @@ def test_xml_commit_links_order_lines_in_one_bulk_pass() -> None:
     assert "for product in stored_products:" not in source
     assert "def link_all_matching_order_lines_for_products" in linking
     assert "identity_map = _product_identity_map(products)" in linking
+    assert "MarketplaceOrderLine.merchant_sku.in_(batch)" in linking
+    assert "MarketplaceOrderLine.external_product_id.in_(batch)" in linking
+    assert "MarketplaceOrderLine.merchant_sku.is_not(None)" not in linking
 
 
 def test_product_center_has_two_step_xml_import_ui() -> None:
@@ -103,6 +129,9 @@ def test_product_center_has_two_step_xml_import_ui() -> None:
     assert "/api/product-registry/imports/xml/${action}" in script
     assert 'xmlRequest("preview", file)' in script
     assert 'xmlRequest("commit", selectedXmlFile)' in script
+    assert 'body:file' in script
+    assert "retainXmlSource" not in script
+    assert 'xmlRequest("retain-source"' not in script
 
 
 def test_xml_reimport_uses_new_source_and_overlays_only_managed_offers(
@@ -185,8 +214,10 @@ def test_xml_reimport_uses_new_source_and_overlays_only_managed_offers(
       <offer sku='DISABLED'><model>Disabled dumping product</model><cityprices><cityprice cityId='750000000'>6300</cityprice></cityprices><availability available='yes' preOrder='5' stockCount='31'/></offer>
     </offers></kaspi_catalog>"""
 
-    result = asyncio.run(
-        commit_xml_import(_XmlRequest(uploaded, filename="corrected.xml"), db_session)
+    result = _commit_xml_import(
+        uploaded,
+        source_filename="corrected.xml",
+        db=db_session,
     )
     db_session.refresh(feed)
 
