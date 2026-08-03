@@ -26,6 +26,7 @@ from .models import (
     ProductStatus,
 )
 from .order_line_product_linking import link_all_matching_order_lines_for_products
+from .product_inventory_group import inventory_owner_ids_for_products
 
 
 router = APIRouter(
@@ -238,12 +239,25 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
                 )
             ).all()
         )
-        managed_product_ids.update(
-            db.scalars(
+        stored_product_ids = {int(product.id) for product in stored_products}
+        owner_by_product = inventory_owner_ids_for_products(
+            db,
+            stored_product_ids,
+        )
+        inventory_owner_ids = set(
+            int(value)
+            for value in db.scalars(
                 select(InventoryBatch.product_id)
-                .where(InventoryBatch.product_id.in_([product.id for product in stored_products]))
+                .where(
+                    InventoryBatch.product_id.in_(set(owner_by_product.values()))
+                )
                 .distinct()
             ).all()
+        )
+        managed_product_ids.update(
+            product_id
+            for product_id, owner_id in owner_by_product.items()
+            if owner_id in inventory_owner_ids
         )
         active_order_statuses = (
             MarketplaceOrderStatus.NEW.value,

@@ -5,7 +5,7 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from decimal import Decimal
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from .inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
@@ -16,6 +16,11 @@ from .models import (
     MarketplaceOrderStatus,
     Product,
 )
+from .product_inventory_group import (
+    inventory_group_product_ids,
+    inventory_owner_product,
+    inventory_owner_product_id,
+)
 
 
 _TERMINAL_ORDER_STATUSES = {
@@ -24,9 +29,12 @@ _TERMINAL_ORDER_STATUSES = {
     MarketplaceOrderStatus.RETURNED.value,
 }
 _INCOMING_ORDER_STATUSES = {
+    MarketplaceOrderStatus.NEW.value,
     MarketplaceOrderStatus.ACCEPTED.value,
+    MarketplaceOrderStatus.ASSEMBLY.value,
     "preorder",
 }
+_MANUAL_INVENTORY_BLOCKING_STAGES = {"cancelled", "returned"}
 
 
 def _sync_product_inventory_to_feed(
@@ -39,10 +47,18 @@ def _sync_product_inventory_to_feed(
     # application startup while keeping the inventory transaction authoritative.
     from .dumping_service import sync_product_inventory_to_feed
 
-    sync_product_inventory_to_feed(
-        session,
-        product_id=product_id,
-        reason=reason,
+    for member_product_id in inventory_group_product_ids(session, product_id):
+        sync_product_inventory_to_feed(
+            session,
+            product_id=member_product_id,
+            reason=reason,
+        )
+
+
+def _order_blocks_inventory_allocation(order: MarketplaceOrder) -> bool:
+    return (
+        order.status in _TERMINAL_ORDER_STATUSES
+        or order.manual_stage in _MANUAL_INVENTORY_BLOCKING_STAGES
     )
 
 
@@ -120,6 +136,8 @@ def release_cancelled_order_inventory(
     *,
     order: MarketplaceOrder,
     released_at: datetime | None = None,
+    force: bool = False,
+    reason: str = "order_cancelled_before_courier_handoff",
 ) -> InventoryReleaseResult:
     """Return pre-handover cancellation allocations to their original batches.
 
@@ -132,7 +150,7 @@ def release_cancelled_order_inventory(
     owned transaction makes the operation idempotent: a repeated observation of
     the same cancelled order finds no allocations and cannot add stock twice.
     """
-    if order.status != MarketplaceOrderStatus.CANCELLED.value:
+    if not force and order.status != MarketplaceOrderStatus.CANCELLED.value:
         return InventoryReleaseResult(0, ())
 
     rows = session.execute(
@@ -193,7 +211,7 @@ def release_cancelled_order_inventory(
         session.delete(allocation)
 
     now = released_at or datetime.now(UTC)
-    event_key = f"inventory_released:cancelled:v{order.version}"
+    event_key = f"inventory_released:{reason}:v{order.version}"
     existing_event = session.scalar(
         select(MarketplaceOrderEvent).where(
             MarketplaceOrderEvent.marketplace_order_id == order.id,
@@ -209,7 +227,7 @@ def release_cancelled_order_inventory(
                 current_status=MarketplaceOrderStatus.CANCELLED.value,
                 occurred_at=now,
                 metadata_json={
-                    "reason": "order_cancelled_before_courier_handoff",
+                    "reason": reason,
                     "released_quantity": released_quantity,
                     "allocations": audit_allocations,
                 },
@@ -238,6 +256,14 @@ def build_incoming_reservations(
     if product_ids is not None and not product_ids:
         return ()
 
+    requested_owner_ids = (
+        {
+            inventory_owner_product_id(session, product_id)
+            for product_id in product_ids
+        }
+        if product_ids is not None
+        else None
+    )
     batch_query = (
         select(InventoryBatch)
         .where(InventoryBatch.is_received.is_(False))
@@ -247,8 +273,10 @@ def build_incoming_reservations(
             InventoryBatch.id,
         )
     )
-    if product_ids is not None:
-        batch_query = batch_query.where(InventoryBatch.product_id.in_(product_ids))
+    if requested_owner_ids is not None:
+        batch_query = batch_query.where(
+            InventoryBatch.product_id.in_(requested_owner_ids)
+        )
     batches = session.scalars(batch_query).all()
     if not batches:
         return ()
@@ -270,12 +298,21 @@ def build_incoming_reservations(
     candidate_rows = session.execute(
         select(MarketplaceOrderLine, MarketplaceOrder)
         .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
+        .join(Product, Product.id == MarketplaceOrderLine.product_id)
         .where(
-            MarketplaceOrderLine.product_id.in_(expected_product_ids),
+            or_(
+                Product.id.in_(expected_product_ids),
+                Product.inventory_owner_product_id.in_(expected_product_ids),
+            ),
             MarketplaceOrder.status.in_(_INCOMING_ORDER_STATUSES),
+            or_(
+                MarketplaceOrder.manual_stage.is_(None),
+                MarketplaceOrder.manual_stage.not_in(
+                    _MANUAL_INVENTORY_BLOCKING_STAGES
+                ),
+            ),
         )
         .order_by(
-            MarketplaceOrderLine.product_id,
             MarketplaceOrder.ordered_at.asc().nullsfirst(),
             MarketplaceOrder.id,
             MarketplaceOrderLine.id,
@@ -304,7 +341,8 @@ def build_incoming_reservations(
     for line, order in candidate_rows:
         if line.product_id is None:
             continue
-        candidates_by_product[int(line.product_id)].append((line, order))
+        owner_id = inventory_owner_product_id(session, int(line.product_id))
+        candidates_by_product[owner_id].append((line, order))
         remaining_by_line[line.id] = max(
             int(line.quantity or 0) - allocated_by_line.get(line.id, 0),
             0,
@@ -358,7 +396,7 @@ def allocate_order_line_fifo(
     previous = allocated_quantity_for_line(session, order_line.id)
     needed = max(requested - previous, 0)
     resolved_order = order or session.get(MarketplaceOrder, order_line.marketplace_order_id)
-    if resolved_order is None or resolved_order.status in _TERMINAL_ORDER_STATUSES:
+    if resolved_order is None or _order_blocks_inventory_allocation(resolved_order):
         return AllocationResult(requested, previous, 0)
     if order_line.product_id is None:
         _close_untracked_order_offer(
@@ -374,10 +412,11 @@ def allocate_order_line_fifo(
 
     now = allocated_at or datetime.now(UTC)
 
+    owner_product_id = inventory_owner_product_id(session, int(order_line.product_id))
     batches = session.scalars(
         select(InventoryBatch)
         .where(
-            InventoryBatch.product_id == order_line.product_id,
+            InventoryBatch.product_id == owner_product_id,
             InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
             InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
@@ -439,9 +478,19 @@ def reconcile_product_orders_from_batch(
     rows = session.execute(
         select(MarketplaceOrderLine, MarketplaceOrder)
         .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
+        .join(Product, Product.id == MarketplaceOrderLine.product_id)
         .where(
-            MarketplaceOrderLine.product_id == batch.product_id,
+            or_(
+                Product.id == batch.product_id,
+                Product.inventory_owner_product_id == batch.product_id,
+            ),
             MarketplaceOrder.status.not_in(_TERMINAL_ORDER_STATUSES),
+            or_(
+                MarketplaceOrder.manual_stage.is_(None),
+                MarketplaceOrder.manual_stage.not_in(
+                    _MANUAL_INVENTORY_BLOCKING_STAGES
+                ),
+            ),
         )
         .order_by(MarketplaceOrder.ordered_at, MarketplaceOrder.id, MarketplaceOrderLine.id)
     ).all()
@@ -467,8 +516,9 @@ def rebuild_product_fifo(
     product_id: int,
     allocated_at: datetime | None = None,
 ) -> int:
+    owner_product_id = inventory_owner_product_id(session, product_id)
     batch_ids = select(InventoryBatch.id).where(
-        InventoryBatch.product_id == product_id,
+        InventoryBatch.product_id == owner_product_id,
         InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
     )
     session.execute(
@@ -479,7 +529,7 @@ def rebuild_product_fifo(
 
     batches = session.scalars(
         select(InventoryBatch)
-        .where(InventoryBatch.product_id == product_id)
+        .where(InventoryBatch.product_id == owner_product_id)
         .order_by(InventoryBatch.received_at, InventoryBatch.id)
         .with_for_update()
     ).all()
@@ -497,9 +547,19 @@ def rebuild_product_fifo(
     rows = session.execute(
         select(MarketplaceOrderLine, MarketplaceOrder)
         .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
+        .join(Product, Product.id == MarketplaceOrderLine.product_id)
         .where(
-            MarketplaceOrderLine.product_id == product_id,
+            or_(
+                Product.id == owner_product_id,
+                Product.inventory_owner_product_id == owner_product_id,
+            ),
             MarketplaceOrder.status.not_in(_TERMINAL_ORDER_STATUSES),
+            or_(
+                MarketplaceOrder.manual_stage.is_(None),
+                MarketplaceOrder.manual_stage.not_in(
+                    _MANUAL_INVENTORY_BLOCKING_STAGES
+                ),
+            ),
         )
         .order_by(MarketplaceOrder.ordered_at, MarketplaceOrder.id, MarketplaceOrderLine.id)
     ).all()
@@ -518,7 +578,7 @@ def rebuild_product_fifo(
     session.flush()
     _sync_product_inventory_to_feed(
         session,
-        product_id=product_id,
+        product_id=owner_product_id,
         reason="fifo_rebuilt",
     )
     return allocated
@@ -553,8 +613,9 @@ def create_inventory_batch(
         )
 
     received = received_at if received_at.tzinfo is not None else received_at.replace(tzinfo=UTC)
+    owner = inventory_owner_product(session, product)
     batch = InventoryBatch(
-        product_id=product.id,
+        product_id=owner.id,
         received_at=received,
         quantity_received=quantity,
         quantity_remaining=(
@@ -581,7 +642,7 @@ def create_inventory_batch(
         allocated = reconcile_product_orders_from_batch(session, batch=batch)
     _sync_product_inventory_to_feed(
         session,
-        product_id=product.id,
+        product_id=owner.id,
         reason="inventory_batch_created",
     )
     return batch, allocated
@@ -623,7 +684,10 @@ def complete_production_order(
         raise ValueError("inventory batch is not a production batch")
     if batch.is_received:
         raise ValueError("production batch must not be received as warehouse stock")
-    if order_line.product_id != batch.product_id:
+    if order_line.product_id is None or inventory_owner_product_id(
+        session,
+        int(order_line.product_id),
+    ) != int(batch.product_id):
         raise ValueError("order line belongs to another product")
 
     order = session.get(MarketplaceOrder, order_line.marketplace_order_id)

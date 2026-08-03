@@ -44,9 +44,13 @@ def _order(*, status="new", lines=(), original_status="NEW"):
     )
 
 
-def test_order_stage_is_already_normalized_by_kaspi_raw_receiver() -> None:
+def test_active_seller_stage_is_reconciled_with_fifo_coverage() -> None:
     assert _order(status="preorder").stage == CommerceOrderStage.PREORDER
-    assert _order(status="assembly").stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="assembly").stage == CommerceOrderStage.PREORDER
+    assert _order(
+        status="assembly",
+        lines=(_line(inventory_allocated_quantity=2),),
+    ).stage == CommerceOrderStage.ASSEMBLY
     assert _order(status="handover").stage == CommerceOrderStage.HANDOVER
     assert _order(status="shipping").stage == CommerceOrderStage.SHIPPING
     assert _order(status="cancelled").stage == CommerceOrderStage.CANCELLED
@@ -54,12 +58,12 @@ def test_order_stage_is_already_normalized_by_kaspi_raw_receiver() -> None:
     assert _order(status="returned").stage == CommerceOrderStage.RETURNED
 
 
-def test_received_preorder_moves_to_packaging() -> None:
+def test_only_fifo_covered_preorder_moves_to_packaging() -> None:
     received = _line(purchase_request_id="purchase-1", purchase_status="received")
     closed = _line(purchase_request_id="purchase-2", purchase_status="closed")
     from_stock = _line(inventory_allocated_quantity=2)
-    assert _order(status="preorder", lines=(received,)).stage == CommerceOrderStage.ASSEMBLY
-    assert _order(status="preorder", lines=(closed,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="preorder", lines=(received,)).stage == CommerceOrderStage.PREORDER
+    assert _order(status="preorder", lines=(closed,)).stage == CommerceOrderStage.PREORDER
     assert _order(status="preorder", lines=(from_stock,)).stage == CommerceOrderStage.ASSEMBLY
 
 
@@ -73,7 +77,7 @@ def test_incomplete_preorder_stays_preorder() -> None:
     )
     assert _order(status="preorder", lines=(ordered,)).stage == CommerceOrderStage.PREORDER
     assert _order(status="preorder", lines=(received, ordered)).stage == CommerceOrderStage.PREORDER
-    assert _order(status="preorder", lines=(ordered_from_stock,)).stage == CommerceOrderStage.PREORDER
+    assert _order(status="preorder", lines=(ordered_from_stock,)).stage == CommerceOrderStage.ASSEMBLY
 
 
 def test_incoming_stock_covers_preorder_without_moving_it_to_packaging() -> None:
@@ -109,13 +113,14 @@ def test_existing_purchase_does_not_hide_residual_shortage() -> None:
 
 
 def test_order_stage_source_is_official_kaspi_orders_api() -> None:
-    assert _order(status="preorder").stage_source == "kaspi_orders_api"
+    assert _order(status="preorder").stage_source == "kaspi_orders_api+inventory_coverage"
 
 
 def test_procurement_is_required_only_for_early_order_stages() -> None:
     line = _line()
     assert _order(status="preorder", lines=(line,)).procurement_required_lines == 1
-    for stage in ("assembly", "handover", "shipping", "delivered", "cancelled", "returned"):
+    assert _order(status="assembly", lines=(line,)).procurement_required_lines == 1
+    for stage in ("handover", "shipping", "delivered", "cancelled", "returned"):
         order = _order(status=stage, lines=(line,))
         assert order.procurement_required_lines == 0
         assert order.effective_procurement_state(line) == ProcurementState.NOT_REQUIRED

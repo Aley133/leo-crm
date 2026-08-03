@@ -20,6 +20,7 @@ const percent = (value) => value == null ? "—" : `${Number(value).toLocaleStri
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
 const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorder:"Предзаказ",assembly:"Упаковка",handover:"Передача",shipping:"Передан в доставку",cancelling:"Отмена в процессе",delivered:"Завершён",cancelled:"Отменён",returned:"Возврат",unknown:"Прочее"}[stage] || stage || "—");
 const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelling","cancelled","returned"].includes(stage) ? "bad" : "warn";
+const stageSourceLabel = (source) => source === "manual_owner_correction" ? "Ручная коррекция владельца" : source === "kaspi_orders_api+inventory_coverage" ? "Kaspi + фактическое покрытие FIFO" : "Kaspi Orders API";
 const procurementLabel = (state) => ({required:"Нужно закупить",in_progress:"Закупка оформлена",received:"Получено",not_required:"Закупка не требуется",cancelled:"Закупка отменена"}[state] || state || "—");
 const purchaseStatusLabel = (status) => ({draft:"Черновик",requested:"Заявка отправлена",ordered:"Заказано",partially_received:"Получено частично",received:"Получено",closed:"Закрыто",cancelled:"Отменено"}[status] || status || "—");
 const nextPurchaseAction = (status) => ({draft:{target:"requested",label:"Отправить заявку",loading:"Отправляю…"},requested:{target:"ordered",label:"Отметить заказанным",loading:"Сохраняю…"},ordered:{target:"received",label:"Отметить полученным",loading:"Принимаю…"},partially_received:{target:"received",label:"Отметить полученным",loading:"Принимаю…"},received:{target:"closed",label:"Закрыть закупку",loading:"Закрываю…"}}[status] || null);
@@ -105,7 +106,13 @@ const renderOrder = (order) => {
   const externalCode = order.external_code || order.order_id;
   const canCreatePurchase = Number(order.procurement_required_lines || 0) > 0 && stage === "preorder";
   const bindingText = Number(order.unresolved_lines || 0) === 0 ? "Товары привязаны" : `Не привязано: ${Number(order.unresolved_lines || 0)}`;
-  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Kaspi Orders API</span></div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${canCreatePurchase ? `<div class="order-actions"><button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button></div>` : ""}</article>`;
+  const manualNote = order.manual_stage_reason ? `<span class="muted">${escapeHtml(order.manual_stage_reason)}</span>` : "";
+  const stageOptions = ["preorder","assembly","handover","shipping","delivered","cancelled"].map((value) => `<option value="${value}" ${order.manual_stage === value ? "selected" : ""}>${escapeHtml(stageLabel(value))}</option>`).join("");
+  const editableStage = !["handover","shipping","cancelling","delivered","cancelled","returned"].includes(order.status);
+  const stageControls = editableStage ? `<div class="stage-override-controls"><select class="stage-override-select" aria-label="Новый этап заказа"><option value="">Выберите этап</option>${stageOptions}</select><button class="button secondary apply-stage-override" type="button">Изменить этап</button>${order.manual_stage ? '<button class="button secondary clear-stage-override" type="button">Вернуть автостатус</button>' : ""}</div>` : "";
+  const purchaseAction = canCreatePurchase ? `<button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button>` : "";
+  const orderActions = stageControls || purchaseAction ? `<div class="order-actions">${stageControls}${purchaseAction}</div>` : "";
+  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">${escapeHtml(stageSourceLabel(order.operational_stage_source))}</span>${manualNote}</div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${orderActions}</article>`;
 };
 
 const procurementProductKey = (line) => {
@@ -357,12 +364,31 @@ const transitionPurchase = async (button) => {
   }
 };
 
+const changeOrderStage = async (button, clear = false) => {
+  const card = button.closest(".order-card");
+  const orderId = Number(card?.dataset.orderId);
+  const stage = clear ? null : card?.querySelector(".stage-override-select")?.value || null;
+  if (!clear && !stage) { message.textContent = "Выберите новый этап заказа."; return; }
+  const reason = clear ? null : prompt("Почему вы меняете этап заказа? Причина сохранится в истории.", "Ручная коррекция владельцем");
+  if (!clear && !reason?.trim()) return;
+  setButtonBusy(button, "Пересчитываю…");
+  try {
+    const response = await fetch(`/api/commerce/orders/${orderId}/stage-override`, {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({stage,reason})});
+    if (!response.ok) throw await responseError(response);
+    message.textContent = clear ? "Ручная коррекция снята. Этап снова определяется по Kaspi и FIFO." : "Этап изменён, FIFO и XML пересчитаны.";
+    await refreshSingleOrder(orderId, card);
+  } catch (error) {
+    message.textContent = error.message || "Не удалось изменить этап заказа.";
+    restoreButton(button);
+  }
+};
+
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, tokenInput.value.trim()); tokenInput.value = ""; loadOrders(); });
 filters.addEventListener("submit", (event) => { event.preventDefault(); loadOrders(); });
 resetButton.addEventListener("click", () => { filters.reset(); loadOrders(); });
 refreshButton.addEventListener("click", () => rebuildOrders(1, true));
 rebuildButton.addEventListener("click", () => rebuildOrders());
 captureRevenueButton.addEventListener("click", captureRevenue);
-ordersList.addEventListener("click", (event) => { const createButton = event.target.closest(".create-purchase"); if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; } const transitionButton = event.target.closest(".purchase-transition"); if (transitionButton) transitionPurchase(transitionButton); });
+ordersList.addEventListener("click", (event) => { const createButton = event.target.closest(".create-purchase"); if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; } const transitionButton = event.target.closest(".purchase-transition"); if (transitionButton) { transitionPurchase(transitionButton); return; } const stageButton = event.target.closest(".apply-stage-override"); if (stageButton) { changeOrderStage(stageButton); return; } const clearButton = event.target.closest(".clear-stage-override"); if (clearButton) changeOrderStage(clearButton, true); });
 restoreListContextFromUrl();
 loadOrders();

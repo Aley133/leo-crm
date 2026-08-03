@@ -157,31 +157,80 @@ class CommerceOrder:
     original_status: str = "UNKNOWN"
     marketplace_account_id: int | None = None
     marketplace_external_account_id: str | None = None
+    manual_stage: str | None = None
+    manual_stage_reason: str | None = None
+    manual_stage_updated_at: datetime | None = None
 
     @property
     def stage(self) -> CommerceOrderStage:
-        normalized = (
-            CommerceOrderStage.PREORDER.value
-            if self.status == CommerceOrderStage.ACCEPTED.value
-            else self.status
-        )
-        if normalized == CommerceOrderStage.PREORDER.value and self._ready_for_packaging:
-            return CommerceOrderStage.ASSEMBLY
         try:
-            return CommerceOrderStage(normalized)
+            source_stage = CommerceOrderStage(self.status)
         except ValueError:
-            return CommerceOrderStage.UNKNOWN
+            source_stage = CommerceOrderStage.UNKNOWN
+
+        # Kaspi remains authoritative once an order has moved beyond the seller's
+        # warehouse or reached a terminal state. A local correction must never
+        # pull such an order backwards and make inventory sellable again.
+        if source_stage in {
+            CommerceOrderStage.HANDOVER,
+            CommerceOrderStage.SHIPPING,
+            CommerceOrderStage.CANCELLING,
+            CommerceOrderStage.DELIVERED,
+            CommerceOrderStage.CANCELLED,
+            CommerceOrderStage.RETURNED,
+        }:
+            return source_stage
+
+        if self.manual_stage:
+            try:
+                return CommerceOrderStage(self.manual_stage)
+            except ValueError:
+                pass
+
+        # While the order is still at the seller, physical coverage is the
+        # authoritative boundary: every unit covered -> packaging; any deficit
+        # -> preorder. Kaspi can otherwise leave ASSEMBLY on an order after the
+        # owner corrects an erroneous warehouse batch.
+        if source_stage in {
+            CommerceOrderStage.NEW,
+            CommerceOrderStage.ACCEPTED,
+            CommerceOrderStage.PREORDER,
+            CommerceOrderStage.ASSEMBLY,
+        }:
+            return (
+                CommerceOrderStage.ASSEMBLY
+                if self._ready_for_packaging
+                else CommerceOrderStage.PREORDER
+            )
+        return source_stage
 
     @property
     def _ready_for_packaging(self) -> bool:
         if not self.lines:
             return False
-        ready_states = {ProcurementState.RECEIVED, ProcurementState.NOT_REQUIRED}
-        return all(line.procurement_state in ready_states for line in self.lines)
+        # A purchase request marked as received is not warehouse evidence by
+        # itself. Packaging is allowed only after every ordered unit has a real
+        # FIFO allocation (purchase or completed production batch).
+        return all(
+            line.product_id is not None
+            and line.inventory_allocated_quantity >= line.quantity
+            for line in self.lines
+        )
 
     @property
     def stage_source(self) -> str:
-        return "kaspi_orders_api+procurement" if self._ready_for_packaging else "kaspi_orders_api"
+        if self.status in {
+            CommerceOrderStage.HANDOVER.value,
+            CommerceOrderStage.SHIPPING.value,
+            CommerceOrderStage.CANCELLING.value,
+            CommerceOrderStage.DELIVERED.value,
+            CommerceOrderStage.CANCELLED.value,
+            CommerceOrderStage.RETURNED.value,
+        }:
+            return "kaspi_orders_api"
+        if self.manual_stage:
+            return "manual_owner_correction"
+        return "kaspi_orders_api+inventory_coverage"
 
     @property
     def units(self) -> int:

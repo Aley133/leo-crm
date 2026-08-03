@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, ROUND_CEILING
 from xml.etree import ElementTree
 
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 
 from .browser_agent_dispatch import queue_browser_target_now
@@ -18,6 +18,10 @@ from .supplier_identity import canonical_supplier_product_identity
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 from .workspace_context import current_workspace_id
 from .workspace_models import Workspace
+from .product_inventory_group import (
+    inventory_owner_ids_for_products,
+    inventory_owner_product_id,
+)
 
 
 MONEY = Decimal("0.01")
@@ -89,13 +93,20 @@ def calculate_safe_floor(*, unit_cost_kzt: Decimal, minimum_profit_kzt: Decimal)
 def _inventory_sources(
     db: Session,
     product_ids: set[int],
+    *,
+    owner_by_product: dict[int, int] | None = None,
 ) -> dict[int, DumpingCostSource]:
     if not product_ids:
         return {}
+    owner_by_product = owner_by_product or inventory_owner_ids_for_products(
+        db,
+        product_ids,
+    )
+    owner_ids = set(owner_by_product.values())
     batches = db.scalars(
         select(InventoryBatch)
         .where(
-            InventoryBatch.product_id.in_(product_ids),
+            InventoryBatch.product_id.in_(owner_ids),
             InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
             InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
@@ -106,11 +117,11 @@ def _inventory_sources(
             InventoryBatch.id,
         )
     ).all()
-    result: dict[int, DumpingCostSource] = {}
+    result_by_owner: dict[int, DumpingCostSource] = {}
     for batch in batches:
-        product_id = int(batch.product_id)
-        result.setdefault(
-            product_id,
+        owner_id = int(batch.product_id)
+        result_by_owner.setdefault(
+            owner_id,
             DumpingCostSource(
                 kind="inventory",
                 name=batch.source_name or "Склад FIFO",
@@ -118,25 +129,56 @@ def _inventory_sources(
                 delivery_days=0,
             ),
         )
-    return result
+    return {
+        product_id: result_by_owner[owner_id]
+        for product_id, owner_id in owner_by_product.items()
+        if owner_id in result_by_owner
+    }
 
 
 def _supplier_sources(
     db: Session,
     product_ids: set[int],
+    *,
+    owner_by_product: dict[int, int] | None = None,
 ) -> dict[int, DumpingCostSource]:
     if not product_ids:
         return {}
+    owner_by_product = owner_by_product or inventory_owner_ids_for_products(
+        db,
+        product_ids,
+    )
+    owner_ids = set(owner_by_product.values())
+    group_products = db.scalars(
+        select(Product).where(
+            or_(
+                Product.id.in_(owner_ids),
+                Product.inventory_owner_product_id.in_(owner_ids),
+            )
+        )
+    ).all()
+    owner_by_group_product = {
+        int(product.id): (
+            int(product.inventory_owner_product_id)
+            if product.inventory_owner_product_id is not None
+            else int(product.id)
+        )
+        for product in group_products
+    }
     rows = db.execute(
         select(ProductBinding, SupplierProduct, Supplier, SupplierOfferState)
         .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
         .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+        .join(Product, Product.id == ProductBinding.product_id)
         .outerjoin(
             SupplierOfferState,
             SupplierOfferState.supplier_product_id == SupplierProduct.id,
         )
         .where(
-            ProductBinding.product_id.in_(product_ids),
+            or_(
+                Product.id.in_(owner_ids),
+                Product.inventory_owner_product_id.in_(owner_ids),
+            ),
             ProductBinding.status.in_(("active", "confirmed", "degraded")),
         )
         .order_by(
@@ -158,12 +200,13 @@ def _supplier_sources(
         ],
     ] = {}
     for binding, supplier_product, supplier, state in rows:
+        owner_id = owner_by_group_product[int(binding.product_id)]
         identity = canonical_supplier_product_identity(
             supplier_code=supplier.code,
             external_id=supplier_product.external_id,
             url=supplier_product.url,
         )
-        grouped_rows.setdefault((binding.product_id, supplier.id, identity), []).append(
+        grouped_rows.setdefault((owner_id, supplier.id, identity), []).append(
             (binding, supplier_product, supplier, state)
         )
 
@@ -197,16 +240,16 @@ def _supplier_sources(
             binding.id,
         )
 
-    result: dict[int, DumpingCostSource] = {}
-    for (product_id, _supplier_id, _identity), duplicate_rows in grouped_rows.items():
-        if product_id in result:
+    result_by_owner: dict[int, DumpingCostSource] = {}
+    for (owner_id, _supplier_id, _identity), duplicate_rows in grouped_rows.items():
+        if owner_id in result_by_owner:
             continue
         _binding, supplier_product, supplier, state = max(
             duplicate_rows,
             key=freshness,
         )
         if state is not None and state.price is not None and state.available is not False:
-            result[product_id] = DumpingCostSource(
+            result_by_owner[owner_id] = DumpingCostSource(
                 kind="supplier",
                 name=supplier.name,
                 unit_cost_kzt=Decimal(state.price),
@@ -217,27 +260,48 @@ def _supplier_sources(
             and supplier_product.current_price is not None
             and supplier_product.in_stock is not False
         ):
-            result[product_id] = DumpingCostSource(
+            result_by_owner[owner_id] = DumpingCostSource(
                 kind="supplier",
                 name=supplier.name,
                 unit_cost_kzt=Decimal(supplier_product.current_price),
                 delivery_days=max(int(supplier_product.delivery_days or 0), 0),
             )
-    return result
+    return {
+        product_id: result_by_owner[owner_id]
+        for product_id, owner_id in owner_by_product.items()
+        if owner_id in result_by_owner
+    }
 
 
 def resolve_cost_sources(
     db: Session,
     *,
     product_ids: set[int],
+    owner_by_product: dict[int, int] | None = None,
 ) -> dict[int, DumpingCostSource | None]:
     """Resolve pricing inputs for a page in a bounded number of SQL reads."""
     normalized = {int(product_id) for product_id in product_ids}
     if not normalized:
         return {}
-    inventory = _inventory_sources(db, normalized)
+    resolved_owners = owner_by_product or inventory_owner_ids_for_products(
+        db,
+        normalized,
+    )
+    inventory = _inventory_sources(
+        db,
+        normalized,
+        owner_by_product=resolved_owners,
+    )
     missing = normalized.difference(inventory)
-    suppliers = _supplier_sources(db, missing)
+    suppliers = _supplier_sources(
+        db,
+        missing,
+        owner_by_product={
+            product_id: resolved_owners[product_id]
+            for product_id in missing
+            if product_id in resolved_owners
+        },
+    )
     return {
         product_id: inventory.get(product_id) or suppliers.get(product_id)
         for product_id in normalized
@@ -255,25 +319,34 @@ def physical_stock_counts(
     db: Session,
     *,
     product_ids: set[int],
+    owner_by_product: dict[int, int] | None = None,
 ) -> dict[int, int]:
     """Return authoritative on-hand stock for several products in one query."""
     normalized = {int(product_id) for product_id in product_ids}
     if not normalized:
         return {}
+    owner_by_product = owner_by_product or inventory_owner_ids_for_products(
+        db,
+        normalized,
+    )
+    owner_ids = set(owner_by_product.values())
     rows = db.execute(
         select(
             InventoryBatch.product_id,
             func.coalesce(func.sum(InventoryBatch.quantity_remaining), 0),
         )
         .where(
-            InventoryBatch.product_id.in_(normalized),
+            InventoryBatch.product_id.in_(owner_ids),
             InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
             InventoryBatch.is_received.is_(True),
         )
         .group_by(InventoryBatch.product_id)
     ).all()
     counted = {int(product_id): int(quantity or 0) for product_id, quantity in rows}
-    return {product_id: counted.get(product_id, 0) for product_id in normalized}
+    return {
+        product_id: counted.get(owner_by_product.get(product_id, product_id), 0)
+        for product_id in normalized
+    }
 
 
 def physical_stock_count(db: Session, *, product_id: int) -> int:
@@ -334,6 +407,58 @@ def _matching_offer(root: ElementTree.Element, sku_candidates: set[str]) -> Elem
     return None
 
 
+def _qualified_tag(parent: ElementTree.Element, local_name: str) -> str:
+    tag = str(parent.tag)
+    if tag.startswith("{") and "}" in tag:
+        namespace = tag.split("}", 1)[0] + "}"
+        return f"{namespace}{local_name}"
+    return local_name
+
+
+def _create_managed_offer(
+    root: ElementTree.Element,
+    *,
+    product: Product,
+    city_id: str,
+) -> ElementTree.Element:
+    """Create the smallest valid managed offer when Seller XML omitted it.
+
+    Product identity and descriptive fields come from the registry; price and
+    availability are filled by the same dumping decision that requested the
+    recovery. This keeps an available supplier preorder from being confused
+    with a missing procurement source.
+    """
+
+    offers = next(
+        (node for node in root.iter() if _local_name(node.tag) == "offers"),
+        root,
+    )
+    offer = ElementTree.SubElement(
+        offers,
+        _qualified_tag(offers, "offer"),
+        {"sku": (product.merchant_sku or product.kaspi_product_id).strip()},
+    )
+    model = ElementTree.SubElement(offer, _qualified_tag(offer, "model"))
+    model.text = product.name
+    if product.brand:
+        brand = ElementTree.SubElement(offer, _qualified_tag(offer, "brand"))
+        brand.text = product.brand
+    cityprices = ElementTree.SubElement(
+        offer,
+        _qualified_tag(offer, "cityprices"),
+    )
+    ElementTree.SubElement(
+        cityprices,
+        _qualified_tag(cityprices, "cityprice"),
+        {"cityId": city_id},
+    )
+    ElementTree.SubElement(
+        offer,
+        _qualified_tag(offer, "availability"),
+    )
+    return offer
+
+
 def update_feed_xml(
     xml_text: str,
     *,
@@ -341,11 +466,19 @@ def update_feed_xml(
     price_kzt: Decimal,
     preorder_days: int,
     stock_count: int,
+    product: Product | None = None,
+    city_id: str = "750000000",
 ) -> str:
     root = ElementTree.fromstring(xml_text.encode("utf-8"))
     offer = _matching_offer(root, {value for value in sku_candidates if value})
     if offer is None:
-        raise ValueError("Товар не найден в сохранённом XML по SKU/Kaspi ID")
+        if product is None:
+            raise ValueError("Товар не найден в сохранённом XML по SKU/Kaspi ID")
+        offer = _create_managed_offer(
+            root,
+            product=product,
+            city_id=city_id,
+        )
 
     price_nodes = [node for node in offer.iter() if _local_name(node.tag) == "cityprice"]
     if not price_nodes:
@@ -457,13 +590,18 @@ def _queue_fresh_supplier_snapshot(
     *,
     product_id: int,
 ) -> tuple[int | None, int | None]:
+    owner_id = inventory_owner_product_id(db, product_id)
     rows = db.execute(
         select(MonitorTarget.id, Supplier.code, SupplierProduct.id)
         .join(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
         .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
         .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+        .join(Product, Product.id == ProductBinding.product_id)
         .where(
-            ProductBinding.product_id == product_id,
+            or_(
+                Product.id == owner_id,
+                Product.inventory_owner_product_id == owner_id,
+            ),
             ProductBinding.status.in_(("active", "confirmed", "degraded")),
             MonitorTarget.status == MonitorStatus.ACTIVE.value,
             Supplier.is_active.is_(True),
@@ -789,6 +927,8 @@ def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, de
         price_kzt=decision.target_price_kzt,
         preorder_days=decision.preorder_days,
         stock_count=decision.stock_count,
+        product=product,
+        city_id=policy.city_id,
     )
     feed.generated_xml = generated
     feed.active = True
@@ -820,6 +960,10 @@ def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, de
             "stock_count": decision.stock_count,
             "logistics_kzt": str(kaspi_logistics_per_unit(decision.target_price_kzt)),
             "feed_url": workspace_feed_url(db),
+            "xml_offer_recovered": feed_offer_is_expected_active(
+                feed.source_xml,
+                sku_candidates=_sku_candidates(product),
+            ) is None,
         },
     )
     db.add(run)

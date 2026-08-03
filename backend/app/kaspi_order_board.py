@@ -106,13 +106,6 @@ def classify_kaspi_order_details(
     if status in {"RETURNED", "KASPI_DELIVERY_RETURN_REQUESTED"}:
         return KaspiOrderClassification("returned", order_type, "kaspi_status")
 
-    delivery_cost = _number(attributes.get("deliveryCostForSeller"))
-    if delivery_cost <= 0:
-        if state in {"NEW", "SIGN_REQUIRED", "PICKUP", "DELIVERY", "KASPI_DELIVERY"}:
-            stage = "preorder" if attributes.get("preOrder") is True else "assembly"
-            return KaspiOrderClassification(stage, order_type, "preorder_flag")
-        return KaspiOrderClassification("unknown", order_type, "unsupported_state")
-
     if _datetime_ms(attributes.get("courierTransmissionDate"), timezone_name):
         return KaspiOrderClassification(
             "shipping",
@@ -150,6 +143,13 @@ def classify_kaspi_order_details(
             order_type,
             "planned_transmission_date",
         )
+
+    delivery_cost = _number(attributes.get("deliveryCostForSeller"))
+    if delivery_cost <= 0:
+        if state in {"NEW", "SIGN_REQUIRED", "PICKUP", "DELIVERY", "KASPI_DELIVERY"}:
+            stage = "preorder" if attributes.get("preOrder") is True else "assembly"
+            return KaspiOrderClassification(stage, order_type, "preorder_flag")
+        return KaspiOrderClassification("unknown", order_type, "unsupported_state")
 
     transfer_started = _parse_iso(
         (history_record or {}).get("transfer_started_at"),

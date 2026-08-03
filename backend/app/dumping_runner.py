@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from decimal import Decimal
 
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
@@ -13,12 +13,12 @@ from .dumping_service import (
     feed_offer_is_expected_active,
     publish_decision,
     resolve_cost_source,
-    suspend_product_removed_from_seller,
     suspend_product_without_cost_source,
     workspace_feed_url,
 )
 from .kaspi_offer_competitor import KaspiCompetitorSnapshot, scan_kaspi_competitors
 from .models import Product
+from .product_inventory_group import inventory_owner_product_id
 from .suppliers import ProductBinding
 from .workspace_context import current_workspace_id, workspace_context
 
@@ -68,34 +68,12 @@ def apply_competitor_snapshot(
         .order_by(DumpingRun.id.desc())
         .limit(1)
     )
-    if (
+    own_offer_missing = (
         market.own_position is None
         and market.own_price_kzt is None
         and expected_active is True
         and previously_seen_own_offer is not None
-    ):
-        run = suspend_product_removed_from_seller(
-            db,
-            product=product,
-            policy=policy,
-        )
-        return {
-            "run_id": run.id,
-            "feed_url": workspace_feed_url(db),
-            "market": {
-                "own_price_kzt": market.own_price_kzt,
-                "competitor_price_kzt": market.competitor_price_kzt,
-                "competitor_name": market.competitor_name,
-                "own_position": market.own_position,
-                "seller_count": market.seller_count,
-                "product_url": market.product_url,
-            },
-            "decision": {
-                "status": "suspended_seller_removed",
-                "published": False,
-                "automatic_recovery": False,
-            },
-        }
+    )
 
     decision = decide_dumping_price(
         db,
@@ -112,6 +90,12 @@ def apply_competitor_snapshot(
         "seller_count": market.seller_count,
         "product_url": market.product_url,
         "scan_source": "local_kaspi_competitor_agent",
+        "own_offer_missing": own_offer_missing,
+        "own_offer_action": (
+            "keep_dumping_and_republish_xml"
+            if own_offer_missing
+            else "none"
+        ),
     }
     db.flush()
     return {
@@ -183,22 +167,39 @@ def refresh_dumping_for_supplier_product(
     """
     with workspace_context(workspace_id):
         with SessionLocal() as db:
-            product_ids = tuple(
+            bound_product_ids = tuple(
                 db.scalars(
                     select(ProductBinding.product_id)
-                    .join(
-                        DumpingPolicy,
-                        DumpingPolicy.product_id == ProductBinding.product_id,
-                    )
                     .where(
                         ProductBinding.supplier_product_id == supplier_product_id,
                         ProductBinding.status.in_(("active", "confirmed", "degraded")),
-                        DumpingPolicy.enabled.is_(True),
-                        DumpingPolicy.auto_publish_xml.is_(True),
                     )
                     .distinct()
                 )
             )
+            owner_ids = {
+                inventory_owner_product_id(db, int(product_id))
+                for product_id in bound_product_ids
+            }
+            product_ids = tuple(
+                db.scalars(
+                    select(DumpingPolicy.product_id)
+                    .join(
+                        Product,
+                        Product.id == DumpingPolicy.product_id,
+                    )
+                    .where(
+                        or_(
+                            Product.id.in_(owner_ids),
+                            Product.inventory_owner_product_id.in_(owner_ids),
+                        ),
+                        DumpingPolicy.enabled.is_(True),
+                        DumpingPolicy.auto_publish_xml.is_(True),
+                    )
+                    .order_by(DumpingPolicy.product_id)
+                    .distinct()
+                )
+            ) if owner_ids else ()
 
         for product_id in product_ids:
             with SessionLocal() as db:

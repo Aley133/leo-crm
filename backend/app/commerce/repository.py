@@ -19,6 +19,7 @@ from ..models import (
 )
 from ..monitoring import SupplierOfferState
 from ..purchase_models import PurchaseRequest, PurchaseRequestLine
+from ..product_inventory_group import inventory_owner_ids_for_products
 from ..suppliers import ProductBinding, Supplier, SupplierProduct
 from .domain import CommerceOrder, CommerceOrderLine
 
@@ -250,7 +251,28 @@ class SqlAlchemyCommerceRepository:
 
         product_ids = set(product_by_id)
         source_by_product: dict[int, tuple[Decimal | None, str | None]] = {}
+        owner_by_product = inventory_owner_ids_for_products(
+            self._session,
+            product_ids,
+        )
         if product_ids:
+            owner_ids = set(owner_by_product.values())
+            group_products = self._session.scalars(
+                select(Product).where(
+                    or_(
+                        Product.id.in_(owner_ids),
+                        Product.inventory_owner_product_id.in_(owner_ids),
+                    )
+                )
+            ).all()
+            owner_by_group_product = {
+                int(product.id): (
+                    int(product.inventory_owner_product_id)
+                    if product.inventory_owner_product_id is not None
+                    else int(product.id)
+                )
+                for product in group_products
+            }
             source_rows = self._session.execute(
                 select(ProductBinding, SupplierProduct, Supplier, SupplierOfferState)
                 .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
@@ -260,7 +282,7 @@ class SqlAlchemyCommerceRepository:
                     SupplierOfferState.supplier_product_id == SupplierProduct.id,
                 )
                 .where(
-                    ProductBinding.product_id.in_(product_ids),
+                    ProductBinding.product_id.in_(owner_by_group_product),
                     ProductBinding.status.in_(("active", "confirmed")),
                 )
                 .order_by(
@@ -271,7 +293,8 @@ class SqlAlchemyCommerceRepository:
                 )
             ).all()
             for binding, supplier_product, supplier, state in source_rows:
-                if binding.product_id in source_by_product:
+                owner_id = owner_by_group_product[int(binding.product_id)]
+                if owner_id in source_by_product:
                     continue
                 price = None
                 if state is not None and state.price is not None and state.available is not False:
@@ -279,7 +302,7 @@ class SqlAlchemyCommerceRepository:
                 elif supplier_product.current_price is not None and supplier_product.in_stock is not False:
                     price = Decimal(supplier_product.current_price)
                 if price is not None:
-                    source_by_product[binding.product_id] = (price, supplier.name)
+                    source_by_product[owner_id] = (price, supplier.name)
 
         lines_by_order: dict[int, list[CommerceOrderLine]] = defaultdict(list)
         for line, purchase_request_id, purchase_status, purchase_version in line_rows:
@@ -322,7 +345,8 @@ class SqlAlchemyCommerceRepository:
                 procurement_source_name = inventory_source_name or "Склад FIFO"
             elif effective_product_id is not None:
                 procurement_unit_cost, procurement_source_name = source_by_product.get(
-                    effective_product_id, (None, None)
+                    owner_by_product.get(effective_product_id, effective_product_id),
+                    (None, None),
                 )
 
             lines_by_order[line.marketplace_order_id].append(
@@ -360,6 +384,9 @@ class SqlAlchemyCommerceRepository:
                 ordered_at=order.ordered_at,
                 delivered_at=order.delivered_at,
                 lines=tuple(lines_by_order.get(order.id, ())),
+                manual_stage=order.manual_stage,
+                manual_stage_reason=order.manual_stage_reason,
+                manual_stage_updated_at=order.manual_stage_updated_at,
             )
             for order, account in order_rows
         )

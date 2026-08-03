@@ -46,6 +46,9 @@ class CommerceOrderRead(BaseModel):
     original_status: str
     operational_stage: str
     operational_stage_source: str
+    manual_stage: str | None
+    manual_stage_reason: str | None
+    manual_stage_updated_at: datetime | None
     currency: str
     total_amount: Decimal
     ordered_at: datetime | None

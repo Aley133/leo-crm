@@ -20,6 +20,11 @@ from .inventory_service import (
     rebuild_product_fifo,
 )
 from .models import MarketplaceOrderLine, Product
+from .product_inventory_group import (
+    inventory_group_products,
+    inventory_owner_product,
+    inventory_owner_product_id,
+)
 
 
 class InventoryBatchCreate(BaseModel):
@@ -42,6 +47,10 @@ class InventoryBatchUpdate(BaseModel):
     reference: str | None = Field(default=None, max_length=255)
     note: str | None = Field(default=None, max_length=2000)
     batch_type: InventoryBatchType | None = None
+
+
+class InventoryOwnerUpdate(BaseModel):
+    owner_product_id: int = Field(gt=0)
 
 
 class ProductionOrderRead(BaseModel):
@@ -71,8 +80,18 @@ class InventoryBatchRead(BaseModel):
     production_orders: list[ProductionOrderRead] = Field(default_factory=list)
 
 
+class InventoryGroupProductRead(BaseModel):
+    product_id: int
+    name: str
+    kaspi_product_id: str
+    merchant_sku: str | None
+
+
 class ProductInventoryRead(BaseModel):
     product_id: int
+    inventory_owner_product_id: int
+    inventory_owner_name: str
+    shared_products: list[InventoryGroupProductRead]
     on_hand: int
     received_total: int
     expected_total: int
@@ -144,12 +163,15 @@ def _batch_read(
 
 
 def _product_inventory(db: Session, product_id: int) -> ProductInventoryRead:
-    if db.get(Product, product_id) is None:
+    product = db.get(Product, product_id)
+    if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    owner = inventory_owner_product(db, product)
+    group_products = inventory_group_products(db, owner)
 
     batches = db.scalars(
         select(InventoryBatch)
-        .where(InventoryBatch.product_id == product_id)
+        .where(InventoryBatch.product_id == owner.id)
         .order_by(InventoryBatch.received_at.desc(), InventoryBatch.id.desc())
     ).all()
     batch_ids = [batch.id for batch in batches]
@@ -169,7 +191,7 @@ def _product_inventory(db: Session, product_id: int) -> ProductInventoryRead:
         )
     }
     production_orders_by_batch: dict[int, list[ProductionOrderRead]] = defaultdict(list)
-    for reservation in build_incoming_reservations(db, product_ids={product_id}):
+    for reservation in build_incoming_reservations(db, product_ids={int(owner.id)}):
         if reservation.batch_type != InventoryBatchType.PRODUCTION.value:
             continue
         production_orders_by_batch[reservation.batch_id].append(
@@ -222,6 +244,17 @@ def _product_inventory(db: Session, product_id: int) -> ProductInventoryRead:
     on_hand = sum(int(batch.quantity_remaining) for batch in received_batches)
     return ProductInventoryRead(
         product_id=product_id,
+        inventory_owner_product_id=int(owner.id),
+        inventory_owner_name=owner.name,
+        shared_products=[
+            InventoryGroupProductRead(
+                product_id=int(member.id),
+                name=member.name,
+                kaspi_product_id=member.kaspi_product_id,
+                merchant_sku=member.merchant_sku,
+            )
+            for member in group_products
+        ],
         on_hand=on_hand,
         received_total=received_total,
         expected_total=expected_total,
@@ -245,6 +278,54 @@ def get_product_inventory(
     product_id: int,
     db: Session = Depends(get_db),
 ) -> ProductInventoryRead:
+    return _product_inventory(db, product_id)
+
+
+@router.put("/{product_id}/inventory-owner", response_model=ProductInventoryRead)
+def merge_product_inventory(
+    product_id: int,
+    payload: InventoryOwnerUpdate,
+    db: Session = Depends(get_db),
+) -> ProductInventoryRead:
+    source_product = db.scalar(
+        select(Product).where(Product.id == product_id).with_for_update()
+    )
+    target_product = db.scalar(
+        select(Product)
+        .where(Product.id == payload.owner_product_id)
+        .with_for_update()
+    )
+    if source_product is None or target_product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+    if int(source_product.workspace_id) != int(target_product.workspace_id):
+        raise HTTPException(
+            status_code=409,
+            detail="Нельзя объединить товары разных аккаунтов",
+        )
+
+    source_owner = inventory_owner_product(db, source_product)
+    target_owner = inventory_owner_product(db, target_product)
+    if int(source_owner.id) == int(target_owner.id):
+        return _product_inventory(db, product_id)
+
+    source_members = inventory_group_products(db, source_owner)
+    db.scalars(
+        select(InventoryBatch)
+        .where(
+            InventoryBatch.product_id.in_((source_owner.id, target_owner.id))
+        )
+        .with_for_update()
+    ).all()
+    for batch in db.scalars(
+        select(InventoryBatch).where(InventoryBatch.product_id == source_owner.id)
+    ).all():
+        batch.product_id = int(target_owner.id)
+    for member in source_members:
+        member.inventory_owner_product_id = int(target_owner.id)
+
+    db.flush()
+    rebuild_product_fifo(db, product_id=int(target_owner.id))
+    db.commit()
     return _product_inventory(db, product_id)
 
 
@@ -295,11 +376,15 @@ def receive_product_inventory_batch(
     batch_id: int,
     db: Session = Depends(get_db),
 ) -> InventoryBatchUpdated:
+    try:
+        owner_id = inventory_owner_product_id(db, product_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     batch = db.scalar(
         select(InventoryBatch)
         .where(
             InventoryBatch.id == batch_id,
-            InventoryBatch.product_id == product_id,
+            InventoryBatch.product_id == owner_id,
         )
         .with_for_update()
     )
@@ -335,11 +420,15 @@ def manufacture_product_order(
     order_line_id: int,
     db: Session = Depends(get_db),
 ) -> ProductionCompletionRead:
+    try:
+        owner_id = inventory_owner_product_id(db, product_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     batch = db.scalar(
         select(InventoryBatch)
         .where(
             InventoryBatch.id == batch_id,
-            InventoryBatch.product_id == product_id,
+            InventoryBatch.product_id == owner_id,
         )
         .with_for_update()
     )
@@ -350,11 +439,14 @@ def manufacture_product_order(
         select(MarketplaceOrderLine)
         .where(
             MarketplaceOrderLine.id == order_line_id,
-            MarketplaceOrderLine.product_id == product_id,
         )
         .with_for_update()
     )
-    if order_line is None:
+    if (
+        order_line is None
+        or order_line.product_id is None
+        or inventory_owner_product_id(db, int(order_line.product_id)) != owner_id
+    ):
         raise HTTPException(status_code=404, detail="Order line not found")
 
     try:
@@ -389,11 +481,15 @@ def update_product_inventory_batch(
     payload: InventoryBatchUpdate,
     db: Session = Depends(get_db),
 ) -> InventoryBatchUpdated:
+    try:
+        owner_id = inventory_owner_product_id(db, product_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     batch = db.scalar(
         select(InventoryBatch)
         .where(
             InventoryBatch.id == batch_id,
-            InventoryBatch.product_id == product_id,
+            InventoryBatch.product_id == owner_id,
         )
         .with_for_update()
     )
@@ -444,7 +540,7 @@ def update_product_inventory_batch(
     batch.reference = (payload.reference or "").strip() or None
     batch.note = (payload.note or "").strip() or None
 
-    reallocated = rebuild_product_fifo(db, product_id=product_id)
+    reallocated = rebuild_product_fifo(db, product_id=owner_id)
     db.commit()
     db.refresh(batch)
 
@@ -465,11 +561,15 @@ def delete_product_inventory_batch(
     batch_id: int,
     db: Session = Depends(get_db),
 ) -> Response:
+    try:
+        owner_id = inventory_owner_product_id(db, product_id)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
     batch = db.scalar(
         select(InventoryBatch)
         .where(
             InventoryBatch.id == batch_id,
-            InventoryBatch.product_id == product_id,
+            InventoryBatch.product_id == owner_id,
         )
         .with_for_update()
     )
@@ -494,7 +594,7 @@ def delete_product_inventory_batch(
         )
 
     product_batch_ids = select(InventoryBatch.id).where(
-        InventoryBatch.product_id == product_id,
+        InventoryBatch.product_id == owner_id,
         InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
     )
     db.execute(
@@ -505,6 +605,6 @@ def delete_product_inventory_batch(
     db.flush()
     db.delete(batch)
     db.flush()
-    rebuild_product_fifo(db, product_id=product_id)
+    rebuild_product_fifo(db, product_id=owner_id)
     db.commit()
     return Response(status_code=status.HTTP_204_NO_CONTENT)

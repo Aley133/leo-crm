@@ -320,6 +320,7 @@ def import_kaspi_order(
         changed = True
     else:
         previous_status = order.status
+        previous_manual_stage = order.manual_stage
         before = (
             order.external_code,
             order.status,
@@ -357,6 +358,28 @@ def import_kaspi_order(
             order.delivered_at = normalized.delivered_at
             order.source_updated_at = normalized.source_updated_at
             order.version += 1
+        if previous_manual_stage is not None and (
+            previous_status != normalized.status
+            or previous_manual_stage == normalized.status
+        ):
+            order.manual_stage = None
+            order.manual_stage_reason = None
+            order.manual_stage_updated_at = None
+            changed = True
+            order.events.append(
+                MarketplaceOrderEvent(
+                    source_event_key=(
+                        f"manual_stage_cleared:source:"
+                        f"{normalized.source_revision or content_hash}:"
+                        f"{normalized.status}"
+                    ),
+                    event_type="manual_stage_cleared",
+                    previous_status=previous_manual_stage,
+                    current_status=normalized.status,
+                    occurred_at=normalized.source_updated_at or datetime.now(UTC),
+                    metadata_json={"reason": "kaspi_source_stage_progressed"},
+                )
+            )
 
     existing_lines = list(order.lines)
     single_incoming = len(normalized.lines) == 1

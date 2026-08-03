@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, Query, status
-from sqlalchemy import delete
+from pydantic import BaseModel, Field
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..auth import require_service_token
 from ..browser_agent_models import BrowserAgentJob
 from ..db import SessionLocal, get_db
+from ..inventory_service import (
+    allocated_quantity_for_line,
+    rebuild_product_fifo,
+    release_cancelled_order_inventory,
+)
 from ..kaspi_product_enrichment_jobs import (
     create_job as create_product_enrichment_job,
     public_job as public_product_enrichment_job,
@@ -17,11 +24,48 @@ from ..kaspi_product_enrichment_jobs import (
 from ..kaspi_raw_receiver_jobs import JOBS as RAW_JOBS
 from ..kaspi_raw_receiver_jobs import create_job, public_job, run_job
 from ..workspace_kaspi import load_workspace_kaspi_connection
+from ..models import MarketplaceOrder, MarketplaceOrderEvent
+from ..product_inventory_group import inventory_owner_product_id
 from .repository import SqlAlchemyCommerceRepository
 from .schemas import CommerceOrderLineRead, CommerceOrderRead, CommerceOrdersResponse, CommerceSummaryRead
 from .service import CommerceService
 
 router = APIRouter(prefix="/api/commerce", tags=["commerce"], dependencies=[Depends(require_service_token)])
+
+
+_MANUAL_ORDER_STAGES = {
+    "preorder",
+    "assembly",
+    "handover",
+    "shipping",
+    "delivered",
+    "cancelled",
+}
+_KASPI_AUTHORITATIVE_STAGES = {
+    "handover",
+    "shipping",
+    "cancelling",
+    "delivered",
+    "cancelled",
+    "returned",
+}
+
+
+class OrderStageOverrideRequest(BaseModel):
+    stage: str | None = None
+    reason: str | None = Field(default=None, min_length=3, max_length=500)
+
+
+def _rebuild_order_inventory(db: Session, order: MarketplaceOrder) -> int:
+    owner_ids = {
+        inventory_owner_product_id(db, int(line.product_id))
+        for line in order.lines
+        if line.product_id is not None
+    }
+    return sum(
+        rebuild_product_fifo(db, product_id=owner_id)
+        for owner_id in sorted(owner_ids)
+    )
 
 
 async def _run_full_kaspi_rebuild(
@@ -188,6 +232,9 @@ def list_commerce_orders(
                 original_status=order.original_status,
                 operational_stage=order.stage.value,
                 operational_stage_source=order.stage_source,
+                manual_stage=order.manual_stage,
+                manual_stage_reason=order.manual_stage_reason,
+                manual_stage_updated_at=order.manual_stage_updated_at,
                 currency=order.currency,
                 total_amount=order.total_amount,
                 ordered_at=order.ordered_at,
@@ -233,3 +280,107 @@ def list_commerce_orders(
             for order in orders
         ],
     )
+
+
+@router.post("/orders/{order_id}/stage-override")
+def override_order_stage(
+    order_id: int,
+    payload: OrderStageOverrideRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    order = db.scalar(
+        select(MarketplaceOrder)
+        .where(MarketplaceOrder.id == order_id)
+        .with_for_update()
+    )
+    if order is None:
+        raise HTTPException(status_code=404, detail="Order not found")
+
+    target_stage = None if payload.stage is None else payload.stage.strip().lower()
+    if target_stage is not None and target_stage not in _MANUAL_ORDER_STAGES:
+        raise HTTPException(
+            status_code=422,
+            detail="Unsupported manual order stage",
+        )
+    if target_stage is not None and not (payload.reason or "").strip():
+        raise HTTPException(
+            status_code=422,
+            detail="Укажите причину ручной коррекции",
+        )
+    if target_stage is not None and order.status in _KASPI_AUTHORITATIVE_STAGES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Этап уже подтверждён Kaspi после передачи со склада; "
+                "ручная коррекция назад запрещена"
+            ),
+        )
+
+    previous_stage = order.manual_stage
+    now = datetime.now(UTC)
+    order.manual_stage = target_stage
+    order.manual_stage_reason = (
+        (payload.reason or "").strip() or None
+        if target_stage is not None
+        else None
+    )
+    order.manual_stage_updated_at = now if target_stage is not None else None
+    order.version += 1
+
+    if target_stage == "cancelled":
+        release_cancelled_order_inventory(
+            db,
+            order=order,
+            released_at=now,
+            force=True,
+            reason="manual_owner_cancellation",
+        )
+    else:
+        _rebuild_order_inventory(db, order)
+
+    if target_stage == "assembly":
+        shortages = [
+            line
+            for line in order.lines
+            if line.product_id is None
+            or allocated_quantity_for_line(db, int(line.id)) < int(line.quantity or 0)
+        ]
+        if shortages:
+            db.rollback()
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Нельзя перевести заказ в упаковку: FIFO не покрывает "
+                    f"{len(shortages)} товарных позиций"
+                ),
+            )
+
+    order.events.append(
+        MarketplaceOrderEvent(
+            source_event_key=(
+                f"manual_stage:{order.version}:{target_stage or 'kaspi_auto'}"
+            ),
+            event_type=(
+                "manual_stage_cleared"
+                if target_stage is None
+                else "manual_stage_changed"
+            ),
+            previous_status=previous_stage or order.status,
+            current_status=target_stage or order.status,
+            occurred_at=now,
+            metadata_json={
+                "reason": (payload.reason or "").strip() or "return_to_kaspi_truth",
+                "source_status": order.status,
+                "source_original_status": order.original_status,
+            },
+        )
+    )
+    db.commit()
+    return {
+        "order_id": order.id,
+        "manual_stage": order.manual_stage,
+        "manual_stage_reason": order.manual_stage_reason,
+        "manual_stage_updated_at": order.manual_stage_updated_at,
+        "source_status": order.status,
+        "reconciled": True,
+    }

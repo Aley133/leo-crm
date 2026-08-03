@@ -40,6 +40,8 @@
 .procurement-product p { margin:5px 0 0; color:#f2e3c9; }
 .procurement-product p b { color:#ffd28a; }
 .order-actions { display:flex; justify-content:flex-end; gap:10px; padding:15px 20px 18px; border-top:1px solid #203047; }
+.stage-override-controls { display:flex; flex:1 1 auto; align-items:center; gap:10px; }
+.stage-override-select { min-width:190px; border:1px solid #2b405d; border-radius:10px; background:#081321; color:#fff; padding:10px 12px; }
 .purchase-transition.is-loading, .create-purchase.is-loading { display:inline-flex; align-items:center; justify-content:center; gap:9px; cursor:wait; opacity:.88; }
 .button-spinner { width:16px; height:16px; flex:0 0 16px; border:2px solid rgba(255,255,255,.38); border-top-color:#fff; border-radius:50%; animation:button-spin .75s linear infinite; }
 @keyframes button-spin { to { transform:rotate(360deg); } }
@@ -75,4 +77,6 @@
   .procurement-advice-header { align-items:flex-start; flex-direction:column; }
   .procurement-product { grid-template-columns:1fr; gap:8px; }
   .order-actions { align-items:stretch; flex-direction:column; }
+  .stage-override-controls { align-items:stretch; flex-direction:column; }
+  .stage-override-select { width:100%; }
 }

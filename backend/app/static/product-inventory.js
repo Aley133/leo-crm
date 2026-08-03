@@ -10,8 +10,14 @@
   const batchTypeInput = document.querySelector("#inventory-batch-type");
   const receivedCheck = document.querySelector("#inventory-is-received");
   const reconcileCheck = document.querySelector("#inventory-reconcile");
+  const ownerDialog = document.querySelector("#inventory-owner-dialog");
+  const ownerForm = document.querySelector("#inventory-owner-form");
+  const ownerSearch = document.querySelector("#inventory-owner-search");
+  const ownerSelect = document.querySelector("#inventory-owner-product");
+  const ownerResult = document.querySelector("#inventory-owner-result");
   let editingBatchId = null;
   let batchesById = new Map();
+  let ownerSearchTimer = null;
 
   const money = (value) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits: 2})} KZT`;
   const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
@@ -31,6 +37,17 @@
       const expectedPurchase = Math.max(Number(inventory.expected_total || 0) - production, 0);
       summary.textContent = `на складе: ${Number(inventory.on_hand || 0)} · ожидается закупка: ${expectedPurchase} · в производстве: ${production} · списано/изготовлено: ${Number(inventory.allocated_total || 0)}`;
     }
+    const ownerName = document.querySelector("#inventory-owner-name");
+    const groupSummary = document.querySelector("#inventory-group-summary");
+    const mergeButton = document.querySelector("#merge-inventory");
+    const members = inventory.shared_products || [];
+    if (ownerName) ownerName.textContent = members.length > 1 ? inventory.inventory_owner_name : "Отдельный остаток";
+    if (groupSummary) {
+      groupSummary.textContent = members.length > 1
+        ? `${members.length} Kaspi-карточки используют одни партии: ${members.map((item) => item.merchant_sku || item.kaspi_product_id).join(", ")}`
+        : "Только эта Kaspi-карточка";
+    }
+    if (mergeButton) mergeButton.textContent = members.length > 1 ? "Добавить ещё карточку" : "Объединить с другой карточкой";
   };
 
   const renderProductionOrders = (batch) => {
@@ -162,6 +179,70 @@
     result.textContent = batchTypeInput.value === "production"
       ? "Количество — это план производства. Заказы останутся в «Предзаказе», пока вы не нажмёте «Изготовлено» у каждого."
       : "Ожидаемая закупка не попадёт в остаток и FIFO, пока вы не отметите её прибытие.";
+  });
+
+  const searchInventoryOwners = async () => {
+    const query = ownerSearch?.value.trim() || "";
+    if (query.length < 2) {
+      ownerSelect.innerHTML = '<option value="">Введите минимум 2 символа</option>';
+      return;
+    }
+    ownerResult.textContent = "Ищу карточки…";
+    try {
+      const token = localStorage.getItem(storageKey);
+      const response = await fetch(`/api/product-registry/products?q=${encodeURIComponent(query)}&limit=50`, {headers:{Authorization:`Bearer ${token}`},cache:"no-store"});
+      if (!response.ok) throw new Error(`API вернул ошибку ${response.status}`);
+      const rows = (await response.json()).filter((row) => Number(row.product_id) !== productId);
+      ownerSelect.innerHTML = rows.length
+        ? '<option value="">Выберите карточку</option>' + rows.map((row) => `<option value="${Number(row.product_id)}">${escapeHtml(row.name)} · SKU ${escapeHtml(row.merchant_sku || row.kaspi_product_id)}</option>`).join("")
+        : '<option value="">Совпадений не найдено</option>';
+      ownerResult.textContent = rows.length ? `Найдено: ${rows.length}` : "Подходящих карточек нет.";
+    } catch (error) {
+      ownerResult.textContent = error instanceof Error ? error.message : "Не удалось найти карточки.";
+    }
+  };
+
+  document.querySelector("#merge-inventory")?.addEventListener("click", () => {
+    ownerForm.reset();
+    ownerSelect.innerHTML = '<option value="">Сначала выполните поиск</option>';
+    ownerResult.textContent = "";
+    ownerDialog.showModal();
+    ownerSearch.focus();
+  });
+  document.querySelector("#close-inventory-owner-dialog")?.addEventListener("click", () => ownerDialog.close());
+  document.querySelector("#cancel-inventory-owner")?.addEventListener("click", () => ownerDialog.close());
+  ownerSearch?.addEventListener("input", () => {
+    clearTimeout(ownerSearchTimer);
+    ownerSearchTimer = setTimeout(searchInventoryOwners, 350);
+  });
+  ownerForm?.addEventListener("submit", async (event) => {
+    event.preventDefault();
+    const ownerProductId = Number(ownerSelect.value);
+    if (!Number.isInteger(ownerProductId) || ownerProductId <= 0) return;
+    if (!confirm("Объединить партии и ожидаемые поставки этих карточек в один FIFO-остаток? Продажи с обоих SKU будут списываться из общего склада.")) return;
+    const save = document.querySelector("#save-inventory-owner");
+    save.disabled = true;
+    ownerResult.textContent = "Объединяю партии и пересчитываю активные заказы…";
+    try {
+      const token = localStorage.getItem(storageKey);
+      const response = await fetch(`/api/products/${productId}/inventory-owner`, {method:"PUT",headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},body:JSON.stringify({owner_product_id:ownerProductId})});
+      if (!response.ok) {
+        let detail = `API вернул ошибку ${response.status}`;
+        try { const payload = await response.json(); if (payload.detail) detail = String(payload.detail); } catch {}
+        throw new Error(detail);
+      }
+      const inventory = await response.json();
+      render(inventory);
+      ownerResult.textContent = "Готово. Обе Kaspi-карточки теперь используют один FIFO-склад.";
+      const pageMessage = document.querySelector("#message");
+      if (pageMessage) pageMessage.textContent = "Общий склад создан: партии, активные заказы и XML пересчитаны.";
+      document.querySelector("#refresh")?.click();
+      setTimeout(() => ownerDialog.close(), 1600);
+    } catch (error) {
+      ownerResult.textContent = error instanceof Error ? error.message : "Не удалось объединить склад.";
+    } finally {
+      save.disabled = false;
+    }
   });
 
   body?.addEventListener("click", async (event) => {

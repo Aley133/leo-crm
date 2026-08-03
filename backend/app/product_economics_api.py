@@ -16,8 +16,7 @@ from .commerce.profit_calculator import (
 from .db import get_db
 from .inventory_models import InventoryAllocation
 from .models import MarketplaceOrder, MarketplaceOrderLine, Product
-from .monitoring import SupplierOfferState
-from .suppliers import ProductBinding, Supplier, SupplierProduct
+from .dumping_service import resolve_cost_source
 
 
 class ProductEconomicsRead(BaseModel):
@@ -87,41 +86,9 @@ def get_product_economics(
             for line_id, quantity, total_cost in inventory_rows
         }
 
-    source_rows = db.execute(
-        select(ProductBinding, SupplierProduct, Supplier, SupplierOfferState)
-        .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
-        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
-        .outerjoin(
-            SupplierOfferState,
-            SupplierOfferState.supplier_product_id == SupplierProduct.id,
-        )
-        .where(
-            ProductBinding.product_id == product_id,
-            ProductBinding.status.in_(("active", "confirmed")),
-        )
-        .order_by(
-            ProductBinding.is_primary.desc(),
-            ProductBinding.priority,
-            ProductBinding.id,
-        )
-    ).all()
-
-    current_source_cost: Decimal | None = None
-    current_source_name: str | None = None
-    for _binding, supplier_product, supplier, state in source_rows:
-        candidate: Decimal | None = None
-        if state is not None and state.price is not None and state.available is not False:
-            candidate = Decimal(state.price)
-        elif (
-            state is None
-            and supplier_product.current_price is not None
-            and supplier_product.in_stock is not False
-        ):
-            candidate = Decimal(supplier_product.current_price)
-        if candidate is not None:
-            current_source_cost = candidate
-            current_source_name = supplier.name
-            break
+    source = resolve_cost_source(db, product_id=product_id)
+    current_source_cost = None if source is None else Decimal(source.unit_cost_kzt)
+    current_source_name = None if source is None else source.name
 
     procurement_cost = current_source_cost
     source_name = current_source_name

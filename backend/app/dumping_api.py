@@ -316,14 +316,26 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
         .order_by(DumpingPolicy.updated_at.desc(), DumpingPolicy.id.desc())
     ).all()
     product_ids = {int(product.id) for _policy, product in rows}
+    owner_by_product = {
+        int(product.id): int(product.inventory_owner_product_id or product.id)
+        for _policy, product in rows
+    }
     latest_runs = _latest_runs_for_products(db, product_ids)
     source_error = None
     try:
-        sources = resolve_cost_sources(db, product_ids=product_ids)
+        sources = resolve_cost_sources(
+            db,
+            product_ids=product_ids,
+            owner_by_product=owner_by_product,
+        )
     except Exception as exc:
         sources = {}
         source_error = str(exc)
-    stock_counts = physical_stock_counts(db, product_ids=product_ids)
+    stock_counts = physical_stock_counts(
+        db,
+        product_ids=product_ids,
+        owner_by_product=owner_by_product,
+    )
     scan_states = states_for_products(product_ids, db=db)
     result: list[dict] = []
     for policy, product in rows:

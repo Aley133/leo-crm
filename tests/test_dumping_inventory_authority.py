@@ -7,7 +7,10 @@ from sqlalchemy import select
 from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from backend.app import dumping_events
-from backend.app.dumping_runner import apply_competitor_snapshot
+from backend.app.dumping_runner import (
+    apply_competitor_snapshot,
+    refresh_dumping_for_supplier_product,
+)
 from backend.app.dumping_service import (
     decide_dumping_price,
     publish_decision,
@@ -128,6 +131,178 @@ def test_fifo_order_writes_exact_remaining_stock_to_xml(db_session) -> None:
     assert 'stockCount="9"' in feed.generated_xml
     assert 'preOrder="0"' in feed.generated_xml
     assert 'available="yes"' in feed.generated_xml
+
+
+def test_supplier_preorder_recreates_offer_missing_from_xml(db_session) -> None:
+    product = _product(db_session, sku="SKU-SUPPLIER-PREORDER")
+    empty_xml = "<kaspi_catalog><offers/></kaspi_catalog>"
+    feed = KaspiXmlFeed(
+        merchant_id="merchant-1",
+        source_filename="catalog.xml",
+        source_xml=empty_xml,
+        generated_xml=empty_xml,
+        active=True,
+    )
+    supplier = Supplier(code="ozon", name="Ozon")
+    db_session.add_all([feed, supplier])
+    db_session.flush()
+    supplier_product = SupplierProduct(
+        supplier_id=supplier.id,
+        external_id="supplier-preorder",
+        title="Товар поставщика",
+        url="https://www.ozon.ru/product/supplier-preorder/",
+        current_price=Decimal("3295"),
+        delivery_days=1,
+        in_stock=True,
+        last_checked_at=NOW,
+    )
+    db_session.add(supplier_product)
+    db_session.flush()
+    binding = ProductBinding(
+        product_id=product.id,
+        supplier_product_id=supplier_product.id,
+        status="active",
+        is_primary=True,
+        priority=0,
+    )
+    policy = DumpingPolicy(
+        product_id=product.id,
+        enabled=True,
+        auto_publish_xml=True,
+        minimum_profit_kzt=Decimal("2000"),
+        supplier_delivery_buffer_days=1,
+    )
+    db_session.add_all([binding, policy])
+    db_session.flush()
+
+    decision = decide_dumping_price(
+        db_session,
+        product=product,
+        policy=policy,
+        competitor_price_kzt=Decimal("9000"),
+        own_price_kzt=None,
+    )
+    run = publish_decision(
+        db_session,
+        product=product,
+        policy=policy,
+        decision=decision,
+    )
+
+    assert decision.source.kind == "supplier"
+    assert decision.source.unit_cost_kzt == Decimal("3295")
+    assert decision.preorder_days == 2
+    assert f'sku="{product.merchant_sku}"' in feed.generated_xml
+    assert f">{int(decision.target_price_kzt)}<" in feed.generated_xml
+    assert 'available="yes"' in feed.generated_xml
+    assert 'preOrder="2"' in feed.generated_xml
+    assert 'stockCount="0"' in feed.generated_xml
+    assert run.explanation_json["xml_offer_recovered"] is True
+
+
+def test_shared_sku_uses_supplier_binding_from_inventory_group(db_session) -> None:
+    owner = _product(db_session, sku="SKU-SUPPLIER-OWNER")
+    variant = _product(db_session, sku="SKU-SUPPLIER-VARIANT")
+    variant.inventory_owner_product_id = owner.id
+    supplier = Supplier(code="ozon", name="Ozon")
+    db_session.add(supplier)
+    db_session.flush()
+    supplier_product = SupplierProduct(
+        supplier_id=supplier.id,
+        external_id="shared-supplier-source",
+        title="Общий товар поставщика",
+        url="https://www.ozon.ru/product/shared-supplier-source/",
+        current_price=Decimal("3500"),
+        delivery_days=3,
+        in_stock=True,
+        last_checked_at=NOW,
+    )
+    db_session.add(supplier_product)
+    db_session.flush()
+    db_session.add(
+        ProductBinding(
+            product_id=owner.id,
+            supplier_product_id=supplier_product.id,
+            status="active",
+            is_primary=True,
+            priority=0,
+        )
+    )
+    policy = DumpingPolicy(
+        product_id=variant.id,
+        enabled=True,
+        auto_publish_xml=True,
+        supplier_delivery_buffer_days=1,
+    )
+    db_session.add(policy)
+    db_session.flush()
+
+    decision = decide_dumping_price(
+        db_session,
+        product=variant,
+        policy=policy,
+        competitor_price_kzt=Decimal("9000"),
+        own_price_kzt=None,
+    )
+
+    assert decision.source.kind == "supplier"
+    assert decision.source.unit_cost_kzt == Decimal("3500")
+    assert decision.preorder_days == 4
+
+
+def test_supplier_refresh_queues_dumping_for_every_shared_sku(
+    db_session,
+    monkeypatch,
+) -> None:
+    owner = _product(db_session, sku="SKU-REFRESH-OWNER")
+    variant = _product(db_session, sku="SKU-REFRESH-VARIANT")
+    variant.inventory_owner_product_id = owner.id
+    supplier = Supplier(code="ozon", name="Ozon")
+    db_session.add(supplier)
+    db_session.flush()
+    supplier_product = SupplierProduct(
+        supplier_id=supplier.id,
+        external_id="shared-refresh-source",
+        title="Обновляемый общий товар",
+        url="https://www.ozon.ru/product/shared-refresh-source/",
+        current_price=Decimal("3600"),
+        delivery_days=2,
+        in_stock=True,
+        last_checked_at=NOW,
+    )
+    db_session.add(supplier_product)
+    db_session.flush()
+    db_session.add_all(
+        [
+            ProductBinding(
+                product_id=owner.id,
+                supplier_product_id=supplier_product.id,
+                status="active",
+                is_primary=True,
+                priority=0,
+            ),
+            DumpingPolicy(product_id=owner.id, enabled=True, auto_publish_xml=True),
+            DumpingPolicy(product_id=variant.id, enabled=True, auto_publish_xml=True),
+        ]
+    )
+    db_session.commit()
+
+    from sqlalchemy.orm import sessionmaker
+
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    queued: list[int] = []
+    monkeypatch.setattr("backend.app.dumping_runner.SessionLocal", factory)
+    monkeypatch.setattr(
+        "backend.app.dumping_runner.enqueue_competitor_scan",
+        lambda product_id, *, reason: queued.append(int(product_id)),
+    )
+
+    refresh_dumping_for_supplier_product(
+        supplier_product.id,
+        workspace_id=1,
+    )
+
+    assert queued == [owner.id, variant.id]
 
 
 def test_untracked_order_offer_is_closed_instead_of_republished(db_session) -> None:
@@ -253,7 +428,7 @@ def test_last_stock_unit_closes_offer_and_queues_fresh_supplier_check(db_session
     assert waiting.status == "supplier_refresh_applied"
 
 
-def test_missing_own_kaspi_offer_latches_manual_seller_removal(db_session) -> None:
+def test_missing_own_kaspi_offer_keeps_dumping_and_republishes_xml(db_session) -> None:
     product = _product(db_session, sku="SKU-REMOVED")
     feed = _feed(db_session, sku=product.merchant_sku or "", stock_count=2)
     batch = InventoryBatch(
@@ -296,17 +471,20 @@ def test_missing_own_kaspi_offer_latches_manual_seller_removal(db_session) -> No
         ),
     )
 
-    assert result["decision"]["status"] == "suspended_seller_removed"
-    assert policy.enabled is False
-    assert 'available="no"' in feed.generated_xml
-    assert 'stockCount="0"' in feed.generated_xml
+    assert result["decision"]["status"] == "ready"
+    assert policy.enabled is True
+    assert 'available="yes"' in feed.generated_xml
+    assert 'stockCount="2"' in feed.generated_xml
+    latest = db_session.get(DumpingRun, result["run_id"])
+    assert latest.explanation_json["own_offer_missing"] is True
+    assert latest.explanation_json["own_offer_action"] == "keep_dumping_and_republish_xml"
 
     sync_product_inventory_to_feed(
         db_session,
         product_id=product.id,
         reason="later_inventory_change",
     )
-    assert 'available="no"' in feed.generated_xml
+    assert 'available="yes"' in feed.generated_xml
 
 
 def test_first_publication_is_not_mistaken_for_manual_seller_removal(db_session) -> None:
