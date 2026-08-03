@@ -8,12 +8,14 @@ from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
 from backend.app import dumping_competitor_worker
+from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.dumping_competitor_worker import (
     build_due_competitor_policies_statement,
     queue_due_competitor_jobs,
 )
 from backend.app.dumping_models import DumpingPolicy, DumpingRun
 from backend.app.inventory_models import InventoryBatch
+from backend.app.kaspi_competitor_agent_api import queue_competitor_job
 from backend.app.models import Product
 
 
@@ -196,4 +198,56 @@ def test_periodic_dispatch_uses_postgresql_skip_locked_and_active_job_guard() ->
     assert "NOT (EXISTS" in sql
     assert "QUEUED_LOCAL" in sql
     assert "LEASED_LOCAL" in sql
-    assert "AWAITING_SUPPLIER_REFRESH" in sql
+
+
+def test_completed_supplier_job_self_heals_waiting_dumping_gate(db_session) -> None:
+    policy = _policy(db_session, kaspi_product_id="100000009")
+    supplier_job = BrowserAgentJob(
+        supplier_product_id=999,
+        url="https://supplier.test/product/999",
+        status="succeeded",
+    )
+    db_session.add(supplier_job)
+    db_session.flush()
+    waiting = DumpingRun(
+        product_id=policy.product_id,
+        dumping_policy_id=policy.id,
+        status="awaiting_supplier_refresh",
+        published=True,
+        explanation_json={"supplier_refresh_job_id": supplier_job.id},
+        created_at=NOW - timedelta(minutes=30),
+    )
+    db_session.add(waiting)
+    db_session.flush()
+
+    job_ids = queue_due_competitor_jobs(db_session, now=NOW)
+
+    assert len(job_ids) == 1
+    assert waiting.status == "supplier_refresh_ready"
+    queued = db_session.get(DumpingRun, job_ids[0])
+    assert queued is not None
+    assert queued.product_id == policy.product_id
+
+
+def test_manual_request_promotes_existing_periodic_job(db_session) -> None:
+    policy = _policy(db_session, kaspi_product_id="100000010")
+    existing = DumpingRun(
+        product_id=policy.product_id,
+        dumping_policy_id=policy.id,
+        status="queued_local",
+        published=False,
+        explanation_json={"reason": "periodic_refresh"},
+        created_at=NOW,
+    )
+    db_session.add(existing)
+    db_session.flush()
+
+    returned = queue_competitor_job(
+        db_session,
+        product_id=policy.product_id,
+        reason="manual",
+    )
+
+    assert returned.id == existing.id
+    assert existing.explanation_json["reason"] == "manual"
+    assert existing.explanation_json["priority"] == "interactive"

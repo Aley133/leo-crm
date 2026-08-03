@@ -321,7 +321,11 @@ def _persist_enriched_order(
     with SessionLocal() as session:
         with session.begin():
             products_to_sync: set[int] = set()
-            stored_order = session.get(MarketplaceOrder, order_id)
+            stored_order = session.scalar(
+                select(MarketplaceOrder)
+                .where(MarketplaceOrder.id == order_id)
+                .with_for_update()
+            )
             if stored_order is None:
                 return 0, 0, 0, errors
             lines = list(

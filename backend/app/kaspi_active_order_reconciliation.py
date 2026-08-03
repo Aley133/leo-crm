@@ -9,12 +9,14 @@ from sqlalchemy import select
 
 from .db import SessionLocal
 from .kaspi_raw_receiver_jobs import _persist_orders_in_batches
-from .models import MarketplaceOrder
+from .models import MarketplaceImportCheckpoint, MarketplaceOrder
 from .workspace_kaspi import WorkspaceKaspiConnection
 
 
 TERMINAL_ORDER_STATUSES = ("delivered", "cancelled", "returned")
 DETAIL_WORKERS = 6
+RECONCILIATION_BATCH_SIZE = 30
+RECONCILIATION_CHECKPOINT_STREAM = "active_order_reconciliation"
 
 
 @dataclass(frozen=True, slots=True)
@@ -36,34 +38,94 @@ class ActiveOrderReconciliationResult:
 def _load_active_order_references(
     *,
     marketplace_account_id: int,
-) -> tuple[ActiveOrderReference, ...]:
-    """Return every locally non-terminal order, regardless of creation date.
+    limit: int = RECONCILIATION_BATCH_SIZE,
+) -> tuple[tuple[ActiveOrderReference, ...], str | None]:
+    """Return the next bounded slice of non-terminal orders.
 
     The regular raw receiver intentionally uses short ``creationDate`` windows
     for fast new-order intake. That makes it unsuitable for lifecycle repair:
     an order that remains local ``assembly`` after the seven-day deep window
-    would otherwise never be observed again.
+    would otherwise never be observed again. A durable per-account cursor makes
+    successive maintenance cycles cover the complete active set without one
+    large request burst starving minute intake or local agents.
     """
 
+    if limit < 1 or limit > 500:
+        raise ValueError("active order reconciliation limit must be between 1 and 500")
+
     with SessionLocal() as session:
-        rows = session.execute(
-            select(MarketplaceOrder.id, MarketplaceOrder.external_code)
-            .where(
-                MarketplaceOrder.marketplace_account_id == marketplace_account_id,
-                MarketplaceOrder.status.not_in(TERMINAL_ORDER_STATUSES),
-                MarketplaceOrder.external_code.is_not(None),
-                MarketplaceOrder.external_code != "",
+        checkpoint = session.scalar(
+            select(MarketplaceImportCheckpoint).where(
+                MarketplaceImportCheckpoint.marketplace_account_id
+                == marketplace_account_id,
+                MarketplaceImportCheckpoint.stream_name
+                == RECONCILIATION_CHECKPOINT_STREAM,
             )
-            .order_by(
-                MarketplaceOrder.ordered_at.asc().nullsfirst(),
-                MarketplaceOrder.id.asc(),
+        )
+        try:
+            cursor = int(checkpoint.cursor or 0) if checkpoint is not None else 0
+        except (TypeError, ValueError):
+            cursor = 0
+
+        conditions = (
+            MarketplaceOrder.marketplace_account_id == marketplace_account_id,
+            MarketplaceOrder.status.not_in(TERMINAL_ORDER_STATUSES),
+            MarketplaceOrder.external_code.is_not(None),
+            MarketplaceOrder.external_code != "",
+        )
+        rows = list(
+            session.execute(
+                select(MarketplaceOrder.id, MarketplaceOrder.external_code)
+                .where(*conditions, MarketplaceOrder.id > cursor)
+                .order_by(MarketplaceOrder.id)
+                .limit(limit)
+            ).all()
+        )
+        if len(rows) < limit and cursor > 0:
+            rows.extend(
+                session.execute(
+                    select(MarketplaceOrder.id, MarketplaceOrder.external_code)
+                    .where(*conditions, MarketplaceOrder.id <= cursor)
+                    .order_by(MarketplaceOrder.id)
+                    .limit(limit - len(rows))
+                ).all()
             )
-        ).all()
-    return tuple(
+
+    references = tuple(
         ActiveOrderReference(order_id=int(order_id), external_code=str(external_code).strip())
         for order_id, external_code in rows
         if str(external_code or "").strip()
     )
+    next_cursor = str(references[-1].order_id) if references else None
+    return references, next_cursor
+
+
+def _save_reconciliation_cursor(
+    *,
+    marketplace_account_id: int,
+    cursor: str | None,
+) -> None:
+    if cursor is None:
+        return
+    with SessionLocal() as session:
+        with session.begin():
+            checkpoint = session.scalar(
+                select(MarketplaceImportCheckpoint)
+                .where(
+                    MarketplaceImportCheckpoint.marketplace_account_id
+                    == marketplace_account_id,
+                    MarketplaceImportCheckpoint.stream_name
+                    == RECONCILIATION_CHECKPOINT_STREAM,
+                )
+                .with_for_update()
+            )
+            if checkpoint is None:
+                checkpoint = MarketplaceImportCheckpoint(
+                    marketplace_account_id=marketplace_account_id,
+                    stream_name=RECONCILIATION_CHECKPOINT_STREAM,
+                )
+                session.add(checkpoint)
+            checkpoint.cursor = cursor
 
 
 def _fetch_active_order_payloads(
@@ -104,17 +166,20 @@ def _fetch_active_order_payloads(
 
 async def reconcile_active_orders(
     connection: WorkspaceKaspiConnection,
+    *,
+    batch_size: int = RECONCILIATION_BATCH_SIZE,
 ) -> ActiveOrderReconciliationResult:
-    """Refresh all non-terminal CRM orders by exact Kaspi order code.
+    """Refresh one bounded slice of CRM orders by exact Kaspi order code.
 
     Reads and HTTP calls stay off the event loop. Persistence reuses the normal
     raw receiver boundary, so status events, manual-override clearing, FIFO and
     XML updates remain transactional and idempotent.
     """
 
-    references = await asyncio.to_thread(
+    references, next_cursor = await asyncio.to_thread(
         _load_active_order_references,
         marketplace_account_id=connection.account_id,
+        limit=batch_size,
     )
     payloads, missing, errors = await asyncio.to_thread(
         _fetch_active_order_payloads,
@@ -129,6 +194,11 @@ async def reconcile_active_orders(
             timezone_name=connection.timezone,
             marketplace_account_id=connection.account_id,
         )
+    await asyncio.to_thread(
+        _save_reconciliation_cursor,
+        marketplace_account_id=connection.account_id,
+        cursor=next_cursor,
+    )
     return ActiveOrderReconciliationResult(
         checked=len(references),
         found=len(payloads),

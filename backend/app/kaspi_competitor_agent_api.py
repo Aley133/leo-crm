@@ -7,10 +7,11 @@ from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
+from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import get_db, get_unscoped_db
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from .dumping_runner import apply_competitor_snapshot
@@ -123,16 +124,6 @@ def _json_compatible(value: object) -> object:
 
 
 def _claimable_job(db: Session, *, now: datetime) -> tuple[DumpingRun | None, bool]:
-    queued = db.scalar(
-        select(DumpingRun)
-        .where(DumpingRun.status == "queued_local")
-        .order_by(DumpingRun.id)
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    )
-    if queued is not None:
-        return queued, False
-
     leased = db.scalars(
         select(DumpingRun)
         .where(DumpingRun.status == "leased_local")
@@ -144,7 +135,69 @@ def _claimable_job(db: Session, *, now: datetime) -> tuple[DumpingRun | None, bo
         lease_until = _metadata_datetime((candidate.explanation_json or {}).get("lease_until"))
         if lease_until is not None and lease_until < now:
             return candidate, True
+
+    reason = DumpingRun.explanation_json["reason"].as_string()
+    priority = case(
+        (reason == "manual", 0),
+        (reason == "supplier_snapshot_changed", 1),
+        else_=2,
+    )
+    queued = db.scalar(
+        select(DumpingRun)
+        .where(DumpingRun.status == "queued_local")
+        .order_by(priority, DumpingRun.id)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+    if queued is not None:
+        return queued, False
     return None, False
+
+
+def release_completed_supplier_refreshes(
+    db: Session,
+    *,
+    product_id: int,
+) -> bool:
+    """Release stale safety gates after their exact supplier job succeeded.
+
+    The normal after-commit hook already performs this transition. This check is
+    a durable self-healing path for a process restart or a failed callback after
+    the supplier observation itself was committed successfully. A queued,
+    leased or failed supplier job remains a hard gate, so stale supplier facts
+    can never reopen a preorder.
+    """
+    waiting = db.scalars(
+        select(DumpingRun)
+        .where(
+            DumpingRun.product_id == product_id,
+            DumpingRun.status == "awaiting_supplier_refresh",
+        )
+        .with_for_update()
+    ).all()
+    unresolved = False
+    now = _now().isoformat()
+    for run in waiting:
+        metadata = run.explanation_json or {}
+        try:
+            supplier_job_id = int(metadata.get("supplier_refresh_job_id"))
+        except (TypeError, ValueError):
+            supplier_job_id = 0
+        supplier_job = db.get(BrowserAgentJob, supplier_job_id) if supplier_job_id else None
+        if (
+            supplier_job is not None
+            and supplier_job.status == BrowserAgentJobStatus.SUCCEEDED.value
+        ):
+            run.status = "supplier_refresh_ready"
+            run.explanation_json = {
+                **metadata,
+                "supplier_refresh_recovered_at": now,
+            }
+            continue
+        unresolved = True
+    if waiting:
+        db.flush()
+    return unresolved
 
 
 def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> DumpingRun:
@@ -155,15 +208,7 @@ def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> Dumpin
     )
     if policy is None or not policy.enabled:
         raise ValueError("Демпинг для товара не подключён")
-    awaiting_supplier = db.scalar(
-        select(DumpingRun.id)
-        .where(
-            DumpingRun.product_id == product_id,
-            DumpingRun.status == "awaiting_supplier_refresh",
-        )
-        .limit(1)
-    )
-    if awaiting_supplier is not None:
+    if release_completed_supplier_refreshes(db, product_id=product_id):
         raise ValueError(
             "Ожидается свежая проверка поставщика после исчерпания склада"
         )
@@ -189,6 +234,14 @@ def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> Dumpin
         .limit(1)
     )
     if existing is not None:
+        if reason == "manual" and (existing.explanation_json or {}).get("reason") != "manual":
+            existing.explanation_json = {
+                **(existing.explanation_json or {}),
+                "reason": "manual",
+                "priority": "interactive",
+                "requested_at": _now().isoformat(),
+            }
+            db.flush()
         return existing
     job = DumpingRun(
         product_id=product_id,

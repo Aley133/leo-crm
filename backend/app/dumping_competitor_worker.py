@@ -110,8 +110,16 @@ def enqueue_competitor_scan(product_id: int, *, reason: str = "manual") -> bool:
 
     with SessionLocal() as db:
         try:
+            existing_id = db.scalar(
+                select(DumpingRun.id)
+                .where(
+                    DumpingRun.product_id == product_id,
+                    DumpingRun.status.in_(_ACTIVE_LOCAL_JOB_STATUSES),
+                )
+                .limit(1)
+            )
             job = queue_competitor_job(db, product_id=product_id, reason=reason)
-            created = job.status == "queued_local"
+            created = existing_id is None and job.status == "queued_local"
             db.commit()
             return created
         except Exception:
@@ -152,14 +160,6 @@ def build_due_competitor_policies_statement(
         )
         .exists()
     )
-    supplier_refresh_pending = (
-        select(DumpingRun.id)
-        .where(
-            DumpingRun.product_id == DumpingPolicy.product_id,
-            DumpingRun.status == "awaiting_supplier_refresh",
-        )
-        .exists()
-    )
     due_before = now - timedelta(seconds=refresh_seconds)
     return (
         select(DumpingPolicy)
@@ -167,7 +167,6 @@ def build_due_competitor_policies_statement(
             DumpingPolicy.enabled.is_(True),
             DumpingPolicy.auto_publish_xml.is_(True),
             ~active_job_exists,
-            ~supplier_refresh_pending,
             or_(latest_scan_at.is_(None), latest_scan_at <= due_before),
         )
         .order_by(DumpingPolicy.id)
@@ -193,7 +192,14 @@ def queue_due_competitor_jobs(
         )
     ).all()
     jobs = []
+    from .kaspi_competitor_agent_api import release_completed_supplier_refreshes
+
     for policy in policies:
+        if release_completed_supplier_refreshes(
+            db,
+            product_id=policy.product_id,
+        ):
+            continue
         source = resolve_cost_source(
             db,
             product_id=policy.product_id,

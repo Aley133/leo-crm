@@ -180,6 +180,110 @@ def test_dumping_runtime_drops_old_expired_leases_from_live_panel(db_session) ->
     assert snapshot.latest_run is None
 
 
+def test_kaspi_agent_claims_manual_job_before_periodic_backlog(db_session) -> None:
+    periodic_product = _product(
+        db_session,
+        kaspi_id="676767676",
+        name="Плановая проверка",
+    )
+    manual_product = _product(
+        db_session,
+        kaspi_id="686868686",
+        name="Ручная проверка",
+    )
+    db_session.add_all(
+        [
+            DumpingPolicy(product_id=periodic_product.id, enabled=True),
+            DumpingPolicy(product_id=manual_product.id, enabled=True),
+            KaspiXmlFeed(
+                merchant_id="merchant-1",
+                source_filename="catalog.xml",
+                source_xml="<kaspi_catalog/>",
+                generated_xml="<kaspi_catalog/>",
+                active=True,
+            ),
+        ]
+    )
+    db_session.flush()
+    periodic = DumpingRun(
+        product_id=periodic_product.id,
+        status="queued_local",
+        published=False,
+        explanation_json={"reason": "periodic_refresh"},
+    )
+    manual = DumpingRun(
+        product_id=manual_product.id,
+        status="queued_local",
+        published=False,
+        explanation_json={"reason": "manual"},
+    )
+    db_session.add_all([periodic, manual])
+    db_session.commit()
+
+    response = claim_job(
+        AgentClaim(agent_id="priority-agent-w1", hostname="BARWORK"),
+        db_session,
+    )
+
+    assert response["job"]["id"] == manual.id
+    assert periodic.status == "queued_local"
+
+
+def test_kaspi_agent_recovers_expired_lease_before_new_queue(db_session) -> None:
+    now = utc_now()
+    expired_product = _product(
+        db_session,
+        kaspi_id="696969696",
+        name="Прерванная проверка",
+    )
+    queued_product = _product(
+        db_session,
+        kaspi_id="707070707",
+        name="Новая проверка",
+    )
+    db_session.add_all(
+        [
+            DumpingPolicy(product_id=expired_product.id, enabled=True),
+            DumpingPolicy(product_id=queued_product.id, enabled=True),
+            KaspiXmlFeed(
+                merchant_id="merchant-1",
+                source_filename="catalog.xml",
+                source_xml="<kaspi_catalog/>",
+                generated_xml="<kaspi_catalog/>",
+                active=True,
+            ),
+        ]
+    )
+    db_session.flush()
+    expired = DumpingRun(
+        product_id=expired_product.id,
+        status="leased_local",
+        published=False,
+        explanation_json={
+            "agent_id": "offline-agent-w1",
+            "lease_token": "expired-lease-token-123456",
+            "lease_until": (now - timedelta(minutes=1)).isoformat(),
+        },
+    )
+    queued = DumpingRun(
+        product_id=queued_product.id,
+        status="queued_local",
+        published=False,
+        explanation_json={"reason": "manual"},
+    )
+    db_session.add_all([expired, queued])
+    db_session.commit()
+
+    response = claim_job(
+        AgentClaim(agent_id="recovery-agent-w1", hostname="BARWORK"),
+        db_session,
+    )
+
+    assert response["job"]["id"] == expired.id
+    assert response["resumed"] is False
+    assert queued.status == "queued_local"
+
+
 def test_kaspi_agent_reclaims_expired_job_and_can_finish_it(db_session) -> None:
     now = utc_now()
     product = _product(
