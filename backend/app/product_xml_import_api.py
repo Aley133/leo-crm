@@ -12,21 +12,15 @@ from .auth import require_service_token
 from .db import get_db
 from .dumping_models import DumpingPolicy, KaspiXmlFeed
 from .dumping_service import (
-    close_untracked_order_offer,
     sync_product_inventory_to_feed,
     workspace_feed_url,
 )
-from .inventory_models import InventoryBatch
 from .kaspi_xml_import import KaspiXmlProduct, parse_kaspi_products
 from .models import (
-    MarketplaceOrder,
-    MarketplaceOrderLine,
-    MarketplaceOrderStatus,
     Product,
     ProductStatus,
 )
 from .order_line_product_linking import link_all_matching_order_lines_for_products
-from .product_inventory_group import inventory_owner_ids_for_products
 
 
 router = APIRouter(
@@ -235,79 +229,17 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
         managed_product_ids = set(
             db.scalars(
                 select(DumpingPolicy.product_id).where(
-                    DumpingPolicy.product_id.in_([product.id for product in stored_products])
+                    DumpingPolicy.product_id.in_([product.id for product in stored_products]),
+                    DumpingPolicy.enabled.is_(True),
+                    DumpingPolicy.auto_publish_xml.is_(True),
                 )
             ).all()
-        )
-        stored_product_ids = {int(product.id) for product in stored_products}
-        owner_by_product = inventory_owner_ids_for_products(
-            db,
-            stored_product_ids,
-        )
-        inventory_owner_ids = set(
-            int(value)
-            for value in db.scalars(
-                select(InventoryBatch.product_id)
-                .where(
-                    InventoryBatch.product_id.in_(set(owner_by_product.values()))
-                )
-                .distinct()
-            ).all()
-        )
-        managed_product_ids.update(
-            product_id
-            for product_id, owner_id in owner_by_product.items()
-            if owner_id in inventory_owner_ids
-        )
-        active_order_statuses = (
-            MarketplaceOrderStatus.NEW.value,
-            MarketplaceOrderStatus.ACCEPTED.value,
-            MarketplaceOrderStatus.ASSEMBLY.value,
-            MarketplaceOrderStatus.HANDOVER.value,
-            MarketplaceOrderStatus.SHIPPING.value,
-            MarketplaceOrderStatus.UNKNOWN.value,
-            "preorder",
-        )
-        managed_product_ids.update(
-            value
-            for value in db.scalars(
-                select(MarketplaceOrderLine.product_id)
-                .join(
-                    MarketplaceOrder,
-                    MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id,
-                )
-                .where(
-                    MarketplaceOrder.status.in_(active_order_statuses),
-                    MarketplaceOrderLine.product_id.is_not(None),
-                )
-                .distinct()
-            ).all()
-            if value is not None
         )
         for product_id in sorted(int(value) for value in managed_product_ids):
             sync_product_inventory_to_feed(
                 db,
                 product_id=product_id,
                 reason="xml_source_reimported",
-            )
-        unresolved_active_lines = db.execute(
-            select(
-                MarketplaceOrderLine.merchant_sku,
-                MarketplaceOrderLine.external_product_id,
-            )
-            .join(
-                MarketplaceOrder,
-                MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id,
-            )
-            .where(
-                MarketplaceOrder.status.in_(active_order_statuses),
-                MarketplaceOrderLine.product_id.is_(None),
-            )
-        ).all()
-        for merchant_sku, external_product_id in unresolved_active_lines:
-            close_untracked_order_offer(
-                db,
-                sku_candidates={merchant_sku or "", external_product_id or ""},
             )
         db.commit()
     except Exception:

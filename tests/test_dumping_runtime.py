@@ -398,6 +398,7 @@ def test_kaspi_agent_successfully_persists_decimal_result_in_one_commit(
     policy = DumpingPolicy(
         product_id=product.id,
         enabled=True,
+        auto_publish_xml=True,
         minimum_profit_kzt=Decimal("1000"),
     )
     source_xml = """<?xml version='1.0' encoding='utf-8'?>

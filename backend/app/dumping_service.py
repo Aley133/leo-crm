@@ -587,6 +587,16 @@ def _sku_candidates(product: Product) -> set[str]:
     return {product.merchant_sku or "", product.kaspi_product_id}
 
 
+def _policy_controls_xml(policy: DumpingPolicy | None) -> bool:
+    """Return whether LEO CRM owns the offer fields in the generated XML.
+
+    Merely existing in the product registry, FIFO, an order or a historical
+    dumping policy does not transfer XML ownership to CRM. The owner opts in
+    only by enabling both dumping and automatic XML publication.
+    """
+    return bool(policy is not None and policy.enabled and policy.auto_publish_xml)
+
+
 def _latest_run(db: Session, *, product_id: int) -> DumpingRun | None:
     return db.scalar(
         select(DumpingRun)
@@ -682,16 +692,37 @@ def sync_product_inventory_to_feed(
     product = db.get(Product, product_id)
     if product is None:
         return {"stock_count": 0, "xml_state": "product_missing", "supplier_job_id": None}
+    stock_count = physical_stock_count(db, product_id=product_id)
+    policy = db.scalar(
+        select(DumpingPolicy).where(DumpingPolicy.product_id == product_id)
+    )
+    if not _policy_controls_xml(policy):
+        return {
+            "stock_count": stock_count,
+            "xml_state": "unmanaged_preserved",
+            "supplier_job_id": None,
+        }
+
     feed = _latest_feed_for_update(db)
     if feed is None:
-        return {"stock_count": 0, "xml_state": "feed_missing", "supplier_job_id": None}
+        return {"stock_count": stock_count, "xml_state": "feed_missing", "supplier_job_id": None}
 
-    stock_count = physical_stock_count(db, product_id=product_id)
+    # All XML writers lock the feed before any policy row. Re-read and lock the
+    # policy after the feed lock so a concurrent manual disable cannot race the
+    # publication and PostgreSQL never sees the inverse policy -> feed order.
     policy = db.scalar(
         select(DumpingPolicy)
         .where(DumpingPolicy.product_id == product_id)
         .with_for_update()
+        .execution_options(populate_existing=True)
     )
+    if not _policy_controls_xml(policy):
+        return {
+            "stock_count": stock_count,
+            "xml_state": "unmanaged_preserved",
+            "supplier_job_id": None,
+        }
+
     seller_removal_latched = _seller_removal_is_latched(
         db,
         product_id=product_id,
@@ -732,13 +763,6 @@ def sync_product_inventory_to_feed(
             "xml_state": "stock",
             "supplier_job_id": None,
         }
-    if policy is None or not policy.enabled or not policy.auto_publish_xml:
-        return {
-            "stock_count": 0,
-            "xml_state": "closed_without_preorder_policy",
-            "supplier_job_id": None,
-        }
-
     supplier_job_id, supplier_product_id = _queue_fresh_supplier_snapshot(
         db,
         product_id=product_id,
@@ -776,14 +800,42 @@ def close_untracked_order_offer(
     *,
     sku_candidates: set[str],
 ) -> bool:
-    """Fail closed when an active order cannot yet be linked to a CRM product."""
+    """Fail closed only for an XML offer explicitly managed by dumping.
+
+    Unknown order identities must never make CRM take ownership of an arbitrary
+    offer from the uploaded source feed. If the identity resolves uniquely to
+    an enabled auto-publishing policy, closing that managed offer remains the
+    safe behaviour until the order line is linked.
+    """
+    normalized = {value.strip() for value in sku_candidates if value and value.strip()}
+    if not normalized:
+        return False
+    managed_products = list(
+        db.scalars(
+            select(Product)
+            .join(DumpingPolicy, DumpingPolicy.product_id == Product.id)
+            .where(
+                DumpingPolicy.enabled.is_(True),
+                DumpingPolicy.auto_publish_xml.is_(True),
+                or_(
+                    Product.merchant_sku.in_(normalized),
+                    Product.kaspi_product_id.in_(normalized),
+                ),
+            )
+            .order_by(Product.id)
+            .limit(2)
+        ).all()
+    )
+    if len(managed_products) != 1:
+        return False
+    product = managed_products[0]
     feed = _latest_feed_for_update(db)
     if feed is None:
         return False
     try:
         feed.generated_xml = set_feed_offer_availability(
             feed.generated_xml or feed.source_xml,
-            sku_candidates=sku_candidates,
+            sku_candidates=_sku_candidates(product),
             available=False,
             stock_count=0,
         )
@@ -802,9 +854,10 @@ def suspend_product_removed_from_seller(
     policy: DumpingPolicy,
 ) -> DumpingRun:
     """Latch a manual Kaspi Seller removal until the owner re-enables it."""
-    feed = _latest_feed_for_update(db)
-    xml_availability = "no"
-    if feed is not None:
+    controls_xml = _policy_controls_xml(policy)
+    feed = _latest_feed_for_update(db) if controls_xml else None
+    xml_availability = "not_managed" if not controls_xml else "no"
+    if controls_xml and feed is not None:
         try:
             feed.generated_xml = set_feed_offer_availability(
                 feed.generated_xml or feed.source_xml,
@@ -843,7 +896,7 @@ def suspend_product_removed_from_seller(
         product_id=product.id,
         dumping_policy_id=policy.id,
         status="suspended_seller_removed",
-        published=True,
+        published=controls_xml,
         explanation_json={
             "reason": "own_offer_absent_while_xml_expected_active",
             "business_state": "owner_removed_from_kaspi_seller",
@@ -871,25 +924,27 @@ def suspend_product_without_cost_source(
     competitor jobs are cancelled; a currently leased job may finish, but its
     decision will still be rejected because there is no cost source.
     """
-    feed = _latest_feed_for_update(db)
-    if feed is None:
+    controls_xml = _policy_controls_xml(policy)
+    feed = _latest_feed_for_update(db) if controls_xml else None
+    if controls_xml and feed is None:
         raise ValueError("Сначала импортируйте полный Kaspi XML в разделе Товары")
 
-    xml_availability = "no"
-    try:
-        feed.generated_xml = set_feed_offer_availability(
-            feed.generated_xml or feed.source_xml,
-            sku_candidates=_sku_candidates(product),
-            available=False,
-            stock_count=0,
-        )
-    except ValueError as exc:
-        if str(exc) != "Товар не найден в сохранённом XML по SKU/Kaspi ID":
-            raise
-        # Absence from the feed is already a safe non-sellable state.
-        xml_availability = "offer_absent"
-    feed.active = True
-    feed.generated_at = func.now()
+    xml_availability = "not_managed" if not controls_xml else "no"
+    if controls_xml and feed is not None:
+        try:
+            feed.generated_xml = set_feed_offer_availability(
+                feed.generated_xml or feed.source_xml,
+                sku_candidates=_sku_candidates(product),
+                available=False,
+                stock_count=0,
+            )
+        except ValueError as exc:
+            if str(exc) != "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+                raise
+            # Absence from the feed is already a safe non-sellable state.
+            xml_availability = "offer_absent"
+        feed.active = True
+        feed.generated_at = func.now()
     _mark_waiting_runs(
         db,
         product_id=product.id,
@@ -926,7 +981,7 @@ def suspend_product_without_cost_source(
         product_id=product.id,
         dumping_policy_id=policy.id,
         status="suspended_no_source",
-        published=True,
+        published=controls_xml,
         explanation_json={
             "reason": reason,
             "business_state": "out_of_stock",
@@ -940,27 +995,34 @@ def suspend_product_without_cost_source(
 
 
 def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, decision: DumpingDecision) -> DumpingRun:
-    feed = _latest_feed_for_update(db)
-    if feed is None:
+    controls_xml = _policy_controls_xml(policy)
+    feed = _latest_feed_for_update(db) if controls_xml else None
+    if controls_xml and feed is None:
         raise ValueError("Сначала импортируйте полный Kaspi XML в разделе Товары")
 
-    generated = update_feed_xml(
-        feed.generated_xml or feed.source_xml,
-        sku_candidates=_sku_candidates(product),
-        price_kzt=decision.target_price_kzt,
-        preorder_days=decision.preorder_days,
-        stock_count=decision.stock_count,
-        product=product,
-        city_id=policy.city_id,
-    )
-    feed.generated_xml = generated
-    feed.active = True
-    feed.generated_at = func.now()
-    _mark_waiting_runs(
-        db,
-        product_id=product.id,
-        status="supplier_refresh_applied",
-    )
+    xml_offer_recovered = False
+    if controls_xml and feed is not None:
+        generated = update_feed_xml(
+            feed.generated_xml or feed.source_xml,
+            sku_candidates=_sku_candidates(product),
+            price_kzt=decision.target_price_kzt,
+            preorder_days=decision.preorder_days,
+            stock_count=decision.stock_count,
+            product=product,
+            city_id=policy.city_id,
+        )
+        feed.generated_xml = generated
+        feed.active = True
+        feed.generated_at = func.now()
+        _mark_waiting_runs(
+            db,
+            product_id=product.id,
+            status="supplier_refresh_applied",
+        )
+        xml_offer_recovered = feed_offer_is_expected_active(
+            feed.source_xml,
+            sku_candidates=_sku_candidates(product),
+        ) is None
 
     run = DumpingRun(
         product_id=product.id,
@@ -975,18 +1037,16 @@ def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, de
         competitor_price_kzt=decision.competitor_price_kzt,
         target_price_kzt=decision.target_price_kzt,
         preorder_days=decision.preorder_days,
-        published=True,
+        published=controls_xml,
         explanation_json={
             "minimum_profit_kzt": str(policy.minimum_profit_kzt),
             "undercut_step_kzt": int(policy.undercut_step_kzt),
             "supplier_delivery_buffer_days": int(policy.supplier_delivery_buffer_days),
             "stock_count": decision.stock_count,
             "logistics_kzt": str(kaspi_logistics_per_unit(decision.target_price_kzt)),
-            "feed_url": workspace_feed_url(db),
-            "xml_offer_recovered": feed_offer_is_expected_active(
-                feed.source_xml,
-                sku_candidates=_sku_candidates(product),
-            ) is None,
+            "feed_url": workspace_feed_url(db) if controls_xml else None,
+            "xml_publication": "published" if controls_xml else "disabled_by_policy",
+            "xml_offer_recovered": xml_offer_recovered,
         },
     )
     db.add(run)

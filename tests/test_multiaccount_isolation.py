@@ -116,7 +116,11 @@ def _seed_workspace(db, workspace_id: int, slug: str):
             quantity_remaining=workspace_id,
             unit_cost=Decimal("500"),
         )
-        policy = DumpingPolicy(product_id=product.id, enabled=True)
+        policy = DumpingPolicy(
+            product_id=product.id,
+            enabled=True,
+            auto_publish_xml=True,
+        )
         feed = KaspiXmlFeed(
             merchant_id=f"merchant-{workspace_id}",
             source_xml=f"<catalog>{workspace_id}</catalog>",

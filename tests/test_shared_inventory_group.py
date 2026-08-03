@@ -6,7 +6,7 @@ import pytest
 from fastapi import HTTPException
 from sqlalchemy import select
 
-from backend.app.dumping_models import KaspiXmlFeed
+from backend.app.dumping_models import DumpingPolicy, KaspiXmlFeed
 from backend.app.inventory_api import InventoryOwnerUpdate, merge_product_inventory
 from backend.app.inventory_models import InventoryAllocation, InventoryBatch
 from backend.app.inventory_service import (
@@ -113,7 +113,22 @@ def test_shared_skus_consume_one_fifo_pool_by_order_time_and_sync_both_offers(
         unit_cost=Decimal("2000"),
         is_received=True,
     )
-    db_session.add_all([feed, batch])
+    db_session.add_all(
+        [
+            feed,
+            batch,
+            DumpingPolicy(
+                product_id=owner.id,
+                enabled=True,
+                auto_publish_xml=True,
+            ),
+            DumpingPolicy(
+                product_id=variant.id,
+                enabled=True,
+                auto_publish_xml=True,
+            ),
+        ]
+    )
     db_session.flush()
 
     later_owner_line = _order_line(
