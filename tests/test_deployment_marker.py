@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.23.4"
-EXPECTED_DEPLOYMENT_MARKER = "postgres-safe-dumping-recovery-lock"
+EXPECTED_APP_VERSION = "0.23.5"
+EXPECTED_DEPLOYMENT_MARKER = "dumping-recovery-fast-retry-diagnostics"
 
 
 def test_application_metadata_contract() -> None:
@@ -18,4 +18,6 @@ def test_health_exposes_dumping_scheduler_state() -> None:
 
     assert "dumping_scheduler" in payload
     assert "recovered_count" in payload["dumping_scheduler"]
+    assert "retry_count" in payload["dumping_scheduler"]
     assert "periodic_count" in payload["dumping_scheduler"]
+    assert "recovery_jobs" in payload["dumping_scheduler"]

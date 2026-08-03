@@ -11,9 +11,12 @@ from backend.app import dumping_competitor_worker
 from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.dumping_api import DumpingPolicyUpsert, upsert_dumping_policy
 from backend.app.dumping_competitor_worker import (
+    build_failed_recovery_candidates_statement,
+    build_failed_recovery_lock_statement,
     build_legacy_recovery_candidates_statement,
     build_legacy_recovery_lock_statement,
     build_due_competitor_policies_statement,
+    queue_failed_recovery_retries,
     queue_due_competitor_jobs,
     recover_legacy_auto_disabled_policies,
 )
@@ -225,6 +228,26 @@ def test_legacy_recovery_uses_postgres_safe_two_phase_locking() -> None:
     assert "FOR UPDATE SKIP LOCKED" in lock_sql
 
 
+def test_failed_recovery_retry_uses_postgres_safe_two_phase_locking() -> None:
+    candidate_sql = str(
+        build_failed_recovery_candidates_statement(now=NOW).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).upper()
+    lock_sql = str(
+        build_failed_recovery_lock_statement(product_ids=(1, 2)).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).upper()
+
+    assert "GROUP BY" in candidate_sql
+    assert "FOR UPDATE" not in candidate_sql
+    assert "GROUP BY" not in lock_sql
+    assert "FOR UPDATE SKIP LOCKED" in lock_sql
+
+
 def test_completed_supplier_job_self_heals_waiting_dumping_gate(db_session) -> None:
     policy = _policy(db_session, kaspi_product_id="100000009")
     supplier_job = BrowserAgentJob(
@@ -399,3 +422,61 @@ def test_policy_api_audits_manual_disable_for_future_recovery(db_session) -> Non
         "reason": "manual_policy_disable",
         "automatic_recovery": False,
     }
+
+
+def test_failed_automatic_recovery_retries_after_one_minute(db_session) -> None:
+    policy = _policy(
+        db_session,
+        kaspi_product_id="121221211_440769904",
+        enabled=True,
+    )
+    failed = DumpingRun(
+        product_id=policy.product_id,
+        dumping_policy_id=policy.id,
+        status="failed_local",
+        published=False,
+        explanation_json={
+            "reason": "automatic_policy_recovery",
+            "error_code": "temporary_agent_error",
+        },
+        created_at=NOW - timedelta(seconds=61),
+    )
+    db_session.add(failed)
+    db_session.flush()
+
+    job_ids = queue_failed_recovery_retries(db_session, now=NOW)
+    repeated = queue_failed_recovery_retries(db_session, now=NOW)
+
+    assert len(job_ids) == 1
+    assert repeated == ()
+    retry = db_session.get(DumpingRun, job_ids[0])
+    assert retry is not None
+    assert retry.status == "queued_local"
+    assert retry.explanation_json["reason"] == "automatic_policy_recovery_retry"
+    assert retry.explanation_json["recovery_retry_attempt"] == 1
+    assert retry.explanation_json["previous_job_id"] == failed.id
+
+
+def test_failed_automatic_recovery_stops_after_three_retries(db_session) -> None:
+    policy = _policy(
+        db_session,
+        kaspi_product_id="121221211_440769905",
+        enabled=True,
+    )
+    db_session.add(
+        DumpingRun(
+            product_id=policy.product_id,
+            dumping_policy_id=policy.id,
+            status="failed_local",
+            published=False,
+            explanation_json={
+                "reason": "automatic_policy_recovery_retry",
+                "recovery_retry_attempt": 3,
+                "error_code": "persistent_agent_error",
+            },
+            created_at=NOW - timedelta(seconds=61),
+        )
+    )
+    db_session.flush()
+
+    assert queue_failed_recovery_retries(db_session, now=NOW) == ()

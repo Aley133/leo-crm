@@ -23,6 +23,9 @@ MAX_BACKOFF_SECONDS = 5 * 60
 SCHEDULER_POLL_SECONDS = 30.0
 SCHEDULER_BATCH_LIMIT = 100
 LEGACY_RECOVERY_BATCH_LIMIT = 100
+RECOVERY_RETRY_SECONDS = 60
+RECOVERY_RETRY_LIMIT = 3
+RECOVERY_DIAGNOSTIC_LIMIT = 10
 _POLICY_STATE_STATUSES = (
     "suspended_seller_removed",
     "policy_disabled_manual",
@@ -35,6 +38,10 @@ _LOCAL_JOB_STATUSES = (
     "failed_local",
 )
 _ACTIVE_LOCAL_JOB_STATUSES = ("queued_local", "leased_local")
+_RECOVERY_REASONS = (
+    "automatic_policy_recovery",
+    "automatic_policy_recovery_retry",
+)
 _SCHEDULER_STOP_EVENT: asyncio.Event | None = None
 _SCHEDULER_TASK: asyncio.Task | None = None
 _LOGGER = logging.getLogger(__name__)
@@ -43,8 +50,10 @@ SCHEDULER_LAST_RUN: dict[str, Any] = {
     "started_at": None,
     "finished_at": None,
     "recovered_count": 0,
+    "retry_count": 0,
     "periodic_count": 0,
     "job_ids": [],
+    "recovery_jobs": [],
     "message": "Kaspi competitor queue scheduler has not started",
 }
 
@@ -358,25 +367,184 @@ def recover_legacy_auto_disabled_policies(
     return tuple(job.id for job in jobs)
 
 
+def build_failed_recovery_candidates_statement(
+    *,
+    now: datetime,
+    retry_seconds: int = RECOVERY_RETRY_SECONDS,
+    limit: int = LEGACY_RECOVERY_BATCH_LIMIT,
+):
+    if retry_seconds < 1:
+        raise ValueError("retry_seconds must be positive")
+    if limit < 1 or limit > 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    reason = DumpingRun.explanation_json["reason"].as_string()
+    latest_recovery_ids = (
+        select(
+            DumpingRun.product_id.label("product_id"),
+            func.max(DumpingRun.id).label("run_id"),
+        )
+        .where(reason.in_(_RECOVERY_REASONS))
+        .group_by(DumpingRun.product_id)
+        .subquery()
+    )
+    return (
+        select(DumpingRun.id, DumpingRun.product_id)
+        .join(latest_recovery_ids, DumpingRun.id == latest_recovery_ids.c.run_id)
+        .where(
+            DumpingRun.status == "failed_local",
+            DumpingRun.created_at <= now - timedelta(seconds=retry_seconds),
+        )
+        .order_by(DumpingRun.id)
+        .limit(limit)
+    )
+
+
+def build_failed_recovery_lock_statement(*, product_ids: tuple[int, ...]):
+    return (
+        select(DumpingPolicy)
+        .where(
+            DumpingPolicy.product_id.in_(product_ids),
+            DumpingPolicy.enabled.is_(True),
+            DumpingPolicy.auto_publish_xml.is_(True),
+        )
+        .order_by(DumpingPolicy.id)
+        .with_for_update(skip_locked=True)
+    )
+
+
+def queue_failed_recovery_retries(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    retry_seconds: int = RECOVERY_RETRY_SECONDS,
+    retry_limit: int = RECOVERY_RETRY_LIMIT,
+) -> tuple[int, ...]:
+    """Retry transient failures from policy recovery without a ten-minute gap."""
+    if retry_limit < 1 or retry_limit > 10:
+        raise ValueError("retry_limit must be between 1 and 10")
+    current = now or datetime.now(UTC)
+    candidate_rows = db.execute(
+        build_failed_recovery_candidates_statement(
+            now=current,
+            retry_seconds=retry_seconds,
+        )
+    ).all()
+    failed_job_by_product = {
+        int(product_id): int(job_id) for job_id, product_id in candidate_rows
+    }
+    product_ids = tuple(failed_job_by_product)
+    if not product_ids:
+        return ()
+    policies = db.scalars(
+        build_failed_recovery_lock_statement(product_ids=product_ids)
+    ).all()
+
+    retries: list[DumpingRun] = []
+    for policy in policies:
+        failed_job = db.get(DumpingRun, failed_job_by_product[policy.product_id])
+        if failed_job is None or failed_job.status != "failed_local":
+            continue
+        failed_meta = failed_job.explanation_json or {}
+        previous_attempt = int(failed_meta.get("recovery_retry_attempt") or 0)
+        if previous_attempt >= retry_limit:
+            continue
+        active_job_id = db.scalar(
+            select(DumpingRun.id)
+            .where(
+                DumpingRun.product_id == policy.product_id,
+                DumpingRun.status.in_(_ACTIVE_LOCAL_JOB_STATUSES),
+            )
+            .limit(1)
+        )
+        if active_job_id is not None:
+            continue
+        source = resolve_cost_source(
+            db,
+            product_id=policy.product_id,
+            inventory_first=policy.inventory_first,
+        )
+        if source is None:
+            continue
+        retries.append(
+            DumpingRun(
+                workspace_id=policy.workspace_id,
+                product_id=policy.product_id,
+                dumping_policy_id=policy.id,
+                status="queued_local",
+                published=False,
+                explanation_json={
+                    "reason": "automatic_policy_recovery_retry",
+                    "agent_type": "kaspi_competitor",
+                    "scheduled_at": current.isoformat(),
+                    "recovery_retry_attempt": previous_attempt + 1,
+                    "previous_job_id": failed_job.id,
+                },
+                created_at=current,
+            )
+        )
+    db.add_all(retries)
+    db.flush()
+    return tuple(job.id for job in retries)
+
+
+def recovery_job_diagnostics(
+    db: Session,
+    *,
+    limit: int = RECOVERY_DIAGNOSTIC_LIMIT,
+) -> list[dict[str, Any]]:
+    reason = DumpingRun.explanation_json["reason"].as_string()
+    jobs = db.scalars(
+        select(DumpingRun)
+        .where(reason.in_(_RECOVERY_REASONS))
+        .order_by(DumpingRun.id.desc())
+        .limit(limit)
+    ).all()
+    rows: list[dict[str, Any]] = []
+    for job in jobs:
+        metadata = job.explanation_json or {}
+        result = metadata.get("result") if isinstance(metadata.get("result"), dict) else {}
+        decision = result.get("decision") if isinstance(result.get("decision"), dict) else {}
+        rows.append(
+            {
+                "job_id": job.id,
+                "product_id": job.product_id,
+                "status": job.status,
+                "reason": metadata.get("reason"),
+                "retry_attempt": int(metadata.get("recovery_retry_attempt") or 0),
+                "error_code": metadata.get("error_code"),
+                "error_message": metadata.get("error_message"),
+                "target_price_kzt": decision.get("target_price_kzt"),
+                "preorder_days": decision.get("preorder_days"),
+                "stock_count": decision.get("stock_count"),
+            }
+        )
+    return rows
+
+
 def dispatch_due_competitor_jobs() -> tuple[int, ...]:
     """Run one short queue-only scheduling transaction."""
     with SessionLocal() as db:
         db.info["include_all_workspaces"] = True
         try:
             recovered_job_ids = recover_legacy_auto_disabled_policies(db)
+            retry_job_ids = queue_failed_recovery_retries(db)
             due_job_ids = queue_due_competitor_jobs(db)
+            recovery_jobs = recovery_job_diagnostics(db)
             db.commit()
-            job_ids = (*recovered_job_ids, *due_job_ids)
+            job_ids = (*recovered_job_ids, *retry_job_ids, *due_job_ids)
             SCHEDULER_LAST_RUN.update(
                 {
                     "status": "completed",
                     "finished_at": datetime.now(UTC).isoformat(),
                     "recovered_count": len(recovered_job_ids),
+                    "retry_count": len(retry_job_ids),
                     "periodic_count": len(due_job_ids),
                     "job_ids": list(job_ids),
+                    "recovery_jobs": recovery_jobs,
                     "message": (
                         "Kaspi competitor queue dispatch completed: "
                         f"recovered={len(recovered_job_ids)}, "
+                        f"retried={len(retry_job_ids)}, "
                         f"periodic={len(due_job_ids)}"
                     ),
                 }
