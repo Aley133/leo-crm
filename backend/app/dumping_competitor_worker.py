@@ -23,6 +23,10 @@ MAX_BACKOFF_SECONDS = 5 * 60
 SCHEDULER_POLL_SECONDS = 30.0
 SCHEDULER_BATCH_LIMIT = 100
 LEGACY_RECOVERY_BATCH_LIMIT = 100
+_POLICY_STATE_STATUSES = (
+    "suspended_seller_removed",
+    "policy_disabled_manual",
+)
 
 _LOCAL_JOB_STATUSES = (
     "queued_local",
@@ -240,27 +244,31 @@ def recover_legacy_auto_disabled_policies(
     failed to see our own offer. Migration 0029 repaired rows only when a
     supplier was available at migration time. If the supplier price arrived
     later, the disabled policy could never enter the scheduler again. Recover
-    only policies whose *latest* audit run proves that exact automatic
-    suspension; an explicitly disabled policy with any later run stays off.
+    only policies whose latest *policy-state* audit event proves that exact
+    automatic suspension. Ordinary queued, failed or successful scan rows do
+    not change the owner's policy choice and therefore must not hide the
+    suspension. A later explicit manual-disable audit always keeps the policy
+    off.
     """
     if limit < 1 or limit > 1000:
         raise ValueError("limit must be between 1 and 1000")
     current = now or datetime.now(UTC)
-    latest_run_ids = (
+    latest_policy_state_ids = (
         select(
             DumpingRun.product_id.label("product_id"),
             func.max(DumpingRun.id).label("run_id"),
         )
+        .where(DumpingRun.status.in_(_POLICY_STATE_STATUSES))
         .group_by(DumpingRun.product_id)
         .subquery()
     )
     policies = db.scalars(
         select(DumpingPolicy)
         .join(
-            latest_run_ids,
-            latest_run_ids.c.product_id == DumpingPolicy.product_id,
+            latest_policy_state_ids,
+            latest_policy_state_ids.c.product_id == DumpingPolicy.product_id,
         )
-        .join(DumpingRun, DumpingRun.id == latest_run_ids.c.run_id)
+        .join(DumpingRun, DumpingRun.id == latest_policy_state_ids.c.run_id)
         .where(
             DumpingPolicy.enabled.is_(False),
             DumpingPolicy.auto_publish_xml.is_(True),

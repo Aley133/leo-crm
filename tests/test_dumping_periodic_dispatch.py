@@ -9,6 +9,7 @@ from sqlalchemy.dialects import postgresql
 
 from backend.app import dumping_competitor_worker
 from backend.app.browser_agent_models import BrowserAgentJob
+from backend.app.dumping_api import DumpingPolicyUpsert, upsert_dumping_policy
 from backend.app.dumping_competitor_worker import (
     build_due_competitor_policies_statement,
     queue_due_competitor_jobs,
@@ -268,6 +269,12 @@ def test_legacy_automatic_suspension_recovers_when_cost_source_returns(
         status="suspended_seller_removed",
         created_at=NOW - timedelta(hours=4),
     )
+    _run(
+        db_session,
+        policy=policy,
+        status="failed_local",
+        created_at=NOW - timedelta(hours=1),
+    )
 
     job_ids = recover_legacy_auto_disabled_policies(db_session, now=NOW)
     repeated = recover_legacy_auto_disabled_policies(db_session, now=NOW)
@@ -301,9 +308,46 @@ def test_explicitly_disabled_policy_is_not_auto_recovered(db_session) -> None:
     _run(
         db_session,
         policy=policy,
-        status="ready",
+        status="policy_disabled_manual",
         created_at=NOW - timedelta(hours=1),
     )
 
     assert recover_legacy_auto_disabled_policies(db_session, now=NOW) == ()
     assert policy.enabled is False
+
+
+def test_policy_api_audits_manual_disable_for_future_recovery(db_session) -> None:
+    policy = _policy(
+        db_session,
+        kaspi_product_id="121221211_440769903",
+        enabled=True,
+    )
+
+    upsert_dumping_policy(
+        policy.product_id,
+        DumpingPolicyUpsert(
+            enabled=False,
+            minimum_profit_kzt=Decimal("1000"),
+        ),
+        db_session,
+    )
+
+    db_session.refresh(policy)
+    latest_state = db_session.scalar(
+        select(DumpingRun)
+        .where(
+            DumpingRun.product_id == policy.product_id,
+            DumpingRun.status.in_(
+                ("suspended_seller_removed", "policy_disabled_manual")
+            ),
+        )
+        .order_by(DumpingRun.id.desc())
+        .limit(1)
+    )
+    assert policy.enabled is False
+    assert latest_state is not None
+    assert latest_state.status == "policy_disabled_manual"
+    assert latest_state.explanation_json == {
+        "reason": "manual_policy_disable",
+        "automatic_recovery": False,
+    }

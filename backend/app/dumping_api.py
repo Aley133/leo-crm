@@ -499,6 +499,7 @@ def upsert_dumping_policy(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
+    existing_policy = policy is not None
     if policy is None:
         policy = DumpingPolicy(product_id=product_id)
         db.add(policy)
@@ -511,6 +512,38 @@ def upsert_dumping_policy(
             product_id=product_id,
             reason="dumping_policy_enabled",
         )
+    else:
+        latest_policy_state = db.scalar(
+            select(DumpingRun)
+            .where(
+                DumpingRun.product_id == product_id,
+                DumpingRun.status.in_(
+                    ("suspended_seller_removed", "policy_disabled_manual")
+                ),
+            )
+            .order_by(DumpingRun.id.desc())
+            .limit(1)
+        )
+        # Saving an existing policy with the switch off is an explicit owner
+        # choice. Persist it separately from operational scan rows so legacy
+        # automatic-recovery can never re-enable that product later.
+        if not (
+            existing_policy
+            and latest_policy_state is not None
+            and latest_policy_state.status == "policy_disabled_manual"
+        ):
+            db.add(
+                DumpingRun(
+                    product_id=product_id,
+                    dumping_policy_id=policy.id,
+                    status="policy_disabled_manual",
+                    published=False,
+                    explanation_json={
+                        "reason": "manual_policy_disable",
+                        "automatic_recovery": False,
+                    },
+                )
+            )
     db.commit()
     db.refresh(policy)
     return {
