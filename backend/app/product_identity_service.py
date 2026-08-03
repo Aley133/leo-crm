@@ -187,6 +187,9 @@ def ensure_marketplace_listing_for_order_line(
     product = find_product_for_order_line(session, order_line)
     if product is not None:
         order_line.product_id = product.id
+        if order_line.merchant_sku is None and product.merchant_sku:
+            order_line.merchant_sku = product.merchant_sku
+            listing.merchant_sku = product.merchant_sku
         listing.product_id = product.id
         listing.status = MarketplaceListingStatus.RESOLVED.value
         listing.resolved_at = listing.resolved_at or datetime.now(UTC)

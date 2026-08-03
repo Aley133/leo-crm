@@ -13,6 +13,7 @@ from backend.app.models import (
     MarketplaceOrder,
     MarketplaceOrderLine,
     MarketplaceProvider,
+    Product,
 )
 
 
@@ -131,3 +132,112 @@ def test_automatic_enrichment_accepts_flat_kaspi_product_responses(
         "/orderentries/entry-1014396386-0/product",
         "/masterproducts/master-1014396386/merchantProduct",
     ]
+
+
+def test_registry_resolves_new_order_before_eventually_consistent_kaspi_endpoints(
+    db_session,
+    monkeypatch,
+) -> None:
+    account = MarketplaceAccount(
+        provider=MarketplaceProvider.KASPI.value,
+        external_account_id="11843018",
+        display_name="Kaspi",
+    )
+    product = Product(
+        kaspi_product_id="102591425_901104670",
+        merchant_sku="102591425_901104670",
+        name='GLS Pharmaceuticals "Климмикс" капсулы 60 шт',
+        status="active",
+    )
+    db_session.add_all([account, product])
+    db_session.flush()
+    order = MarketplaceOrder(
+        marketplace_account_id=account.id,
+        external_order_id="order-internal-1020953791",
+        external_code="1020953791",
+        status="preorder",
+        original_status="ACCEPTED_BY_MERCHANT",
+        currency="KZT",
+        total_amount=Decimal("4245"),
+        ordered_at=datetime.now(UTC) - timedelta(hours=2),
+    )
+    order.lines.append(
+        MarketplaceOrderLine(
+            external_line_id="entry-1020953791-0",
+            external_product_id="102591425",
+            merchant_sku=None,
+            title="Unknown product",
+            quantity=1,
+            unit_price=Decimal("4245"),
+            line_total=Decimal("4245"),
+        )
+    )
+    db_session.add(order)
+    db_session.commit()
+
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    monkeypatch.setattr(kaspi_product_enrichment_jobs, "SessionLocal", factory)
+
+    resolved, updated, linked = (
+        kaspi_product_enrichment_jobs._resolve_stored_order_from_registry(
+            order_id=order.id,
+            account_id=account.id,
+        )
+    )
+
+    with factory() as session:
+        stored = session.get(MarketplaceOrder, order.id)
+        assert stored is not None
+        line = stored.lines[0]
+        assert line.product_id == product.id
+        assert line.merchant_sku == product.merchant_sku
+        assert line.title == product.name
+    assert resolved is True
+    assert updated == 1
+    assert linked == 1
+
+
+def test_unresolved_backlog_remains_eligible_after_fast_poll_window(
+    db_session,
+    monkeypatch,
+) -> None:
+    account = MarketplaceAccount(
+        provider=MarketplaceProvider.KASPI.value,
+        external_account_id="11843018",
+        display_name="Kaspi",
+    )
+    db_session.add(account)
+    db_session.flush()
+    old_order = MarketplaceOrder(
+        marketplace_account_id=account.id,
+        external_order_id="old-unresolved-order",
+        external_code="1020953791",
+        status="preorder",
+        original_status="ACCEPTED_BY_MERCHANT",
+        currency="KZT",
+        total_amount=Decimal("4245"),
+        ordered_at=datetime.now(UTC) - timedelta(days=10),
+    )
+    old_order.lines.append(
+        MarketplaceOrderLine(
+            external_line_id="old-unresolved-line",
+            external_product_id="102591425",
+            title="Unknown product",
+            quantity=1,
+            unit_price=Decimal("4245"),
+            line_total=Decimal("4245"),
+        )
+    )
+    db_session.add(old_order)
+    db_session.commit()
+
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    monkeypatch.setattr(kaspi_product_enrichment_jobs, "SessionLocal", factory)
+
+    selected = kaspi_product_enrichment_jobs._load_unresolved_orders(
+        datetime.now(UTC) - timedelta(days=31),
+        marketplace_account_id=account.id,
+        limit=16,
+    )
+
+    assert [row[0] for row in selected] == [old_order.id]

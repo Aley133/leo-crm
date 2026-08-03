@@ -33,9 +33,35 @@ def find_product_for_order_line(session: Session, line: MarketplaceOrderLine) ->
     if external_product_id is not None:
         conditions.append(Product.kaspi_product_id == external_product_id)
         conditions.append(Product.merchant_sku == external_product_id)
-    if not conditions:
+    if conditions:
+        exact = session.scalar(
+            select(Product).where(or_(*conditions)).order_by(Product.id).limit(1)
+        )
+        if exact is not None:
+            return exact
+
+    # A fresh Kaspi order often exposes only the numeric master-product ID,
+    # while Seller XML identifies the same offer as ``<master_id>_<offer_id>``.
+    # Resolve that representation immediately when it is unambiguous instead
+    # of leaving the line as ``Unknown product`` until Kaspi's slower product
+    # endpoint happens to return the merchant SKU.
+    if external_product_id is None or not external_product_id.isdigit():
         return None
-    return session.scalar(select(Product).where(or_(*conditions)).order_by(Product.id).limit(1))
+    compound_prefix = f"{external_product_id}_%"
+    candidates = list(
+        session.scalars(
+            select(Product)
+            .where(
+                or_(
+                    Product.merchant_sku.like(compound_prefix),
+                    Product.kaspi_product_id.like(compound_prefix),
+                )
+            )
+            .order_by(Product.id)
+            .limit(2)
+        ).all()
+    )
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def link_order_line_to_product(

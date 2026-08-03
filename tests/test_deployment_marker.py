@@ -1,8 +1,8 @@
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app
 
 
-EXPECTED_APP_VERSION = "0.23.0"
-EXPECTED_DEPLOYMENT_MARKER = "independent-fast-orders-priority-dumping"
+EXPECTED_APP_VERSION = "0.23.1"
+EXPECTED_DEPLOYMENT_MARKER = "immediate-order-identity-auto-dumping-recovery"
 
 
 def test_application_metadata_contract() -> None:

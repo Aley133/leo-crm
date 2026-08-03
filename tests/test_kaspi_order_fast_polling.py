@@ -25,14 +25,16 @@ def test_fast_raw_job_reads_only_recent_active_order_window() -> None:
     assert job["progress"]["total"] == len(kaspi_order_polling.FAST_ORDER_STATES) + 1
 
 
-def test_fast_enrichment_job_reads_only_the_same_recent_window() -> None:
+def test_enrichment_repairs_the_full_month_backlog_in_bounded_batches() -> None:
     kaspi_product_enrichment_jobs.JOBS.clear()
     job_id = kaspi_product_enrichment_jobs.create_job(
-        days=1,
-        lookback_minutes=kaspi_order_polling.FAST_LOOKBACK_MINUTES,
+        days=kaspi_order_polling.ENRICHMENT_LOOKBACK_DAYS,
     )
 
-    assert kaspi_product_enrichment_jobs.JOBS[job_id]["lookback_minutes"] == 20
+    job = kaspi_product_enrichment_jobs.JOBS[job_id]
+    assert job["days"] == 31
+    assert job["lookback_minutes"] is None
+    assert kaspi_product_enrichment_jobs.ENRICHMENT_ORDER_LIMIT == 16
 
 
 def test_fast_polling_never_runs_maintenance_inline(
