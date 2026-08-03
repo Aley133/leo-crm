@@ -69,8 +69,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.7"
-DEPLOYMENT_MARKER = "nonblocking-indexed-xml-import"
+APP_VERSION = "0.23.8"
+DEPLOYMENT_MARKER = "dumping-sku-search-existing-policy"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

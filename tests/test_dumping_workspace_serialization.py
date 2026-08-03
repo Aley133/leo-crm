@@ -183,3 +183,14 @@ def test_dumping_ui_prefers_current_floor_over_stale_run_floor() -> None:
     )
     assert "Товар закрыт" in source
     assert "мониторинг поставщика продолжается" in source
+
+
+def test_dumping_search_opens_an_existing_policy_instead_of_hiding_it() -> None:
+    source = (ROOT / "backend" / "app" / "static" / "dumping.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "configuredByProductId" in source
+    assert "Демпинг уже подключён" in source
+    assert "fillForm(configured)" in source
+    assert "свободные карточки не найдены" not in source
