@@ -12,6 +12,7 @@ from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.dumping_competitor_worker import (
     build_due_competitor_policies_statement,
     queue_due_competitor_jobs,
+    recover_legacy_auto_disabled_policies,
 )
 from backend.app.dumping_models import DumpingPolicy, DumpingRun
 from backend.app.inventory_models import InventoryBatch
@@ -251,3 +252,58 @@ def test_manual_request_promotes_existing_periodic_job(db_session) -> None:
     assert returned.id == existing.id
     assert existing.explanation_json["reason"] == "manual"
     assert existing.explanation_json["priority"] == "interactive"
+
+
+def test_legacy_automatic_suspension_recovers_when_cost_source_returns(
+    db_session,
+) -> None:
+    policy = _policy(
+        db_session,
+        kaspi_product_id="120199530_817407461",
+        enabled=False,
+    )
+    suspended = _run(
+        db_session,
+        policy=policy,
+        status="suspended_seller_removed",
+        created_at=NOW - timedelta(hours=4),
+    )
+
+    job_ids = recover_legacy_auto_disabled_policies(db_session, now=NOW)
+    repeated = recover_legacy_auto_disabled_policies(db_session, now=NOW)
+
+    assert len(job_ids) == 1
+    assert repeated == ()
+    assert policy.enabled is True
+    queued = db_session.get(DumpingRun, job_ids[0])
+    assert queued is not None
+    assert queued.product_id == policy.product_id
+    assert queued.explanation_json == {
+        "reason": "automatic_policy_recovery",
+        "agent_type": "kaspi_competitor",
+        "scheduled_at": NOW.isoformat(),
+        "recovered_from": suspended.status,
+    }
+
+
+def test_explicitly_disabled_policy_is_not_auto_recovered(db_session) -> None:
+    policy = _policy(
+        db_session,
+        kaspi_product_id="121221211_440769902",
+        enabled=False,
+    )
+    _run(
+        db_session,
+        policy=policy,
+        status="suspended_seller_removed",
+        created_at=NOW - timedelta(hours=4),
+    )
+    _run(
+        db_session,
+        policy=policy,
+        status="ready",
+        created_at=NOW - timedelta(hours=1),
+    )
+
+    assert recover_legacy_auto_disabled_policies(db_session, now=NOW) == ()
+    assert policy.enabled is False

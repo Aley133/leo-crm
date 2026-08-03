@@ -28,6 +28,7 @@ from .workspace_kaspi import (
 POLL_INTERVAL_SECONDS = 60
 STARTUP_DELAY_SECONDS = 30
 FAST_LOOKBACK_MINUTES = 20
+ENRICHMENT_LOOKBACK_DAYS = 31
 ENRICHMENT_STARTUP_OFFSET_SECONDS = 15
 MAINTENANCE_INTERVAL_SECONDS = 10 * 60
 MAINTENANCE_STARTUP_DELAY_SECONDS = 90
@@ -57,7 +58,7 @@ ENRICHMENT_LAST_RUN: dict[str, Any] = {
     "cycle": 0,
     "started_at": None,
     "finished_at": None,
-    "lookback_minutes": FAST_LOOKBACK_MINUTES,
+    "lookback_days": ENRICHMENT_LOOKBACK_DAYS,
     "message": "Kaspi product enrichment has not started",
 }
 MAINTENANCE_LAST_RUN: dict[str, Any] = {
@@ -383,7 +384,7 @@ async def enrichment_polling_loop(stop_event: asyncio.Event) -> None:
                 "cycle": cycle,
                 "started_at": datetime.now(UTC).isoformat(),
                 "finished_at": None,
-                "lookback_minutes": FAST_LOOKBACK_MINUTES,
+                "lookback_days": ENRICHMENT_LOOKBACK_DAYS,
                 "message": "Kaspi product enrichment started",
             }
         )
@@ -394,10 +395,9 @@ async def enrichment_polling_loop(stop_event: asyncio.Event) -> None:
             for connection in connections:
                 with workspace_context(connection.workspace_id):
                     job_id = create_enrichment_job(
-                        days=1,
+                        days=ENRICHMENT_LOOKBACK_DAYS,
                         marketplace_account_id=connection.account_id,
                         workspace_id=connection.workspace_id,
-                        lookback_minutes=FAST_LOOKBACK_MINUTES,
                     )
                     await run_enrichment_job(
                         job_id,
@@ -410,9 +410,12 @@ async def enrichment_polling_loop(stop_event: asyncio.Event) -> None:
                         "workspace_id": connection.workspace_id,
                         "account_id": connection.account_id,
                         "status": result.get("status", "unknown"),
+                        "total": result.get("total", 0),
+                        "processed": result.get("processed", 0),
                         "updated": result.get("updated", 0),
                         "linked": result.get("linked", 0),
                         "allocated": result.get("allocated", 0),
+                        "request_count": result.get("request_count", 0),
                         "errors": len(result.get("errors") or []),
                     }
                 )

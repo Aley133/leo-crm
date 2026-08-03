@@ -22,6 +22,7 @@ PERIODIC_REFRESH_SECONDS = 10 * 60
 MAX_BACKOFF_SECONDS = 5 * 60
 SCHEDULER_POLL_SECONDS = 30.0
 SCHEDULER_BATCH_LIMIT = 100
+LEGACY_RECOVERY_BATCH_LIMIT = 100
 
 _LOCAL_JOB_STATUSES = (
     "queued_local",
@@ -227,14 +228,89 @@ def queue_due_competitor_jobs(
     return tuple(job.id for job in jobs)
 
 
+def recover_legacy_auto_disabled_policies(
+    db: Session,
+    *,
+    now: datetime | None = None,
+    limit: int = LEGACY_RECOVERY_BATCH_LIMIT,
+) -> tuple[int, ...]:
+    """Resume policies disabled by the retired seller-visibility heuristic.
+
+    Older releases permanently disabled dumping when a Kaspi scan temporarily
+    failed to see our own offer. Migration 0029 repaired rows only when a
+    supplier was available at migration time. If the supplier price arrived
+    later, the disabled policy could never enter the scheduler again. Recover
+    only policies whose *latest* audit run proves that exact automatic
+    suspension; an explicitly disabled policy with any later run stays off.
+    """
+    if limit < 1 or limit > 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    current = now or datetime.now(UTC)
+    latest_run_ids = (
+        select(
+            DumpingRun.product_id.label("product_id"),
+            func.max(DumpingRun.id).label("run_id"),
+        )
+        .group_by(DumpingRun.product_id)
+        .subquery()
+    )
+    policies = db.scalars(
+        select(DumpingPolicy)
+        .join(
+            latest_run_ids,
+            latest_run_ids.c.product_id == DumpingPolicy.product_id,
+        )
+        .join(DumpingRun, DumpingRun.id == latest_run_ids.c.run_id)
+        .where(
+            DumpingPolicy.enabled.is_(False),
+            DumpingPolicy.auto_publish_xml.is_(True),
+            DumpingRun.status == "suspended_seller_removed",
+        )
+        .order_by(DumpingPolicy.id)
+        .with_for_update(skip_locked=True)
+        .limit(limit)
+    ).all()
+
+    jobs: list[DumpingRun] = []
+    for policy in policies:
+        source = resolve_cost_source(
+            db,
+            product_id=policy.product_id,
+            inventory_first=policy.inventory_first,
+        )
+        if source is None:
+            continue
+        policy.enabled = True
+        jobs.append(
+            DumpingRun(
+                workspace_id=policy.workspace_id,
+                product_id=policy.product_id,
+                dumping_policy_id=policy.id,
+                status="queued_local",
+                published=False,
+                explanation_json={
+                    "reason": "automatic_policy_recovery",
+                    "agent_type": "kaspi_competitor",
+                    "scheduled_at": current.isoformat(),
+                    "recovered_from": "suspended_seller_removed",
+                },
+                created_at=current,
+            )
+        )
+    db.add_all(jobs)
+    db.flush()
+    return tuple(job.id for job in jobs)
+
+
 def dispatch_due_competitor_jobs() -> tuple[int, ...]:
     """Run one short queue-only scheduling transaction."""
     with SessionLocal() as db:
         db.info["include_all_workspaces"] = True
         try:
-            job_ids = queue_due_competitor_jobs(db)
+            recovered_job_ids = recover_legacy_auto_disabled_policies(db)
+            due_job_ids = queue_due_competitor_jobs(db)
             db.commit()
-            return job_ids
+            return (*recovered_job_ids, *due_job_ids)
         except Exception:
             db.rollback()
             raise

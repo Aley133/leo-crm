@@ -20,6 +20,7 @@ from .workspace_context import current_workspace_id
 JOBS: dict[str, dict[str, Any]] = {}
 _UNKNOWN_TITLES = {"", "unknown product", "название не получено"}
 JOB_HISTORY_LIMIT = 32
+ENRICHMENT_ORDER_LIMIT = 16
 
 
 def _prune_job_registry() -> None:
@@ -263,7 +264,10 @@ def _match_line(
 def _load_unresolved_orders(
     since: datetime,
     marketplace_account_id: int | None = None,
+    limit: int = ENRICHMENT_ORDER_LIMIT,
 ) -> list[tuple[int, str, str | None, int]]:
+    if limit < 1:
+        return []
     with SessionLocal() as session:
         unresolved_order_ids = (
             select(MarketplaceOrderLine.marketplace_order_id)
@@ -277,7 +281,7 @@ def _load_unresolved_orders(
             )
             .distinct()
         )
-        statement = (
+        base_statement = (
             select(
                 MarketplaceOrder.id,
                 MarketplaceOrder.external_order_id,
@@ -288,13 +292,30 @@ def _load_unresolved_orders(
                 MarketplaceOrder.ordered_at >= since,
                 MarketplaceOrder.id.in_(unresolved_order_ids),
             )
-            .order_by(MarketplaceOrder.ordered_at.desc(), MarketplaceOrder.id.desc())
         )
         if marketplace_account_id is not None:
-            statement = statement.where(
+            base_statement = base_statement.where(
                 MarketplaceOrder.marketplace_account_id == marketplace_account_id
             )
-        rows = session.execute(statement).all()
+        recent_limit = max(1, (limit + 1) // 2)
+        backlog_limit = max(0, limit - recent_limit)
+        recent_rows = session.execute(
+            base_statement
+            .order_by(MarketplaceOrder.ordered_at.desc(), MarketplaceOrder.id.desc())
+            .limit(recent_limit)
+        ).all()
+        backlog_rows = (
+            session.execute(
+                base_statement
+                .order_by(MarketplaceOrder.ordered_at.asc(), MarketplaceOrder.id.asc())
+                .limit(backlog_limit)
+            ).all()
+            if backlog_limit
+            else []
+        )
+        rows = list(recent_rows)
+        seen = {int(row[0]) for row in rows}
+        rows.extend(row for row in backlog_rows if int(row[0]) not in seen)
     return [
         (
             int(order_id),
@@ -409,6 +430,58 @@ def _persist_enriched_order(
                     )
 
     return local_updated, local_linked, local_allocated, errors
+
+
+def _resolve_stored_order_from_registry(
+    *,
+    order_id: int,
+    account_id: int,
+) -> tuple[bool, int, int]:
+    """Resolve identities already known by CRM before calling Kaspi again.
+
+    Fresh orders normally contain the numeric master-product ID immediately.
+    When that ID uniquely identifies a compound Seller SKU, the local registry
+    can set the exact title, product link and FIFO allocation without waiting
+    for the eventually consistent product-detail endpoints.
+    """
+    local_updated = 0
+    local_linked = 0
+    with SessionLocal() as session:
+        with session.begin():
+            stored_order = session.scalar(
+                select(MarketplaceOrder)
+                .where(MarketplaceOrder.id == order_id)
+                .with_for_update()
+            )
+            if stored_order is None:
+                return True, 0, 0
+            lines = list(
+                session.scalars(
+                    select(MarketplaceOrderLine)
+                    .where(MarketplaceOrderLine.marketplace_order_id == order_id)
+                    .order_by(MarketplaceOrderLine.id)
+                ).all()
+            )
+            for line in lines:
+                before = (line.product_id, line.title, line.merchant_sku)
+                ensure_marketplace_listing_for_order_line(
+                    session,
+                    marketplace_account_id=account_id,
+                    order_line=line,
+                )
+                after = (line.product_id, line.title, line.merchant_sku)
+                if before[0] is None and after[0] is not None:
+                    local_linked += 1
+                if before != after:
+                    local_updated += 1
+
+            fully_resolved = bool(lines) and all(
+                line.product_id is not None
+                and bool(str(line.merchant_sku or "").strip())
+                and str(line.title or "").strip().casefold() not in _UNKNOWN_TITLES
+                for line in lines
+            )
+    return fully_resolved, local_updated, local_linked
 
 
 async def run_job(
@@ -577,6 +650,21 @@ async def run_job(
                 order_id, external_order_id, external_code, account_id = order_row
                 order_key = str(external_code or external_order_id or order_id)
                 kaspi_order_id = str(external_order_id or "").strip()
+                async with database_write_semaphore:
+                    (
+                        locally_resolved,
+                        local_registry_updated,
+                        local_registry_linked,
+                    ) = await asyncio.to_thread(
+                        _resolve_stored_order_from_registry,
+                        order_id=int(order_id),
+                        account_id=int(account_id),
+                    )
+                async with counter_lock:
+                    job["updated"] += local_registry_updated
+                    job["linked"] += local_registry_linked
+                if locally_resolved:
+                    return
                 if not kaspi_order_id:
                     async with counter_lock:
                         job["errors"].append(
