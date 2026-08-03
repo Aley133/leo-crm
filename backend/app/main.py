@@ -24,6 +24,7 @@ from .db import SessionLocal, engine
 from .dumping_api import public_router as dumping_public_router
 from .dumping_api import router as dumping_router
 from .dumping_competitor_worker import (
+    SCHEDULER_LAST_RUN as DUMPING_SCHEDULER_STATUS,
     start_dumping_competitor_worker,
     stop_dumping_competitor_worker,
 )
@@ -68,8 +69,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.2"
-DEPLOYMENT_MARKER = "durable-dumping-policy-state-recovery"
+APP_VERSION = "0.23.3"
+DEPLOYMENT_MARKER = "legacy-dumping-recovery-observability"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -265,6 +266,7 @@ async def root() -> dict[str, object]:
         "kaspi_polling": dict(KASPI_POLL_STATUS),
         "kaspi_order_enrichment": dict(KASPI_ENRICHMENT_STATUS),
         "kaspi_order_maintenance": dict(KASPI_MAINTENANCE_STATUS),
+        "dumping_scheduler": dict(DUMPING_SCHEDULER_STATUS),
     }
 
 
@@ -282,6 +284,7 @@ async def health() -> dict[str, object]:
         "kaspi_polling": dict(KASPI_POLL_STATUS),
         "kaspi_order_enrichment": dict(KASPI_ENRICHMENT_STATUS),
         "kaspi_order_maintenance": dict(KASPI_MAINTENANCE_STATUS),
+        "dumping_scheduler": dict(DUMPING_SCHEDULER_STATUS),
     }
 
 
