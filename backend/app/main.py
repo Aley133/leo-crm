@@ -69,8 +69,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.3"
-DEPLOYMENT_MARKER = "legacy-dumping-recovery-observability"
+APP_VERSION = "0.23.4"
+DEPLOYMENT_MARKER = "postgres-safe-dumping-recovery-lock"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
