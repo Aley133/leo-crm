@@ -241,6 +241,58 @@ def queue_due_competitor_jobs(
     return tuple(job.id for job in jobs)
 
 
+def build_legacy_recovery_candidates_statement(
+    *,
+    limit: int = LEGACY_RECOVERY_BATCH_LIMIT,
+):
+    if limit < 1 or limit > 1000:
+        raise ValueError("limit must be between 1 and 1000")
+    latest_policy_state_ids = (
+        select(
+            DumpingRun.product_id.label("product_id"),
+            func.max(DumpingRun.id).label("run_id"),
+        )
+        .where(DumpingRun.status.in_(_POLICY_STATE_STATUSES))
+        .group_by(DumpingRun.product_id)
+        .subquery()
+    )
+    # PostgreSQL cannot apply FOR UPDATE to a statement containing GROUP BY,
+    # even when the aggregation lives in a joined subquery. Candidate discovery
+    # is intentionally read-only; the policy rows are locked by a second,
+    # aggregation-free statement below.
+    return (
+        select(DumpingPolicy.id, DumpingRun.status)
+        .outerjoin(
+            latest_policy_state_ids,
+            latest_policy_state_ids.c.product_id == DumpingPolicy.product_id,
+        )
+        .outerjoin(DumpingRun, DumpingRun.id == latest_policy_state_ids.c.run_id)
+        .where(
+            DumpingPolicy.enabled.is_(False),
+            DumpingPolicy.auto_publish_xml.is_(True),
+            or_(
+                DumpingRun.id.is_(None),
+                DumpingRun.status == "suspended_seller_removed",
+            ),
+        )
+        .order_by(DumpingPolicy.id)
+        .limit(limit)
+    )
+
+
+def build_legacy_recovery_lock_statement(*, policy_ids: tuple[int, ...]):
+    return (
+        select(DumpingPolicy)
+        .where(
+            DumpingPolicy.id.in_(policy_ids),
+            DumpingPolicy.enabled.is_(False),
+            DumpingPolicy.auto_publish_xml.is_(True),
+        )
+        .order_by(DumpingPolicy.id)
+        .with_for_update(skip_locked=True)
+    )
+
+
 def recover_legacy_auto_disabled_policies(
     db: Session,
     *,
@@ -260,36 +312,19 @@ def recover_legacy_auto_disabled_policies(
     the suspension. A later explicit manual-disable audit always keeps the
     policy off.
     """
-    if limit < 1 or limit > 1000:
-        raise ValueError("limit must be between 1 and 1000")
     current = now or datetime.now(UTC)
-    latest_policy_state_ids = (
-        select(
-            DumpingRun.product_id.label("product_id"),
-            func.max(DumpingRun.id).label("run_id"),
-        )
-        .where(DumpingRun.status.in_(_POLICY_STATE_STATUSES))
-        .group_by(DumpingRun.product_id)
-        .subquery()
-    )
+    candidate_rows = db.execute(
+        build_legacy_recovery_candidates_statement(limit=limit)
+    ).all()
+    recovered_from_by_policy = {
+        int(policy_id): str(state or "legacy_unclassified")
+        for policy_id, state in candidate_rows
+    }
+    policy_ids = tuple(recovered_from_by_policy)
+    if not policy_ids:
+        return ()
     policies = db.scalars(
-        select(DumpingPolicy)
-        .outerjoin(
-            latest_policy_state_ids,
-            latest_policy_state_ids.c.product_id == DumpingPolicy.product_id,
-        )
-        .outerjoin(DumpingRun, DumpingRun.id == latest_policy_state_ids.c.run_id)
-        .where(
-            DumpingPolicy.enabled.is_(False),
-            DumpingPolicy.auto_publish_xml.is_(True),
-            or_(
-                DumpingRun.id.is_(None),
-                DumpingRun.status == "suspended_seller_removed",
-            ),
-        )
-        .order_by(DumpingPolicy.id)
-        .with_for_update(skip_locked=True)
-        .limit(limit)
+        build_legacy_recovery_lock_statement(policy_ids=policy_ids)
     ).all()
 
     jobs: list[DumpingRun] = []
@@ -313,7 +348,7 @@ def recover_legacy_auto_disabled_policies(
                     "reason": "automatic_policy_recovery",
                     "agent_type": "kaspi_competitor",
                     "scheduled_at": current.isoformat(),
-                    "recovered_from": "suspended_seller_removed",
+                    "recovered_from": recovered_from_by_policy[policy.id],
                 },
                 created_at=current,
             )

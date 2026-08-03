@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.23.3"
-EXPECTED_DEPLOYMENT_MARKER = "legacy-dumping-recovery-observability"
+EXPECTED_APP_VERSION = "0.23.4"
+EXPECTED_DEPLOYMENT_MARKER = "postgres-safe-dumping-recovery-lock"
 
 
 def test_application_metadata_contract() -> None:

@@ -11,6 +11,8 @@ from backend.app import dumping_competitor_worker
 from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.dumping_api import DumpingPolicyUpsert, upsert_dumping_policy
 from backend.app.dumping_competitor_worker import (
+    build_legacy_recovery_candidates_statement,
+    build_legacy_recovery_lock_statement,
     build_due_competitor_policies_statement,
     queue_due_competitor_jobs,
     recover_legacy_auto_disabled_policies,
@@ -203,6 +205,26 @@ def test_periodic_dispatch_uses_postgresql_skip_locked_and_active_job_guard() ->
     assert "LEASED_LOCAL" in sql
 
 
+def test_legacy_recovery_uses_postgres_safe_two_phase_locking() -> None:
+    candidate_sql = str(
+        build_legacy_recovery_candidates_statement().compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).upper()
+    lock_sql = str(
+        build_legacy_recovery_lock_statement(policy_ids=(1, 2)).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).upper()
+
+    assert "GROUP BY" in candidate_sql
+    assert "FOR UPDATE" not in candidate_sql
+    assert "GROUP BY" not in lock_sql
+    assert "FOR UPDATE SKIP LOCKED" in lock_sql
+
+
 def test_completed_supplier_job_self_heals_waiting_dumping_gate(db_session) -> None:
     policy = _policy(db_session, kaspi_product_id="100000009")
     supplier_job = BrowserAgentJob(
@@ -316,6 +338,7 @@ def test_unclassified_legacy_disabled_policy_recovers_when_source_exists(
     queued = db_session.get(DumpingRun, job_ids[0])
     assert queued is not None
     assert queued.explanation_json["reason"] == "automatic_policy_recovery"
+    assert queued.explanation_json["recovered_from"] == "legacy_unclassified"
 
 
 def test_explicitly_disabled_policy_is_not_auto_recovered(db_session) -> None:
