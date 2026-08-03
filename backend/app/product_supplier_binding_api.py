@@ -45,6 +45,25 @@ class ManualSupplierBindingResult(BaseModel):
     queued_initial_check: bool
 
 
+class ManualSupplierBindingUpdate(BaseModel):
+    url: HttpUrl
+    run_initial_check: bool = True
+
+
+class ManualSupplierBindingUpdateResult(BaseModel):
+    product_id: int
+    binding_id: int
+    monitor_target_id: int
+    previous_supplier_product_id: int
+    supplier_product_id: int
+    supplier_code: str
+    url: str
+    created_supplier_product: bool
+    cancelled_stale_jobs: int
+    job_id: int | None
+    queued_initial_check: bool
+
+
 router = APIRouter(
     prefix="/api/product-registry",
     tags=["product-supplier-binding"],
@@ -175,6 +194,44 @@ def _disable_duplicate_bindings(
             "Задание отменено: источник объединён с канонической привязкой"
         )
         job.finished_at = datetime.now(UTC)
+
+
+def _cancel_stale_browser_jobs(
+    db: Session,
+    *,
+    monitor_target_id: int,
+    supplier_product_id: int,
+    url: str,
+) -> int:
+    jobs = db.scalars(
+        select(BrowserAgentJob)
+        .where(
+            BrowserAgentJob.monitor_target_id == monitor_target_id,
+            BrowserAgentJob.status.in_(
+                (
+                    BrowserAgentJobStatus.QUEUED.value,
+                    BrowserAgentJobStatus.LEASED.value,
+                )
+            ),
+        )
+        .with_for_update()
+    ).all()
+    cancelled = 0
+    finished_at = datetime.now(UTC)
+    for job in jobs:
+        if job.supplier_product_id == supplier_product_id and job.url == url:
+            continue
+        job.status = BrowserAgentJobStatus.FAILED.value
+        job.error_code = "supplier_source_replaced"
+        job.error_message = (
+            "Задание отменено: ссылка источника закупки была заменена"
+        )
+        job.finished_at = finished_at
+        job.lease_owner = None
+        job.lease_token = None
+        job.lease_until = None
+        cancelled += 1
+    return cancelled
 
 
 @router.post(
@@ -319,5 +376,170 @@ def create_manual_supplier_binding(
         job_id=None if job is None else job.id,
         created_supplier_product=created_supplier_product,
         created_binding=created_binding,
+        queued_initial_check=job is not None,
+    )
+
+
+@router.patch(
+    "/products/{product_id}/supplier-bindings/{binding_id}/manual",
+    response_model=ManualSupplierBindingUpdateResult,
+)
+def update_manual_supplier_binding(
+    product_id: int,
+    binding_id: int,
+    payload: ManualSupplierBindingUpdate,
+    db: Session = Depends(get_db),
+) -> ManualSupplierBindingUpdateResult:
+    row = db.execute(
+        select(ProductBinding, SupplierProduct, Supplier, MonitorTarget)
+        .join(
+            SupplierProduct,
+            SupplierProduct.id == ProductBinding.supplier_product_id,
+        )
+        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+        .outerjoin(
+            MonitorTarget,
+            MonitorTarget.product_binding_id == ProductBinding.id,
+        )
+        .where(
+            ProductBinding.id == binding_id,
+            ProductBinding.product_id == product_id,
+        )
+        .with_for_update()
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Источник закупки не найден")
+
+    binding, previous_supplier_product, previous_supplier, monitor_target = row
+    previous_supplier_product_id = previous_supplier_product.id
+    previous_url = previous_supplier_product.url
+    if previous_supplier.code.startswith(("offline-", "production-")):
+        raise HTTPException(
+            status_code=422,
+            detail="Заменить ссылку можно только у онлайн-поставщика",
+        )
+
+    product = db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Товар не найден")
+
+    url = str(payload.url)
+    supplier_code, supplier_name, external_id = _source_from_url(url)
+    supplier = db.scalar(
+        select(Supplier)
+        .where(Supplier.code == supplier_code)
+        .with_for_update()
+    )
+    if supplier is None:
+        supplier = Supplier(
+            code=supplier_code,
+            name=supplier_name,
+            is_active=True,
+        )
+        db.add(supplier)
+        db.flush()
+
+    matching_products = _matching_supplier_products(
+        db,
+        supplier=supplier,
+        external_id=external_id,
+    )
+    supplier_product = matching_products[0][0] if matching_products else None
+    created_supplier_product = supplier_product is None
+    if supplier_product is None:
+        supplier_product = SupplierProduct(
+            supplier_id=supplier.id,
+            external_id=external_id,
+            title=previous_supplier_product.title or product.name,
+            url=url,
+        )
+        db.add(supplier_product)
+        db.flush()
+    else:
+        duplicate_binding_id = db.scalar(
+            select(ProductBinding.id).where(
+                ProductBinding.product_id == product_id,
+                ProductBinding.supplier_product_id == supplier_product.id,
+                ProductBinding.id != binding.id,
+            )
+        )
+        if duplicate_binding_id is not None:
+            raise HTTPException(
+                status_code=409,
+                detail=(
+                    "Эта ссылка уже подключена к товару как другой источник "
+                    f"(binding {duplicate_binding_id})"
+                ),
+            )
+        exact_identity_owner = next(
+            (
+                item
+                for item, _state in matching_products
+                if item.external_id == external_id
+            ),
+            None,
+        )
+        if exact_identity_owner is None:
+            supplier_product.external_id = external_id
+        supplier_product.url = url
+
+    source_changed = (
+        previous_supplier_product_id != supplier_product.id
+        or previous_url != url
+    )
+    binding.supplier_product_id = supplier_product.id
+    binding.status = BindingStatus.ACTIVE.value
+    binding.decision_source = "manual"
+    binding.last_validated_at = datetime.now(UTC)
+
+    if monitor_target is None:
+        monitor_target = MonitorTarget(
+            product_binding_id=binding.id,
+            status=MonitorStatus.ACTIVE.value,
+            interval_seconds=300,
+            next_check_at=datetime.now(UTC),
+        )
+        db.add(monitor_target)
+        db.flush()
+    else:
+        monitor_target.status = MonitorStatus.ACTIVE.value
+        monitor_target.next_check_at = datetime.now(UTC)
+        if source_changed:
+            monitor_target.last_checked_at = None
+            monitor_target.consecutive_failures = 0
+            monitor_target.lease_owner = None
+            monitor_target.lease_token = None
+            monitor_target.lease_until = None
+
+    cancelled_stale_jobs = _cancel_stale_browser_jobs(
+        db,
+        monitor_target_id=monitor_target.id,
+        supplier_product_id=supplier_product.id,
+        url=url,
+    )
+
+    job: BrowserAgentJob | None = None
+    if payload.run_initial_check:
+        queue_result = queue_browser_target_now(
+            db,
+            target_id=monitor_target.id,
+            supplier_code=supplier.code,
+        )
+        if queue_result.job_id is not None:
+            job = db.get(BrowserAgentJob, queue_result.job_id)
+
+    db.commit()
+
+    return ManualSupplierBindingUpdateResult(
+        product_id=product.id,
+        binding_id=binding.id,
+        monitor_target_id=monitor_target.id,
+        previous_supplier_product_id=previous_supplier_product_id,
+        supplier_product_id=supplier_product.id,
+        supplier_code=supplier.code,
+        url=supplier_product.url,
+        created_supplier_product=created_supplier_product,
+        cancelled_stale_jobs=cancelled_stale_jobs,
+        job_id=None if job is None else job.id,
         queued_initial_check=job is not None,
     )

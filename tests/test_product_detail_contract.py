@@ -43,6 +43,7 @@ def test_product_detail_ui_route_and_assets_are_exposed() -> None:
     assert '@router.get("/crm/products/{product_id}"' in ui
     assert "product-detail.html" in ui
     assert "/static/product-detail.css" in html
+    assert "/static/product-detail-source-edit.css" in html
     assert "/static/product-detail.js" in html
     for element_id in (
         'id="kaspi-product-id"', 'id="merchant-sku"', 'id="product-brand"',
@@ -50,6 +51,7 @@ def test_product_detail_ui_route_and_assets_are_exposed() -> None:
         'id="revenue-kzt"', 'id="last-ordered-at"', 'id="best-offer"',
         'id="bindings"', 'id="observations-body"', 'id="add-supplier"',
         'id="supplier-dialog"', 'id="supplier-form"', 'id="supplier-url"',
+        'id="supplier-dialog-title"', 'id="supplier-online-help"',
         'id="price-drop-alert-enabled"', 'id="price-alert-result"',
     ):
         assert element_id in html
@@ -77,6 +79,10 @@ def test_product_detail_allows_only_explicit_supplier_binding_write() -> None:
     assert 'fetch(`/api/products/${productId}/detail' in script
     assert '/api/product-registry/products/${productId}/supplier-bindings/manual' in script
     assert 'method:"POST"' in script
+    assert '/supplier-bindings/${Number(editingBinding.binding_id)}/manual' in script
+    assert 'method:"PATCH"' in script
+    assert 'data-edit-binding=' in script
+    assert "Старая ссылка перестанет проверяться" in script
     assert "/run-now" not in script
     assert 'method:"DELETE"' not in script
 
