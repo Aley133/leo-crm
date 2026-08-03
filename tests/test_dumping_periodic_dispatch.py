@@ -183,6 +183,7 @@ def test_queue_scheduler_dispatches_immediately_without_scanning_kaspi(
     asyncio.run(dumping_competitor_worker._scheduler_loop(stop_event))
 
     assert dispatches == [True]
+    assert dumping_competitor_worker.SCHEDULER_LAST_RUN["status"] == "completed"
 
 
 def test_periodic_dispatch_uses_postgresql_skip_locked_and_active_job_guard() -> None:
@@ -291,6 +292,30 @@ def test_legacy_automatic_suspension_recovers_when_cost_source_returns(
         "scheduled_at": NOW.isoformat(),
         "recovered_from": suspended.status,
     }
+
+
+def test_unclassified_legacy_disabled_policy_recovers_when_source_exists(
+    db_session,
+) -> None:
+    policy = _policy(
+        db_session,
+        kaspi_product_id="120199530_817407462",
+        enabled=False,
+    )
+    _run(
+        db_session,
+        policy=policy,
+        status="failed_local",
+        created_at=NOW - timedelta(hours=1),
+    )
+
+    job_ids = recover_legacy_auto_disabled_policies(db_session, now=NOW)
+
+    assert len(job_ids) == 1
+    assert policy.enabled is True
+    queued = db_session.get(DumpingRun, job_ids[0])
+    assert queued is not None
+    assert queued.explanation_json["reason"] == "automatic_policy_recovery"
 
 
 def test_explicitly_disabled_policy_is_not_auto_recovered(db_session) -> None:

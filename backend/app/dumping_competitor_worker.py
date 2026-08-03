@@ -38,6 +38,15 @@ _ACTIVE_LOCAL_JOB_STATUSES = ("queued_local", "leased_local")
 _SCHEDULER_STOP_EVENT: asyncio.Event | None = None
 _SCHEDULER_TASK: asyncio.Task | None = None
 _LOGGER = logging.getLogger(__name__)
+SCHEDULER_LAST_RUN: dict[str, Any] = {
+    "status": "idle",
+    "started_at": None,
+    "finished_at": None,
+    "recovered_count": 0,
+    "periodic_count": 0,
+    "job_ids": [],
+    "message": "Kaspi competitor queue scheduler has not started",
+}
 
 
 _STATUS_MAP = {
@@ -244,11 +253,12 @@ def recover_legacy_auto_disabled_policies(
     failed to see our own offer. Migration 0029 repaired rows only when a
     supplier was available at migration time. If the supplier price arrived
     later, the disabled policy could never enter the scheduler again. Recover
-    only policies whose latest *policy-state* audit event proves that exact
-    automatic suspension. Ordinary queued, failed or successful scan rows do
-    not change the owner's policy choice and therefore must not hide the
-    suspension. A later explicit manual-disable audit always keeps the policy
-    off.
+    policies whose latest *policy-state* audit event proves that exact
+    automatic suspension, plus unclassified legacy policies created before
+    policy-state auditing existed. Ordinary queued, failed or successful scan
+    rows do not change the owner's policy choice and therefore must not hide
+    the suspension. A later explicit manual-disable audit always keeps the
+    policy off.
     """
     if limit < 1 or limit > 1000:
         raise ValueError("limit must be between 1 and 1000")
@@ -264,15 +274,18 @@ def recover_legacy_auto_disabled_policies(
     )
     policies = db.scalars(
         select(DumpingPolicy)
-        .join(
+        .outerjoin(
             latest_policy_state_ids,
             latest_policy_state_ids.c.product_id == DumpingPolicy.product_id,
         )
-        .join(DumpingRun, DumpingRun.id == latest_policy_state_ids.c.run_id)
+        .outerjoin(DumpingRun, DumpingRun.id == latest_policy_state_ids.c.run_id)
         .where(
             DumpingPolicy.enabled.is_(False),
             DumpingPolicy.auto_publish_xml.is_(True),
-            DumpingRun.status == "suspended_seller_removed",
+            or_(
+                DumpingRun.id.is_(None),
+                DumpingRun.status == "suspended_seller_removed",
+            ),
         )
         .order_by(DumpingPolicy.id)
         .with_for_update(skip_locked=True)
@@ -318,7 +331,22 @@ def dispatch_due_competitor_jobs() -> tuple[int, ...]:
             recovered_job_ids = recover_legacy_auto_disabled_policies(db)
             due_job_ids = queue_due_competitor_jobs(db)
             db.commit()
-            return (*recovered_job_ids, *due_job_ids)
+            job_ids = (*recovered_job_ids, *due_job_ids)
+            SCHEDULER_LAST_RUN.update(
+                {
+                    "status": "completed",
+                    "finished_at": datetime.now(UTC).isoformat(),
+                    "recovered_count": len(recovered_job_ids),
+                    "periodic_count": len(due_job_ids),
+                    "job_ids": list(job_ids),
+                    "message": (
+                        "Kaspi competitor queue dispatch completed: "
+                        f"recovered={len(recovered_job_ids)}, "
+                        f"periodic={len(due_job_ids)}"
+                    ),
+                }
+            )
+            return job_ids
         except Exception:
             db.rollback()
             raise
@@ -326,11 +354,42 @@ def dispatch_due_competitor_jobs() -> tuple[int, ...]:
 
 async def _scheduler_loop(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
+        SCHEDULER_LAST_RUN.update(
+            {
+                "status": "running",
+                "started_at": datetime.now(UTC).isoformat(),
+                "finished_at": None,
+                "message": "Kaspi competitor queue dispatch started",
+            }
+        )
         try:
-            await asyncio.to_thread(dispatch_due_competitor_jobs)
+            job_ids = await asyncio.to_thread(dispatch_due_competitor_jobs)
+            if SCHEDULER_LAST_RUN["status"] == "running":
+                SCHEDULER_LAST_RUN.update(
+                    {
+                        "status": "completed",
+                        "finished_at": datetime.now(UTC).isoformat(),
+                        "periodic_count": len(job_ids),
+                        "job_ids": list(job_ids),
+                        "message": (
+                            "Kaspi competitor queue dispatch completed: "
+                            f"jobs={len(job_ids)}"
+                        ),
+                    }
+                )
         except asyncio.CancelledError:
             raise
-        except Exception:
+        except Exception as exc:
+            SCHEDULER_LAST_RUN.update(
+                {
+                    "status": "failed",
+                    "finished_at": datetime.now(UTC).isoformat(),
+                    "message": (
+                        "Kaspi competitor queue dispatch failed: "
+                        f"{type(exc).__name__}: {exc}"
+                    ),
+                }
+            )
             _LOGGER.exception("Kaspi competitor queue dispatch failed")
 
         try:
