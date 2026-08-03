@@ -118,7 +118,12 @@ def test_fifo_order_writes_exact_remaining_stock_to_xml(db_session) -> None:
         unit_cost=Decimal("4000"),
         source_name="Склад FIFO",
     )
-    db_session.add(batch)
+    policy = DumpingPolicy(
+        product_id=product.id,
+        enabled=True,
+        auto_publish_xml=True,
+    )
+    db_session.add_all([batch, policy])
     order, line = _order_line(
         db_session,
         product=product,
@@ -307,8 +312,11 @@ def test_supplier_refresh_queues_dumping_for_every_shared_sku(
     assert queued == [owner.id, variant.id]
 
 
-def test_untracked_order_offer_is_closed_instead_of_republished(db_session) -> None:
+def test_untracked_order_offer_is_preserved_when_dumping_is_not_connected(
+    db_session,
+) -> None:
     feed = _feed(db_session, sku="SKU-UNKNOWN")
+    original_xml = feed.generated_xml
     order, line = _order_line(
         db_session,
         product=None,
@@ -318,9 +326,99 @@ def test_untracked_order_offer_is_closed_instead_of_republished(db_session) -> N
     result = allocate_order_line_fifo(db_session, order_line=line, order=order)
 
     assert result.newly_allocated_quantity == 0
+    assert feed.generated_xml == original_xml
+
+
+def test_unlinked_order_closes_offer_only_when_dumping_controls_it(db_session) -> None:
+    product = _product(db_session, sku="SKU-MANAGED-UNKNOWN")
+    feed = _feed(db_session, sku=product.merchant_sku or "")
+    db_session.add(
+        DumpingPolicy(
+            product_id=product.id,
+            enabled=True,
+            auto_publish_xml=True,
+        )
+    )
+    db_session.flush()
+    order, line = _order_line(
+        db_session,
+        product=None,
+        sku=product.merchant_sku or "",
+    )
+
+    result = allocate_order_line_fifo(db_session, order_line=line, order=order)
+
+    assert result.newly_allocated_quantity == 0
     assert 'available="no"' in feed.generated_xml
     assert 'preOrder="0"' in feed.generated_xml
     assert 'stockCount="0"' in feed.generated_xml
+
+
+def test_fifo_allocation_does_not_change_unmanaged_xml_offer(db_session) -> None:
+    product = _product(db_session, sku="SKU-UNMANAGED-STOCK")
+    feed = _feed(db_session, sku=product.merchant_sku or "", stock_count=17)
+    original_xml = feed.generated_xml
+    batch = InventoryBatch(
+        product_id=product.id,
+        received_at=NOW,
+        quantity_received=10,
+        quantity_remaining=10,
+        unit_cost=Decimal("4000"),
+        source_name="Склад FIFO",
+    )
+    db_session.add(batch)
+    order, line = _order_line(
+        db_session,
+        product=product,
+        sku=product.merchant_sku or "",
+    )
+
+    result = allocate_order_line_fifo(db_session, order_line=line, order=order)
+
+    assert result.newly_allocated_quantity == 1
+    assert batch.quantity_remaining == 9
+    assert feed.generated_xml == original_xml
+
+
+def test_dumping_calculation_does_not_publish_when_xml_autopublish_is_off(
+    db_session,
+) -> None:
+    product = _product(db_session, sku="SKU-CALCULATE-ONLY")
+    feed = _feed(db_session, sku=product.merchant_sku or "", stock_count=23)
+    original_xml = feed.generated_xml
+    batch = InventoryBatch(
+        product_id=product.id,
+        received_at=NOW,
+        quantity_received=4,
+        quantity_remaining=4,
+        unit_cost=Decimal("4000"),
+        source_name="Склад FIFO",
+    )
+    policy = DumpingPolicy(
+        product_id=product.id,
+        enabled=True,
+        auto_publish_xml=False,
+    )
+    db_session.add_all([batch, policy])
+    db_session.flush()
+
+    decision = decide_dumping_price(
+        db_session,
+        product=product,
+        policy=policy,
+        competitor_price_kzt=Decimal("9000"),
+        own_price_kzt=Decimal("9999"),
+    )
+    run = publish_decision(
+        db_session,
+        product=product,
+        policy=policy,
+        decision=decision,
+    )
+
+    assert run.published is False
+    assert run.explanation_json["xml_publication"] == "disabled_by_policy"
+    assert feed.generated_xml == original_xml
 
 
 def test_last_stock_unit_closes_offer_and_queues_fresh_supplier_check(db_session) -> None:

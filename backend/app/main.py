@@ -69,8 +69,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.5"
-DEPLOYMENT_MARKER = "dumping-recovery-fast-retry-diagnostics"
+APP_VERSION = "0.23.6"
+DEPLOYMENT_MARKER = "dumping-xml-managed-offers-only"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
