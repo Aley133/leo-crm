@@ -152,6 +152,7 @@ def test_available_source_reopens_xml_through_normal_dumping_publication(
 
     assert 'available="yes"' in feed.generated_xml
     assert 'preOrder="9"' in feed.generated_xml
+    assert 'stockCount="5"' in feed.generated_xml
 
 
 def test_newest_duplicate_supplier_state_overrides_stale_available_price(

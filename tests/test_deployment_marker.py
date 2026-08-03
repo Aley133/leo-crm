@@ -1,8 +1,8 @@
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app
 
 
-EXPECTED_APP_VERSION = "0.22.1"
-EXPECTED_DEPLOYMENT_MARKER = "active-order-self-healing-theme-toggle"
+EXPECTED_APP_VERSION = "0.22.2"
+EXPECTED_DEPLOYMENT_MARKER = "supplier-preorder-xml-stock-capacity"
 
 
 def test_application_metadata_contract() -> None:

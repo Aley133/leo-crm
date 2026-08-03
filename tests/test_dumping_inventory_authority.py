@@ -196,7 +196,8 @@ def test_supplier_preorder_recreates_offer_missing_from_xml(db_session) -> None:
     assert f">{int(decision.target_price_kzt)}<" in feed.generated_xml
     assert 'available="yes"' in feed.generated_xml
     assert 'preOrder="2"' in feed.generated_xml
-    assert 'stockCount="0"' in feed.generated_xml
+    assert decision.stock_count == 5
+    assert 'stockCount="5"' in feed.generated_xml
     assert run.explanation_json["xml_offer_recovered"] is True
 
 
@@ -248,6 +249,7 @@ def test_shared_sku_uses_supplier_binding_from_inventory_group(db_session) -> No
     assert decision.source.kind == "supplier"
     assert decision.source.unit_cost_kzt == Decimal("3500")
     assert decision.preorder_days == 4
+    assert decision.stock_count == 5
 
 
 def test_supplier_refresh_queues_dumping_for_every_shared_sku(
@@ -421,10 +423,10 @@ def test_last_stock_unit_closes_offer_and_queues_fresh_supplier_check(db_session
 
     assert decision.source.kind == "supplier"
     assert decision.preorder_days == 8
-    assert decision.stock_count == 0
+    assert decision.stock_count == 5
     assert 'available="yes"' in feed.generated_xml
     assert 'preOrder="8"' in feed.generated_xml
-    assert 'stockCount="0"' in feed.generated_xml
+    assert 'stockCount="5"' in feed.generated_xml
     assert waiting.status == "supplier_refresh_applied"
 
 

@@ -62,8 +62,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.22.1"
-DEPLOYMENT_MARKER = "active-order-self-healing-theme-toggle"
+APP_VERSION = "0.22.2"
+DEPLOYMENT_MARKER = "supplier-preorder-xml-stock-capacity"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

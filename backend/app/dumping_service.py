@@ -26,6 +26,7 @@ from .product_inventory_group import (
 
 MONEY = Decimal("0.01")
 ONE = Decimal("1")
+SUPPLIER_PREORDER_STOCK_COUNT = 5
 
 
 def workspace_feed_url(db: Session) -> str:
@@ -354,6 +355,24 @@ def physical_stock_count(db: Session, *, product_id: int) -> int:
     return physical_stock_counts(db, product_ids={product_id}).get(product_id, 0)
 
 
+def xml_stock_count_for_source(
+    db: Session,
+    *,
+    product_id: int,
+    source: DumpingCostSource,
+) -> int:
+    """Return the quantity Kaspi may sell for the selected procurement mode.
+
+    Physical FIFO stock and supplier preorder capacity are different business
+    values. Inventory sales expose the exact remaining received quantity. An
+    available supplier source exposes the deliberately bounded preorder window
+    even though CRM has no physical units on hand yet.
+    """
+    if source.kind == "supplier":
+        return SUPPLIER_PREORDER_STOCK_COUNT
+    return physical_stock_count(db, product_id=product_id)
+
+
 def decide_dumping_price(
     db: Session,
     *,
@@ -388,7 +407,11 @@ def decide_dumping_price(
         competitor_price_kzt=None if competitor_price_kzt is None else _money(Decimal(competitor_price_kzt)),
         own_price_kzt=None if own_price_kzt is None else _money(Decimal(own_price_kzt)),
         target_price_kzt=_money(target),
-        stock_count=physical_stock_count(db, product_id=product.id),
+        stock_count=xml_stock_count_for_source(
+            db,
+            product_id=product.id,
+            source=source,
+        ),
         status=status,
     )
 
