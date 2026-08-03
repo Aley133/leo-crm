@@ -36,6 +36,18 @@ An unresolved active order may close an offer only when its identity resolves
 uniquely to a managed product. CRM never guesses between multiple products and
 never closes an arbitrary source offer.
 
+## Import runtime contract
+
+Preview is read-only. It must not retain, activate or otherwise write an XML
+source in the background. The source becomes authoritative only after the user
+confirms the import and the database transaction commits successfully.
+
+XML parsing, catalog persistence, order-line linking and managed overlays run
+outside the asynchronous web loop. The database session is created and closed
+inside that bounded worker. Order-line linking reads only identities present in
+the imported catalog; it must not materialize unrelated historical order lines.
+Concurrent XML writers serialize on the active workspace feed row.
+
 ## Required regression checks
 
 - reimport replaces a previously generated/zeroed baseline;

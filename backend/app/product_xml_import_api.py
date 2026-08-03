@@ -1,15 +1,18 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from collections.abc import Callable
+from typing import TypeVar
 from urllib.parse import unquote
 from xml.etree import ElementTree
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from .auth import require_service_token
-from .db import get_db
+from .db import SessionLocal
 from .dumping_models import DumpingPolicy, KaspiXmlFeed
 from .dumping_service import (
     sync_product_inventory_to_feed,
@@ -30,6 +33,8 @@ router = APIRouter(
 )
 
 _LOOKUP_BATCH_SIZE = 400
+_Result = TypeVar("_Result")
+_LookupValue = TypeVar("_LookupValue")
 
 
 def _local_name(value: str) -> str:
@@ -57,13 +62,18 @@ def _source_filename(request: Request) -> str | None:
     return value[:255] or None
 
 
-async def _read_products(request: Request) -> tuple[bytes, list[KaspiXmlProduct], list[str]]:
-    body = await request.body()
+def _parse_products(body: bytes) -> tuple[list[KaspiXmlProduct], list[str]]:
     try:
         products, warnings = parse_kaspi_products(body)
-        return body, products, warnings
+        return products, warnings
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
+
+
+def _with_session(operation: Callable[[Session], _Result]) -> _Result:
+    """Create, use and close a DB session inside the same worker thread."""
+    with SessionLocal() as db:
+        return operation(db)
 
 
 def _sample(products: list[KaspiXmlProduct], *, limit: int = 10) -> list[dict]:
@@ -78,7 +88,10 @@ def _sample(products: list[KaspiXmlProduct], *, limit: int = 10) -> list[dict]:
     ]
 
 
-def _chunks(values: list[str], size: int = _LOOKUP_BATCH_SIZE) -> Iterable[list[str]]:
+def _chunks(
+    values: list[_LookupValue],
+    size: int = _LOOKUP_BATCH_SIZE,
+) -> Iterable[list[_LookupValue]]:
     for index in range(0, len(values), size):
         yield values[index : index + size]
 
@@ -112,7 +125,12 @@ def _store_feed_source(
     activate: bool,
 ) -> KaspiXmlFeed:
     xml_text = body.decode("utf-8-sig")
-    feed = db.scalar(select(KaspiXmlFeed).order_by(KaspiXmlFeed.id.desc()).limit(1))
+    feed = db.scalar(
+        select(KaspiXmlFeed)
+        .order_by(KaspiXmlFeed.id.desc())
+        .with_for_update()
+        .limit(1)
+    )
     if feed is None:
         feed = KaspiXmlFeed(
             merchant_id=_merchant_id(body),
@@ -132,14 +150,18 @@ def _store_feed_source(
     return feed
 
 
-@router.post("/retain-source")
-async def retain_xml_source(request: Request, db: Session = Depends(get_db)) -> dict:
-    body, products, warnings = await _read_products(request)
+def _retain_xml_source(
+    body: bytes,
+    *,
+    source_filename: str | None,
+    db: Session,
+) -> dict:
+    products, warnings = _parse_products(body)
     try:
         feed = _store_feed_source(
             db,
             body=body,
-            source_filename=_source_filename(request),
+            source_filename=source_filename,
             activate=False,
         )
         db.commit()
@@ -156,9 +178,22 @@ async def retain_xml_source(request: Request, db: Session = Depends(get_db)) -> 
     }
 
 
-@router.post("/preview")
-async def preview_xml_import(request: Request, db: Session = Depends(get_db)) -> dict:
-    _body, products, warnings = await _read_products(request)
+@router.post("/retain-source")
+async def retain_xml_source(request: Request) -> dict:
+    body = await request.body()
+    source_filename = _source_filename(request)
+    return await run_in_threadpool(
+        _with_session,
+        lambda db: _retain_xml_source(
+            body,
+            source_filename=source_filename,
+            db=db,
+        ),
+    )
+
+
+def _preview_xml_import(body: bytes, *, db: Session) -> dict:
+    products, warnings = _parse_products(body)
     ids = list(dict.fromkeys(item.kaspi_product_id for item in products))
     existing_ids = _existing_product_ids(db, ids)
     return {
@@ -171,9 +206,22 @@ async def preview_xml_import(request: Request, db: Session = Depends(get_db)) ->
     }
 
 
-@router.post("/commit")
-async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> dict:
-    body, products, warnings = await _read_products(request)
+@router.post("/preview")
+async def preview_xml_import(request: Request) -> dict:
+    body = await request.body()
+    return await run_in_threadpool(
+        _with_session,
+        lambda db: _preview_xml_import(body, db=db),
+    )
+
+
+def _commit_xml_import(
+    body: bytes,
+    *,
+    source_filename: str | None,
+    db: Session,
+) -> dict:
+    products, warnings = _parse_products(body)
     ids = list(dict.fromkeys(item.kaspi_product_id for item in products))
     existing = _existing_products(db, ids)
 
@@ -222,19 +270,23 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
         feed = _store_feed_source(
             db,
             body=body,
-            source_filename=_source_filename(request),
+            source_filename=source_filename,
             activate=True,
         )
         feed.active = True
-        managed_product_ids = set(
-            db.scalars(
-                select(DumpingPolicy.product_id).where(
-                    DumpingPolicy.product_id.in_([product.id for product in stored_products]),
-                    DumpingPolicy.enabled.is_(True),
-                    DumpingPolicy.auto_publish_xml.is_(True),
-                )
-            ).all()
-        )
+        managed_product_ids: set[int] = set()
+        stored_product_ids = [int(product.id) for product in stored_products]
+        for batch in _chunks(stored_product_ids):
+            managed_product_ids.update(
+                int(value)
+                for value in db.scalars(
+                    select(DumpingPolicy.product_id).where(
+                        DumpingPolicy.product_id.in_(batch),
+                        DumpingPolicy.enabled.is_(True),
+                        DumpingPolicy.auto_publish_xml.is_(True),
+                    )
+                ).all()
+            )
         for product_id in sorted(int(value) for value in managed_product_ids):
             sync_product_inventory_to_feed(
                 db,
@@ -256,3 +308,17 @@ async def commit_xml_import(request: Request, db: Session = Depends(get_db)) -> 
         "warnings": warnings,
         "feed_url": workspace_feed_url(db),
     }
+
+
+@router.post("/commit")
+async def commit_xml_import(request: Request) -> dict:
+    body = await request.body()
+    source_filename = _source_filename(request)
+    return await run_in_threadpool(
+        _with_session,
+        lambda db: _commit_xml_import(
+            body,
+            source_filename=source_filename,
+            db=db,
+        ),
+    )

@@ -10,6 +10,9 @@ from .models import MarketplaceOrderLine, Product
 from .product_identity_models import MarketplaceListing, MarketplaceListingStatus
 
 
+_ORDER_LINE_LOOKUP_BATCH_SIZE = 400
+
+
 def _clean(value: str | None) -> str | None:
     if value is None:
         return None
@@ -120,12 +123,14 @@ def link_all_matching_order_lines_for_products(
     *,
     products: Iterable[Product],
 ) -> int:
-    """Link all matching order lines in one database read.
+    """Link matching order lines with bounded, identity-indexed reads.
 
     The old XML commit called ``link_all_matching_order_lines`` once per product.
     A normal 1,600-item catalog therefore produced thousands of SQL statements and
-    could exceed Render's HTTP timeout. This implementation builds an in-memory
-    identity map and scans the existing order lines once.
+    could exceed Render's HTTP timeout. A later implementation scanned the whole
+    order-line history once, which grew slower over time. This implementation uses
+    the imported identities and existing SKU indexes, so unrelated history is never
+    materialized in the web process.
     """
 
     identity_map = _product_identity_map(products)
@@ -133,28 +138,37 @@ def link_all_matching_order_lines_for_products(
         return 0
 
     linked = 0
-    lines = session.scalars(
-        select(MarketplaceOrderLine).where(
-            or_(
-                MarketplaceOrderLine.merchant_sku.is_not(None),
-                MarketplaceOrderLine.external_product_id.is_not(None),
+    seen_line_ids: set[int] = set()
+    identities = tuple(identity_map)
+    for index in range(0, len(identities), _ORDER_LINE_LOOKUP_BATCH_SIZE):
+        batch = identities[index : index + _ORDER_LINE_LOOKUP_BATCH_SIZE]
+        lines = session.scalars(
+            select(MarketplaceOrderLine)
+            .where(
+                or_(
+                    MarketplaceOrderLine.merchant_sku.in_(batch),
+                    MarketplaceOrderLine.external_product_id.in_(batch),
+                )
             )
+            .execution_options(yield_per=500)
         )
-    )
-    for line in lines:
-        product = None
-        for identity in (_clean(line.merchant_sku), _clean(line.external_product_id)):
-            if identity is not None:
-                product = identity_map.get(identity)
-                if product is not None:
-                    break
-        if product is None:
-            continue
+        for line in lines:
+            if line.id in seen_line_ids:
+                continue
+            seen_line_ids.add(line.id)
+            product = None
+            for identity in (_clean(line.merchant_sku), _clean(line.external_product_id)):
+                if identity is not None:
+                    product = identity_map.get(identity)
+                    if product is not None:
+                        break
+            if product is None:
+                continue
 
-        line.product_id = product.id
-        if not line.title or line.title.strip().casefold() in {"unknown product", "название не получено"}:
-            line.title = product.name
-        linked += 1
+            line.product_id = product.id
+            if not line.title or line.title.strip().casefold() in {"unknown product", "название не получено"}:
+                line.title = product.name
+            linked += 1
     return linked
 
 
