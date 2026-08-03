@@ -104,17 +104,29 @@ const selectProduct = (row) => {
 };
 
 const renderProductResults = (rows, query) => {
-  const configured = new Set(configuredRows.map((row) => Number(row.product_id)));
-  const available = rows.filter((row) => !configured.has(Number(row.product_id)));
-  productResults.innerHTML = available.length ? available.map((row) => `
-    <button class="product-result" type="button" role="option" data-product-id="${row.product_id}">
+  const configuredByProductId = new Map(configuredRows.map((row) => [Number(row.product_id), row]));
+  productResults.innerHTML = rows.length ? rows.map((row) => {
+    const configured = configuredByProductId.get(Number(row.product_id));
+    const dumpingState = configured
+      ? `Демпинг уже подключён · ${configured.policy.enabled ? "включён" : "отключён"}`
+      : "Можно подключить к демпингу";
+    return `
+    <button class="product-result" type="button" role="option" data-product-id="${row.product_id}" data-configured="${Boolean(configured)}">
       <strong>${escapeHtml(row.name)}</strong>
-      <span>Артикул: ${escapeHtml(row.merchant_sku || "—")} · Kaspi ID: ${escapeHtml(row.kaspi_product_id)}</span>
-    </button>`).join("") : `<div class="product-result-empty">По запросу «${escapeHtml(query)}» свободные карточки не найдены.</div>`;
+      <span>Артикул: ${escapeHtml(row.merchant_sku || "—")} · Kaspi ID: ${escapeHtml(row.kaspi_product_id)} · ${escapeHtml(dumpingState)}</span>
+    </button>`;
+  }).join("") : `<div class="product-result-empty">По запросу «${escapeHtml(query)}» товары не найдены.</div>`;
   productResults.classList.remove("hidden");
   productSearch.setAttribute("aria-expanded", "true");
   productResults.querySelectorAll(".product-result").forEach((button) => button.addEventListener("click", () => {
-    const row = available.find((item) => Number(item.product_id) === Number(button.dataset.productId));
+    const productId = Number(button.dataset.productId);
+    const configured = configuredByProductId.get(productId);
+    if (configured) {
+      fillForm(configured);
+      message.textContent = "Карточка уже подключена к демпингу. Открыты её текущие настройки.";
+      return;
+    }
+    const row = rows.find((item) => Number(item.product_id) === productId);
     if (row) selectProduct(row);
   }));
 };

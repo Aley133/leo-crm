@@ -136,3 +136,28 @@ def test_product_filters_run_before_the_page_limit(db_session) -> None:
     assert [row.product_id for row in without_supplier] == [unbound.id]
     assert [row.product_id for row in failures] == [monitored.id]
     assert [row.product_id for row in monitored_rows] == [monitored.id]
+
+
+def test_product_registry_searches_by_merchant_sku(db_session) -> None:
+    product = Product(
+        kaspi_product_id="999999999",
+        merchant_sku="100501313",
+        name="Товар с отдельным артикулом",
+        status="active",
+    )
+    db_session.add(product)
+    db_session.commit()
+
+    rows = list_products(
+        q="100501313",
+        status=None,
+        only_without_supplier=False,
+        only_failures=False,
+        only_monitored=False,
+        limit=20,
+        offset=0,
+        db=db_session,
+    )
+
+    assert [row.product_id for row in rows] == [product.id]
+    assert rows[0].merchant_sku == "100501313"
