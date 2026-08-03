@@ -6,6 +6,7 @@ from time import monotonic
 from datetime import UTC, datetime
 from typing import Any
 
+from .kaspi_active_order_reconciliation import reconcile_active_orders
 from .kaspi_product_enrichment_jobs import (
     create_job as create_enrichment_job,
     public_job as public_enrichment_job,
@@ -124,9 +125,17 @@ async def _run_account_cycle(
                 marketplace_account_id=connection.account_id,
             )
             enrichment = public_enrichment_job(enrichment_job_id) or {}
+        active_reconciliation = None
+        if mode != "fast":
+            active_reconciliation = await reconcile_active_orders(connection)
         raw_errors = list(raw_job.get("errors") or [])
         enrichment_errors = list(enrichment.get("errors") or [])
-        has_errors = bool(raw_errors or enrichment_errors)
+        reconciliation_errors = (
+            list(active_reconciliation.errors)
+            if active_reconciliation is not None
+            else []
+        )
+        has_errors = bool(raw_errors or enrichment_errors or reconciliation_errors)
         return {
             "workspace_id": connection.workspace_id,
             "account_id": connection.account_id,
@@ -140,7 +149,31 @@ async def _run_account_cycle(
             "product_lines": enrichment.get("updated", 0),
             "linked": enrichment.get("linked", 0),
             "allocated": enrichment.get("allocated", 0),
-            "errors": len(raw_errors) + len(enrichment_errors),
+            "active_orders_checked": (
+                active_reconciliation.checked
+                if active_reconciliation is not None
+                else 0
+            ),
+            "active_orders_found": (
+                active_reconciliation.found
+                if active_reconciliation is not None
+                else 0
+            ),
+            "active_orders_updated": (
+                active_reconciliation.updated
+                if active_reconciliation is not None
+                else 0
+            ),
+            "active_orders_missing": (
+                active_reconciliation.missing
+                if active_reconciliation is not None
+                else 0
+            ),
+            "errors": (
+                len(raw_errors)
+                + len(enrichment_errors)
+                + len(reconciliation_errors)
+            ),
         }
 
 
@@ -195,7 +228,19 @@ async def run_poll_cycle(
     has_errors = any(item["status"] == "completed_with_errors" for item in results)
     totals = {
         key: sum(int(item.get(key) or 0) for item in results)
-        for key in ("orders", "imported", "updated", "product_lines", "linked", "allocated", "errors")
+        for key in (
+            "orders",
+            "imported",
+            "updated",
+            "product_lines",
+            "linked",
+            "allocated",
+            "active_orders_checked",
+            "active_orders_found",
+            "active_orders_updated",
+            "active_orders_missing",
+            "errors",
+        )
     }
     LAST_RUN.update(
         {
@@ -213,6 +258,8 @@ async def run_poll_cycle(
                 f"orders={totals['orders']}, imported={totals['imported']}, "
                 f"updated={totals['updated']}, product_lines={totals['product_lines']}, "
                 f"linked={totals['linked']}, allocated={totals['allocated']}, "
+                f"active_checked={totals['active_orders_checked']}, "
+                f"active_updated={totals['active_orders_updated']}, "
                 f"errors={totals['errors']}"
             ),
         }
