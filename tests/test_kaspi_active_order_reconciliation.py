@@ -11,7 +11,11 @@ from sqlalchemy.pool import StaticPool
 
 from backend.app import kaspi_active_order_reconciliation, kaspi_raw_receiver_jobs
 from backend.app.db import Base
-from backend.app.models import MarketplaceAccount, MarketplaceOrder
+from backend.app.models import (
+    MarketplaceAccount,
+    MarketplaceImportCheckpoint,
+    MarketplaceOrder,
+)
 
 
 class ExactCodeTransport:
@@ -208,6 +212,87 @@ def test_one_exact_lookup_failure_does_not_block_other_active_orders(monkeypatch
                 )
             )
             assert repaired is not None and repaired.status == "delivered"
+    finally:
+        Base.metadata.drop_all(engine)
+        engine.dispose()
+
+
+def test_active_order_reconciliation_is_bounded_and_advances_durable_cursor(
+    monkeypatch,
+) -> None:
+    factory, engine = _factory()
+    try:
+        with factory() as session:
+            with session.begin():
+                account = MarketplaceAccount(
+                    provider="kaspi",
+                    external_account_id="merchant-bounded-repair",
+                    display_name="BARWORK",
+                    timezone="Asia/Almaty",
+                )
+                session.add(account)
+                session.flush()
+                account_id = account.id
+                orders = [
+                    _order(
+                        account,
+                        code=f"103000{index:04d}",
+                        status="assembly",
+                        days_ago=20,
+                    )
+                    for index in range(25)
+                ]
+                session.add_all(orders)
+
+        payloads = {
+            f"103000{index:04d}": {
+                "id": f"external-103000{index:04d}",
+                "attributes": {
+                    "code": f"103000{index:04d}",
+                    "status": "COMPLETED",
+                    "state": "ARCHIVE",
+                    "currency": "KZT",
+                    "totalPrice": "5000",
+                },
+            }
+            for index in range(25)
+        }
+        transport = ExactCodeTransport(payloads)
+        connection = SimpleNamespace(
+            account_id=account_id,
+            timezone="Asia/Almaty",
+            transport=lambda **_options: transport,
+        )
+        monkeypatch.setattr(kaspi_active_order_reconciliation, "SessionLocal", factory)
+        monkeypatch.setattr(kaspi_raw_receiver_jobs, "SessionLocal", factory)
+
+        first = asyncio.run(
+            kaspi_active_order_reconciliation.reconcile_active_orders(
+                connection,
+                batch_size=10,
+            )
+        )
+        second = asyncio.run(
+            kaspi_active_order_reconciliation.reconcile_active_orders(
+                connection,
+                batch_size=10,
+            )
+        )
+
+        assert first.checked == 10
+        assert second.checked == 10
+        assert len(transport.calls) == 20
+        assert len(set(transport.calls)) == 20
+        with factory() as session:
+            checkpoint = session.scalar(
+                select(MarketplaceImportCheckpoint).where(
+                    MarketplaceImportCheckpoint.marketplace_account_id == account_id,
+                    MarketplaceImportCheckpoint.stream_name
+                    == kaspi_active_order_reconciliation.RECONCILIATION_CHECKPOINT_STREAM,
+                )
+            )
+            assert checkpoint is not None
+            assert checkpoint.cursor is not None
     finally:
         Base.metadata.drop_all(engine)
         engine.dispose()

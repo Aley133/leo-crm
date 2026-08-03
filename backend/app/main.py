@@ -31,8 +31,14 @@ from .dumping_run_compat_api import router as dumping_run_compat_router
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .inventory_api import router as inventory_router
 from .kaspi_competitor_agent_api import router as kaspi_competitor_agent_router
+from .kaspi_order_polling import ENRICHMENT_LAST_RUN as KASPI_ENRICHMENT_STATUS
 from .kaspi_order_polling import LAST_RUN as KASPI_POLL_STATUS
-from .kaspi_order_polling import polling_loop
+from .kaspi_order_polling import MAINTENANCE_LAST_RUN as KASPI_MAINTENANCE_STATUS
+from .kaspi_order_polling import (
+    enrichment_polling_loop,
+    maintenance_polling_loop,
+    polling_loop,
+)
 from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
@@ -62,8 +68,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.22.2"
-DEPLOYMENT_MARKER = "supplier-preorder-xml-stock-capacity"
+APP_VERSION = "0.23.0"
+DEPLOYMENT_MARKER = "independent-fast-orders-priority-dumping"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -200,13 +206,19 @@ async def start_background_services() -> None:
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
+    app.state.kaspi_enrichment_task = asyncio.create_task(
+        enrichment_polling_loop(stop_event)
+    )
+    app.state.kaspi_maintenance_task = asyncio.create_task(
+        maintenance_polling_loop(stop_event)
+    )
     price_alert_stop_event = asyncio.Event()
     app.state.price_alert_stop_event = price_alert_stop_event
     app.state.price_alert_task = asyncio.create_task(
         price_alert_publisher_loop(price_alert_stop_event)
     )
-    # No server-side Kaspi competitor requests are started here. The compatibility
-    # hook is intentionally a no-op; local Kaspi Competitor Agent owns scans.
+    # Render schedules durable competitor jobs only. The local Kaspi Competitor
+    # Agent remains the sole owner of Kaspi HTTP scans.
     await start_dumping_competitor_worker()
 
 
@@ -214,15 +226,20 @@ async def start_background_services() -> None:
 async def stop_background_services() -> None:
     await stop_dumping_competitor_worker()
     stop_event = getattr(app.state, "kaspi_poll_stop_event", None)
-    task = getattr(app.state, "kaspi_poll_task", None)
+    tasks = [
+        getattr(app.state, "kaspi_poll_task", None),
+        getattr(app.state, "kaspi_enrichment_task", None),
+        getattr(app.state, "kaspi_maintenance_task", None),
+    ]
     if stop_event is not None:
         stop_event.set()
-    if task is not None:
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            pass
+    for task in tasks:
+        if task is not None:
+            task.cancel()
+    await asyncio.gather(
+        *(task for task in tasks if task is not None),
+        return_exceptions=True,
+    )
     price_alert_stop_event = getattr(app.state, "price_alert_stop_event", None)
     price_alert_task = getattr(app.state, "price_alert_task", None)
     if price_alert_stop_event is not None:
@@ -246,6 +263,8 @@ async def root() -> dict[str, object]:
         "crm": "/crm",
         "kaspi_feed": "/feeds/kaspi/catalog.xml",
         "kaspi_polling": dict(KASPI_POLL_STATUS),
+        "kaspi_order_enrichment": dict(KASPI_ENRICHMENT_STATUS),
+        "kaspi_order_maintenance": dict(KASPI_MAINTENANCE_STATUS),
     }
 
 
@@ -261,6 +280,8 @@ async def health() -> dict[str, object]:
         "deployment_marker": DEPLOYMENT_MARKER,
         "timestamp": datetime.now(UTC).isoformat(),
         "kaspi_polling": dict(KASPI_POLL_STATUS),
+        "kaspi_order_enrichment": dict(KASPI_ENRICHMENT_STATUS),
+        "kaspi_order_maintenance": dict(KASPI_MAINTENANCE_STATUS),
     }
 
 

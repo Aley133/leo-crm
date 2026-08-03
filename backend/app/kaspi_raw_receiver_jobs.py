@@ -311,12 +311,19 @@ def _persist_orders(
         with session.begin():
             products_to_sync: set[int] = set()
             account = (
-                session.get(MarketplaceAccount, marketplace_account_id)
+                session.scalar(
+                    select(MarketplaceAccount)
+                    .where(MarketplaceAccount.id == marketplace_account_id)
+                    .with_for_update()
+                )
                 if marketplace_account_id is not None
                 else ensure_kaspi_marketplace_account(session)
             )
             if account is None:
                 raise RuntimeError("Kaspi marketplace account is missing")
+            # Fast intake and bounded maintenance may fetch Kaspi concurrently.
+            # Lock only this five-order persistence batch so their idempotent
+            # select/insert sequence cannot race on account-scoped unique keys.
             for source_payload in orders:
                 external_order_id = str(
                     source_payload.get("id") or _attrs(source_payload).get("code") or ""

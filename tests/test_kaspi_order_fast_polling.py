@@ -35,7 +35,7 @@ def test_fast_enrichment_job_reads_only_the_same_recent_window() -> None:
     assert kaspi_product_enrichment_jobs.JOBS[job_id]["lookback_minutes"] == 20
 
 
-def test_polling_runs_fast_each_minute_and_full_reconciliation_every_tenth_cycle(
+def test_fast_polling_never_runs_maintenance_inline(
     monkeypatch,
 ) -> None:
     calls: list[dict] = []
@@ -53,10 +53,47 @@ def test_polling_runs_fast_each_minute_and_full_reconciliation_every_tenth_cycle
 
     asyncio.run(kaspi_order_polling.polling_loop(stop_event))
 
-    assert all(call["mode"] == "fast" for call in calls[:9])
-    assert all(call["lookback_minutes"] == 20 for call in calls[:9])
-    assert all(call["enrich_products"] is True for call in calls[:9])
-    assert calls[9] == {"days": 1, "mode": "full", "enrich_products": True}
+    assert len(calls) == 10
+    assert all(call["mode"] == "fast" for call in calls)
+    assert all(call["lookback_minutes"] == 20 for call in calls)
+    assert all(call["enrich_products"] is False for call in calls)
+
+
+def test_maintenance_runs_independently_and_uses_deep_cycle_every_hour(
+    monkeypatch,
+) -> None:
+    calls: list[dict] = []
+    stop_event = asyncio.Event()
+
+    async def run_cycle(**options):
+        calls.append(options)
+        if len(calls) == 6:
+            stop_event.set()
+
+    monkeypatch.setattr(kaspi_order_polling, "polling_enabled", lambda: True)
+    monkeypatch.setattr(
+        kaspi_order_polling,
+        "maintenance_startup_delay_seconds",
+        lambda: 0,
+    )
+    monkeypatch.setattr(
+        kaspi_order_polling,
+        "maintenance_interval_seconds",
+        lambda: 0.001,
+    )
+    monkeypatch.setattr(kaspi_order_polling, "run_poll_cycle", run_cycle)
+
+    asyncio.run(kaspi_order_polling.maintenance_polling_loop(stop_event))
+
+    assert [call["mode"] for call in calls] == [
+        "full",
+        "full",
+        "full",
+        "full",
+        "full",
+        "deep",
+    ]
+    assert all(call["status_store"] is kaspi_order_polling.MAINTENANCE_LAST_RUN for call in calls)
 
 
 def test_fast_polling_applies_the_same_cycle_to_every_kaspi_workspace(monkeypatch) -> None:
