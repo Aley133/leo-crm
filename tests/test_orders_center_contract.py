@@ -64,6 +64,15 @@ def test_orders_center_explains_preorder_coverage_per_product() -> None:
     assert ".procurement-disclosure[open]" in styles
 
 
+def test_orders_center_shows_one_order_logistics_tariff() -> None:
+    script = (ROOT / "backend" / "app" / "static" / "orders.js").read_text(
+        encoding="utf-8"
+    )
+
+    assert "Логистика заказа ${money(order.logistics, order.currency)}" in script
+    assert 'multiLineOrder ? "доля логистики" : "логистика"' in script
+
+
 def test_order_product_link_preserves_the_orders_list_context() -> None:
     product_html = (
         ROOT / "backend" / "app" / "static" / "product-detail.html"

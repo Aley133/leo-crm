@@ -51,6 +51,7 @@ class CommerceOrderRead(BaseModel):
     manual_stage_updated_at: datetime | None
     currency: str
     total_amount: Decimal
+    logistics: Decimal
     ordered_at: datetime | None
     delivered_at: datetime | None
     units: int

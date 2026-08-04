@@ -69,8 +69,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.11"
-DEPLOYMENT_MARKER = "kaspi-preorder-truth-and-order-return"
+APP_VERSION = "0.23.12"
+DEPLOYMENT_MARKER = "received-fifo-preorder-and-order-logistics"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

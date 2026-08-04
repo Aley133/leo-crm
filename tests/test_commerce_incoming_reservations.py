@@ -1,8 +1,11 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+from backend.app import inventory_service
+from backend.app.commerce.domain import CommerceOrderStage
 from backend.app.commerce.repository import SqlAlchemyCommerceRepository
 from backend.app.inventory_models import InventoryAllocation, InventoryBatch
+from backend.app.inventory_service import create_inventory_batch, mark_inventory_batch_received
 from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderLine, Product
 
 
@@ -142,3 +145,75 @@ def test_physical_fifo_is_deducted_before_incoming_reservation(db_session) -> No
 
     assert reservations[first.id] == 1
     assert reservations[second.id] == 1
+
+
+def test_received_batches_move_preorders_to_packaging_in_order_fifo(
+    db_session,
+    monkeypatch,
+) -> None:
+    monkeypatch.setattr(
+        inventory_service,
+        "_sync_product_inventory_to_feed",
+        lambda *_args, **_kwargs: None,
+    )
+    account = MarketplaceAccount(
+        provider="kaspi",
+        external_account_id="11843018",
+        display_name="Kaspi",
+        timezone="Asia/Almaty",
+    )
+    db_session.add(account)
+    db_session.flush()
+    product = _product(db_session, "PENTA-1")
+    first = _line(db_session, account, product, number=1, status="accepted")
+    second = _line(db_session, account, product, number=2, status="accepted")
+    incoming_batch, allocated = create_inventory_batch(
+        db_session,
+        product=product,
+        quantity=1,
+        unit_cost=Decimal("589"),
+        received_at=NOW + timedelta(days=1),
+        source_name="FIFO supplier",
+        is_received=False,
+    )
+
+    assert allocated == 0
+    _total, before_receipt = SqlAlchemyCommerceRepository(db_session).list_orders(
+        limit=20,
+        offset=0,
+    )
+    assert {order.stage for order in before_receipt} == {
+        CommerceOrderStage.PREORDER
+    }
+
+    assert mark_inventory_batch_received(
+        db_session,
+        batch=incoming_batch,
+        received_at=NOW + timedelta(hours=1),
+    ) == 1
+    _total, after_first_receipt = SqlAlchemyCommerceRepository(db_session).list_orders(
+        limit=20,
+        offset=0,
+    )
+    stages_by_line = {
+        order.lines[0].line_id: order.stage for order in after_first_receipt
+    }
+    assert stages_by_line[first.id] is CommerceOrderStage.ASSEMBLY
+    assert stages_by_line[second.id] is CommerceOrderStage.PREORDER
+
+    _second_batch, allocated = create_inventory_batch(
+        db_session,
+        product=product,
+        quantity=1,
+        unit_cost=Decimal("589"),
+        received_at=NOW + timedelta(hours=2),
+        source_name="FIFO supplier",
+    )
+    assert allocated == 1
+    _total, after_second_receipt = SqlAlchemyCommerceRepository(db_session).list_orders(
+        limit=20,
+        offset=0,
+    )
+    assert {order.stage for order in after_second_receipt} == {
+        CommerceOrderStage.ASSEMBLY
+    }

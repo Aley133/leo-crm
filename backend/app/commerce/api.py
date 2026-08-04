@@ -247,6 +247,7 @@ def list_commerce_orders(
                 manual_stage_updated_at=order.manual_stage_updated_at,
                 currency=order.currency,
                 total_amount=order.total_amount,
+                logistics=order.logistics,
                 ordered_at=order.ordered_at,
                 delivered_at=order.delivered_at,
                 units=order.units,
