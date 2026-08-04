@@ -272,15 +272,32 @@ async def run_poll_cycle(
 
     results: list[dict[str, Any]] = []
     for connection in connections:
-        results.append(
-            await _run_account_cycle(
-                connection,
-                days=days,
-                mode=mode,
-                lookback_minutes=lookback_minutes,
-                enrich_products=enrich_products,
+        try:
+            results.append(
+                await _run_account_cycle(
+                    connection,
+                    days=days,
+                    mode=mode,
+                    lookback_minutes=lookback_minutes,
+                    enrich_products=enrich_products,
+                )
             )
-        )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            # One marketplace account must never starve the accounts that
+            # follow it in the polling cycle. Keep processing and retain an
+            # account-scoped diagnostic in the aggregate health snapshot.
+            results.append(
+                {
+                    "workspace_id": connection.workspace_id,
+                    "account_id": connection.account_id,
+                    "mode": mode,
+                    "status": "failed",
+                    "errors": 1,
+                    "message": f"{type(exc).__name__}: {str(exc)[:500]}",
+                }
+            )
     has_failures = any(item["status"] == "failed" for item in results)
     has_errors = any(item["status"] == "completed_with_errors" for item in results)
     totals = {
