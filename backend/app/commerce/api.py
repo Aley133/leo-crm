@@ -198,11 +198,18 @@ def list_commerce_orders(
     limit: int = Query(default=50, ge=1, le=200),
     offset: int = Query(default=0, ge=0),
     order_status: str | None = Query(default=None, alias="status"),
+    kaspi_status: str | None = Query(default=None),
     query: str | None = Query(default=None, min_length=1, max_length=200),
     db: Session = Depends(get_db),
 ) -> CommerceOrdersResponse:
     service = CommerceService(SqlAlchemyCommerceRepository(db))
-    total, orders, summary = service.list_orders(limit=limit, offset=offset, status=order_status, query=query)
+    total, orders, summary = service.list_orders(
+        limit=limit,
+        offset=offset,
+        status=order_status,
+        source_status=kaspi_status,
+        query=query,
+    )
     return CommerceOrdersResponse(
         total=total,
         limit=limit,

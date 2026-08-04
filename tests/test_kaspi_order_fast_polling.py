@@ -143,3 +143,56 @@ def test_fast_polling_applies_the_same_cycle_to_every_kaspi_workspace(monkeypatc
         (2, 1, "fast", 20, True),
     ]
     assert [item["workspace_id"] for item in kaspi_order_polling.LAST_RUN["accounts"]] == [1, 2]
+
+
+def test_one_failed_account_does_not_skip_the_next_workspace(monkeypatch) -> None:
+    connections = [
+        SimpleNamespace(workspace_id=1, account_id=11),
+        SimpleNamespace(workspace_id=2, account_id=22),
+    ]
+    observed: list[int] = []
+
+    monkeypatch.setattr(
+        kaspi_order_polling,
+        "list_workspace_kaspi_connections",
+        lambda _session: connections,
+    )
+
+    async def run_account(connection, **_options):
+        observed.append(connection.workspace_id)
+        if connection.workspace_id == 1:
+            raise RuntimeError("BARWORK temporary failure")
+        return {
+            "workspace_id": connection.workspace_id,
+            "account_id": connection.account_id,
+            "status": "completed",
+        }
+
+    monkeypatch.setattr(kaspi_order_polling, "_run_account_cycle", run_account)
+
+    asyncio.run(
+        kaspi_order_polling.run_poll_cycle(
+            days=1,
+            mode="fast",
+            lookback_minutes=20,
+            enrich_products=False,
+        )
+    )
+
+    assert observed == [1, 2]
+    assert kaspi_order_polling.LAST_RUN["status"] == "failed"
+    assert kaspi_order_polling.LAST_RUN["accounts"] == [
+        {
+            "workspace_id": 1,
+            "account_id": 11,
+            "mode": "fast",
+            "status": "failed",
+            "errors": 1,
+            "message": "RuntimeError: BARWORK temporary failure",
+        },
+        {
+            "workspace_id": 2,
+            "account_id": 22,
+            "status": "completed",
+        },
+    ]

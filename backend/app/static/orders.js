@@ -54,9 +54,11 @@ const restoreListContextFromUrl = () => {
   const params = new URLSearchParams(window.location.search);
   const query = params.get("query");
   const status = params.get("status");
+  const kaspiStatus = params.get("kaspi_status");
   const scrollTop = Number(params.get("scroll") || 0);
   if (query != null) document.querySelector("#search").value = query;
   if (status != null) document.querySelector("#status").value = status;
+  if (kaspiStatus != null) document.querySelector("#kaspi-status").value = kaspiStatus;
   pendingScrollTop = Number.isFinite(scrollTop) && scrollTop > 0 ? scrollTop : 0;
 };
 
@@ -64,8 +66,10 @@ const currentOrdersReturnUrl = () => {
   const params = new URLSearchParams();
   const query = document.querySelector("#search").value.trim();
   const status = document.querySelector("#status").value;
+  const kaspiStatus = document.querySelector("#kaspi-status").value;
   if (query) params.set("query", query);
   if (status) params.set("status", status);
+  if (kaspiStatus) params.set("kaspi_status", kaspiStatus);
   params.set("scroll", String(Math.max(0, Math.round(window.scrollY))));
   return `/crm/orders?${params.toString()}`;
 };
@@ -74,8 +78,10 @@ const queryString = () => {
   const params = new URLSearchParams({limit:"200"});
   const query = document.querySelector("#search").value.trim();
   const status = document.querySelector("#status").value;
+  const kaspiStatus = document.querySelector("#kaspi-status").value;
   if (query) params.set("query", query);
   if (status) params.set("status", status);
+  if (kaspiStatus) params.set("kaspi_status", kaspiStatus);
   return params.toString();
 };
 
@@ -112,7 +118,7 @@ const renderOrder = (order) => {
   const stageControls = editableStage ? `<div class="stage-override-controls"><select class="stage-override-select" aria-label="Новый этап заказа"><option value="">Выберите этап</option>${stageOptions}</select><button class="button secondary apply-stage-override" type="button">Изменить этап</button>${order.manual_stage ? '<button class="button secondary clear-stage-override" type="button">Вернуть автостатус</button>' : ""}</div>` : "";
   const purchaseAction = canCreatePurchase ? `<button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button>` : "";
   const orderActions = stageControls || purchaseAction ? `<div class="order-actions">${stageControls}${purchaseAction}</div>` : "";
-  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">${escapeHtml(stageSourceLabel(order.operational_stage_source))}</span>${manualNote}</div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${orderActions}</article>`;
+  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Kaspi: ${escapeHtml(stageLabel(order.status))}</span><span class="muted">${escapeHtml(stageSourceLabel(order.operational_stage_source))}</span>${manualNote}</div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${orderActions}</article>`;
 };
 
 const procurementProductKey = (line) => {
