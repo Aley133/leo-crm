@@ -168,9 +168,10 @@ class CommerceOrder:
         except ValueError:
             source_stage = CommerceOrderStage.UNKNOWN
 
-        # Kaspi remains authoritative once an order has moved beyond the seller's
-        # warehouse or reached a terminal state. A local correction must never
-        # pull such an order backwards and make inventory sellable again.
+        # The Kaspi Orders API is authoritative for the visible order stage.
+        # Its explicit preOrder flag is normalized to ACCEPTED/PREORDER by the
+        # receiver, while a regular seller order is normalized to ASSEMBLY.
+        # FIFO coverage affects cost and procurement, never the Kaspi stage.
         if source_stage in {
             CommerceOrderStage.HANDOVER,
             CommerceOrderStage.SHIPPING,
@@ -187,50 +188,15 @@ class CommerceOrder:
             except ValueError:
                 pass
 
-        # While the order is still at the seller, physical coverage is the
-        # authoritative boundary: every unit covered -> packaging; any deficit
-        # -> preorder. Kaspi can otherwise leave ASSEMBLY on an order after the
-        # owner corrects an erroneous warehouse batch.
-        if source_stage in {
-            CommerceOrderStage.NEW,
-            CommerceOrderStage.ACCEPTED,
-            CommerceOrderStage.PREORDER,
-            CommerceOrderStage.ASSEMBLY,
-        }:
-            return (
-                CommerceOrderStage.ASSEMBLY
-                if self._ready_for_packaging
-                else CommerceOrderStage.PREORDER
-            )
+        if source_stage == CommerceOrderStage.ACCEPTED:
+            return CommerceOrderStage.PREORDER
         return source_stage
 
     @property
-    def _ready_for_packaging(self) -> bool:
-        if not self.lines:
-            return False
-        # A purchase request marked as received is not warehouse evidence by
-        # itself. Packaging is allowed only after every ordered unit has a real
-        # FIFO allocation (purchase or completed production batch).
-        return all(
-            line.product_id is not None
-            and line.inventory_allocated_quantity >= line.quantity
-            for line in self.lines
-        )
-
-    @property
     def stage_source(self) -> str:
-        if self.status in {
-            CommerceOrderStage.HANDOVER.value,
-            CommerceOrderStage.SHIPPING.value,
-            CommerceOrderStage.CANCELLING.value,
-            CommerceOrderStage.DELIVERED.value,
-            CommerceOrderStage.CANCELLED.value,
-            CommerceOrderStage.RETURNED.value,
-        }:
-            return "kaspi_orders_api"
         if self.manual_stage:
             return "manual_owner_correction"
-        return "kaspi_orders_api+inventory_coverage"
+        return "kaspi_orders_api"
 
     @property
     def units(self) -> int:

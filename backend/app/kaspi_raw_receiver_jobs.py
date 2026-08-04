@@ -94,6 +94,7 @@ def create_job(
         "progress": {"completed": 0, "total": range_count * ranges_per_day, "percent": 0},
         "request_count": 0,
         "orders_count": 0,
+        "orders_ready": False,
         "imported_count": 0,
         "updated_count": 0,
         "latest_order_at": None,
@@ -325,15 +326,25 @@ def _persist_orders(
             # Lock only this five-order persistence batch so their idempotent
             # select/insert sequence cannot race on account-scoped unique keys.
             for source_payload in orders:
+                source_attributes = _attrs(source_payload)
                 external_order_id = str(
-                    source_payload.get("id") or _attrs(source_payload).get("code") or ""
+                    source_payload.get("id") or source_attributes.get("code") or ""
                 ).strip()
                 if not external_order_id:
                     continue
-                history = _history_record(
-                    session,
-                    marketplace_account_id=account.id,
-                    external_order_id=external_order_id,
+                needs_delivery_history = (
+                    _delivery_cost(source_payload) > 0
+                    and not source_attributes.get("courierTransmissionDate")
+                    and not source_attributes.get("courierTransmissionPlanningDate")
+                )
+                history = (
+                    _history_record(
+                        session,
+                        marketplace_account_id=account.id,
+                        external_order_id=external_order_id,
+                    )
+                    if needs_delivery_history
+                    else None
                 )
                 payload = canonicalize_kaspi_order_payload(
                     source_payload,
@@ -352,6 +363,12 @@ def _persist_orders(
                     imported += 1
                 elif result.changed:
                     updated += 1
+                # Adding/receiving an inventory batch already reconciles every
+                # existing order for that product. Re-running identity, FIFO and
+                # XML work for an unchanged order made a 7-day manual refresh
+                # spend minutes repeating writes after Kaspi was already read.
+                if not result.created and not result.changed:
+                    continue
                 order = session.get(MarketplaceOrder, result.order_id)
                 if order is not None:
                     for line in order.lines:
@@ -359,6 +376,7 @@ def _persist_orders(
                             session,
                             marketplace_account_id=account.id,
                             order_line=line,
+                            allocate_inventory=False,
                         )
                         # Product identity can be backfilled even for an unchanged
                         # order. Allocate after identity resolution on every manual
@@ -599,6 +617,8 @@ async def run_job(
             await asyncio.gather(*(worker() for _ in range(3)))
 
         orders = sorted(unique.values(), key=_creation_ms, reverse=True)
+        job["status"] = "saving_orders"
+        job["message"] = f"Получено {len(orders)} заказов. Сохраняем их в CRM"
         state_counts = Counter(_state_name(item) for item in orders)
         latest_ms = max((_creation_ms(item) for item in orders), default=0)
         imported, updated = await _persist_orders_in_batches(

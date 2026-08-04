@@ -20,7 +20,6 @@ const percent = (value) => value == null ? "—" : `${Number(value).toLocaleStri
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
 const stageLabel = (stage) => ({new:"Новый",accepted:"Принят",preorder:"Предзаказ",assembly:"Упаковка",handover:"Передача",shipping:"Передан в доставку",cancelling:"Отмена в процессе",delivered:"Завершён",cancelled:"Отменён",returned:"Возврат",unknown:"Прочее"}[stage] || stage || "—");
 const stageClass = (stage) => stage === "delivered" ? "ok" : ["cancelling","cancelled","returned"].includes(stage) ? "bad" : "warn";
-const stageSourceLabel = (source) => source === "manual_owner_correction" ? "Ручная коррекция владельца" : source === "kaspi_orders_api+inventory_coverage" ? "Kaspi + фактическое покрытие FIFO" : "Kaspi Orders API";
 const procurementLabel = (state) => ({required:"Нужно закупить",in_progress:"Закупка оформлена",received:"Получено",not_required:"Закупка не требуется",cancelled:"Закупка отменена"}[state] || state || "—");
 const purchaseStatusLabel = (status) => ({draft:"Черновик",requested:"Заявка отправлена",ordered:"Заказано",partially_received:"Получено частично",received:"Получено",closed:"Закрыто",cancelled:"Отменено"}[status] || status || "—");
 const nextPurchaseAction = (status) => ({draft:{target:"requested",label:"Отправить заявку",loading:"Отправляю…"},requested:{target:"ordered",label:"Отметить заказанным",loading:"Сохраняю…"},ordered:{target:"received",label:"Отметить полученным",loading:"Принимаю…"},partially_received:{target:"received",label:"Отметить полученным",loading:"Принимаю…"},received:{target:"closed",label:"Закрыть закупку",loading:"Закрываю…"}}[status] || null);
@@ -54,11 +53,9 @@ const restoreListContextFromUrl = () => {
   const params = new URLSearchParams(window.location.search);
   const query = params.get("query");
   const status = params.get("status");
-  const kaspiStatus = params.get("kaspi_status");
   const scrollTop = Number(params.get("scroll") || 0);
   if (query != null) document.querySelector("#search").value = query;
   if (status != null) document.querySelector("#status").value = status;
-  if (kaspiStatus != null) document.querySelector("#kaspi-status").value = kaspiStatus;
   pendingScrollTop = Number.isFinite(scrollTop) && scrollTop > 0 ? scrollTop : 0;
 };
 
@@ -66,10 +63,8 @@ const currentOrdersReturnUrl = () => {
   const params = new URLSearchParams();
   const query = document.querySelector("#search").value.trim();
   const status = document.querySelector("#status").value;
-  const kaspiStatus = document.querySelector("#kaspi-status").value;
   if (query) params.set("query", query);
   if (status) params.set("status", status);
-  if (kaspiStatus) params.set("kaspi_status", kaspiStatus);
   params.set("scroll", String(Math.max(0, Math.round(window.scrollY))));
   return `/crm/orders?${params.toString()}`;
 };
@@ -78,10 +73,8 @@ const queryString = () => {
   const params = new URLSearchParams({limit:"200"});
   const query = document.querySelector("#search").value.trim();
   const status = document.querySelector("#status").value;
-  const kaspiStatus = document.querySelector("#kaspi-status").value;
   if (query) params.set("query", query);
   if (status) params.set("status", status);
-  if (kaspiStatus) params.set("kaspi_status", kaspiStatus);
   return params.toString();
 };
 
@@ -99,7 +92,7 @@ const renderPurchaseAction = (line) => {
 
 const renderLine = (line) => {
   const identity = [line.merchant_sku ? `Артикул ${escapeHtml(line.merchant_sku)}` : null, line.external_product_id ? `Kaspi ID ${escapeHtml(line.external_product_id)}` : null].filter(Boolean).join(" · ") || "Идентификатор не получен";
-  const title = line.product_id ? `<a class="line-title" href="/crm/products/${line.product_id}">${escapeHtml(line.title)}</a>` : `<strong>${escapeHtml(line.title)}</strong>`;
+  const title = line.product_id ? `<a class="line-title order-product-link" data-product-id="${Number(line.product_id)}" href="/crm/products/${Number(line.product_id)}">${escapeHtml(line.title)}</a>` : `<strong>${escapeHtml(line.title)}</strong>`;
   const cost = line.procurement_unit_cost == null ? "—" : money(line.procurement_unit_cost);
   const source = line.procurement_source_name ? escapeHtml(line.procurement_source_name) : "Источник не выбран";
   const netProfit = line.net_profit == null ? "—" : `${money(line.net_profit)} · ${percent(line.net_margin_pct)}`;
@@ -118,7 +111,7 @@ const renderOrder = (order) => {
   const stageControls = editableStage ? `<div class="stage-override-controls"><select class="stage-override-select" aria-label="Новый этап заказа"><option value="">Выберите этап</option>${stageOptions}</select><button class="button secondary apply-stage-override" type="button">Изменить этап</button>${order.manual_stage ? '<button class="button secondary clear-stage-override" type="button">Вернуть автостатус</button>' : ""}</div>` : "";
   const purchaseAction = canCreatePurchase ? `<button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button>` : "";
   const orderActions = stageControls || purchaseAction ? `<div class="order-actions">${stageControls}${purchaseAction}</div>` : "";
-  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Этап LEO</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong><span class="muted">Kaspi: ${escapeHtml(stageLabel(order.status))}</span><span class="muted">${escapeHtml(stageSourceLabel(order.operational_stage_source))}</span>${manualNote}</div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${orderActions}</article>`;
+  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Статус Kaspi</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong>${manualNote}</div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${orderActions}</article>`;
 };
 
 const procurementProductKey = (line) => {
@@ -271,7 +264,7 @@ const pollRebuildJob = async (jobId) => {
     const job = await response.json();
     const progress = job.progress || {};
     message.textContent = `${job.message || job.status}. Прогресс: ${Number(progress.percent || 0)}%. Заказов: ${Number(job.orders_count || 0)}. Запросов: ${Number(job.request_count || 0)}. Ошибок диапазонов: ${(job.errors || []).length}.`;
-    if (["completed", "completed_with_errors", "failed"].includes(job.status)) return job;
+    if (job.orders_ready === true || ["completed", "completed_with_errors", "failed"].includes(job.status)) return job;
     await sleep(1200);
   }
 };
@@ -301,7 +294,9 @@ const rebuildOrders = async (daysOverride = null, preserveFilters = false) => {
     if (result.status === "lost") throw new Error("Render дважды перезапустил процесс во время загрузки. Повторите после завершения деплоя.");
     if (result.status === "failed") throw new Error(result.message || "Kaspi raw receiver завершился с ошибкой.");
     const enrichment = result.product_enrichment || {};
-    message.textContent = `Готово. Заказов: ${Number(result.orders_count || 0)}, новых: ${Number(result.imported_count || 0)}, обновлено: ${Number(result.updated_count || 0)}, товарных строк: ${Number(enrichment.updated || 0)}.`;
+    message.textContent = result.status === "enriching_products"
+      ? `Заказы сохранены: ${Number(result.orders_count || 0)}. Уточнение названий товаров продолжается в фоне.`
+      : `Готово. Заказов: ${Number(result.orders_count || 0)}, новых: ${Number(result.imported_count || 0)}, обновлено: ${Number(result.updated_count || 0)}, товарных строк: ${Number(enrichment.updated || 0)}.`;
     if (!preserveFilters) filters.reset();
     await loadOrders();
   } catch (error) {
@@ -381,7 +376,7 @@ const changeOrderStage = async (button, clear = false) => {
   try {
     const response = await fetch(`/api/commerce/orders/${orderId}/stage-override`, {method:"POST",headers:{...headers(),"Content-Type":"application/json"},body:JSON.stringify({stage,reason})});
     if (!response.ok) throw await responseError(response);
-    message.textContent = clear ? "Ручная коррекция снята. Этап снова определяется по Kaspi и FIFO." : "Этап изменён, FIFO и XML пересчитаны.";
+    message.textContent = clear ? "Ручная коррекция снята. Статус снова определяется по Kaspi." : "Этап изменён, FIFO и XML пересчитаны.";
     await refreshSingleOrder(orderId, card);
   } catch (error) {
     message.textContent = error.message || "Не удалось изменить этап заказа.";
@@ -395,6 +390,6 @@ resetButton.addEventListener("click", () => { filters.reset(); loadOrders(); });
 refreshButton.addEventListener("click", () => rebuildOrders(1, true));
 rebuildButton.addEventListener("click", () => rebuildOrders());
 captureRevenueButton.addEventListener("click", captureRevenue);
-ordersList.addEventListener("click", (event) => { const createButton = event.target.closest(".create-purchase"); if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; } const transitionButton = event.target.closest(".purchase-transition"); if (transitionButton) { transitionPurchase(transitionButton); return; } const stageButton = event.target.closest(".apply-stage-override"); if (stageButton) { changeOrderStage(stageButton); return; } const clearButton = event.target.closest(".clear-stage-override"); if (clearButton) changeOrderStage(clearButton, true); });
+ordersList.addEventListener("click", (event) => { const productLink = event.target.closest(".order-product-link"); if (productLink) { event.preventDefault(); const returnTo = currentOrdersReturnUrl(); window.location.assign(`/crm/products/${encodeURIComponent(productLink.dataset.productId)}?return_to=${encodeURIComponent(returnTo)}`); return; } const createButton = event.target.closest(".create-purchase"); if (createButton) { createPurchase(createButton.dataset.orderId, createButton); return; } const transitionButton = event.target.closest(".purchase-transition"); if (transitionButton) { transitionPurchase(transitionButton); return; } const stageButton = event.target.closest(".apply-stage-override"); if (stageButton) { changeOrderStage(stageButton); return; } const clearButton = event.target.closest(".clear-stage-override"); if (clearButton) changeOrderStage(clearButton, true); });
 restoreListContextFromUrl();
 loadOrders();

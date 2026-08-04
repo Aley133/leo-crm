@@ -127,6 +127,7 @@ def ensure_marketplace_listing_for_order_line(
     *,
     marketplace_account_id: int,
     order_line: MarketplaceOrderLine,
+    allocate_inventory: bool = True,
 ) -> ListingEnsureResult:
     """Ensure listing identity, catalogue resolution and FIFO stock allocation.
 
@@ -199,7 +200,8 @@ def ensure_marketplace_listing_for_order_line(
         }:
             order_line.title = product.name
         session.flush()
-        allocate_order_line_fifo(session, order_line=order_line)
+        if allocate_inventory:
+            allocate_order_line_fifo(session, order_line=order_line)
 
     _resolve_open_issue(session, order_line_id=order_line.id)
     return ListingEnsureResult(

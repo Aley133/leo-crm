@@ -83,6 +83,9 @@ async def _run_full_kaspi_rebuild(
     raw_job = RAW_JOBS.get(job_id)
     if raw_job is None or raw_job.get("status") == "failed":
         return
+    # Orders are already persisted at this point. Product enrichment is useful
+    # maintenance, but the Orders screen must not remain locked while it runs.
+    raw_job["orders_ready"] = True
     enrichment_job_id = create_product_enrichment_job(
         days=days,
         marketplace_account_id=marketplace_account_id,

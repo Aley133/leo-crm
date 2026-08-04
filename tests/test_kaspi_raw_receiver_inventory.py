@@ -199,7 +199,16 @@ def test_raw_receiver_persists_order_and_allocates_existing_fifo_stock(
         assert persisted_batch.quantity_remaining == 11
 
     # A manual rebuild may revisit the same unchanged order. It must not consume
-    # a second unit from the batch.
+    # a second unit from the batch or repeat FIFO work after Kaspi is already
+    # persisted. Inventory-batch creation owns later reconciliation.
+    def unexpected_fifo_rebuild(*_args, **_kwargs):
+        raise AssertionError("unchanged order must not repeat FIFO allocation")
+
+    monkeypatch.setattr(
+        kaspi_raw_receiver_jobs,
+        "allocate_order_line_fifo",
+        unexpected_fifo_rebuild,
+    )
     kaspi_raw_receiver_jobs._persist_orders([payload], timezone_name="Asia/Almaty")
     with factory() as session:
         allocations = session.scalars(select(InventoryAllocation)).all()

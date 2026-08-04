@@ -38,7 +38,7 @@ class InMemoryCommerceRepository:
         return len(rows), rows[offset : offset + limit]
 
 
-def _order(order_id: int, *, fifo_ready: bool) -> CommerceOrder:
+def _order(order_id: int, *, fifo_ready: bool, status: str = "assembly") -> CommerceOrder:
     line = CommerceOrderLine(
         line_id=order_id,
         product_id=order_id,
@@ -58,8 +58,8 @@ def _order(order_id: int, *, fifo_ready: bool) -> CommerceOrder:
         marketplace="kaspi",
         marketplace_account_id=2,
         marketplace_external_account_id="30295031",
-        status="assembly",
-        original_status="ASSEMBLY",
+        status=status,
+        original_status=("ACCEPTED_BY_MERCHANT" if status == "accepted" else "ASSEMBLY"),
         currency="KZT",
         total_amount=Decimal("1000"),
         ordered_at=datetime(2026, 8, 4, tzinfo=UTC),
@@ -68,7 +68,7 @@ def _order(order_id: int, *, fifo_ready: bool) -> CommerceOrder:
     )
 
 
-def test_kaspi_packaging_filter_keeps_all_source_orders() -> None:
+def test_kaspi_packaging_filter_keeps_all_orders_regardless_of_fifo() -> None:
     orders = tuple(_order(index, fifo_ready=index <= 16) for index in range(1, 57))
     repository = InMemoryCommerceRepository(orders)
     service = CommerceService(repository)
@@ -76,32 +76,34 @@ def test_kaspi_packaging_filter_keeps_all_source_orders() -> None:
     total, visible, summary = service.list_orders(
         limit=200,
         offset=0,
-        source_status="assembly",
+        status="assembly",
     )
 
     assert total == 56
     assert len(visible) == 56
     assert summary.orders_count == 56
-    assert repository.calls[-1]["status"] == "assembly"
+    assert repository.calls[-1]["status"] is None
 
 
-def test_leo_packaging_filter_remains_fifo_authoritative() -> None:
-    orders = tuple(_order(index, fifo_ready=index <= 16) for index in range(1, 57))
+def test_kaspi_preorder_filter_keeps_covered_and_uncovered_preorders() -> None:
+    orders = tuple(
+        _order(index, fifo_ready=index <= 16, status="accepted")
+        for index in range(1, 41)
+    )
     service = CommerceService(InMemoryCommerceRepository(orders))
 
     total, visible, summary = service.list_orders(
         limit=200,
         offset=0,
-        status="assembly",
-        source_status="assembly",
+        status="preorder",
     )
 
-    assert total == 16
-    assert len(visible) == 16
-    assert summary.orders_count == 16
+    assert total == 40
+    assert len(visible) == 40
+    assert summary.orders_count == 40
 
 
-def test_orders_ui_exposes_independent_kaspi_and_leo_filters() -> None:
+def test_orders_ui_exposes_one_authoritative_kaspi_filter() -> None:
     html = (ROOT / "backend" / "app" / "static" / "orders.html").read_text(
         encoding="utf-8"
     )
@@ -109,8 +111,10 @@ def test_orders_ui_exposes_independent_kaspi_and_leo_filters() -> None:
         encoding="utf-8"
     )
 
-    assert 'id="kaspi-status"' in html
+    assert html.count('id="status"') == 1
+    assert 'id="kaspi-status"' not in html
     assert "Статус Kaspi" in html
-    assert "Готово к упаковке" in html
-    assert 'params.set("kaspi_status", kaspiStatus)' in script
-    assert "Kaspi: ${escapeHtml(stageLabel(order.status))}" in script
+    assert "Этап LEO" not in html
+    assert 'params.set("kaspi_status", kaspiStatus)' not in script
+    assert "Kaspi + фактическое покрытие FIFO" not in script
+    assert "<span>Статус Kaspi</span>" in script

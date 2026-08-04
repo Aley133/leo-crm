@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from pathlib import Path
 from types import SimpleNamespace
 
 from backend.app import (
@@ -8,6 +9,7 @@ from backend.app import (
     kaspi_product_enrichment_jobs,
     kaspi_raw_receiver_jobs,
 )
+from backend.app.commerce import api as commerce_api
 
 
 def test_fast_raw_job_reads_only_recent_active_order_window() -> None:
@@ -196,3 +198,62 @@ def test_one_failed_account_does_not_skip_the_next_workspace(monkeypatch) -> Non
             "status": "completed",
         },
     ]
+
+
+def test_manual_rebuild_marks_orders_ready_before_product_enrichment(monkeypatch) -> None:
+    job_id = "manual-rebuild"
+    commerce_api.RAW_JOBS.clear()
+    commerce_api.RAW_JOBS[job_id] = {
+        "id": job_id,
+        "status": "queued",
+        "orders_count": 56,
+        "errors": [],
+    }
+    observed: list[bool] = []
+
+    async def run_raw(*_args, **_kwargs) -> None:
+        commerce_api.RAW_JOBS[job_id]["status"] = "completed"
+
+    async def run_enrichment(*_args, **_kwargs) -> None:
+        observed.append(commerce_api.RAW_JOBS[job_id]["orders_ready"])
+
+    monkeypatch.setattr(commerce_api, "run_job", run_raw)
+    monkeypatch.setattr(
+        commerce_api,
+        "create_product_enrichment_job",
+        lambda **_kwargs: "enrichment-job",
+    )
+    monkeypatch.setattr(commerce_api, "run_product_enrichment_job", run_enrichment)
+    monkeypatch.setattr(
+        commerce_api,
+        "public_product_enrichment_job",
+        lambda _job_id: {
+            "status": "completed",
+            "processed": 0,
+            "total": 0,
+            "updated": 0,
+            "linked": 0,
+            "allocated": 0,
+            "request_count": 0,
+            "errors": [],
+        },
+    )
+
+    asyncio.run(
+        commerce_api._run_full_kaspi_rebuild(
+            job_id,
+            days=7,
+            api_token="token",
+            marketplace_account_id=2,
+        )
+    )
+
+    assert observed == [True]
+    assert commerce_api.RAW_JOBS[job_id]["orders_ready"] is True
+    assert commerce_api.RAW_JOBS[job_id]["status"] == "completed"
+
+
+def test_orders_ui_stops_loading_once_orders_are_persisted() -> None:
+    source = Path(__file__).resolve().parents[1] / "backend" / "app" / "static" / "orders.js"
+    script = source.read_text(encoding="utf-8")
+    assert "job.orders_ready === true" in script
