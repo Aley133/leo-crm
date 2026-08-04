@@ -396,6 +396,7 @@ def _persist_enriched_order(
                     session,
                     marketplace_account_id=account_id,
                     order_line=stored,
+                    allocate_inventory=False,
                 )
                 if before_product_id is None and stored.product_id is not None:
                     local_linked += 1

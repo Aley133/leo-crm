@@ -10,6 +10,7 @@ from backend.app.commerce.domain import (
     CommerceOrder,
     CommerceOrderLine,
     CommerceOrderStage,
+    ProcurementState,
 )
 from backend.app.commerce.repository import SqlAlchemyCommerceRepository
 from backend.app.inventory_api import (
@@ -174,7 +175,7 @@ def test_production_capacity_covers_orders_without_moving_them_to_packaging(
     ]
 
 
-def test_manufactured_action_moves_only_selected_order_to_packaging(
+def test_manufactured_action_allocates_only_selected_active_preorder(
     db_session,
 ) -> None:
     product, batch, first_order, first_line, second_order, second_line, _allocated = (
@@ -205,7 +206,7 @@ def test_manufactured_action_moves_only_selected_order_to_packaging(
         offset=0,
     )
     by_id = {order.order_id: order for order in orders}
-    assert by_id[first_order.id].stage is CommerceOrderStage.ASSEMBLY
+    assert by_id[first_order.id].stage is CommerceOrderStage.PREORDER
     assert by_id[first_order.id].lines[0].procurement_source_name == "Производство"
     assert by_id[second_order.id].stage is CommerceOrderStage.PREORDER
 
@@ -309,7 +310,7 @@ def test_manufactured_action_is_idempotent(db_session) -> None:
     assert allocation.quantity == 1
 
 
-def test_manufactured_signal_overrides_stale_purchase_request() -> None:
+def test_manufactured_signal_resolves_procurement_without_renaming_preorder() -> None:
     line = CommerceOrderLine(
         line_id=1,
         product_id=1,
@@ -336,7 +337,8 @@ def test_manufactured_signal_overrides_stale_purchase_request() -> None:
         lines=(line,),
     )
 
-    assert order.stage is CommerceOrderStage.ASSEMBLY
+    assert order.stage is CommerceOrderStage.PREORDER
+    assert order.effective_procurement_state(line) is ProcurementState.NOT_REQUIRED
 
 
 def test_production_batch_cannot_be_received_as_whole_stock(db_session) -> None:

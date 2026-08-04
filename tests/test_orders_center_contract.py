@@ -62,3 +62,18 @@ def test_orders_center_explains_preorder_coverage_per_product() -> None:
     assert 'class="procurement-advice hidden"' in html
     assert ".procurement-product" in styles
     assert ".procurement-disclosure[open]" in styles
+
+
+def test_order_product_link_preserves_the_orders_list_context() -> None:
+    product_html = (
+        ROOT / "backend" / "app" / "static" / "product-detail.html"
+    ).read_text(encoding="utf-8")
+    orders_script = (
+        ROOT / "backend" / "app" / "static" / "orders.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'class="line-title order-product-link"' in orders_script
+    assert "currentOrdersReturnUrl()" in orders_script
+    assert "return_to=${encodeURIComponent(returnTo)}" in orders_script
+    assert 'id="back-to-orders"' in product_html
+    assert "Вернуться к списку заказов" in product_html

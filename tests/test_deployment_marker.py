@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.23.10"
-EXPECTED_DEPLOYMENT_MARKER = "kaspi-source-stage-order-filter"
+EXPECTED_APP_VERSION = "0.23.11"
+EXPECTED_DEPLOYMENT_MARKER = "kaspi-preorder-truth-and-order-return"
 
 
 def test_application_metadata_contract() -> None:
