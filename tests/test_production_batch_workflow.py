@@ -206,7 +206,7 @@ def test_manufactured_action_allocates_only_selected_active_preorder(
         offset=0,
     )
     by_id = {order.order_id: order for order in orders}
-    assert by_id[first_order.id].stage is CommerceOrderStage.PREORDER
+    assert by_id[first_order.id].stage is CommerceOrderStage.ASSEMBLY
     assert by_id[first_order.id].lines[0].procurement_source_name == "Производство"
     assert by_id[second_order.id].stage is CommerceOrderStage.PREORDER
 
@@ -310,7 +310,7 @@ def test_manufactured_action_is_idempotent(db_session) -> None:
     assert allocation.quantity == 1
 
 
-def test_manufactured_signal_resolves_procurement_without_renaming_preorder() -> None:
+def test_manufactured_signal_moves_covered_preorder_to_packaging() -> None:
     line = CommerceOrderLine(
         line_id=1,
         product_id=1,
@@ -337,7 +337,7 @@ def test_manufactured_signal_resolves_procurement_without_renaming_preorder() ->
         lines=(line,),
     )
 
-    assert order.stage is CommerceOrderStage.PREORDER
+    assert order.stage is CommerceOrderStage.ASSEMBLY
     assert order.effective_procurement_state(line) is ProcurementState.NOT_REQUIRED
 
 

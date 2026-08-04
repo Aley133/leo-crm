@@ -1,11 +1,15 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from .profit_calculator import calculate_line_economics, kaspi_logistics_per_unit
+from .profit_calculator import (
+    allocate_order_logistics,
+    calculate_line_economics,
+    kaspi_logistics_per_unit,
+)
 
 
 class CommerceOrderStage(StrEnum):
@@ -48,6 +52,7 @@ class CommerceOrderLine:
     inventory_allocated_quantity: int = 0
     production_completed_quantity: int = 0
     incoming_reserved_quantity: int = 0
+    order_logistics_share: Decimal | None = None
 
     @property
     def is_resolved(self) -> bool:
@@ -114,6 +119,8 @@ class CommerceOrderLine:
 
     @property
     def logistics(self) -> Decimal:
+        if self.order_logistics_share is not None:
+            return self.order_logistics_share
         return kaspi_logistics_per_unit(self.unit_price) * self.quantity
 
     @property
@@ -130,6 +137,7 @@ class CommerceOrderLine:
             unit_sale_price=self.unit_price,
             quantity=self.quantity,
             procurement_unit_cost=Decimal("0"),
+            logistics_cost=self.order_logistics_share,
         )
 
     @property
@@ -140,6 +148,7 @@ class CommerceOrderLine:
             unit_sale_price=self.unit_price,
             quantity=self.quantity,
             procurement_unit_cost=self.procurement_unit_cost,
+            logistics_cost=self.order_logistics_share,
         )
 
 
@@ -161,6 +170,20 @@ class CommerceOrder:
     manual_stage_reason: str | None = None
     manual_stage_updated_at: datetime | None = None
 
+    def __post_init__(self) -> None:
+        logistics_shares = allocate_order_logistics(
+            order_total=self.total_amount,
+            line_totals=tuple(line.line_total for line in self.lines),
+        )
+        object.__setattr__(
+            self,
+            "lines",
+            tuple(
+                replace(line, order_logistics_share=share)
+                for line, share in zip(self.lines, logistics_shares, strict=True)
+            ),
+        )
+
     @property
     def stage(self) -> CommerceOrderStage:
         try:
@@ -168,10 +191,10 @@ class CommerceOrder:
         except ValueError:
             source_stage = CommerceOrderStage.UNKNOWN
 
-        # The Kaspi Orders API is authoritative for the visible order stage.
-        # Its explicit preOrder flag is normalized to ACCEPTED/PREORDER by the
-        # receiver, while a regular seller order is normalized to ASSEMBLY.
-        # FIFO coverage affects cost and procurement, never the Kaspi stage.
+        # Kaspi is authoritative for regular seller orders and every stage after
+        # the warehouse. A real preorder may advance to packaging only when
+        # every ordered unit has a physical FIFO allocation. Incoming batches
+        # are deliberately excluded until they are marked as received.
         if source_stage in {
             CommerceOrderStage.HANDOVER,
             CommerceOrderStage.SHIPPING,
@@ -188,15 +211,41 @@ class CommerceOrder:
             except ValueError:
                 pass
 
-        if source_stage == CommerceOrderStage.ACCEPTED:
-            return CommerceOrderStage.PREORDER
+        if source_stage in {
+            CommerceOrderStage.ACCEPTED,
+            CommerceOrderStage.PREORDER,
+        }:
+            return (
+                CommerceOrderStage.ASSEMBLY
+                if self._ready_for_packaging
+                else CommerceOrderStage.PREORDER
+            )
         return source_stage
+
+    @property
+    def _ready_for_packaging(self) -> bool:
+        if not self.lines:
+            return False
+        return all(
+            line.product_id is not None
+            and line.inventory_allocated_quantity >= line.quantity
+            for line in self.lines
+        )
 
     @property
     def stage_source(self) -> str:
         if self.manual_stage:
             return "manual_owner_correction"
+        if self.status in {
+            CommerceOrderStage.ACCEPTED.value,
+            CommerceOrderStage.PREORDER.value,
+        } and self._ready_for_packaging:
+            return "kaspi_orders_api+received_fifo"
         return "kaspi_orders_api"
+
+    @property
+    def logistics(self) -> Decimal:
+        return sum((line.logistics for line in self.lines), Decimal("0"))
 
     @property
     def units(self) -> int:

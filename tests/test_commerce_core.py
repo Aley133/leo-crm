@@ -29,14 +29,20 @@ def _line(
     )
 
 
-def _order(*, status="new", lines=(), original_status="NEW"):
+def _order(
+    *,
+    status="new",
+    lines=(),
+    original_status="NEW",
+    total_amount=Decimal("10000"),
+):
     return CommerceOrder(
         order_id=1,
         external_code="996801988",
         marketplace="kaspi",
         status=status,
         currency="KZT",
-        total_amount=Decimal("10000"),
+        total_amount=total_amount,
         ordered_at=datetime(2026, 7, 21, tzinfo=UTC),
         delivered_at=None,
         lines=tuple(lines),
@@ -44,7 +50,7 @@ def _order(*, status="new", lines=(), original_status="NEW"):
     )
 
 
-def test_kaspi_stage_is_not_reclassified_by_fifo_coverage() -> None:
+def test_regular_kaspi_packaging_never_depends_on_fifo_coverage() -> None:
     assert _order(status="accepted").stage == CommerceOrderStage.PREORDER
     assert _order(status="preorder").stage == CommerceOrderStage.PREORDER
     assert _order(status="assembly").stage == CommerceOrderStage.ASSEMBLY
@@ -59,17 +65,17 @@ def test_kaspi_stage_is_not_reclassified_by_fifo_coverage() -> None:
     assert _order(status="returned").stage == CommerceOrderStage.RETURNED
 
 
-def test_active_preorder_stays_preorder_after_purchase_or_fifo_coverage() -> None:
+def test_only_fifo_covered_preorder_moves_to_packaging() -> None:
     received = _line(purchase_request_id="purchase-1", purchase_status="received")
     closed = _line(purchase_request_id="purchase-2", purchase_status="closed")
     from_stock = _line(inventory_allocated_quantity=2)
     assert _order(status="preorder", lines=(received,)).stage == CommerceOrderStage.PREORDER
     assert _order(status="preorder", lines=(closed,)).stage == CommerceOrderStage.PREORDER
-    assert _order(status="preorder", lines=(from_stock,)).stage == CommerceOrderStage.PREORDER
-    assert _order(status="accepted", lines=(from_stock,)).stage == CommerceOrderStage.PREORDER
+    assert _order(status="preorder", lines=(from_stock,)).stage == CommerceOrderStage.ASSEMBLY
+    assert _order(status="accepted", lines=(from_stock,)).stage == CommerceOrderStage.ASSEMBLY
 
 
-def test_incomplete_preorder_stays_preorder() -> None:
+def test_purchase_workflow_does_not_override_physical_fifo_coverage() -> None:
     ordered = _line(purchase_request_id="purchase-1", purchase_status="ordered")
     received = _line(purchase_request_id="purchase-2", purchase_status="received")
     ordered_from_stock = _line(
@@ -79,7 +85,7 @@ def test_incomplete_preorder_stays_preorder() -> None:
     )
     assert _order(status="preorder", lines=(ordered,)).stage == CommerceOrderStage.PREORDER
     assert _order(status="preorder", lines=(received, ordered)).stage == CommerceOrderStage.PREORDER
-    assert _order(status="preorder", lines=(ordered_from_stock,)).stage == CommerceOrderStage.PREORDER
+    assert _order(status="preorder", lines=(ordered_from_stock,)).stage == CommerceOrderStage.ASSEMBLY
 
 
 def test_incoming_stock_covers_preorder_without_moving_it_to_packaging() -> None:
@@ -116,6 +122,52 @@ def test_existing_purchase_does_not_hide_residual_shortage() -> None:
 
 def test_order_stage_source_is_official_kaspi_orders_api() -> None:
     assert _order(status="preorder").stage_source == "kaspi_orders_api"
+    covered = _line(inventory_allocated_quantity=2)
+    assert (
+        _order(status="preorder", lines=(covered,)).stage_source
+        == "kaspi_orders_api+received_fifo"
+    )
+
+
+def test_order_logistics_uses_combined_total_once() -> None:
+    first = CommerceOrderLine(
+        line_id=1,
+        product_id=1,
+        external_product_id="1",
+        merchant_sku="1",
+        title="Первый товар",
+        quantity=1,
+        unit_price=Decimal("6100"),
+        line_total=Decimal("6100"),
+        purchase_request_id=None,
+        purchase_status=None,
+        procurement_unit_cost=Decimal("1000"),
+    )
+    second = CommerceOrderLine(
+        line_id=2,
+        product_id=2,
+        external_product_id="2",
+        merchant_sku="2",
+        title="Второй товар",
+        quantity=1,
+        unit_price=Decimal("7200"),
+        line_total=Decimal("7200"),
+        purchase_request_id=None,
+        purchase_status=None,
+        procurement_unit_cost=Decimal("2000"),
+    )
+    order = _order(
+        status="assembly",
+        lines=(first, second),
+        total_amount=Decimal("13300"),
+    )
+
+    assert order.logistics == Decimal("1507.00")
+    assert [line.logistics for line in order.lines] == [
+        Decimal("691.18"),
+        Decimal("815.82"),
+    ]
+    assert order.confirmed_net_profit == Decimal("6798.00")
 
 
 def test_procurement_is_required_only_for_early_order_stages() -> None:

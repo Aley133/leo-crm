@@ -85,7 +85,7 @@ def test_kaspi_packaging_filter_keeps_all_orders_regardless_of_fifo() -> None:
     assert repository.calls[-1]["status"] is None
 
 
-def test_kaspi_preorder_filter_keeps_covered_and_uncovered_preorders() -> None:
+def test_preorder_filter_keeps_only_orders_without_received_fifo_coverage() -> None:
     orders = tuple(
         _order(index, fifo_ready=index <= 16, status="accepted")
         for index in range(1, 41)
@@ -98,9 +98,27 @@ def test_kaspi_preorder_filter_keeps_covered_and_uncovered_preorders() -> None:
         status="preorder",
     )
 
-    assert total == 40
-    assert len(visible) == 40
-    assert summary.orders_count == 40
+    assert total == 24
+    assert len(visible) == 24
+    assert summary.orders_count == 24
+
+
+def test_packaging_filter_adds_fifo_covered_preorders() -> None:
+    orders = tuple(
+        _order(index, fifo_ready=index <= 16, status="accepted")
+        for index in range(1, 41)
+    )
+    service = CommerceService(InMemoryCommerceRepository(orders))
+
+    total, visible, summary = service.list_orders(
+        limit=200,
+        offset=0,
+        status="assembly",
+    )
+
+    assert total == 16
+    assert len(visible) == 16
+    assert summary.orders_count == 16
 
 
 def test_orders_ui_exposes_one_authoritative_kaspi_filter() -> None:

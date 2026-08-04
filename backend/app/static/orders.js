@@ -90,13 +90,14 @@ const renderPurchaseAction = (line) => {
   return `<button class="button purchase-transition" type="button" data-purchase-id="${escapeHtml(line.purchase_request_id)}" data-version="${Number(line.purchase_version)}" data-target-status="${action.target}" data-loading-label="${escapeHtml(action.loading)}">${escapeHtml(action.label)}</button>`;
 };
 
-const renderLine = (line) => {
+const renderLine = (line, multiLineOrder = false) => {
   const identity = [line.merchant_sku ? `Артикул ${escapeHtml(line.merchant_sku)}` : null, line.external_product_id ? `Kaspi ID ${escapeHtml(line.external_product_id)}` : null].filter(Boolean).join(" · ") || "Идентификатор не получен";
   const title = line.product_id ? `<a class="line-title order-product-link" data-product-id="${Number(line.product_id)}" href="/crm/products/${Number(line.product_id)}">${escapeHtml(line.title)}</a>` : `<strong>${escapeHtml(line.title)}</strong>`;
   const cost = line.procurement_unit_cost == null ? "—" : money(line.procurement_unit_cost);
   const source = line.procurement_source_name ? escapeHtml(line.procurement_source_name) : "Источник не выбран";
   const netProfit = line.net_profit == null ? "—" : `${money(line.net_profit)} · ${percent(line.net_margin_pct)}`;
-  const fees = `Комиссия ${money(line.kaspi_commission)} · налог ${money(line.tax)} · логистика ${money(line.logistics)}`;
+  const logisticsLabel = multiLineOrder ? "доля логистики" : "логистика";
+  const fees = `Комиссия ${money(line.kaspi_commission)} · налог ${money(line.tax)} · ${logisticsLabel} ${money(line.logistics)}`;
   return `<div class="order-line"><div>${title}<span class="muted">${identity}</span></div><div><span class="muted">Количество</span><strong>${Number(line.quantity || 0)}</strong></div><div><span class="muted">Цена продажи</span><strong>${money(line.unit_price)}</strong></div><div><span class="muted">Закупочная цена</span><strong>${cost}</strong><span class="muted">${source}</span></div><div><span class="muted">Чистая прибыль</span><strong>${netProfit}</strong><span class="muted">${fees}</span><span class="muted">${escapeHtml(procurementLabel(line.procurement_state))}</span>${line.purchase_status ? `<span class="muted">${escapeHtml(purchaseStatusLabel(line.purchase_status))}</span>` : ""}${renderPurchaseAction(line)}</div></div>`;
 };
 
@@ -111,7 +112,7 @@ const renderOrder = (order) => {
   const stageControls = editableStage ? `<div class="stage-override-controls"><select class="stage-override-select" aria-label="Новый этап заказа"><option value="">Выберите этап</option>${stageOptions}</select><button class="button secondary apply-stage-override" type="button">Изменить этап</button>${order.manual_stage ? '<button class="button secondary clear-stage-override" type="button">Вернуть автостатус</button>' : ""}</div>` : "";
   const purchaseAction = canCreatePurchase ? `<button class="button create-purchase" type="button" data-order-id="${order.order_id}">Создать заявку на закупку</button>` : "";
   const orderActions = stageControls || purchaseAction ? `<div class="order-actions">${stageControls}${purchaseAction}</div>` : "";
-  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Статус Kaspi</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong>${manualNote}</div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map(renderLine).join("")}</div>${orderActions}</article>`;
+  return `<article class="order-card" data-order-id="${order.order_id}"><div class="order-header"><div><span class="order-number">Заказ №${escapeHtml(externalCode)}</span><span class="order-meta">${escapeHtml(order.marketplace)} · кабинет ${escapeHtml(order.marketplace_external_account_id)} · ${dateTime(order.ordered_at)}</span></div><div class="order-stat"><span>Статус Kaspi</span><strong><span class="badge ${stageClass(stage)}">${escapeHtml(stageLabel(stage))}</span></strong>${manualNote}</div><div class="order-stat"><span>Единиц</span><strong>${Number(order.units || 0)}</strong></div><div class="order-stat"><span>Сумма заказа</span><strong>${money(order.total_amount, order.currency)}</strong><span class="muted">Логистика заказа ${money(order.logistics, order.currency)}</span></div><div class="order-stat"><span>Связь с каталогом</span><strong>${escapeHtml(bindingText)}</strong></div></div><div class="order-lines">${order.lines.map((line) => renderLine(line, order.lines.length > 1)).join("")}</div>${orderActions}</article>`;
 };
 
 const procurementProductKey = (line) => {
