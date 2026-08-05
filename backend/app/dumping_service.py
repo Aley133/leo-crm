@@ -381,6 +381,8 @@ def decide_dumping_price(
     competitor_price_kzt: Decimal | None,
     own_price_kzt: Decimal | None,
 ) -> DumpingDecision:
+    if not product.sale_enabled:
+        raise ValueError("Товар вручную отмечен как отсутствующий и снят с продажи")
     source = resolve_cost_source(db, product_id=product.id, inventory_first=policy.inventory_first)
     if source is None:
         raise ValueError("Нет доступной партии или актуального предложения поставщика")
@@ -696,7 +698,12 @@ def sync_product_inventory_to_feed(
     policy = db.scalar(
         select(DumpingPolicy).where(DumpingPolicy.product_id == product_id)
     )
-    if not _policy_controls_xml(policy):
+    controls_xml = _policy_controls_xml(policy)
+    if (
+        product.sale_enabled
+        and not product.sale_state_overridden
+        and not controls_xml
+    ):
         return {
             "stock_count": stock_count,
             "xml_state": "unmanaged_preserved",
@@ -706,6 +713,69 @@ def sync_product_inventory_to_feed(
     feed = _latest_feed_for_update(db)
     if feed is None:
         return {"stock_count": stock_count, "xml_state": "feed_missing", "supplier_job_id": None}
+
+    # The feed is the first lock for every XML writer. Re-read the product only
+    # after that lock so a concurrent manual stop always wins over a stale
+    # dumping decision or inventory event.
+    product = db.scalar(
+        select(Product)
+        .where(Product.id == product_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if product is None:
+        return {"stock_count": 0, "xml_state": "product_missing", "supplier_job_id": None}
+    if not product.sale_enabled:
+        try:
+            feed.generated_xml = set_feed_offer_availability(
+                feed.generated_xml or feed.source_xml,
+                sku_candidates=_sku_candidates(product),
+                available=False,
+                stock_count=0,
+            )
+        except ValueError as exc:
+            if str(exc) == "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+                return {
+                    "stock_count": stock_count,
+                    "xml_state": "offer_absent",
+                    "supplier_job_id": None,
+                }
+            raise
+        feed.generated_at = func.now()
+        return {
+            "stock_count": stock_count,
+            "xml_state": "manual_out_of_stock",
+            "supplier_job_id": None,
+        }
+    if not controls_xml and product.sale_state_overridden:
+        try:
+            feed.generated_xml = set_feed_offer_availability(
+                feed.generated_xml or feed.source_xml,
+                sku_candidates=_sku_candidates(product),
+                available=True,
+                stock_count=max(stock_count, 1),
+                preorder_days=0,
+            )
+        except ValueError as exc:
+            if str(exc) == "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+                return {
+                    "stock_count": stock_count,
+                    "xml_state": "offer_absent",
+                    "supplier_job_id": None,
+                }
+            raise
+        feed.generated_at = func.now()
+        return {
+            "stock_count": max(stock_count, 1),
+            "xml_state": "manual_in_stock",
+            "supplier_job_id": None,
+        }
+    if not controls_xml:
+        return {
+            "stock_count": stock_count,
+            "xml_state": "unmanaged_preserved",
+            "supplier_job_id": None,
+        }
 
     # All XML writers lock the feed before any policy row. Re-read and lock the
     # policy after the feed lock so a concurrent manual disable cannot race the
@@ -792,6 +862,125 @@ def sync_product_inventory_to_feed(
         "stock_count": 0,
         "xml_state": "awaiting_supplier_refresh",
         "supplier_job_id": supplier_job_id,
+    }
+
+
+def set_product_sale_enabled(
+    db: Session,
+    *,
+    product_id: int,
+    sale_enabled: bool,
+) -> dict[str, int | str | bool | None]:
+    """Persist a manual sale switch and project it into the public XML now."""
+    feed = _latest_feed_for_update(db)
+    product = db.scalar(
+        select(Product)
+        .where(Product.id == product_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if product is None:
+        raise ValueError("Товар не найден")
+
+    product.sale_enabled = bool(sale_enabled)
+    product.sale_state_overridden = True
+    db.flush()
+    policy = db.scalar(
+        select(DumpingPolicy).where(DumpingPolicy.product_id == product_id)
+    )
+
+    if not product.sale_enabled:
+        xml_state = "feed_missing"
+        if feed is not None:
+            try:
+                feed.generated_xml = set_feed_offer_availability(
+                    feed.generated_xml or feed.source_xml,
+                    sku_candidates=_sku_candidates(product),
+                    available=False,
+                    stock_count=0,
+                )
+                feed.generated_at = func.now()
+                xml_state = "manual_out_of_stock"
+            except ValueError as exc:
+                if str(exc) != "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+                    raise
+                xml_state = "offer_absent"
+
+        cancelled_jobs = 0
+        active_jobs = db.scalars(
+            select(DumpingRun)
+            .where(
+                DumpingRun.product_id == product_id,
+                DumpingRun.status.in_(("queued_local", "leased_local")),
+            )
+            .with_for_update()
+        ).all()
+        for job in active_jobs:
+            job.status = "failed_local"
+            job.explanation_json = {
+                **(job.explanation_json or {}),
+                "stage": "cancelled_manual_out_of_stock",
+                "error_code": "manual_out_of_stock",
+                "error_message": "Товар вручную снят с продажи во вкладке «Товары»",
+                "updated_at": datetime.now(UTC).isoformat(),
+            }
+            cancelled_jobs += 1
+
+        latest = _latest_run(db, product_id=product_id)
+        if latest is None or latest.status != "suspended_manual_out_of_stock":
+            db.add(
+                DumpingRun(
+                    product_id=product_id,
+                    dumping_policy_id=None if policy is None else policy.id,
+                    status="suspended_manual_out_of_stock",
+                    published=feed is not None,
+                    explanation_json={
+                        "reason": "manual_product_sale_switch",
+                        "business_state": "manual_out_of_stock",
+                        "xml_availability": "no" if feed is not None else "feed_missing",
+                        "automatic_recovery": False,
+                        "resume_action": "mark_product_in_stock",
+                    },
+                )
+            )
+        db.flush()
+        return {
+            "sale_enabled": False,
+            "xml_state": xml_state,
+            "stock_count": 0,
+            "cancelled_jobs": cancelled_jobs,
+        }
+
+    if _policy_controls_xml(policy):
+        result = sync_product_inventory_to_feed(
+            db,
+            product_id=product_id,
+            reason="manual_product_sale_resumed",
+        )
+        return {"sale_enabled": True, "cancelled_jobs": 0, **result}
+
+    physical_stock = physical_stock_count(db, product_id=product_id)
+    xml_state = "feed_missing"
+    if feed is not None:
+        try:
+            feed.generated_xml = set_feed_offer_availability(
+                feed.generated_xml or feed.source_xml,
+                sku_candidates=_sku_candidates(product),
+                available=True,
+                stock_count=max(physical_stock, 1),
+                preorder_days=0,
+            )
+            feed.generated_at = func.now()
+            xml_state = "manual_in_stock"
+        except ValueError as exc:
+            if str(exc) != "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+                raise
+            xml_state = "offer_absent"
+    return {
+        "sale_enabled": True,
+        "xml_state": xml_state,
+        "stock_count": max(physical_stock, 1),
+        "cancelled_jobs": 0,
     }
 
 
@@ -999,6 +1188,45 @@ def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, de
     feed = _latest_feed_for_update(db) if controls_xml else None
     if controls_xml and feed is None:
         raise ValueError("Сначала импортируйте полный Kaspi XML в разделе Товары")
+
+    product = db.scalar(
+        select(Product)
+        .where(Product.id == product.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    ) or product
+    if not product.sale_enabled:
+        xml_state = "not_managed" if not controls_xml else "feed_missing"
+        if controls_xml and feed is not None:
+            try:
+                feed.generated_xml = set_feed_offer_availability(
+                    feed.generated_xml or feed.source_xml,
+                    sku_candidates=_sku_candidates(product),
+                    available=False,
+                    stock_count=0,
+                )
+                feed.generated_at = func.now()
+                xml_state = "no"
+            except ValueError as exc:
+                if str(exc) != "Товар не найден в сохранённом XML по SKU/Kaspi ID":
+                    raise
+                xml_state = "offer_absent"
+        run = DumpingRun(
+            product_id=product.id,
+            dumping_policy_id=policy.id,
+            status="suspended_manual_out_of_stock",
+            published=controls_xml and feed is not None,
+            explanation_json={
+                "reason": "stale_dumping_result_rejected",
+                "business_state": "manual_out_of_stock",
+                "xml_availability": xml_state,
+                "automatic_recovery": False,
+                "resume_action": "mark_product_in_stock",
+            },
+        )
+        db.add(run)
+        db.flush()
+        return run
 
     xml_offer_recovered = False
     if controls_xml and feed is not None:

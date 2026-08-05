@@ -13,6 +13,7 @@ class KaspiXmlProduct:
     merchant_sku: str | None
     name: str
     brand: str | None
+    available: bool | None
 
 
 def _local_name(value: str) -> str:
@@ -44,6 +45,28 @@ def _attribute(element: ElementTree.Element, *names: str, limit: int) -> str | N
         value = _clean(attrs.get(name.lower()), limit=limit)
         if value:
             return value
+    return None
+
+
+def _offer_availability(element: ElementTree.Element) -> bool | None:
+    availability = next(
+        (
+            child
+            for child in element.iter()
+            if child is not element and _local_name(child.tag) == "availability"
+        ),
+        None,
+    )
+    if availability is None:
+        return None
+    raw = _attribute(availability, "available", limit=16)
+    if raw is None:
+        return None
+    normalized = raw.casefold()
+    if normalized in {"yes", "true", "1"}:
+        return True
+    if normalized in {"no", "false", "0"}:
+        return False
     return None
 
 
@@ -91,6 +114,7 @@ def parse_kaspi_products(xml_bytes: bytes) -> tuple[list[KaspiXmlProduct], list[
             merchant_sku=merchant_sku,
             name=name,
             brand=brand,
+            available=_offer_availability(element),
         )
 
     if not products_by_id:

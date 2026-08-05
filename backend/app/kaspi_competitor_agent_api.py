@@ -201,6 +201,11 @@ def release_completed_supplier_refreshes(
 
 
 def queue_competitor_job(db: Session, *, product_id: int, reason: str) -> DumpingRun:
+    product = db.get(Product, product_id)
+    if product is None:
+        raise ValueError("Product not found")
+    if not product.sale_enabled:
+        raise ValueError("Товар отмечен как отсутствующий и исключён из демпинга")
     policy = db.scalar(
         select(DumpingPolicy)
         .where(DumpingPolicy.product_id == product_id)
@@ -377,7 +382,7 @@ def _claimed_job_payload(
         .order_by(KaspiXmlFeed.id.desc())
         .limit(1)
     )
-    if product is None or policy is None or feed is None:
+    if product is None or policy is None or feed is None or not product.sale_enabled:
         return None
     return _serialize_claimed_job(
         job=job,
@@ -423,9 +428,22 @@ def claim_job(payload: AgentClaim, db: Session = Depends(get_unscoped_db)) -> di
         .order_by(KaspiXmlFeed.id.desc())
         .limit(1)
     )
-    if product is None or policy is None or feed is None or not feed.merchant_id:
+    if (
+        product is None
+        or policy is None
+        or feed is None
+        or not feed.merchant_id
+        or not product.sale_enabled
+    ):
         job.status = "failed_local"
-        job.explanation_json = {**(job.explanation_json or {}), "error_message": "Product, policy or XML feed missing"}
+        job.explanation_json = {
+            **(job.explanation_json or {}),
+            "error_message": (
+                "Товар вручную снят с продажи"
+                if product is not None and not product.sale_enabled
+                else "Product, policy or XML feed missing"
+            ),
+        }
         db.commit()
         return {"job": None}
 

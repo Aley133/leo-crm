@@ -38,6 +38,8 @@ def apply_competitor_snapshot(
     product = db.get(Product, product_id)
     if product is None:
         raise ValueError("Product not found")
+    if not product.sale_enabled:
+        raise ValueError("Товар вручную отмечен как отсутствующий и снят с продажи")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     if policy is None or not policy.enabled:
         raise ValueError("Демпинг для товара не подключён")
@@ -132,6 +134,8 @@ async def execute_dumping_for_product(db: Session, product_id: int) -> dict:
     product = db.get(Product, product_id)
     if product is None:
         raise ValueError("Product not found")
+    if not product.sale_enabled:
+        raise ValueError("Товар вручную отмечен как отсутствующий и снят с продажи")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     if policy is None or not policy.enabled:
         raise ValueError("Демпинг для товара не подключён")
@@ -195,6 +199,7 @@ def refresh_dumping_for_supplier_product(
                         ),
                         DumpingPolicy.enabled.is_(True),
                         DumpingPolicy.auto_publish_xml.is_(True),
+                        Product.sale_enabled.is_(True),
                     )
                     .order_by(DumpingPolicy.product_id)
                     .distinct()
@@ -209,7 +214,12 @@ def refresh_dumping_for_supplier_product(
                     .where(DumpingPolicy.product_id == product_id)
                     .with_for_update()
                 )
-                if product is None or policy is None or not policy.enabled:
+                if (
+                    product is None
+                    or policy is None
+                    or not policy.enabled
+                    or not product.sale_enabled
+                ):
                     continue
                 source = resolve_cost_source(
                     db,

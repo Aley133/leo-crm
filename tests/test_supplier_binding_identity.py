@@ -1,5 +1,7 @@
 from datetime import UTC, datetime, timedelta
 
+from sqlalchemy.dialects import postgresql
+
 from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.models import Product
 from backend.app.monitoring import (
@@ -11,6 +13,7 @@ from backend.app.product_supplier_binding_api import (
     ManualSupplierBindingCreate,
     ManualSupplierBindingUpdate,
     create_manual_supplier_binding,
+    _locked_binding_source_statement,
     update_manual_supplier_binding,
 )
 from backend.app.supplier_identity import (
@@ -31,6 +34,18 @@ def _seed_product_and_supplier(db_session):
     db_session.add_all([product, supplier])
     db_session.flush()
     return product, supplier
+
+
+def test_supplier_replacement_lock_is_valid_on_postgresql() -> None:
+    sql = str(
+        _locked_binding_source_statement(product_id=10, binding_id=20).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    )
+
+    assert "LEFT OUTER JOIN" not in sql
+    assert "FOR UPDATE OF product_bindings" in sql
 
 
 def test_supplier_url_identity_ignores_domain_slug_and_query_string() -> None:

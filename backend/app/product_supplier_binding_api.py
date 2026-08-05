@@ -234,6 +234,23 @@ def _cancel_stale_browser_jobs(
     return cancelled
 
 
+def _locked_binding_source_statement(*, product_id: int, binding_id: int):
+    """Lock the binding without locking a nullable LEFT JOIN on PostgreSQL."""
+    return (
+        select(ProductBinding, SupplierProduct, Supplier)
+        .join(
+            SupplierProduct,
+            SupplierProduct.id == ProductBinding.supplier_product_id,
+        )
+        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+        .where(
+            ProductBinding.id == binding_id,
+            ProductBinding.product_id == product_id,
+        )
+        .with_for_update(of=ProductBinding)
+    )
+
+
 @router.post(
     "/products/{product_id}/supplier-bindings/manual",
     response_model=ManualSupplierBindingResult,
@@ -391,26 +408,20 @@ def update_manual_supplier_binding(
     db: Session = Depends(get_db),
 ) -> ManualSupplierBindingUpdateResult:
     row = db.execute(
-        select(ProductBinding, SupplierProduct, Supplier, MonitorTarget)
-        .join(
-            SupplierProduct,
-            SupplierProduct.id == ProductBinding.supplier_product_id,
+        _locked_binding_source_statement(
+            product_id=product_id,
+            binding_id=binding_id,
         )
-        .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
-        .outerjoin(
-            MonitorTarget,
-            MonitorTarget.product_binding_id == ProductBinding.id,
-        )
-        .where(
-            ProductBinding.id == binding_id,
-            ProductBinding.product_id == product_id,
-        )
-        .with_for_update()
     ).one_or_none()
     if row is None:
         raise HTTPException(status_code=404, detail="Источник закупки не найден")
 
-    binding, previous_supplier_product, previous_supplier, monitor_target = row
+    binding, previous_supplier_product, previous_supplier = row
+    monitor_target = db.scalar(
+        select(MonitorTarget)
+        .where(MonitorTarget.product_binding_id == binding.id)
+        .with_for_update()
+    )
     previous_supplier_product_id = previous_supplier_product.id
     previous_url = previous_supplier_product.url
     if previous_supplier.code.startswith(("offline-", "production-")):
