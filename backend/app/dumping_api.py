@@ -240,6 +240,7 @@ def _product_payload(product: Product) -> dict:
         "merchant_sku": product.merchant_sku,
         "brand": product.brand,
         "status": product.status,
+        "sale_enabled": bool(product.sale_enabled),
     }
 
 
@@ -346,6 +347,7 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
             "name": product.name,
             "kaspi_product_id": product.kaspi_product_id,
             "merchant_sku": product.merchant_sku,
+            "sale_enabled": bool(product.sale_enabled),
             "policy": _policy_payload(policy),
             "source": source,
             "source_error": source_error,

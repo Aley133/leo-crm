@@ -21,6 +21,7 @@ def test_products_page_uses_product_registry_contract() -> None:
         'id="products-body"',
         'id="filters"',
         'id="status"',
+        'id="sale-state"',
         'id="only-unbound"',
         'id="only-failures"',
         'id="only-monitored"',
@@ -49,6 +50,9 @@ def test_products_page_renders_product_registry_fields() -> None:
         "merchant_sku",
         "brand",
         "status",
+        "sale_enabled",
+        "inventory_on_hand",
+        "dumping_enabled",
         "orders_count",
         "units_sold",
         "revenue_kzt",
@@ -66,7 +70,7 @@ def test_products_page_renders_product_registry_fields() -> None:
     assert 'href="/crm/products/${row.product_id}"' in script
 
 
-def test_products_frontend_only_writes_through_explicit_xml_import() -> None:
+def test_products_frontend_writes_only_through_xml_import_and_sale_switch() -> None:
     script = (ROOT / "backend" / "app" / "static" / "products.js").read_text(encoding="utf-8")
 
     assert 'method:"POST"' in script
@@ -74,5 +78,6 @@ def test_products_frontend_only_writes_through_explicit_xml_import() -> None:
     assert 'xmlRequest("preview", file)' in script
     assert 'xmlRequest("commit", selectedXmlFile)' in script
     assert 'method:"PUT"' not in script
-    assert 'method:"PATCH"' not in script
+    assert '/sale-state`' in script
+    assert 'body:JSON.stringify({sale_enabled:saleEnabled})' in script
     assert 'method:"DELETE"' not in script

@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from .db import SessionLocal
 from .dumping_models import DumpingPolicy, DumpingRun
 from .dumping_service import resolve_cost_source
+from .models import Product
 
 # Legacy compatibility constants. Render no longer performs Kaspi HTTP scans;
 # the local Kaspi Competitor Agent owns network access. Keeping these names
@@ -186,9 +187,11 @@ def build_due_competitor_policies_statement(
     due_before = now - timedelta(seconds=refresh_seconds)
     return (
         select(DumpingPolicy)
+        .join(Product, Product.id == DumpingPolicy.product_id)
         .where(
             DumpingPolicy.enabled.is_(True),
             DumpingPolicy.auto_publish_xml.is_(True),
+            Product.sale_enabled.is_(True),
             ~active_job_exists,
             or_(latest_scan_at.is_(None), latest_scan_at <= due_before),
         )
@@ -402,10 +405,12 @@ def build_failed_recovery_candidates_statement(
 def build_failed_recovery_lock_statement(*, product_ids: tuple[int, ...]):
     return (
         select(DumpingPolicy)
+        .join(Product, Product.id == DumpingPolicy.product_id)
         .where(
             DumpingPolicy.product_id.in_(product_ids),
             DumpingPolicy.enabled.is_(True),
             DumpingPolicy.auto_publish_xml.is_(True),
+            Product.sale_enabled.is_(True),
         )
         .order_by(DumpingPolicy.id)
         .with_for_update(skip_locked=True)

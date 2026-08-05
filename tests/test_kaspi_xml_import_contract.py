@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 import pytest
 
 from backend.app.dumping_models import DumpingPolicy, KaspiXmlFeed
+from backend.app.dumping_service import set_product_sale_enabled
 from backend.app.inventory_models import InventoryBatch
 from backend.app.kaspi_xml_import import parse_kaspi_products
 from backend.app.models import Product
@@ -67,6 +68,7 @@ def test_kaspi_xml_parser_reads_offer_identity_and_product_fields() -> None:
     assert products[0].merchant_sku == "131846482"
     assert products[0].name == "SOLAB Magnesium"
     assert products[0].brand == "SOLAB"
+    assert products[0].available is None
 
 
 def test_kaspi_xml_parser_rejects_dtd_and_external_entities() -> None:
@@ -223,7 +225,12 @@ def test_xml_reimport_uses_new_source_and_overlays_only_managed_offers(
 
     assert result["total"] == 3
     assert feed.source_filename == "corrected.xml"
-    assert feed.source_xml == uploaded.decode("utf-8")
+    assert _offer_state(feed.source_xml, "MANAGED") == {
+        "price": "9000",
+        "available": "no",
+        "preOrder": "7",
+        "stockCount": "91",
+    }
     assert _offer_state(feed.generated_xml, "MANAGED") == {
         "price": "9000",
         "available": "yes",
@@ -242,3 +249,107 @@ def test_xml_reimport_uses_new_source_and_overlays_only_managed_offers(
         "preOrder": "5",
         "stockCount": "31",
     }
+
+
+def test_xml_import_accumulates_catalog_and_keeps_new_unavailable_items_out_of_dumping(
+    db_session,
+) -> None:
+    first = b"""<kaspi_catalog><merchantid>merchant-1</merchantid><offers>
+      <offer sku='A'><model>Available A</model><cityprices><cityprice cityId='750000000'>5000</cityprice></cityprices><availability available='yes' preOrder='0' stockCount='4'/></offer>
+    </offers></kaspi_catalog>"""
+    second = b"""<kaspi_catalog><merchantid>merchant-1</merchantid><offers>
+      <offer sku='B'><model>Unavailable B</model><cityprices><cityprice cityId='750000000'>6000</cityprice></cityprices><availability available='no' preOrder='0' stockCount='0'/></offer>
+    </offers></kaspi_catalog>"""
+
+    _commit_xml_import(first, source_filename="available.xml", db=db_session)
+    result = _commit_xml_import(second, source_filename="unavailable.xml", db=db_session)
+
+    products = {
+        product.kaspi_product_id: product
+        for product in db_session.query(Product).order_by(Product.id).all()
+    }
+    feed = db_session.query(KaspiXmlFeed).one()
+    assert set(products) == {"A", "B"}
+    assert products["A"].sale_enabled is True
+    assert products["B"].sale_enabled is False
+    assert result["created_count"] == 1
+    assert result["retained_count"] == 1
+    assert result["catalog_total"] == 2
+    assert _offer_state(feed.source_xml, "A")["available"] == "yes"
+    assert _offer_state(feed.source_xml, "B")["available"] == "no"
+    assert _offer_state(feed.generated_xml, "A")["available"] == "yes"
+    assert _offer_state(feed.generated_xml, "B")["available"] == "no"
+    assert db_session.query(DumpingPolicy).count() == 0
+
+    set_product_sale_enabled(
+        db_session,
+        product_id=products["B"].id,
+        sale_enabled=True,
+    )
+    db_session.commit()
+    third = b"""<kaspi_catalog><merchantid>merchant-1</merchantid><offers>
+      <offer sku='C'><model>Product C</model><cityprices><cityprice cityId='750000000'>7000</cityprice></cityprices><availability available='no' preOrder='0' stockCount='0'/></offer>
+    </offers></kaspi_catalog>"""
+    _commit_xml_import(third, source_filename="third.xml", db=db_session)
+    db_session.refresh(feed)
+    db_session.refresh(products["B"])
+    assert products["B"].sale_enabled is True
+    assert products["B"].sale_state_overridden is True
+    assert _offer_state(feed.generated_xml, "B")["available"] == "yes"
+    assert _offer_state(feed.generated_xml, "B")["stockCount"] == "1"
+
+
+def test_manual_out_of_stock_survives_xml_reimport_and_resumes_without_losing_policy(
+    db_session,
+) -> None:
+    initial = b"""<kaspi_catalog><merchantid>merchant-1</merchantid><offers>
+      <offer sku='A'><model>Product A</model><cityprices><cityprice cityId='750000000'>5000</cityprice></cityprices><availability available='yes' preOrder='0' stockCount='2'/></offer>
+    </offers></kaspi_catalog>"""
+    _commit_xml_import(initial, source_filename="initial.xml", db=db_session)
+    product = db_session.query(Product).filter_by(kaspi_product_id="A").one()
+    policy = DumpingPolicy(
+        product_id=product.id,
+        enabled=True,
+        auto_publish_xml=True,
+    )
+    batch = InventoryBatch(
+        product_id=product.id,
+        received_at=datetime(2026, 8, 5, 10, 0, tzinfo=UTC),
+        quantity_received=2,
+        quantity_remaining=2,
+        unit_cost=Decimal("1000"),
+    )
+    db_session.add_all([policy, batch])
+    db_session.commit()
+
+    stopped = set_product_sale_enabled(
+        db_session,
+        product_id=product.id,
+        sale_enabled=False,
+    )
+    db_session.commit()
+    feed = db_session.query(KaspiXmlFeed).one()
+    assert stopped["xml_state"] == "manual_out_of_stock"
+    assert _offer_state(feed.generated_xml, "A")["available"] == "no"
+    assert _offer_state(feed.generated_xml, "A")["stockCount"] == "0"
+
+    updated = initial.replace(b">5000<", b">5500<")
+    _commit_xml_import(updated, source_filename="updated.xml", db=db_session)
+    db_session.refresh(product)
+    db_session.refresh(policy)
+    db_session.refresh(feed)
+    assert product.sale_enabled is False
+    assert policy.enabled is True
+    assert _offer_state(feed.generated_xml, "A")["available"] == "no"
+
+    resumed = set_product_sale_enabled(
+        db_session,
+        product_id=product.id,
+        sale_enabled=True,
+    )
+    db_session.commit()
+    db_session.refresh(feed)
+    assert resumed["xml_state"] == "stock"
+    assert _offer_state(feed.generated_xml, "A")["available"] == "yes"
+    assert _offer_state(feed.generated_xml, "A")["stockCount"] == "2"
+    assert policy.enabled is True

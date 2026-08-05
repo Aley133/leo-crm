@@ -4,6 +4,7 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 from sqlalchemy.dialects import postgresql
 
@@ -85,6 +86,21 @@ def _run(
     db_session.add(run)
     db_session.flush()
     return run
+
+
+def test_manual_out_of_stock_product_is_not_queued_for_dumping(db_session) -> None:
+    policy = _policy(db_session, kaspi_product_id="MANUAL-STOP")
+    product = db_session.get(Product, policy.product_id)
+    product.sale_enabled = False
+    db_session.flush()
+
+    assert queue_due_competitor_jobs(db_session, now=NOW) == ()
+    with pytest.raises(ValueError, match="исключён из демпинга"):
+        queue_competitor_job(
+            db_session,
+            product_id=product.id,
+            reason="manual",
+        )
 
 
 def test_periodic_dispatch_queues_only_due_enabled_policies_once(db_session) -> None:

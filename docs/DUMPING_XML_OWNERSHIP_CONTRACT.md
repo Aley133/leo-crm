@@ -2,12 +2,17 @@
 
 Status: production business rule
 
-## Source baseline
+## Cumulative source baseline
 
-The last XML confirmed through the product-registry import is the complete
-baseline for that workspace. Import resets the generated feed to that exact
-business state before any managed overlays are applied. A generated value from
-an older XML upload must not leak into the newly imported baseline.
+Every XML confirmed through the product-registry import is an upsert into one
+persistent workspace catalog. Offers present in the new file replace the same
+SKU from the previous baseline; offers absent from the new file remain in the
+baseline and generated feed. A partial export must never delete earlier
+products or offers.
+
+After the merge, the generated feed is reset to the cumulative source baseline
+before managed overlays are applied. A generated price or availability value
+from an older publication must not leak into that baseline.
 
 ## Explicit ownership
 
@@ -19,6 +24,13 @@ product has one `DumpingPolicy` with both flags enabled:
 
 Product-registry membership, historical policies, FIFO batches, active orders
 and unresolved order identities do not grant XML ownership.
+
+The one exception is the explicit product sale switch. `sale_enabled = false`
+is a durable owner command to close that offer with `available=no`,
+`preOrder=0`, and `stockCount=0`. It does not delete FIFO, supplier bindings or
+the dumping policy. While the switch is off, periodic/manual competitor jobs
+must not be queued and stale results must not reopen the offer. Turning it on
+removes the latch and returns the offer to the ordinary inventory/dumping flow.
 
 For an unmanaged offer, CRM preserves the imported price, `available`,
 `preOrder`, `stockCount` and all other source fields. Inventory allocation,
@@ -51,6 +63,10 @@ Concurrent XML writers serialize on the active workspace feed row.
 ## Required regression checks
 
 - reimport replaces a previously generated/zeroed baseline;
+- partial reimport preserves offers absent from the uploaded file;
+- newly imported `available=no` products remain outside dumping until a policy
+  is explicitly connected;
+- the manual out-of-stock switch survives reimport and blocks publication;
 - enabled auto-publishing offers receive the managed overlay;
 - offers without a policy remain unchanged even when FIFO or orders exist;
 - disabled policies remain unchanged;

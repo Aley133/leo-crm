@@ -10,6 +10,8 @@ from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .db import get_db
+from .dumping_models import DumpingPolicy
+from .dumping_service import physical_stock_counts, set_product_sale_enabled
 from .models import MarketplaceOrderLine, Product, ProductStatus
 from .monitoring import MonitorTarget, SupplierOfferState
 from .suppliers import ProductBinding, Supplier, SupplierProduct
@@ -22,6 +24,9 @@ class ProductRegistryRow(BaseModel):
     name: str
     brand: str | None
     status: str
+    sale_enabled: bool
+    inventory_on_hand: int
+    dumping_enabled: bool
     orders_count: int
     units_sold: int
     revenue_kzt: Decimal
@@ -42,6 +47,10 @@ class ProductRegistryUpdate(BaseModel):
     status: ProductStatus | None = None
 
 
+class ProductSaleStateUpdate(BaseModel):
+    sale_enabled: bool
+
+
 router = APIRouter(
     prefix="/api/product-registry",
     tags=["product-registry"],
@@ -55,6 +64,17 @@ def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryR
     if not products:
         return []
     ids = [item.id for item in products]
+    stock_counts = physical_stock_counts(db, product_ids=set(ids))
+    dumping_enabled_ids = {
+        int(product_id)
+        for product_id in db.scalars(
+            select(DumpingPolicy.product_id).where(
+                DumpingPolicy.product_id.in_(ids),
+                DumpingPolicy.enabled.is_(True),
+                DumpingPolicy.auto_publish_xml.is_(True),
+            )
+        ).all()
+    }
 
     sales = {
         row.product_id: row
@@ -114,6 +134,9 @@ def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryR
                 name=product.name,
                 brand=product.brand,
                 status=product.status,
+                sale_enabled=bool(product.sale_enabled),
+                inventory_on_hand=stock_counts.get(int(product.id), 0),
+                dumping_enabled=int(product.id) in dumping_enabled_ids,
                 orders_count=int(sale.orders_count) if sale else 0,
                 units_sold=int(sale.units_sold) if sale else 0,
                 revenue_kzt=Decimal(sale.revenue_kzt) if sale else Decimal("0"),
@@ -134,6 +157,7 @@ def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryR
 def list_products(
     q: str | None = Query(default=None, min_length=1, max_length=200),
     status: ProductStatus | None = None,
+    sale_enabled: bool | None = None,
     only_without_supplier: bool = False,
     only_failures: bool = False,
     only_monitored: bool = False,
@@ -152,6 +176,8 @@ def list_products(
         ))
     if status is not None:
         statement = statement.where(Product.status == status.value)
+    if sale_enabled is not None:
+        statement = statement.where(Product.sale_enabled.is_(sale_enabled))
 
     visible_binding_exists = exists(
         select(ProductBinding.id).where(
@@ -220,4 +246,29 @@ def update_product(
         setattr(product, field, value.strip() if isinstance(value, str) else value)
     db.commit()
     db.refresh(product)
+    return _product_rows(db, [product])[0]
+
+
+@router.patch("/products/{product_id}/sale-state", response_model=ProductRegistryRow)
+def update_product_sale_state(
+    product_id: int,
+    payload: ProductSaleStateUpdate,
+    db: Session = Depends(get_db),
+) -> ProductRegistryRow:
+    try:
+        set_product_sale_enabled(
+            db,
+            product_id=product_id,
+            sale_enabled=payload.sale_enabled,
+        )
+        db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except Exception:
+        db.rollback()
+        raise
+    product = db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
     return _product_rows(db, [product])[0]

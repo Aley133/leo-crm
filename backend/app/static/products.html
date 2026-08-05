@@ -29,7 +29,7 @@
         <div>
           <p class="eyebrow">Product Registry</p>
           <h1>Товары</h1>
-          <p class="subtitle">Одна строка — одна карточка Kaspi: продажи, поставщики и мониторинг в одном операционном представлении</p>
+          <p class="subtitle">Одна строка — одна карточка Kaspi. XML-импорты накапливают каталог и не удаляют товары из прошлых файлов.</p>
         </div>
         <div class="topbar-actions">
           <button id="import-xml" class="button" type="button">Импорт XML</button>
@@ -47,6 +47,7 @@
         <form id="filters" class="filters">
           <label class="search-field"><span>Поиск</span><input id="search" type="search" placeholder="Название, Kaspi ID, SKU или бренд"></label>
           <label><span>Статус</span><select id="status"><option value="">Все</option><option value="active">Активные</option><option value="draft">Черновики</option><option value="paused">Приостановленные</option><option value="archived">Архивные</option></select></label>
+          <label><span>Продажа</span><select id="sale-state"><option value="">Все</option><option value="true">В наличии</option><option value="false">Нет в наличии</option></select></label>
           <label class="check"><input id="only-unbound" type="checkbox"><span>Без поставщика</span></label>
           <label class="check"><input id="only-failures" type="checkbox"><span>С ошибками</span></label>
           <label class="check"><input id="only-monitored" type="checkbox"><span>На мониторинге</span></label>
@@ -65,7 +66,7 @@
         <div class="table-meta"><span id="rows-label">Загрузка…</span><span id="updated-at"></span></div>
         <div class="table-wrap">
           <table>
-            <thead><tr><th>Kaspi-товар</th><th>Статус</th><th>Продажи</th><th>Выручка</th><th>Поставщики</th><th>Лучший поставщик</th><th>Лучшая цена</th><th>Мониторинг</th><th>Проверено</th></tr></thead>
+            <thead><tr><th>Kaspi-товар</th><th>Статус</th><th>Продажа / остаток</th><th>Продажи</th><th>Выручка</th><th>Поставщики</th><th>Лучший поставщик</th><th>Лучшая цена</th><th>Мониторинг</th><th>Проверено</th></tr></thead>
             <tbody id="products-body"></tbody>
           </table>
         </div>
@@ -82,6 +83,7 @@
         <button class="dialog-close" value="cancel" aria-label="Закрыть">×</button>
       </div>
       <p id="xml-file-name" class="muted"></p>
+      <p class="muted">Новые позиции добавятся, существующие обновятся, а товары из предыдущих XML останутся в каталоге и публичном feed.</p>
       <section id="xml-preview" class="xml-preview"></section>
       <div id="xml-warnings" class="xml-warnings hidden"></div>
       <div class="dialog-actions">
@@ -92,6 +94,6 @@
   </dialog>
 
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/products.js?v=20260803-3" defer></script>
+  <script src="/static/products.js?v=20260805-1" defer></script>
 </body>
 </html>

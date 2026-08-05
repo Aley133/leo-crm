@@ -35,8 +35,10 @@ const queryString = () => {
   const params = new URLSearchParams({limit:"200"});
   const q = document.querySelector("#search").value.trim();
   const status = document.querySelector("#status").value;
+  const saleState = document.querySelector("#sale-state").value;
   if (q) params.set("q", q);
   if (status) params.set("status", status);
+  if (saleState) params.set("sale_enabled", saleState);
   if (document.querySelector("#only-unbound").checked) params.set("only_without_supplier", "true");
   if (document.querySelector("#only-failures").checked) params.set("only_failures", "true");
   if (document.querySelector("#only-monitored").checked) params.set("only_monitored", "true");
@@ -47,6 +49,17 @@ const monitoringBadge = (row) => {
   if (row.failed_monitor_count > 0) return '<span class="badge bad">Есть ошибки</span>';
   if (row.active_monitor_count > 0) return '<span class="badge ok">Активен</span>';
   return '<span class="badge">Не настроен</span>';
+};
+
+const saleControl = (row) => {
+  const enabled = Boolean(row.sale_enabled);
+  const label = enabled ? "В наличии" : "Нет в наличии";
+  const action = enabled ? "Нет в наличии" : "Есть в наличии";
+  const inventory = Math.max(0, Number(row.inventory_on_hand || 0));
+  const dumping = row.dumping_enabled
+    ? (enabled ? "демпинг активен" : "демпинг заблокирован")
+    : "без демпинга";
+  return `<span class="badge ${enabled ? "ok" : "bad"}">${label}</span><span class="muted">FIFO: ${inventory.toLocaleString("ru-RU")} шт. · ${dumping}</span><button class="button secondary sale-toggle" type="button" data-product-id="${row.product_id}" data-sale-enabled="${enabled ? "false" : "true"}">${action}</button>`;
 };
 
 const renderSummary = (rows) => {
@@ -65,6 +78,7 @@ const render = (rows) => {
     <tr>
       <td><a class="product-title" href="/crm/products/${row.product_id}">${escapeHtml(row.name)}</a><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></td>
       <td><span class="badge ${statusClass(row.status)}">${escapeHtml(statusLabel(row.status))}</span></td>
+      <td>${saleControl(row)}</td>
       <td><strong>${Number(row.units_sold || 0).toLocaleString("ru-RU")}</strong><span class="muted">строк заказов: ${Number(row.orders_count || 0).toLocaleString("ru-RU")}</span></td>
       <td><strong>${money(row.revenue_kzt)}</strong></td>
       <td><strong>${row.supplier_count}</strong><span class="muted">доступно: ${row.available_offer_count}</span></td>
@@ -123,12 +137,42 @@ const xmlRequest = async (action, file) => {
   return payload;
 };
 
+const setSaleState = async (button) => {
+  const token = localStorage.getItem(storageKey);
+  const productId = Number(button.dataset.productId);
+  const saleEnabled = button.dataset.saleEnabled === "true";
+  if (!productId || !token) return;
+  const previousLabel = button.textContent;
+  button.disabled = true;
+  button.textContent = "Сохраняю…";
+  message.textContent = "";
+  try {
+    const response = await fetch(`/api/product-registry/products/${productId}/sale-state`, {
+      method:"PATCH",
+      headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
+      body:JSON.stringify({sale_enabled:saleEnabled}),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(payload.detail || `API вернул ошибку ${response.status}`);
+    message.textContent = saleEnabled
+      ? "Товар снова разрешён к продаже. XML и демпинг синхронизированы."
+      : "Товар снят с продажи: XML закрыт, автоматический демпинг остановлен.";
+    await loadProducts();
+  } catch (error) {
+    button.disabled = false;
+    button.textContent = previousLabel;
+    message.textContent = error instanceof Error ? error.message : "Не удалось изменить наличие";
+  }
+};
+
 const renderXmlPreview = (payload) => {
   xmlPreview.innerHTML = `
     <div class="preview-grid">
       <article><span>Всего позиций</span><strong>${payload.total}</strong></article>
       <article><span>Новых товаров</span><strong>${payload.new_count}</strong></article>
-      <article><span>Будут обновлены</span><strong>${payload.existing_count}</strong></article>
+      <article><span>Уже в каталоге</span><strong>${payload.existing_count}</strong></article>
+      <article><span>Сохранено из прошлых XML</span><strong>${payload.retained_count}</strong></article>
+      <article><span>Каталог после импорта</span><strong>${payload.catalog_total_after}</strong></article>
       <article><span>Предупреждений</span><strong>${payload.warning_count}</strong></article>
     </div>
     <div class="preview-sample">${payload.sample.map((item) => `<div><strong>${escapeHtml(item.name)}</strong><span>Kaspi ${escapeHtml(item.kaspi_product_id)}${item.brand ? ` · ${escapeHtml(item.brand)}` : ""}</span></div>`).join("")}</div>`;
@@ -165,7 +209,7 @@ const commitXml = async () => {
   try {
     const result = await xmlRequest("commit", selectedXmlFile);
     xmlDialog.close();
-    message.textContent = `XML импортирован: создано ${result.created_count}, обновлено ${result.updated_count}, без изменений ${result.unchanged_count}.`;
+    message.textContent = `XML добавлен в каталог: создано ${result.created_count}, обновлено ${result.updated_count}, сохранено из прошлых файлов ${result.retained_count}. Всего товаров: ${result.catalog_total}.`;
     await loadProducts();
   } catch (error) {
     xmlWarnings.classList.remove("hidden");
@@ -180,6 +224,7 @@ tokenForm.addEventListener("submit", (event) => {event.preventDefault();const to
 filters.addEventListener("submit", (event) => {event.preventDefault();loadProducts();});
 resetButton.addEventListener("click", () => {filters.reset();loadProducts();});
 refreshButton.addEventListener("click", loadProducts);
+body.addEventListener("click", (event) => {const button=event.target.closest(".sale-toggle");if(button)setSaleState(button);});
 importButton.addEventListener("click", () => xmlFileInput.click());
 xmlFileInput.addEventListener("change", () => {const file=xmlFileInput.files?.[0];if(file)previewXml(file);xmlFileInput.value="";});
 confirmImportButton.addEventListener("click", commitXml);

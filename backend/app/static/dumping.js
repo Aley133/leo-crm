@@ -149,6 +149,7 @@ const searchProducts = async () => {
 
 const scanLabel = (row) => {
   const state = row.scan_state;
+  if (!row.sale_enabled) return '<span class="badge-limited">Нет в наличии</span>';
   if (!row.policy.enabled) return '<span class="badge-off">Отключён</span>';
   if (!row.source) return '<span class="badge-limited">Приостановлен</span>';
   if (state?.status === "queued") return '<span class="badge-off">В очереди</span>';
@@ -163,6 +164,9 @@ const scanLabel = (row) => {
 
 const scanMeta = (row) => {
   const state = row.scan_state;
+  if (!row.sale_enabled) {
+    return "Товар вручную снят с продажи во вкладке «Товары». XML закрыт, автоматический демпинг не запускается.";
+  }
   if (row.policy.enabled && !row.source) {
     return "Нет доступного поставщика или складского остатка. Товар закрыт в XML; мониторинг поставщика продолжается.";
   }
@@ -287,13 +291,15 @@ const render = (rows) => {
     const ownPosition = explanation.own_position ?? state.own_position;
     const sellerCount = explanation.seller_count ?? state.seller_count;
     const inventoryOnHand = Math.max(0, Number(row.inventory_on_hand || 0));
-    const sourceAvailable = Boolean(row.source);
+    const sourceAvailable = Boolean(row.source) && Boolean(row.sale_enabled);
     const safeFloor = sourceAvailable ? (preview.safe_floor_kzt ?? run.safe_floor_kzt) : null;
     const targetPrice = sourceAvailable ? (run.target_price_kzt ?? state.target_price_kzt) : null;
     const preorderDays = sourceAvailable ? (run.preorder_days ?? preview.preorder_days) : null;
     const runButton = sourceAvailable
       ? '<button class="button run-now" type="button">Проверить сейчас</button>'
-      : '<button class="button run-now" type="button" disabled title="Нет доступного источника закупки">Нет источника</button>';
+      : row.sale_enabled
+        ? '<button class="button run-now" type="button" disabled title="Нет доступного источника закупки">Нет источника</button>'
+        : '<button class="button run-now" type="button" disabled title="Товар снят с продажи во вкладке Товары">Нет в наличии</button>';
     return `
     <article class="dumping-card" data-product-id="${row.product_id}">
       <div class="dumping-head">
