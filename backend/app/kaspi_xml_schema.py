@@ -108,12 +108,16 @@ def ensure_offer_availability(offer: ElementTree.Element) -> ElementTree.Element
 
 def repair_kaspi_catalog_tree(root: ElementTree.Element) -> ElementTree.Element:
     """Repair malformed availability placement in every offer of a catalog."""
+    store_id = catalog_store_id(root)
     for offer in root.iter():
         if _local_name(offer.tag) != "offer":
             continue
         child_names = {_local_name(child.tag) for child in list(offer)}
-        if "availability" in child_names or "availabilities" in child_names:
-            ensure_offer_availability(offer)
+        if "availability" not in child_names and "availabilities" not in child_names:
+            continue
+        availability = ensure_offer_availability(offer)
+        if store_id and not str(availability.attrib.get("storeId") or "").strip():
+            availability.set("storeId", store_id)
     return root
 
 
