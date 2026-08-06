@@ -123,10 +123,11 @@ def repair_kaspi_catalog_tree(root: ElementTree.Element) -> ElementTree.Element:
 
 def normalize_kaspi_feed_xml(xml_text: str) -> str:
     """Return Kaspi XML with schema-safe availability containers and order."""
+    xml_declaration = xml_text.lstrip().startswith("<?xml")
     root = ElementTree.fromstring(xml_text.encode("utf-8"))
     repair_kaspi_catalog_tree(root)
     return ElementTree.tostring(
         root,
         encoding="unicode",
-        xml_declaration=True,
+        xml_declaration=xml_declaration,
     )
