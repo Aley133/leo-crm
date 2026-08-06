@@ -1,6 +1,9 @@
 """LEO CRM backend package."""
 
-from .kaspi_xml_runtime_patch import install_kaspi_xml_schema_patch
+import os
 
 
-install_kaspi_xml_schema_patch()
+if os.getenv("DATABASE_URL"):
+    from .kaspi_xml_runtime_patch import install_kaspi_xml_schema_patch
+
+    install_kaspi_xml_schema_patch()
