@@ -12,13 +12,18 @@ from backend.app.dumping_api import read_dumping_runtime
 from backend.app.dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from backend.app.inventory_models import InventoryBatch
 from backend.app.kaspi_competitor_agent_api import (
+    _AGENT_HEARTBEATS,
     AgentClaim,
     AgentComplete,
+    AgentHeartbeat,
     claim_job,
     complete_job,
+    heartbeat,
+    read_agent_status,
 )
 from backend.app.lease_engine import utc_now
 from backend.app.models import Product
+from backend.app.workspace_context import workspace_context
 
 
 def _product(db_session, *, kaspi_id: str, name: str) -> Product:
@@ -384,6 +389,110 @@ def test_kaspi_agent_resumes_its_active_lease_after_lost_claim_response(
     assert response["job"]["id"] == run.id
     assert response["job"]["lease_token"] == "stable-lease-token-123456"
     assert run.explanation_json["lease_attempt"] == 1
+
+
+def test_kaspi_agents_claim_only_their_workspace_queue(db_session) -> None:
+    db_session.info["include_all_workspaces"] = True
+    try:
+        barwork_product = Product(
+            workspace_id=1,
+            kaspi_product_id="WORKSPACE-BARWORK",
+            merchant_sku="WORKSPACE-BARWORK",
+            name="BARWORK product",
+            status="active",
+        )
+        leoxpress_product = Product(
+            workspace_id=2,
+            kaspi_product_id="WORKSPACE-LEOXPRESS",
+            merchant_sku="WORKSPACE-LEOXPRESS",
+            name="LeoXpress product",
+            status="active",
+        )
+        db_session.add_all((barwork_product, leoxpress_product))
+        db_session.flush()
+        barwork_policy = DumpingPolicy(
+            workspace_id=1,
+            product_id=barwork_product.id,
+            enabled=True,
+        )
+        leoxpress_policy = DumpingPolicy(
+            workspace_id=2,
+            product_id=leoxpress_product.id,
+            enabled=True,
+        )
+        db_session.add_all(
+            (
+                barwork_policy,
+                leoxpress_policy,
+                KaspiXmlFeed(
+                    workspace_id=1,
+                    merchant_id="barwork-merchant",
+                    source_xml="<kaspi_catalog/>",
+                    generated_xml="<kaspi_catalog/>",
+                    active=True,
+                ),
+                KaspiXmlFeed(
+                    workspace_id=2,
+                    merchant_id="leoxpress-merchant",
+                    source_xml="<kaspi_catalog/>",
+                    generated_xml="<kaspi_catalog/>",
+                    active=True,
+                ),
+            )
+        )
+        db_session.flush()
+        barwork_job = DumpingRun(
+            workspace_id=1,
+            product_id=barwork_product.id,
+            dumping_policy_id=barwork_policy.id,
+            status="queued_local",
+            published=False,
+            explanation_json={"reason": "manual"},
+        )
+        leoxpress_job = DumpingRun(
+            workspace_id=2,
+            product_id=leoxpress_product.id,
+            dumping_policy_id=leoxpress_policy.id,
+            status="queued_local",
+            published=False,
+            explanation_json={"reason": "manual"},
+        )
+        db_session.add_all((barwork_job, leoxpress_job))
+        db_session.commit()
+
+        barwork_claim = claim_job(
+            AgentClaim(agent_id="barwork-agent", workspace_id=1),
+            db_session,
+        )
+        leoxpress_claim = claim_job(
+            AgentClaim(agent_id="leoxpress-agent", workspace_id=2),
+            db_session,
+        )
+
+        assert barwork_claim["job"]["id"] == barwork_job.id
+        assert barwork_claim["job"]["workspace_id"] == 1
+        assert leoxpress_claim["job"]["id"] == leoxpress_job.id
+        assert leoxpress_claim["job"]["workspace_id"] == 2
+    finally:
+        db_session.info.pop("include_all_workspaces", None)
+
+
+def test_kaspi_agent_status_is_visible_only_in_selected_workspace() -> None:
+    _AGENT_HEARTBEATS.clear()
+    heartbeat(AgentHeartbeat(agent_id="barwork-agent", workspace_id=1))
+    heartbeat(AgentHeartbeat(agent_id="leoxpress-agent", workspace_id=2))
+
+    with workspace_context(1):
+        barwork = read_agent_status()
+    with workspace_context(2):
+        leoxpress = read_agent_status()
+
+    assert [agent["agent_id"] for agent in barwork["agents"]] == [
+        "barwork-agent"
+    ]
+    assert [agent["agent_id"] for agent in leoxpress["agents"]] == [
+        "leoxpress-agent"
+    ]
 
 
 def test_kaspi_agent_successfully_persists_decimal_result_in_one_commit(

@@ -4,7 +4,7 @@ from collections import defaultdict
 from decimal import Decimal
 from typing import Protocol
 
-from sqlalchemy import func, or_, select, tuple_
+from sqlalchemy import case, exists, func, or_, select, tuple_
 from sqlalchemy.orm import Session
 
 from ..inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
@@ -31,8 +31,83 @@ class CommerceRepository(Protocol):
         limit: int,
         offset: int,
         status: str | None = None,
+        operational_stage: str | None = None,
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...]]: ...
+
+
+_TERMINAL_SOURCE_STAGES = {
+    "handover",
+    "shipping",
+    "cancelling",
+    "delivered",
+    "cancelled",
+    "returned",
+}
+_FIFO_DERIVED_SOURCE_STAGES = {"accepted", "preorder"}
+
+
+def _operational_stage_expression():
+    """Return the SQL equivalent of ``CommerceOrder.stage``.
+
+    Status filters must paginate in PostgreSQL before the Orders screen loads
+    product, supplier, raw-payload and FIFO details.  Keeping this expression
+    beside the domain mapper makes the database predicate explicit while the
+    final ``CommerceOrder`` still remains the authoritative response model.
+    """
+
+    allocated_quantity = (
+        select(func.coalesce(func.sum(InventoryAllocation.quantity), 0))
+        .where(
+            InventoryAllocation.marketplace_order_line_id
+            == MarketplaceOrderLine.id
+        )
+        .correlate(MarketplaceOrderLine)
+        .scalar_subquery()
+    )
+    has_lines = exists(
+        select(MarketplaceOrderLine.id).where(
+            MarketplaceOrderLine.marketplace_order_id == MarketplaceOrder.id
+        )
+    )
+    has_unready_line = exists(
+        select(MarketplaceOrderLine.id).where(
+            MarketplaceOrderLine.marketplace_order_id == MarketplaceOrder.id,
+            or_(
+                MarketplaceOrderLine.product_id.is_(None),
+                allocated_quantity < MarketplaceOrderLine.quantity,
+            ),
+        )
+    )
+    fifo_ready = has_lines & ~has_unready_line
+    return case(
+        (
+            MarketplaceOrder.status.in_(_TERMINAL_SOURCE_STAGES),
+            MarketplaceOrder.status,
+        ),
+        (
+            MarketplaceOrder.manual_stage.is_not(None),
+            MarketplaceOrder.manual_stage,
+        ),
+        (
+            MarketplaceOrder.status.in_(_FIFO_DERIVED_SOURCE_STAGES),
+            case((fifo_ready, "assembly"), else_="preorder"),
+        ),
+        else_=MarketplaceOrder.status,
+    )
+
+
+def _operational_stage_filter(stage: str):
+    """Build a sargable prefilter plus the exact domain-equivalent predicate."""
+
+    source_candidates = {stage}
+    if stage in {"assembly", "preorder"}:
+        source_candidates.update(_FIFO_DERIVED_SOURCE_STAGES)
+    coarse_filter = or_(
+        MarketplaceOrder.status.in_(source_candidates),
+        MarketplaceOrder.manual_stage == stage,
+    )
+    return coarse_filter & (_operational_stage_expression() == stage)
 
 
 def _latest_order_raw_payloads(
@@ -109,17 +184,32 @@ class SqlAlchemyCommerceRepository:
             reserved[reservation.order_line_id] += reservation.reserved_quantity
         return reserved
 
+    def _incoming_reservations_for_products(
+        self,
+        product_ids: set[int],
+    ) -> dict[int, int]:
+        reserved: dict[int, int] = defaultdict(int)
+        for reservation in build_incoming_reservations(
+            self._session,
+            product_ids=product_ids,
+        ):
+            reserved[reservation.order_line_id] += reservation.reserved_quantity
+        return reserved
+
     def list_orders(
         self,
         *,
         limit: int,
         offset: int,
         status: str | None = None,
+        operational_stage: str | None = None,
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...]]:
         filters = []
         if status:
             filters.append(MarketplaceOrder.status == status)
+        if operational_stage:
+            filters.append(_operational_stage_filter(operational_stage))
         if query:
             pattern = f"%{query.strip()}%"
             matching_order_ids = select(MarketplaceOrderLine.marketplace_order_id).where(
@@ -149,7 +239,6 @@ class SqlAlchemyCommerceRepository:
         if not order_rows:
             return total, ()
 
-        incoming_reserved_by_line = self._incoming_reservations()
         order_ids = [order.id for order, _account in order_rows]
         order_key_by_id = {
             order.id: (account.id, order.external_order_id)
@@ -231,6 +320,14 @@ class SqlAlchemyCommerceRepository:
                 identities.add(line.merchant_sku.strip())
             if line.external_product_id:
                 identities.add(line.external_product_id.strip())
+
+        # Incoming FIFO reservations must account for older orders of the same
+        # products, but unrelated products must not be scanned on every Orders
+        # request.  This keeps the calculation exact for visible rows while its
+        # cost grows with the page's product set instead of the whole catalog.
+        incoming_reserved_by_line = self._incoming_reservations_for_products(
+            explicit_product_ids
+        )
 
         product_rows = self._session.scalars(
             select(Product).where(

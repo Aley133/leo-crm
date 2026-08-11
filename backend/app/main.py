@@ -8,6 +8,7 @@ from pathlib import Path
 import anyio
 from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse
+from fastapi.middleware.gzip import GZipMiddleware
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
@@ -69,8 +70,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.13"
-DEPLOYMENT_MARKER = "cumulative-catalog-sale-controls-and-supplier-link-fix"
+APP_VERSION = "0.23.14"
+DEPLOYMENT_MARKER = "bounded-order-filters-and-account-bound-agents"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -78,6 +79,11 @@ app = FastAPI(
     version=APP_VERSION,
     description="Backend for product monitoring, pricing, XML, orders and purchases.",
 )
+
+# Orders JSON, static assets and cumulative Kaspi XML are highly compressible.
+# Compression preserves every response byte after decoding while materially
+# reducing Render bandwidth and browser transfer time.
+app.add_middleware(GZipMiddleware, minimum_size=1024, compresslevel=5)
 
 
 @app.middleware("http")

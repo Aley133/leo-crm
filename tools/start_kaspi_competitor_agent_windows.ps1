@@ -4,7 +4,10 @@ $RepoRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $RepoRoot
 
 $ApiUrl = "https://leo-crm-api.onrender.com"
-$AgentId = "kaspi-competitor-$env:COMPUTERNAME"
+$WorkspaceId = Read-Host "ID аккаунта CRM (1 = BARWORK, 2 = LeoXpress)"
+if ([string]::IsNullOrWhiteSpace($WorkspaceId)) { $WorkspaceId = "1" }
+if ($WorkspaceId -notmatch '^[1-9][0-9]*$') { throw "ID аккаунта должен быть положительным числом." }
+$AgentId = "kaspi-competitor-$env:COMPUTERNAME-workspace-$WorkspaceId"
 
 if (-not (Get-Command python -ErrorAction SilentlyContinue)) {
     throw "Python не найден в PATH. Установите Python 3.12 и включите Add Python to PATH."
@@ -32,6 +35,7 @@ if ([string]::IsNullOrWhiteSpace($Token)) { throw "Токен не введён.
 $env:CRM_API_URL = $ApiUrl
 $env:CRM_SERVICE_TOKEN = $Token
 $env:KASPI_COMPETITOR_AGENT_ID = $AgentId
+$env:KASPI_COMPETITOR_WORKSPACE_ID = $WorkspaceId
 $env:KASPI_COMPETITOR_POLL_SECONDS = "3"
 $env:KASPI_COMPETITOR_CONCURRENCY = "2"
 
@@ -39,6 +43,7 @@ Write-Host ""
 Write-Host "LEO Kaspi Competitor Agent запущен." -ForegroundColor Green
 Write-Host "CRM: $ApiUrl"
 Write-Host "Agent: $AgentId"
+Write-Host "Аккаунт CRM: workspace $WorkspaceId"
 Write-Host "Используется обычный HTTP-клиент из проверенного архива."
 Write-Host "Browser Agent поставщиков и Chrome не затрагиваются."
 Write-Host "Для остановки нажмите Ctrl+C."

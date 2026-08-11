@@ -4,7 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func, true
+from sqlalchemy import Boolean, CheckConstraint, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func, true
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
@@ -78,6 +78,12 @@ class InventoryAllocation(WorkspaceOwned, Base):
         ),
         CheckConstraint("quantity > 0", name="ck_inventory_allocation_quantity_positive"),
         CheckConstraint("unit_cost >= 0", name="ck_inventory_allocation_unit_cost_nonnegative"),
+        Index(
+            "ix_inventory_allocations_workspace_line",
+            "workspace_id",
+            "marketplace_order_line_id",
+            "inventory_batch_id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)

@@ -2,7 +2,7 @@ from datetime import datetime
 from decimal import Decimal
 from enum import StrEnum
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .attempt_contracts import AttemptOutcome
@@ -40,7 +40,15 @@ class SourceHealthStatus(StrEnum):
 
 class MonitorTarget(WorkspaceOwned, Base):
     __tablename__ = "monitor_targets"
-    __table_args__ = (UniqueConstraint("product_binding_id", name="uq_monitor_target_binding"),)
+    __table_args__ = (
+        UniqueConstraint("product_binding_id", name="uq_monitor_target_binding"),
+        Index(
+            "ix_monitor_targets_status_due",
+            "status",
+            "next_check_at",
+            "id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     product_binding_id: Mapped[int] = mapped_column(

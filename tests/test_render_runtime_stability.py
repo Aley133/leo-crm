@@ -4,9 +4,12 @@ import asyncio
 import inspect
 import threading
 
-from backend.app import kaspi_order_polling, kaspi_product_enrichment_jobs
+from fastapi.middleware.gzip import GZipMiddleware
+
+from backend.app import browser_agent_api, kaspi_order_polling, kaspi_product_enrichment_jobs
 from backend.app import kaspi_raw_receiver_jobs
 from backend.app import telegram_price_alerts
+from backend.app.main import app
 
 
 def test_raw_order_persistence_releases_connection_between_bounded_batches(
@@ -102,3 +105,33 @@ def test_price_alert_publisher_keeps_database_work_off_event_loop() -> None:
 
     assert "events = await asyncio.to_thread(" in source
     assert source.count("await asyncio.to_thread(") == 3
+
+
+def test_idle_supplier_agent_claim_is_read_only(db_session, monkeypatch) -> None:
+    commits = 0
+
+    def commit() -> None:
+        nonlocal commits
+        commits += 1
+
+    monkeypatch.setattr(db_session, "commit", commit)
+    response = browser_agent_api.claim_browser_agent_job(
+        browser_agent_api.BrowserAgentClaim(agent_id="idle-agent"),
+        db_session,
+    )
+
+    assert response == {
+        "job": None,
+        "retry_after_seconds": (
+            browser_agent_api.BROWSER_AGENT_IDLE_RETRY_SECONDS
+        ),
+    }
+    assert commits == 0
+
+
+def test_large_api_and_xml_responses_use_gzip_middleware() -> None:
+    assert any(
+        middleware.cls is GZipMiddleware
+        and middleware.kwargs == {"minimum_size": 1024, "compresslevel": 5}
+        for middleware in app.user_middleware
+    )

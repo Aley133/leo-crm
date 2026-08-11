@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import datetime
 from decimal import Decimal
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -44,6 +44,14 @@ class DumpingPolicy(WorkspaceOwned, Base):
 
 class DumpingRun(WorkspaceOwned, Base):
     __tablename__ = "dumping_runs"
+    __table_args__ = (
+        Index(
+            "ix_dumping_runs_workspace_status_id",
+            "workspace_id",
+            "status",
+            "id",
+        ),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     product_id: Mapped[int] = mapped_column(

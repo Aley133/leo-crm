@@ -19,6 +19,8 @@ from backend.app.supplier_adapters.wildberries_browser_access import Wildberries
 
 SUPPLIER_JOB_TYPE = "supplier_product_observation"
 DEFAULT_JOB_TIMEOUT_SECONDS = 120.0
+HEARTBEAT_SECONDS = 15.0
+IDLE_POLL_MAX_SECONDS = 15.0
 
 
 def _required_env(name: str) -> str:
@@ -115,23 +117,43 @@ async def _complete_job(*, api_url: str, token: str, job: dict, adapters: dict[s
     return str(response.get("status") or completion["status"])
 
 
-async def _claim_one(*, api_url: str, token: str, agent_id: str, lease_seconds: int = 180) -> dict | None:
-    claim = await asyncio.to_thread(
+def _agent_identity(agent_id: str) -> dict[str, Any]:
+    return {
+        "agent_id": agent_id,
+        "hostname": socket.gethostname(),
+        "platform": platform.platform(),
+        "version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip(),
+    }
+
+
+async def _heartbeat_loop(*, api_url: str, token: str, agent_id: str) -> None:
+    payload = {**_agent_identity(agent_id), "status": "idle"}
+    while True:
+        try:
+            await asyncio.to_thread(
+                _post_json,
+                f"{api_url}/api/browser-agent/heartbeat",
+                token,
+                payload,
+            )
+        except Exception as exc:
+            print(f"Heartbeat error: {exc}")
+        await asyncio.sleep(HEARTBEAT_SECONDS)
+
+
+async def _claim_one(*, api_url: str, token: str, agent_id: str, lease_seconds: int = 180) -> dict:
+    return await asyncio.to_thread(
         _post_json,
         f"{api_url}/api/browser-agent/claim",
         token,
         {
-            "agent_id": agent_id,
+            **_agent_identity(agent_id),
             "lease_seconds": lease_seconds,
-            "hostname": socket.gethostname(),
-            "platform": platform.platform(),
-            "version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip(),
         },
     )
-    return claim.get("job")
 
 
-async def _dispatch_source_once(*, api_url: str, token: str, dispatch_limit: int, supplier_code: str) -> int:
+async def _dispatch_source_once(*, api_url: str, token: str, dispatch_limit: int, supplier_code: str) -> dict:
     result = await asyncio.to_thread(
         _post_json,
         f"{api_url}/api/browser-agent/dispatch-due",
@@ -140,42 +162,68 @@ async def _dispatch_source_once(*, api_url: str, token: str, dispatch_limit: int
     )
     queued = int(result.get("queued_count") or 0)
     print(f"Dispatcher queued {queued} due {supplier_code} monitor targets")
-    return queued
+    return result
 
 
-async def _dispatch_once(*, api_url: str, token: str, dispatch_limit: int) -> int:
+async def _dispatch_once(*, api_url: str, token: str, dispatch_limit: int) -> tuple[int, float]:
     queued = 0
+    retry_after = 0.0
     for supplier_code in ("ozon", "wb"):
-        queued += await _dispatch_source_once(
+        result = await _dispatch_source_once(
             api_url=api_url,
             token=token,
             dispatch_limit=dispatch_limit,
             supplier_code=supplier_code,
         )
-    return queued
+        queued += int(result.get("queued_count") or 0)
+        retry_after = max(
+            retry_after,
+            float(result.get("retry_after_seconds") or 0),
+        )
+    return queued, retry_after
 
 
 async def _dispatch_loop(*, api_url: str, token: str, poll_seconds: float, dispatch_limit: int) -> None:
     while True:
+        retry_after = poll_seconds
         try:
-            await _dispatch_once(api_url=api_url, token=token, dispatch_limit=dispatch_limit)
+            _queued, retry_after = await _dispatch_once(
+                api_url=api_url,
+                token=token,
+                dispatch_limit=dispatch_limit,
+            )
         except Exception as exc:
             print(f"Dispatcher error: {exc}")
-        await asyncio.sleep(poll_seconds)
+        await asyncio.sleep(max(poll_seconds, retry_after))
 
 
 async def _worker_loop(*, worker_number: int, api_url: str, token: str, agent_id: str, adapters: dict[str, Any], poll_seconds: float) -> None:
     worker_id = f"{agent_id}-w{worker_number}"
+    idle_seconds = poll_seconds
     while True:
         try:
-            job = await _claim_one(api_url=api_url, token=token, agent_id=worker_id)
+            claim = await _claim_one(
+                api_url=api_url,
+                token=token,
+                agent_id=worker_id,
+            )
         except Exception as exc:
             print(f"Worker {worker_number} claim error: {exc}")
             await asyncio.sleep(poll_seconds)
             continue
+        job = claim.get("job")
         if not job:
-            await asyncio.sleep(poll_seconds)
+            idle_seconds = min(
+                IDLE_POLL_MAX_SECONDS,
+                max(
+                    poll_seconds,
+                    float(claim.get("retry_after_seconds") or idle_seconds),
+                    idle_seconds * 2,
+                ),
+            )
+            await asyncio.sleep(idle_seconds)
             continue
+        idle_seconds = poll_seconds
         try:
             await _complete_job(api_url=api_url, token=token, job=job, adapters=adapters)
         except Exception as exc:
@@ -184,7 +232,12 @@ async def _worker_loop(*, worker_number: int, api_url: str, token: str, agent_id
 
 async def _run_once(*, api_url: str, token: str, agent_id: str, adapters: dict[str, Any], dispatch_limit: int) -> int:
     await _dispatch_once(api_url=api_url, token=token, dispatch_limit=dispatch_limit)
-    job = await _claim_one(api_url=api_url, token=token, agent_id=f"{agent_id}-once")
+    claim = await _claim_one(
+        api_url=api_url,
+        token=token,
+        agent_id=f"{agent_id}-once",
+    )
+    job = claim.get("job")
     if not job:
         print("No queued supplier browser jobs.")
         return 2
@@ -234,6 +287,14 @@ async def main(*, once: bool = False) -> int:
             await pool.close()
 
     tasks = [
+        asyncio.create_task(
+            _heartbeat_loop(
+                api_url=api_url,
+                token=token,
+                agent_id=agent_id,
+            ),
+            name="browser-agent-heartbeat",
+        ),
         asyncio.create_task(
             _dispatch_loop(
                 api_url=api_url,

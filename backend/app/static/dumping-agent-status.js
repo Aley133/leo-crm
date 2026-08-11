@@ -24,7 +24,7 @@
     title.textContent = online ? `Подключён: ${agent.hostname || agent.agent_id}` : `Нет связи: ${agent.hostname || agent.agent_id}`;
     const version = agent.version ? `версия ${agent.version}` : "версия неизвестна";
     const workers = agent.concurrency ? `потоков ${agent.concurrency}` : "число потоков неизвестно";
-    meta.textContent = `${version} · ${workers} · последний heartbeat ${formatDate(agent.last_seen_at)}`;
+    meta.textContent = `${version} · ${workers} · аккаунт ${agent.workspace_id} · последний heartbeat ${formatDate(agent.last_seen_at)}`;
   };
 
   const poll = async () => {

@@ -110,3 +110,12 @@ def test_agent_claim_sends_machine_identity() -> None:
     assert '"version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip()' in source
     assert '"wb": WildberriesBrowserAccessAdapter(pool)' in source
     assert 'for supplier_code in ("ozon", "wb")' in source
+
+
+def test_supplier_agent_uses_bounded_idle_polling_and_heartbeat() -> None:
+    source = (ROOT / "tools" / "browser_agent.py").read_text(encoding="utf-8")
+
+    assert "IDLE_POLL_MAX_SECONDS" in source
+    assert "HEARTBEAT_SECONDS" in source
+    assert "/api/browser-agent/heartbeat" in source
+    assert 'claim.get("retry_after_seconds")' in source
