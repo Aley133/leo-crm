@@ -17,9 +17,10 @@ from urllib.request import Request, urlopen
 
 from tools.kaspi_competitor_scanner import scan_kaspi_competitors
 
-VERSION = "1.4.0"
+VERSION = "1.5.0"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 15
+IDLE_POLL_MAX_SECONDS = 15
 CRM_HTTP_TIMEOUT_SECONDS = 30
 CRM_RETRY_ATTEMPTS = 4
 TRANSIENT_HTTP_STATUSES = {408, 425, 429, 502, 503, 504}
@@ -44,8 +45,11 @@ def _app_dir() -> Path:
     return root
 
 
-def _config_path() -> Path:
-    return _app_dir() / "kaspi_competitor_agent.json"
+def _config_path(workspace_id: int = 1) -> Path:
+    if workspace_id == 1:
+        # Preserve the existing BARWORK installation and stored service token.
+        return _app_dir() / "kaspi_competitor_agent.json"
+    return _app_dir() / f"kaspi_competitor_agent.workspace-{workspace_id}.json"
 
 
 def _log_path() -> Path:
@@ -62,8 +66,8 @@ def _log(message: str) -> None:
     print(message, flush=True)
 
 
-def _load_config() -> dict:
-    path = _config_path()
+def _load_config(workspace_id: int = 1) -> dict:
+    path = _config_path(workspace_id)
     if not path.exists():
         return {}
     try:
@@ -73,8 +77,11 @@ def _load_config() -> dict:
         return {}
 
 
-def _save_config(payload: dict) -> None:
-    _config_path().write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+def _save_config(payload: dict, workspace_id: int = 1) -> None:
+    _config_path(workspace_id).write_text(
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        encoding="utf-8",
+    )
 
 
 def _prompt_token_gui() -> str:
@@ -96,6 +103,25 @@ def _prompt_token_gui() -> str:
         return ""
 
 
+def _prompt_workspace_gui() -> int | None:
+    try:
+        from tkinter import Tk, simpledialog
+
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        value = simpledialog.askinteger(
+            "LEO Kaspi Competitor Agent",
+            "Для какого аккаунта запустить бота?\n1 — BARWORK\n2 — LeoXpress",
+            minvalue=1,
+            parent=root,
+        )
+        root.destroy()
+        return value
+    except Exception:
+        return None
+
+
 def _show_message(title: str, message: str, *, error: bool = False) -> None:
     try:
         from tkinter import Tk, messagebox
@@ -112,7 +138,7 @@ def _show_message(title: str, message: str, *, error: bool = False) -> None:
         _log(f"{title}: {message}")
 
 
-def _service_token(config: dict) -> str:
+def _service_token(config: dict, *, workspace_id: int) -> str:
     value = (os.getenv("CRM_SERVICE_TOKEN") or config.get("service_token") or "").strip()
     if value:
         return value
@@ -125,7 +151,7 @@ def _service_token(config: dict) -> str:
     if not value:
         raise RuntimeError("SERVICE_API_TOKEN не введён")
     config["service_token"] = value
-    _save_config(config)
+    _save_config(config, workspace_id)
     return value
 
 
@@ -188,9 +214,10 @@ async def _post_json_with_retry(
     raise RuntimeError(f"{operation}: retry loop finished unexpectedly")
 
 
-def _agent_payload(agent_id: str, concurrency: int) -> dict:
+def _agent_payload(agent_id: str, concurrency: int, workspace_id: int) -> dict:
     return {
         "agent_id": agent_id,
+        "workspace_id": workspace_id,
         "hostname": socket.gethostname(),
         "platform": platform.platform(),
         "version": VERSION,
@@ -198,8 +225,17 @@ def _agent_payload(agent_id: str, concurrency: int) -> dict:
     }
 
 
-async def _heartbeat(api_url: str, token: str, agent_id: str, concurrency: int) -> None:
-    payload = {**_agent_payload(agent_id, concurrency), "status": "online"}
+async def _heartbeat(
+    api_url: str,
+    token: str,
+    agent_id: str,
+    concurrency: int,
+    workspace_id: int,
+) -> None:
+    payload = {
+        **_agent_payload(agent_id, concurrency, workspace_id),
+        "status": "online",
+    }
     while True:
         try:
             await _post_json_with_retry(
@@ -213,14 +249,20 @@ async def _heartbeat(api_url: str, token: str, agent_id: str, concurrency: int) 
         await asyncio.sleep(HEARTBEAT_SECONDS)
 
 
-async def _claim(api_url: str, token: str, agent_id: str, concurrency: int) -> dict | None:
+async def _claim(
+    api_url: str,
+    token: str,
+    agent_id: str,
+    concurrency: int,
+    workspace_id: int,
+) -> dict:
     response = await _post_json_with_retry(
         f"{api_url}/api/kaspi-competitor-agent/claim",
         token,
-        _agent_payload(agent_id, concurrency),
+        _agent_payload(agent_id, concurrency, workspace_id),
         operation="Получение задания",
     )
-    return response.get("job")
+    return response
 
 
 async def _process_job(api_url: str, token: str, job: dict) -> None:
@@ -269,25 +311,61 @@ async def _process_job(api_url: str, token: str, job: dict) -> None:
         _log(f"Задание #{job['id']}: {result.get('status')}")
 
 
-async def main(*, once: bool = False) -> int:
-    config = _load_config()
+def _workspace_id(requested: int | None = None) -> int:
+    configured = os.getenv("KASPI_COMPETITOR_WORKSPACE_ID")
+    raw: object | None = requested if requested is not None else configured
+    if raw in (None, ""):
+        legacy_config = _load_config(1)
+        if legacy_config:
+            raw = legacy_config.get("workspace_id") or 1
+        elif os.name == "nt":
+            raw = _prompt_workspace_gui()
+        if raw in (None, ""):
+            try:
+                raw = input(
+                    "ID аккаунта CRM (1 = BARWORK, 2 = LeoXpress): "
+                ).strip()
+            except (EOFError, KeyboardInterrupt):
+                raw = "1"
+        if raw in (None, ""):
+            raw = "1"
+    try:
+        value = int(raw)
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("KASPI_COMPETITOR_WORKSPACE_ID должен быть целым числом") from exc
+    if value < 1:
+        raise RuntimeError("KASPI_COMPETITOR_WORKSPACE_ID должен быть больше нуля")
+    return value
+
+
+async def main(*, once: bool = False, workspace_id: int | None = None) -> int:
+    selected_workspace_id = _workspace_id(workspace_id)
+    config = _load_config(selected_workspace_id)
     api_url = (os.getenv("CRM_API_URL") or config.get("api_url") or DEFAULT_API_URL).strip().rstrip("/")
-    token = _service_token(config)
+    token = _service_token(config, workspace_id=selected_workspace_id)
     agent_id = (
         os.getenv("KASPI_COMPETITOR_AGENT_ID")
         or config.get("agent_id")
-        or f"kaspi-competitor-{socket.gethostname()}"
+        or f"kaspi-competitor-{socket.gethostname()}-workspace-{selected_workspace_id}"
     ).strip()
     poll_seconds = max(1.0, float(os.getenv("KASPI_COMPETITOR_POLL_SECONDS") or "3"))
     concurrency = max(
         1,
         min(8, int(os.getenv("KASPI_COMPETITOR_CONCURRENCY") or config.get("concurrency") or "2")),
     )
-    config.update({"api_url": api_url, "agent_id": agent_id, "concurrency": concurrency})
-    _save_config(config)
+    config.update(
+        {
+            "api_url": api_url,
+            "agent_id": agent_id,
+            "concurrency": concurrency,
+            "workspace_id": selected_workspace_id,
+        }
+    )
+    _save_config(config, selected_workspace_id)
 
     _log(f"LEO Kaspi Competitor Agent {VERSION}")
     _log(f"CRM: {api_url}")
+    _log(f"Аккаунт CRM: workspace {selected_workspace_id}")
     _log(f"Agent ID: {agent_id}")
     _log(f"Параллельных проверок: {1 if once else concurrency}")
     _log("Автономный режим: DATABASE_URL, SQLAlchemy и Browser Agent не используются.")
@@ -296,7 +374,14 @@ async def main(*, once: bool = False) -> int:
         await _post_json_with_retry(
             f"{api_url}/api/kaspi-competitor-agent/heartbeat",
             token,
-            {**_agent_payload(agent_id, concurrency), "status": "online"},
+            {
+                **_agent_payload(
+                    agent_id,
+                    concurrency,
+                    selected_workspace_id,
+                ),
+                "status": "online",
+            },
             operation="Подключение к CRM",
         )
     except Exception as exc:
@@ -311,14 +396,30 @@ async def main(*, once: bool = False) -> int:
     semaphore = asyncio.Semaphore(1 if once else concurrency)
 
     async def worker(number: int) -> None:
+        idle_seconds = poll_seconds
         while True:
             try:
-                job = await _claim(api_url, token, f"{agent_id}-w{number}", 1 if once else concurrency)
+                claim = await _claim(
+                    api_url,
+                    token,
+                    f"{agent_id}-w{number}",
+                    1 if once else concurrency,
+                    selected_workspace_id,
+                )
+                job = claim.get("job")
                 if not job:
                     if once:
                         return
-                    await asyncio.sleep(poll_seconds)
+                    retry_after = float(
+                        claim.get("retry_after_seconds") or idle_seconds
+                    )
+                    idle_seconds = min(
+                        IDLE_POLL_MAX_SECONDS,
+                        max(poll_seconds, retry_after, idle_seconds * 2),
+                    )
+                    await asyncio.sleep(idle_seconds)
                     continue
+                idle_seconds = poll_seconds
                 async with semaphore:
                     await _process_job(api_url, token, job)
             except Exception as exc:
@@ -331,7 +432,15 @@ async def main(*, once: bool = False) -> int:
         await worker(1)
         return 0
 
-    heartbeat_task = asyncio.create_task(_heartbeat(api_url, token, agent_id, concurrency))
+    heartbeat_task = asyncio.create_task(
+        _heartbeat(
+            api_url,
+            token,
+            agent_id,
+            concurrency,
+            selected_workspace_id,
+        )
+    )
     try:
         await asyncio.gather(*(worker(number) for number in range(1, concurrency + 1)))
     finally:
@@ -343,6 +452,11 @@ async def main(*, once: bool = False) -> int:
 def _parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LEO local Kaspi competitor agent")
     parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--workspace-id",
+        type=int,
+        help="ID аккаунта CRM; 1 = старый BARWORK",
+    )
     return parser.parse_args()
 
 
@@ -350,7 +464,11 @@ if __name__ == "__main__":
     started = time.time()
     args = _parse_args()
     try:
-        raise SystemExit(asyncio.run(main(once=args.once)))
+        raise SystemExit(
+            asyncio.run(
+                main(once=args.once, workspace_id=args.workspace_id)
+            )
+        )
     except KeyboardInterrupt:
         _log(f"Агент остановлен через {int(time.time() - started)} сек.")
     except Exception as exc:

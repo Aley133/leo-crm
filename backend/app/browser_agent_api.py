@@ -79,6 +79,7 @@ def _dispatch_min_interval_seconds() -> float:
 
 
 DISPATCH_MIN_INTERVAL_SECONDS = _dispatch_min_interval_seconds()
+BROWSER_AGENT_IDLE_RETRY_SECONDS = 15
 _DISPATCH_LAST_AT: dict[str, float] = {}
 _DISPATCH_LOCK = Lock()
 
@@ -300,6 +301,7 @@ def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_u
         "queued_count": result.queued_count,
         "job_ids": list(result.queued_job_ids),
         "throttled": False,
+        "retry_after_seconds": DISPATCH_MIN_INTERVAL_SECONDS,
     }
 
 
@@ -326,14 +328,6 @@ def create_browser_agent_job(payload: BrowserAgentJobCreate, db: Session = Depen
 
 @router.post("/claim")
 def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(get_unscoped_db)):
-    agent = _upsert_agent(
-        db,
-        agent_id=payload.agent_id,
-        status_value="claiming",
-        hostname=payload.hostname,
-        platform=payload.platform,
-        version=payload.version,
-    )
     now = utc_now()
     job = db.scalar(
         select(BrowserAgentJob)
@@ -349,11 +343,27 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
         .limit(1)
     )
     if job is None:
-        agent.status = "idle"
-        agent.current_job_id = None
-        db.commit()
-        record_browser_agent_heartbeat(agent_id=payload.agent_id, status="idle", version=agent.version)
-        return {"job": None}
+        # Empty queue polling is intentionally read-only. The agent sends a
+        # separate bounded heartbeat, so idle workers no longer create a
+        # PostgreSQL transaction every few seconds.
+        record_browser_agent_heartbeat(
+            agent_id=payload.agent_id,
+            status="idle",
+            version=payload.version,
+        )
+        return {
+            "job": None,
+            "retry_after_seconds": BROWSER_AGENT_IDLE_RETRY_SECONDS,
+        }
+
+    agent = _upsert_agent(
+        db,
+        agent_id=payload.agent_id,
+        status_value="claiming",
+        hostname=payload.hostname,
+        platform=payload.platform,
+        version=payload.version,
+    )
 
     token = secrets.token_hex(24)
     job.status = BrowserAgentJobStatus.LEASED.value

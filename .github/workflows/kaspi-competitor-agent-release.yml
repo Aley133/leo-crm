@@ -125,11 +125,11 @@ jobs:
             gh release create kaspi-competitor-agent-latest `
               --target "$env:GITHUB_SHA" `
               --title "LEO Kaspi Competitor Agent" `
-              --notes "Автономный локальный агент анализа конкурентов Kaspi. Не требует DATABASE_URL, SQLAlchemy, Playwright или LEO Browser Agent. После первого запуска введите SERVICE_API_TOKEN из Render."
+              --notes "Автономный локальный агент анализа конкурентов Kaspi. Не требует DATABASE_URL, SQLAlchemy, Playwright или LEO Browser Agent. При первом запуске выберите аккаунт CRM (BARWORK или LeoXpress) и введите SERVICE_API_TOKEN из Render. Каждый экземпляр обрабатывает только свой аккаунт."
           } else {
             gh release edit kaspi-competitor-agent-latest `
               --target "$env:GITHUB_SHA" `
               --title "LEO Kaspi Competitor Agent" `
-              --notes "Автономный локальный агент анализа конкурентов Kaspi. Не требует DATABASE_URL, SQLAlchemy, Playwright или LEO Browser Agent. После первого запуска введите SERVICE_API_TOKEN из Render."
+              --notes "Автономный локальный агент анализа конкурентов Kaspi. Не требует DATABASE_URL, SQLAlchemy, Playwright или LEO Browser Agent. При первом запуске выберите аккаунт CRM (BARWORK или LeoXpress) и введите SERVICE_API_TOKEN из Render. Каждый экземпляр обрабатывает только свой аккаунт."
           }
           gh release upload kaspi-competitor-agent-latest "dist/LEO-Kaspi-Competitor-Agent.exe" --clobber

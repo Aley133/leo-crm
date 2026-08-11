@@ -31,23 +31,13 @@ class CommerceService:
         source_status: str | None = None,
         query: str | None = None,
     ) -> tuple[int, tuple[CommerceOrder, ...], CommerceSummary]:
-        if status:
-            _raw_total, candidates = self._repository.list_orders(
-                limit=1000,
-                offset=0,
-                status=source_status,
-                query=query,
-            )
-            filtered = tuple(order for order in candidates if order.stage.value == status)
-            orders = filtered[offset : offset + limit]
-            total = len(filtered)
-        else:
-            total, orders = self._repository.list_orders(
-                limit=limit,
-                offset=offset,
-                status=source_status,
-                query=query,
-            )
+        total, orders = self._repository.list_orders(
+            limit=limit,
+            offset=offset,
+            status=source_status,
+            operational_stage=status,
+            query=query,
+        )
         return total, orders, self.summarize(orders)
 
     @staticmethod

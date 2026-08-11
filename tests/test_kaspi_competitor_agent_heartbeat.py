@@ -16,8 +16,11 @@ def test_competitor_agent_exposes_isolated_heartbeat_contract() -> None:
     assert '@router.post("/heartbeat")' in api
     assert '@router.get("/agents/status")' in api
     assert "AGENT_ONLINE_SECONDS" in api
+    assert "AGENT_HEARTBEAT_REGISTRY_LIMIT" in api
     assert "/api/kaspi-competitor-agent/heartbeat" in agent
     assert "HEARTBEAT_SECONDS" in agent
+    assert "workspace_id" in api
+    assert "retry_after_seconds" in api
     assert "tools.browser_agent" not in agent
     assert "playwright" not in agent.lower()
 

@@ -1,6 +1,6 @@
 # ADR-0012: Multi-account isolation without UI duplication
 
-Status: prepared for release, not deployed
+Status: production rule
 
 ## Decision
 
@@ -21,11 +21,17 @@ accepted on create/update and are never returned by the API. The legacy Render
 credentials are copied into workspace 1 once; stored CRM credentials win on all
 later starts.
 
-Browser Agent and Kaspi Competitor Agent remain shared executors. Their durable
-jobs carry `workspace_id`; claim/complete endpoints may inspect all workspaces,
-but business results are applied inside the job owner's context. Automatic
-Kaspi polling iterates active credentials and passes each account's token and
-marketplace account ID explicitly.
+Supplier Browser Agent remains a shared executor because supplier observations
+are already applied inside each durable job owner's workspace. Kaspi Competitor
+Agent is stricter: every installed process is bound to exactly one
+`workspace_id`, and claim/resume queries may see only that workspace's dumping
+queue. BARWORK is workspace 1 for backward compatibility; an older agent that
+does not send ownership therefore defaults safely to BARWORK and cannot claim a
+LeoXpress job. Heartbeats and the Dumping page's agent status are scoped by the
+same workspace boundary.
+
+Automatic Kaspi polling iterates active credentials and passes each account's
+token and marketplace account ID explicitly.
 
 Workspace 1 retains `/feeds/kaspi/catalog.xml`. Every workspace also has a
 stable independent URL `/feeds/kaspi/{workspace_slug}/catalog.xml`.

@@ -7,6 +7,7 @@ from sqlalchemy import (
     JSON,
     DateTime,
     ForeignKey,
+    Index,
     Integer,
     Numeric,
     String,
@@ -161,6 +162,20 @@ class MarketplaceOrder(WorkspaceOwned, Base):
     __tablename__ = "marketplace_orders"
     __table_args__ = (
         UniqueConstraint("marketplace_account_id", "external_order_id", name="uq_marketplace_order_account_external"),
+        Index(
+            "ix_marketplace_orders_workspace_status_sort",
+            "workspace_id",
+            "status",
+            "ordered_at",
+            "id",
+        ),
+        Index(
+            "ix_marketplace_orders_workspace_manual_stage_sort",
+            "workspace_id",
+            "manual_stage",
+            "ordered_at",
+            "id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -195,6 +210,12 @@ class MarketplaceOrderLine(WorkspaceOwned, Base):
     __tablename__ = "marketplace_order_lines"
     __table_args__ = (
         UniqueConstraint("marketplace_order_id", "external_line_id", name="uq_marketplace_order_line_external"),
+        Index(
+            "ix_marketplace_order_lines_workspace_order",
+            "workspace_id",
+            "marketplace_order_id",
+            "id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -235,6 +256,15 @@ class MarketplaceRawPayload(WorkspaceOwned, Base):
     __tablename__ = "marketplace_raw_payloads"
     __table_args__ = (
         UniqueConstraint("marketplace_account_id", "payload_type", "external_object_id", "content_hash", name="uq_marketplace_raw_payload_identity"),
+        Index(
+            "ix_marketplace_raw_payloads_latest_order",
+            "workspace_id",
+            "marketplace_account_id",
+            "payload_type",
+            "external_object_id",
+            "received_at",
+            "id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(primary_key=True)

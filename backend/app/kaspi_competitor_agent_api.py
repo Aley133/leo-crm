@@ -17,7 +17,11 @@ from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from .dumping_runner import apply_competitor_snapshot
 from .kaspi_offer_competitor import KaspiCompetitorSnapshot
 from .models import Product
-from .workspace_context import workspace_context
+from .workspace_context import (
+    LEGACY_WORKSPACE_ID,
+    current_workspace_id,
+    workspace_context,
+)
 
 
 router = APIRouter(
@@ -29,12 +33,15 @@ router = APIRouter(
 LEASE_SECONDS = 180
 AGENT_ONLINE_SECONDS = 45
 LEASE_RECOVERY_SCAN_LIMIT = 100
-_AGENT_HEARTBEATS: dict[str, dict] = {}
+AGENT_IDLE_RETRY_SECONDS = 15
+AGENT_HEARTBEAT_REGISTRY_LIMIT = 64
+_AGENT_HEARTBEATS: dict[tuple[int, str], dict] = {}
 _AGENT_HEARTBEATS_LOCK = Lock()
 
 
 class AgentClaim(BaseModel):
     agent_id: str = Field(min_length=1, max_length=128)
+    workspace_id: int = Field(default=LEGACY_WORKSPACE_ID, ge=1)
     hostname: str | None = Field(default=None, max_length=255)
     platform: str | None = Field(default=None, max_length=128)
     version: str | None = Field(default=None, max_length=32)
@@ -66,6 +73,7 @@ def _touch_agent(payload: AgentClaim, *, status: str = "online") -> dict:
     now = _now()
     record = {
         "agent_id": payload.agent_id,
+        "workspace_id": payload.workspace_id,
         "hostname": payload.hostname,
         "platform": payload.platform,
         "version": payload.version,
@@ -74,14 +82,30 @@ def _touch_agent(payload: AgentClaim, *, status: str = "online") -> dict:
         "last_seen_at": now.isoformat(),
     }
     with _AGENT_HEARTBEATS_LOCK:
-        _AGENT_HEARTBEATS[payload.agent_id] = record
+        _AGENT_HEARTBEATS[(payload.workspace_id, payload.agent_id)] = record
+        if len(_AGENT_HEARTBEATS) > AGENT_HEARTBEAT_REGISTRY_LIMIT:
+            oldest_keys = sorted(
+                _AGENT_HEARTBEATS,
+                key=lambda key: str(
+                    _AGENT_HEARTBEATS[key].get("last_seen_at") or ""
+                ),
+            )
+            for key in oldest_keys[
+                : len(_AGENT_HEARTBEATS) - AGENT_HEARTBEAT_REGISTRY_LIMIT
+            ]:
+                _AGENT_HEARTBEATS.pop(key, None)
     return record
 
 
-def _agent_status_payload() -> dict:
+def _agent_status_payload(*, workspace_id: int) -> dict:
     now = _now()
     with _AGENT_HEARTBEATS_LOCK:
-        agents = [dict(item) for item in _AGENT_HEARTBEATS.values()]
+        agents = [
+            dict(item)
+            for item in _AGENT_HEARTBEATS.values()
+            if int(item.get("workspace_id") or LEGACY_WORKSPACE_ID)
+            == workspace_id
+        ]
     for item in agents:
         try:
             seen = datetime.fromisoformat(str(item["last_seen_at"]))
@@ -123,10 +147,18 @@ def _json_compatible(value: object) -> object:
     return value
 
 
-def _claimable_job(db: Session, *, now: datetime) -> tuple[DumpingRun | None, bool]:
+def _claimable_job(
+    db: Session,
+    *,
+    now: datetime,
+    workspace_id: int,
+) -> tuple[DumpingRun | None, bool]:
     leased = db.scalars(
         select(DumpingRun)
-        .where(DumpingRun.status == "leased_local")
+        .where(
+            DumpingRun.workspace_id == workspace_id,
+            DumpingRun.status == "leased_local",
+        )
         .order_by(DumpingRun.id)
         .with_for_update(skip_locked=True)
         .limit(LEASE_RECOVERY_SCAN_LIMIT)
@@ -144,7 +176,10 @@ def _claimable_job(db: Session, *, now: datetime) -> tuple[DumpingRun | None, bo
     )
     queued = db.scalar(
         select(DumpingRun)
-        .where(DumpingRun.status == "queued_local")
+        .where(
+            DumpingRun.workspace_id == workspace_id,
+            DumpingRun.status == "queued_local",
+        )
         .order_by(priority, DumpingRun.id)
         .with_for_update(skip_locked=True)
         .limit(1)
@@ -324,11 +359,15 @@ def _leased_job_for_agent(
     *,
     agent_id: str,
     now: datetime,
+    workspace_id: int,
 ) -> DumpingRun | None:
     """Resume a claim whose HTTP response was lost without leasing another job."""
     candidates = db.scalars(
         select(DumpingRun)
-        .where(DumpingRun.status == "leased_local")
+        .where(
+            DumpingRun.workspace_id == workspace_id,
+            DumpingRun.status == "leased_local",
+        )
         .order_by(DumpingRun.id)
         .limit(LEASE_RECOVERY_SCAN_LIMIT)
     ).all()
@@ -353,6 +392,7 @@ def _serialize_claimed_job(
         return None
     return {
         "id": job.id,
+        "workspace_id": job.workspace_id,
         "product_id": product.id,
         "name": product.name,
         "brand": product.brand,
@@ -371,8 +411,18 @@ def _claimed_job_payload(
     *,
     job: DumpingRun,
 ) -> dict | None:
-    product = db.get(Product, job.product_id)
-    policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == job.product_id))
+    product = db.scalar(
+        select(Product).where(
+            Product.id == job.product_id,
+            Product.workspace_id == job.workspace_id,
+        )
+    )
+    policy = db.scalar(
+        select(DumpingPolicy).where(
+            DumpingPolicy.product_id == job.product_id,
+            DumpingPolicy.workspace_id == job.workspace_id,
+        )
+    )
     feed = db.scalar(
         select(KaspiXmlFeed)
         .where(
@@ -400,25 +450,48 @@ def heartbeat(payload: AgentHeartbeat) -> dict:
 
 @router.get("/agents/status")
 def read_agent_status() -> dict:
-    return _agent_status_payload()
+    return _agent_status_payload(workspace_id=current_workspace_id())
 
 
 @router.post("/claim")
 def claim_job(payload: AgentClaim, db: Session = Depends(get_unscoped_db)) -> dict:
     _touch_agent(payload)
     now = _now()
-    job = _leased_job_for_agent(db, agent_id=payload.agent_id, now=now)
+    job = _leased_job_for_agent(
+        db,
+        agent_id=payload.agent_id,
+        now=now,
+        workspace_id=payload.workspace_id,
+    )
     if job is not None:
         resumed_payload = _claimed_job_payload(db, job=job)
         if resumed_payload is not None:
             return {"job": resumed_payload, "resumed": True}
 
-    job, recovered = _claimable_job(db, now=now)
+    job, recovered = _claimable_job(
+        db,
+        now=now,
+        workspace_id=payload.workspace_id,
+    )
     if job is None:
-        return {"job": None}
+        return {
+            "job": None,
+            "workspace_id": payload.workspace_id,
+            "retry_after_seconds": AGENT_IDLE_RETRY_SECONDS,
+        }
 
-    product = db.get(Product, job.product_id)
-    policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == job.product_id))
+    product = db.scalar(
+        select(Product).where(
+            Product.id == job.product_id,
+            Product.workspace_id == job.workspace_id,
+        )
+    )
+    policy = db.scalar(
+        select(DumpingPolicy).where(
+            DumpingPolicy.product_id == job.product_id,
+            DumpingPolicy.workspace_id == job.workspace_id,
+        )
+    )
     feed = db.scalar(
         select(KaspiXmlFeed)
         .where(
