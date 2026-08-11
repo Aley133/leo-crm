@@ -71,13 +71,25 @@ def _quote(identifier: str) -> str:
     return op.get_bind().dialect.identifier_preparer.quote(identifier)
 
 
+def _indexes_for_existing_tables() -> tuple[
+    tuple[str, str, tuple[str, ...]], ...
+]:
+    existing_tables = set(sa.inspect(op.get_bind()).get_table_names())
+    return tuple(
+        index_definition
+        for index_definition in INDEXES
+        if index_definition[1] in existing_tables
+    )
+
+
 def upgrade() -> None:
+    indexes = _indexes_for_existing_tables()
     if op.get_bind().dialect.name == "postgresql":
         # These tables are continuously read and written in production.  Build
         # each index outside the migration transaction so deploy does not hold
         # a table-wide write lock while historical rows are scanned.
         with op.get_context().autocommit_block():
-            for name, table, columns in INDEXES:
+            for name, table, columns in indexes:
                 column_sql = ", ".join(_quote(column) for column in columns)
                 op.execute(
                     sa.text(
@@ -88,7 +100,7 @@ def upgrade() -> None:
         return
 
     inspector = sa.inspect(op.get_bind())
-    for name, table, columns in INDEXES:
+    for name, table, columns in indexes:
         existing = {
             index.get("name")
             for index in inspector.get_indexes(table)
@@ -99,9 +111,10 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
+    indexes = _indexes_for_existing_tables()
     if op.get_bind().dialect.name == "postgresql":
         with op.get_context().autocommit_block():
-            for name, _table, _columns in reversed(INDEXES):
+            for name, _table, _columns in reversed(indexes):
                 op.execute(
                     sa.text(
                         f"DROP INDEX CONCURRENTLY IF EXISTS {_quote(name)}"
@@ -110,7 +123,7 @@ def downgrade() -> None:
         return
 
     inspector = sa.inspect(op.get_bind())
-    for name, table, _columns in reversed(INDEXES):
+    for name, table, _columns in reversed(indexes):
         existing = {
             index.get("name")
             for index in inspector.get_indexes(table)

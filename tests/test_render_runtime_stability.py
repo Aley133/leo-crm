@@ -1,15 +1,31 @@
 from __future__ import annotations
 
 import asyncio
+import importlib.util
 import inspect
+from pathlib import Path
 import threading
 
 from fastapi.middleware.gzip import GZipMiddleware
+import sqlalchemy as sa
 
 from backend.app import browser_agent_api, kaspi_order_polling, kaspi_product_enrichment_jobs
 from backend.app import kaspi_raw_receiver_jobs
 from backend.app import telegram_price_alerts
 from backend.app.main import app
+
+
+ROOT = Path(__file__).resolve().parents[1]
+
+
+def _load_runtime_index_migration():
+    path = ROOT / "migrations" / "versions" / "20260811_0031_runtime_query_indexes.py"
+    spec = importlib.util.spec_from_file_location("runtime_query_indexes", path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def test_raw_order_persistence_releases_connection_between_bounded_batches(
@@ -135,3 +151,39 @@ def test_large_api_and_xml_responses_use_gzip_middleware() -> None:
         and middleware.kwargs == {"minimum_size": 1024, "compresslevel": 5}
         for middleware in app.user_middleware
     )
+
+
+def test_runtime_index_migration_skips_tables_created_after_alembic(
+    monkeypatch,
+) -> None:
+    migration = _load_runtime_index_migration()
+    engine = sa.create_engine("sqlite://")
+    metadata = sa.MetaData()
+    sa.Table(
+        "marketplace_orders",
+        metadata,
+        sa.Column("id", sa.Integer),
+        sa.Column("workspace_id", sa.Integer),
+        sa.Column("status", sa.String),
+        sa.Column("manual_stage", sa.String),
+        sa.Column("ordered_at", sa.DateTime),
+    )
+    metadata.create_all(engine)
+
+    created: list[tuple[str, str, tuple[str, ...]]] = []
+    with engine.connect() as connection:
+        monkeypatch.setattr(migration.op, "get_bind", lambda: connection)
+        monkeypatch.setattr(
+            migration.op,
+            "create_index",
+            lambda name, table, columns: created.append(
+                (name, table, tuple(columns))
+            ),
+        )
+        migration.upgrade()
+
+    assert {name for name, _table, _columns in created} == {
+        "ix_marketplace_orders_workspace_status_sort",
+        "ix_marketplace_orders_workspace_manual_stage_sort",
+    }
+    assert all(table == "marketplace_orders" for _name, table, _columns in created)
