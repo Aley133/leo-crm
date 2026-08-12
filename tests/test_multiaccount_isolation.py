@@ -79,6 +79,12 @@ OPERATIONAL_TABLES = {
     "browser_agent_jobs",
 }
 
+FAST_DUMPING_OPERATIONAL_TABLES = {
+    "fast_dumping_policies",
+    "fast_dumping_states",
+    "fast_dumping_jobs",
+}
+
 
 def _seed_workspace(db, workspace_id: int, slug: str):
     db.add(Workspace(id=workspace_id, name=slug.upper(), slug=slug, is_active=True))
@@ -145,8 +151,9 @@ def test_every_operational_model_has_workspace_ownership() -> None:
         mapper.local_table.name: mapper.local_table
         for mapper in Base.registry.mappers
     }
-    assert OPERATIONAL_TABLES <= mapped_tables.keys()
-    assert all("workspace_id" in mapped_tables[name].c for name in OPERATIONAL_TABLES)
+    operational_tables = OPERATIONAL_TABLES | FAST_DUMPING_OPERATIONAL_TABLES
+    assert operational_tables <= mapped_tables.keys()
+    assert all("workspace_id" in mapped_tables[name].c for name in operational_tables)
 
 
 def test_two_workspaces_are_invisible_to_each_other(db_session) -> None:

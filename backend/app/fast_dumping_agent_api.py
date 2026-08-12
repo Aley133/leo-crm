@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+from datetime import UTC, datetime, timedelta
+from threading import Lock
+from typing import Literal
+
+from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel, Field
+from sqlalchemy import select
+from sqlalchemy.orm import Session
+
+from .auth import require_service_token
+from .db import get_unscoped_db
+from .fast_dumping_service import (
+    claim_job,
+    complete_apply,
+    complete_scan,
+    complete_verification,
+    prepare_apply,
+    serialize_claimed_job,
+)
+from .workspace_context import LEGACY_WORKSPACE_ID, current_workspace_id, workspace_context
+from .workspace_models import KaspiAccountCredential
+
+
+class FastAgentIdentity(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=255)
+    workspace_id: int = Field(default=LEGACY_WORKSPACE_ID, ge=1)
+    hostname: str | None = Field(default=None, max_length=255)
+    platform: str | None = Field(default=None, max_length=500)
+    version: str | None = Field(default=None, max_length=64)
+    concurrency: int = Field(default=1, ge=1, le=8)
+    merchant_uid: str = Field(min_length=1, max_length=128)
+
+
+class FastAgentHeartbeat(FastAgentIdentity):
+    status: str = Field(default="online", max_length=32)
+
+
+class FastScanComplete(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=255)
+    workspace_id: int = Field(ge=1)
+    lease_token: str = Field(min_length=16, max_length=64)
+    status: Literal["succeeded", "failed"]
+    market: dict = Field(default_factory=dict)
+    error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=4000)
+
+
+class FastPrepareApply(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=255)
+    workspace_id: int = Field(ge=1)
+    lease_token: str = Field(min_length=16, max_length=64)
+
+
+class FastApplyComplete(FastPrepareApply):
+    accepted: bool = False
+    verified: bool = False
+    status_code: int | None = Field(default=None, ge=100, le=599)
+    operation_id: str | None = Field(default=None, max_length=255)
+    latency_seconds: float = Field(default=0, ge=0, le=3600)
+    observed_own_price_kzt: str | None = Field(default=None, max_length=64)
+    session_refreshed: bool = False
+    error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=2000)
+
+
+class FastVerifyComplete(FastPrepareApply):
+    observed_own_price_kzt: str | None = Field(default=None, max_length=64)
+
+
+router = APIRouter(
+    prefix="/api/fast-dumping-agent",
+    tags=["fast-dumping-agent"],
+    dependencies=[Depends(require_service_token)],
+)
+
+_HEARTBEATS: dict[tuple[int, str], dict] = {}
+_HEARTBEATS_LOCK = Lock()
+_ONLINE_FOR = timedelta(seconds=45)
+_MAX_HEARTBEATS = 32
+
+
+def _now() -> datetime:
+    return datetime.now(UTC)
+
+
+def _touch_agent(payload: FastAgentIdentity, *, status: str = "online") -> dict:
+    record = {
+        "agent_id": payload.agent_id,
+        "workspace_id": payload.workspace_id,
+        "hostname": payload.hostname,
+        "platform": payload.platform,
+        "version": payload.version,
+        "concurrency": payload.concurrency,
+        "merchant_uid": payload.merchant_uid,
+        "status": status,
+        "last_seen_at": _now(),
+    }
+    with _HEARTBEATS_LOCK:
+        _HEARTBEATS[(payload.workspace_id, payload.agent_id)] = record
+        if len(_HEARTBEATS) > _MAX_HEARTBEATS:
+            oldest = sorted(
+                _HEARTBEATS,
+                key=lambda key: _HEARTBEATS[key]["last_seen_at"],
+            )[: len(_HEARTBEATS) - _MAX_HEARTBEATS]
+            for key in oldest:
+                _HEARTBEATS.pop(key, None)
+    return record
+
+
+def _status_payload(workspace_id: int) -> dict:
+    checked_at = _now()
+    with _HEARTBEATS_LOCK:
+        agents = [
+            dict(record)
+            for (record_workspace, _agent_id), record in _HEARTBEATS.items()
+            if record_workspace == workspace_id
+        ]
+    agents.sort(key=lambda item: item["last_seen_at"], reverse=True)
+    for item in agents:
+        item["online"] = item["last_seen_at"] >= checked_at - _ONLINE_FOR
+    return {
+        "workspace_id": workspace_id,
+        "online": any(item["online"] for item in agents),
+        "agents": agents,
+        "checked_at": checked_at,
+    }
+
+
+def _conflict(exc: ValueError) -> HTTPException:
+    return HTTPException(status_code=409, detail=str(exc))
+
+
+def _validate_workspace_merchant(
+    db: Session,
+    *,
+    workspace_id: int,
+    merchant_uid: str,
+) -> None:
+    credential = db.scalar(
+        select(KaspiAccountCredential).where(
+            KaspiAccountCredential.workspace_id == workspace_id
+        )
+    )
+    if credential is None:
+        raise ValueError("В выбранном workspace не настроен аккаунт Kaspi")
+    if credential.partner_id.strip() != merchant_uid.strip():
+        raise ValueError(
+            "Merchant UID Fast Agent не совпадает с Kaspi Partner ID выбранного workspace"
+        )
+
+
+@router.post("/heartbeat")
+def heartbeat(
+    payload: FastAgentHeartbeat,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    try:
+        _validate_workspace_merchant(
+            db,
+            workspace_id=payload.workspace_id,
+            merchant_uid=payload.merchant_uid,
+        )
+    except ValueError as exc:
+        raise _conflict(exc) from exc
+    return _touch_agent(payload, status=payload.status)
+
+
+@router.get("/agents/status")
+def read_agent_status() -> dict:
+    return _status_payload(current_workspace_id())
+
+
+@router.post("/claim")
+def claim(
+    payload: FastAgentIdentity,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    try:
+        _validate_workspace_merchant(
+            db,
+            workspace_id=payload.workspace_id,
+            merchant_uid=payload.merchant_uid,
+        )
+    except ValueError as exc:
+        raise _conflict(exc) from exc
+    _touch_agent(payload)
+    try:
+        with workspace_context(payload.workspace_id):
+            job = claim_job(
+                db,
+                workspace_id=payload.workspace_id,
+                agent_id=payload.agent_id,
+            )
+            result = (
+                None
+                if job is None
+                else serialize_claimed_job(
+                    db,
+                    job=job,
+                    workspace_id=payload.workspace_id,
+                )
+            )
+            db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _conflict(exc) from exc
+    return {"job": result, "retry_after_seconds": 10 if result is None else 0}
+
+
+@router.post("/jobs/{job_id}/scan-complete")
+def scan_complete(
+    job_id: int,
+    payload: FastScanComplete,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    try:
+        with workspace_context(payload.workspace_id):
+            result = complete_scan(
+                db,
+                workspace_id=payload.workspace_id,
+                job_id=job_id,
+                agent_id=payload.agent_id,
+                lease_token=payload.lease_token,
+                succeeded=payload.status == "succeeded",
+                market_payload=payload.market,
+                error_code=payload.error_code,
+                error_message=payload.error_message,
+            )
+            db.commit()
+            return result
+    except ValueError as exc:
+        db.rollback()
+        raise _conflict(exc) from exc
+
+
+@router.post("/jobs/{job_id}/prepare-apply")
+def prepare_job_apply(
+    job_id: int,
+    payload: FastPrepareApply,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    try:
+        with workspace_context(payload.workspace_id):
+            result = prepare_apply(
+                db,
+                workspace_id=payload.workspace_id,
+                job_id=job_id,
+                agent_id=payload.agent_id,
+                lease_token=payload.lease_token,
+            )
+            db.commit()
+            return result
+    except ValueError as exc:
+        db.rollback()
+        raise _conflict(exc) from exc
+
+
+@router.post("/jobs/{job_id}/apply-complete")
+def apply_complete(
+    job_id: int,
+    payload: FastApplyComplete,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    try:
+        with workspace_context(payload.workspace_id):
+            result = complete_apply(
+                db,
+                workspace_id=payload.workspace_id,
+                job_id=job_id,
+                agent_id=payload.agent_id,
+                lease_token=payload.lease_token,
+                write_payload=payload.model_dump(
+                    exclude={"agent_id", "workspace_id", "lease_token"}
+                ),
+            )
+            db.commit()
+            return result
+    except ValueError as exc:
+        db.rollback()
+        raise _conflict(exc) from exc
+
+
+@router.post("/jobs/{job_id}/verify-complete")
+def verify_complete(
+    job_id: int,
+    payload: FastVerifyComplete,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    try:
+        with workspace_context(payload.workspace_id):
+            result = complete_verification(
+                db,
+                workspace_id=payload.workspace_id,
+                job_id=job_id,
+                agent_id=payload.agent_id,
+                lease_token=payload.lease_token,
+                observed_own_price_kzt=payload.observed_own_price_kzt,
+            )
+            db.commit()
+            return result
+    except ValueError as exc:
+        db.rollback()
+        raise _conflict(exc) from exc
