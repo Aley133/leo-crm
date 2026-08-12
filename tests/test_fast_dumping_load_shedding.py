@@ -1,0 +1,98 @@
+from __future__ import annotations
+
+from pathlib import Path
+from time import monotonic
+
+import backend.app.fast_dumping_agent_api as agent_api
+import tools.kaspi_fast_dumping_agent as desktop_agent
+
+
+def test_server_throttles_duplicate_claim_before_database_access() -> None:
+    workspace_id = 9011
+
+    class DatabaseMustNotBeUsed:
+        def scalar(self, *_args, **_kwargs):
+            raise AssertionError("throttled claim acquired a database connection")
+
+    payload = agent_api.FastAgentIdentity(
+        agent_id="old-agent-worker-2",
+        workspace_id=workspace_id,
+        merchant_uid="merchant",
+        concurrency=2,
+        version="1.0.0",
+    )
+    with agent_api._AGENT_GUARD_LOCK:
+        agent_api._CLAIM_NOT_BEFORE[workspace_id] = monotonic() + 30
+    try:
+        result = agent_api.claim(payload, db=DatabaseMustNotBeUsed())
+    finally:
+        with agent_api._AGENT_GUARD_LOCK:
+            agent_api._CLAIM_NOT_BEFORE.pop(workspace_id, None)
+
+    assert result["job"] is None
+    assert result["throttled"] is True
+    assert result["retry_after_seconds"] >= 29
+
+
+def test_server_claim_gate_bounds_busy_and_idle_polling() -> None:
+    workspace_id = 9012
+    with agent_api._AGENT_GUARD_LOCK:
+        agent_api._CLAIM_NOT_BEFORE.pop(workspace_id, None)
+    try:
+        assert agent_api._reserve_claim_slot(workspace_id, now=100.0) == 0
+        assert agent_api._reserve_claim_slot(workspace_id, now=100.1) == 2
+
+        agent_api._defer_claims(workspace_id, seconds=10, now=102.0)
+        assert agent_api._reserve_claim_slot(workspace_id, now=105.0) == 7
+        assert agent_api._reserve_claim_slot(workspace_id, now=112.0) == 0
+    finally:
+        with agent_api._AGENT_GUARD_LOCK:
+            agent_api._CLAIM_NOT_BEFORE.pop(workspace_id, None)
+
+
+def test_agent_uses_one_worker_by_default_and_bounds_override(monkeypatch) -> None:
+    monkeypatch.delenv("KASPI_FAST_DUMPING_CONCURRENCY", raising=False)
+    assert desktop_agent._configured_concurrency() == 1
+
+    monkeypatch.setenv("KASPI_FAST_DUMPING_CONCURRENCY", "8")
+    assert desktop_agent._configured_concurrency() == 2
+
+    monkeypatch.setenv("KASPI_FAST_DUMPING_CONCURRENCY", "invalid")
+    assert desktop_agent._configured_concurrency() == 1
+
+
+def test_agent_treats_cloudflare_520_as_transient_and_shares_backoff() -> None:
+    assert {520, 521, 522, 523, 524}.issubset(
+        desktop_agent.TRANSIENT_HTTP_STATUSES
+    )
+    desktop_agent._record_crm_success()
+    try:
+        first = desktop_agent._record_crm_failure(
+            retry_after=None,
+            now=100.0,
+            jitter=0,
+        )
+        second = desktop_agent._record_crm_failure(
+            retry_after=None,
+            now=100.0,
+            jitter=0,
+        )
+
+        assert first == 1.0
+        assert second == 2.0
+        assert desktop_agent._crm_gate_delay(now=100.0) == 2.0
+    finally:
+        desktop_agent._record_crm_success()
+
+    assert desktop_agent._crm_gate_delay(now=100.0) == 0.0
+
+
+def test_agent_serializes_crm_requests_behind_shared_circuit() -> None:
+    source = Path(desktop_agent.__file__).read_text(encoding="utf-8")
+
+    assert "_CRM_REQUEST_LOCK = asyncio.Lock()" in source
+    assert "async with _CRM_REQUEST_LOCK" in source
+    assert "await _wait_for_crm_gate()" in source
+    assert "_acquire_single_instance(selected_workspace)" in source
+    assert "ERROR_ALREADY_EXISTS" in source
+    assert 'VERSION = "1.0.1"' in source

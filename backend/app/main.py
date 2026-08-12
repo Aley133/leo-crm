@@ -72,8 +72,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.15"
-DEPLOYMENT_MARKER = "isolated-realtime-fast-dumping"
+APP_VERSION = "0.23.16"
+DEPLOYMENT_MARKER = "bounded-fast-dumping-agent-load"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

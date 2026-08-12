@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from threading import Lock
+from time import monotonic
 from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -79,6 +80,10 @@ _HEARTBEATS: dict[tuple[int, str], dict] = {}
 _HEARTBEATS_LOCK = Lock()
 _ONLINE_FOR = timedelta(seconds=45)
 _MAX_HEARTBEATS = 32
+_AGENT_GUARD_LOCK = Lock()
+_MIN_CLAIM_INTERVAL_SECONDS = 2.0
+_IDLE_CLAIM_INTERVAL_SECONDS = 10.0
+_CLAIM_NOT_BEFORE: dict[int, float] = {}
 
 
 def _now() -> datetime:
@@ -151,6 +156,32 @@ def _validate_workspace_merchant(
         )
 
 
+def _reserve_claim_slot(workspace_id: int, *, now: float | None = None) -> int:
+    """Allow one bounded claim stream per workspace, including old agents."""
+
+    checked_at = monotonic() if now is None else now
+    with _AGENT_GUARD_LOCK:
+        not_before = _CLAIM_NOT_BEFORE.get(workspace_id, 0.0)
+        if not_before > checked_at:
+            return max(1, int(not_before - checked_at + 0.999))
+        _CLAIM_NOT_BEFORE[workspace_id] = checked_at + _MIN_CLAIM_INTERVAL_SECONDS
+    return 0
+
+
+def _defer_claims(
+    workspace_id: int,
+    *,
+    seconds: float,
+    now: float | None = None,
+) -> None:
+    checked_at = monotonic() if now is None else now
+    with _AGENT_GUARD_LOCK:
+        _CLAIM_NOT_BEFORE[workspace_id] = max(
+            _CLAIM_NOT_BEFORE.get(workspace_id, 0.0),
+            checked_at + max(_MIN_CLAIM_INTERVAL_SECONDS, seconds),
+        )
+
+
 @router.post("/heartbeat")
 def heartbeat(
     payload: FastAgentHeartbeat,
@@ -168,7 +199,7 @@ def heartbeat(
 
 
 @router.get("/agents/status")
-def read_agent_status() -> dict:
+async def read_agent_status() -> dict:
     return _status_payload(current_workspace_id())
 
 
@@ -177,6 +208,13 @@ def claim(
     payload: FastAgentIdentity,
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
+    retry_after = _reserve_claim_slot(payload.workspace_id)
+    if retry_after:
+        return {
+            "job": None,
+            "retry_after_seconds": retry_after,
+            "throttled": True,
+        }
     try:
         _validate_workspace_merchant(
             db,
@@ -206,6 +244,11 @@ def claim(
     except ValueError as exc:
         db.rollback()
         raise _conflict(exc) from exc
+    if result is None:
+        _defer_claims(
+            payload.workspace_id,
+            seconds=_IDLE_CLAIM_INTERVAL_SECONDS,
+        )
     return {"job": result, "retry_after_seconds": 10 if result is None else 0}
 
 

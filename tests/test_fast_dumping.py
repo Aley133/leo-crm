@@ -319,6 +319,42 @@ def test_unconfirmed_write_latches_only_fast_product(db_session) -> None:
     assert state.next_scan_at is None
 
 
+def test_missing_own_offer_pauses_repeated_fast_scans(db_session) -> None:
+    _product, _batch, policy, state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        job, _ = queue_scan(
+            db_session,
+            policy=policy,
+            workspace_id=1,
+            reason="test",
+        )
+        db_session.commit()
+    leased_scan = _claim(db_session, 1)
+
+    market = _market(own="20000", competitor="19800")
+    market["own_price_kzt"] = None
+    market["offers"] = [
+        offer for offer in market["offers"] if not offer.get("is_own")
+    ]
+    with workspace_context(1):
+        result = complete_scan(
+            db_session,
+            workspace_id=1,
+            job_id=job.id,
+            agent_id="fast-agent",
+            lease_token=leased_scan.lease_token,
+            succeeded=True,
+            market_payload=market,
+        )
+        db_session.commit()
+
+    db_session.refresh(state)
+    assert result["status"] == "own_offer_missing"
+    assert state.automatic_writes_paused is True
+    assert state.next_scan_at is None
+    assert "Merchant UID" in state.pause_reason
+
+
 def test_floor_limited_product_is_exposed_for_inline_threshold_edit(db_session) -> None:
     _product, _batch, policy, state = _seed_fast_product(db_session)
     floor = calculate_safe_floor(
