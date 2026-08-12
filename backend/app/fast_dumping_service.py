@@ -672,6 +672,12 @@ def complete_scan(
             reason="Наша строка продавца не найдена; realtime-запись заблокирована.",
             now=now,
         )
+        state.automatic_writes_paused = True
+        state.pause_reason = (
+            "Наша строка продавца не найдена. Проверьте Merchant UID, карточку "
+            "и наличие товара в кабинете Kaspi, затем возобновите вручную."
+        )
+        state.next_scan_at = None
         return {"status": state.status, "queued_apply": False}
 
     decision = decide_fast_price(

@@ -8,6 +8,7 @@ import getpass
 import json
 import os
 import platform
+import random
 import socket
 import sys
 import time
@@ -15,6 +16,7 @@ import traceback
 from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
+from threading import Lock
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -25,17 +27,40 @@ from tools.kaspi_fast_dumping_scanner import (
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 
 
-VERSION = "1.0.0"
+VERSION = "1.0.1"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
-HEARTBEAT_SECONDS = 15
+HEARTBEAT_SECONDS = 20
 IDLE_POLL_MAX_SECONDS = 15
 CRM_HTTP_TIMEOUT_SECONDS = 30
 CRM_RETRY_ATTEMPTS = 4
 VERIFY_TIMEOUT_SECONDS = 120
 VERIFY_POLL_SECONDS = 6
-TRANSIENT_HTTP_STATUSES = {408, 425, 429, 502, 503, 504}
+TRANSIENT_HTTP_STATUSES = {
+    408,
+    425,
+    429,
+    500,
+    502,
+    503,
+    504,
+    # Cloudflare returns these non-standard statuses when the Render origin is
+    # overloaded or temporarily unavailable. They must share the same backoff
+    # as ordinary gateway failures instead of starting a new worker loop.
+    520,
+    521,
+    522,
+    523,
+    524,
+    530,
+}
+CRM_BACKOFF_MAX_SECONDS = 60.0
 _WRITE_LOCK = asyncio.Lock()
+_CRM_REQUEST_LOCK = asyncio.Lock()
 _RUNTIME_SID: dict[int, str] = {}
+_CRM_GATE_LOCK = Lock()
+_CRM_FAILURE_COUNT = 0
+_CRM_RETRY_NOT_BEFORE = 0.0
+_INSTANCE_MUTEX_HANDLE: int | None = None
 
 
 class CRMRequestError(RuntimeError):
@@ -49,6 +74,84 @@ class CRMRequestError(RuntimeError):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
+
+
+def _acquire_single_instance(workspace_id: int) -> None:
+    """Keep one Windows Fast Agent process per workspace."""
+
+    global _INSTANCE_MUTEX_HANDLE
+    if os.name != "nt" or _INSTANCE_MUTEX_HANDLE is not None:
+        return
+    kernel32 = ctypes.windll.kernel32
+    create_mutex = kernel32.CreateMutexW
+    create_mutex.argtypes = (ctypes.c_void_p, ctypes.c_bool, ctypes.c_wchar_p)
+    create_mutex.restype = ctypes.c_void_p
+    mutex_name = f"Local\\LEO-Kaspi-Fast-Dumping-Agent-workspace-{workspace_id}"
+    handle = create_mutex(None, False, mutex_name)
+    if not handle:
+        raise ctypes.WinError()
+    error_code = int(kernel32.GetLastError())
+    if error_code == 183:  # ERROR_ALREADY_EXISTS
+        kernel32.CloseHandle(ctypes.c_void_p(handle))
+        raise RuntimeError(
+            f"Fast Dumping Agent для workspace {workspace_id} уже запущен. "
+            "Используйте одно окно агента."
+        )
+    _INSTANCE_MUTEX_HANDLE = int(handle)
+
+
+def _crm_gate_delay(*, now: float | None = None) -> float:
+    checked_at = time.monotonic() if now is None else now
+    with _CRM_GATE_LOCK:
+        return max(0.0, _CRM_RETRY_NOT_BEFORE - checked_at)
+
+
+async def _wait_for_crm_gate() -> None:
+    while True:
+        delay = _crm_gate_delay()
+        if delay <= 0:
+            return
+        await asyncio.sleep(delay)
+
+
+def _record_crm_failure(
+    *,
+    retry_after: float | None,
+    now: float | None = None,
+    jitter: float | None = None,
+) -> float:
+    """Open one shared retry gate for heartbeat and every worker.
+
+    A failing origin previously caused each coroutine to retry independently.
+    The shared gate turns that fan-out into one bounded reconnect stream.
+    """
+
+    global _CRM_FAILURE_COUNT, _CRM_RETRY_NOT_BEFORE
+    checked_at = time.monotonic() if now is None else now
+    with _CRM_GATE_LOCK:
+        _CRM_FAILURE_COUNT = min(10, _CRM_FAILURE_COUNT + 1)
+        if retry_after is None:
+            base = min(
+                CRM_BACKOFF_MAX_SECONDS,
+                float(2 ** (_CRM_FAILURE_COUNT - 1)),
+            )
+        else:
+            base = min(CRM_BACKOFF_MAX_SECONDS, max(1.0, float(retry_after)))
+        spread = (
+            random.uniform(0.0, min(1.0, base * 0.2))
+            if jitter is None
+            else max(0.0, float(jitter))
+        )
+        delay = min(CRM_BACKOFF_MAX_SECONDS, base + spread)
+        _CRM_RETRY_NOT_BEFORE = max(_CRM_RETRY_NOT_BEFORE, checked_at + delay)
+        return delay
+
+
+def _record_crm_success() -> None:
+    global _CRM_FAILURE_COUNT, _CRM_RETRY_NOT_BEFORE
+    with _CRM_GATE_LOCK:
+        _CRM_FAILURE_COUNT = 0
+        _CRM_RETRY_NOT_BEFORE = 0.0
 
 
 class DataBlob(ctypes.Structure):
@@ -323,17 +426,25 @@ async def _post_json_with_retry(
     operation: str,
 ) -> dict:
     for attempt in range(1, CRM_RETRY_ATTEMPTS + 1):
+        await _wait_for_crm_gate()
         try:
-            return await asyncio.to_thread(_post_json, url, token, payload)
+            async with _CRM_REQUEST_LOCK:
+                # Another request may have opened the shared circuit while this
+                # coroutine was waiting for the single HTTP slot.
+                await _wait_for_crm_gate()
+                result = await asyncio.to_thread(_post_json, url, token, payload)
         except CRMRequestError as exc:
-            if not exc.retryable or attempt >= CRM_RETRY_ATTEMPTS:
+            if not exc.retryable:
                 raise
-            delay = exc.retry_after if exc.retry_after is not None else 2 ** (attempt - 1)
-            delay = min(8.0, max(1.0, delay))
+            delay = _record_crm_failure(retry_after=exc.retry_after)
+            if attempt >= CRM_RETRY_ATTEMPTS:
+                raise
             _log(
-                f"{operation}: временная ошибка CRM; повтор через {delay:g} с"
+                f"{operation}: временная ошибка CRM; общий повтор через {delay:.1f} с"
             )
-            await asyncio.sleep(delay)
+            continue
+        _record_crm_success()
+        return result
     raise RuntimeError(f"{operation}: retry loop finished unexpectedly")
 
 
@@ -352,6 +463,15 @@ def _agent_payload(
         "concurrency": concurrency,
         "merchant_uid": merchant_uid,
     }
+
+
+def _configured_concurrency() -> int:
+    raw = (os.getenv("KASPI_FAST_DUMPING_CONCURRENCY") or "1").strip()
+    try:
+        requested = int(raw)
+    except ValueError:
+        requested = 1
+    return max(1, min(2, requested))
 
 
 def _market_payload(market: KaspiCompetitorSnapshot) -> dict:
@@ -600,6 +720,7 @@ async def main(
     reconfigure: bool = False,
 ) -> int:
     selected_workspace = _workspace_id(workspace_id)
+    _acquire_single_instance(selected_workspace)
     config = _load_config(selected_workspace)
     api_url = (
         os.getenv("CRM_API_URL")
@@ -647,17 +768,7 @@ async def main(
         prompt="Пароль Merchant Cabinet",
         reconfigure=reconfigure,
     )
-    concurrency = max(
-        1,
-        min(
-            4,
-            int(
-                os.getenv("KASPI_FAST_DUMPING_CONCURRENCY")
-                or config.get("concurrency")
-                or "2"
-            ),
-        ),
-    )
+    concurrency = _configured_concurrency()
     agent_id = (
         os.getenv("KASPI_FAST_DUMPING_AGENT_ID")
         or config.get("agent_id")
@@ -708,6 +819,7 @@ async def main(
 
     async def heartbeat() -> None:
         while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
             try:
                 await _post_json_with_retry(
                     f"{api_url}/api/fast-dumping-agent/heartbeat",
@@ -717,7 +829,6 @@ async def main(
                 )
             except Exception as exc:
                 _log(f"Heartbeat: {exc}", workspace_id=selected_workspace)
-            await asyncio.sleep(HEARTBEAT_SECONDS)
 
     async def worker(number: int) -> None:
         idle_seconds = 2.0
