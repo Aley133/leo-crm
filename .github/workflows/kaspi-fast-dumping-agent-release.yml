@@ -1,0 +1,120 @@
+name: Kaspi Fast Dumping Agent Release
+
+on:
+  push:
+    branches:
+      - main
+    paths:
+      - "tools/kaspi_fast_dumping_agent.py"
+      - "tools/kaspi_fast_dumping_scanner.py"
+      - "tools/kaspi_fast_dumping_session.py"
+      - ".github/workflows/kaspi-fast-dumping-agent-release.yml"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: kaspi-fast-dumping-agent-release
+  cancel-in-progress: true
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install standalone dependencies
+        shell: pwsh
+        run: |
+          python -m pip install --upgrade pip
+          pip install httpx pyinstaller
+
+      - name: Verify isolated imports
+        shell: pwsh
+        run: |
+          python -c "import tools.kaspi_fast_dumping_agent; import tools.kaspi_fast_dumping_scanner; import tools.kaspi_fast_dumping_session"
+          @'
+          import ast
+          from pathlib import Path
+
+          forbidden_roots = {"backend", "sqlalchemy", "playwright"}
+          for path in (
+              Path("tools/kaspi_fast_dumping_agent.py"),
+              Path("tools/kaspi_fast_dumping_scanner.py"),
+              Path("tools/kaspi_fast_dumping_session.py"),
+          ):
+              tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+              imported = set()
+              for node in ast.walk(tree):
+                  if isinstance(node, ast.Import):
+                      imported.update(alias.name for alias in node.names)
+                  elif isinstance(node, ast.ImportFrom) and node.module:
+                      imported.add(node.module)
+              violations = sorted(
+                  module for module in imported
+                  if module.split(".", 1)[0] in forbidden_roots
+              )
+              if violations:
+                  raise AssertionError(f"{path} imports forbidden dependencies: {violations}")
+          '@ | python -
+
+      - name: Build standalone executable
+        shell: pwsh
+        run: |
+          pyinstaller --noconfirm --clean --onefile --console `
+            --name LEO-Kaspi-Fast-Dumping-Agent `
+            --paths . `
+            --hidden-import tools.kaspi_fast_dumping_scanner `
+            --hidden-import tools.kaspi_fast_dumping_session `
+            --collect-submodules httpx `
+            tools/kaspi_fast_dumping_agent.py
+
+      - name: Verify executable
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "dist/LEO-Kaspi-Fast-Dumping-Agent.exe")) {
+            throw "LEO-Kaspi-Fast-Dumping-Agent.exe was not created"
+          }
+          $size = (Get-Item "dist/LEO-Kaspi-Fast-Dumping-Agent.exe").Length
+          if ($size -lt 1000000) {
+            throw "Packaged executable is unexpectedly small: $size bytes"
+          }
+
+      - name: Upload workflow artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LEO-Kaspi-Fast-Dumping-Agent-Windows
+          path: dist/LEO-Kaspi-Fast-Dumping-Agent.exe
+          if-no-files-found: error
+          retention-days: 30
+
+      - name: Publish rolling release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git tag -f kaspi-fast-dumping-agent-latest $env:GITHUB_SHA
+          git push origin refs/tags/kaspi-fast-dumping-agent-latest --force
+          gh release view kaspi-fast-dumping-agent-latest *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create kaspi-fast-dumping-agent-latest `
+              --target "$env:GITHUB_SHA" `
+              --title "LEO Kaspi Fast Dumping Agent" `
+              --notes "Отдельный realtime-агент быстрого демпинга. Обычный XML-демпинг не изменяет. Настройки и Merchant-сессия изолированы по workspace; секреты Merchant Cabinet защищены Windows DPAPI."
+          } else {
+            gh release edit kaspi-fast-dumping-agent-latest `
+              --target "$env:GITHUB_SHA" `
+              --title "LEO Kaspi Fast Dumping Agent" `
+              --notes "Отдельный realtime-агент быстрого демпинга. Обычный XML-демпинг не изменяет. Настройки и Merchant-сессия изолированы по workspace; секреты Merchant Cabinet защищены Windows DPAPI."
+          }
+          gh release upload kaspi-fast-dumping-agent-latest "dist/LEO-Kaspi-Fast-Dumping-Agent.exe" --clobber

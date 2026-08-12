@@ -31,6 +31,8 @@ from .dumping_competitor_worker import (
 )
 from .dumping_run_compat_api import router as dumping_run_compat_router
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
+from .fast_dumping_agent_api import router as fast_dumping_agent_router
+from .fast_dumping_api import router as fast_dumping_router
 from .inventory_api import router as inventory_router
 from .kaspi_competitor_agent_api import router as kaspi_competitor_agent_router
 from .kaspi_order_polling import ENRICHMENT_LAST_RUN as KASPI_ENRICHMENT_STATUS
@@ -70,8 +72,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.14"
-DEPLOYMENT_MARKER = "bounded-order-filters-and-account-bound-agents"
+APP_VERSION = "0.23.15"
+DEPLOYMENT_MARKER = "isolated-realtime-fast-dumping"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -132,8 +134,10 @@ app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
 app.include_router(browser_agent_registry_router)
 app.include_router(kaspi_competitor_agent_router)
+app.include_router(fast_dumping_agent_router)
 app.include_router(pricing_router)
 app.include_router(dumping_router)
+app.include_router(fast_dumping_router)
 app.include_router(dumping_run_compat_router)
 app.include_router(dumping_public_router)
 app.include_router(marketplace_router)
