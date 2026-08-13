@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -9,8 +9,10 @@ from sqlalchemy import event, select
 from backend.app.dumping_service import calculate_safe_floor
 from backend.app.fast_dumping_agent_api import _validate_workspace_merchant
 from backend.app.fast_dumping_api import (
+    FastDumpingPolicyUpsert,
     list_fast_dumping_products,
     read_fast_dumping_offers,
+    run_fast_dumping_now,
 )
 from backend.app.fast_dumping_models import (
     FastDumpingJob,
@@ -22,8 +24,10 @@ from backend.app.fast_dumping_service import (
     claim_job,
     complete_apply,
     complete_scan,
+    complete_verification,
     ensure_state,
     prepare_apply,
+    prune_fast_dumping_history,
     queue_scan,
 )
 from backend.app.inventory_models import InventoryBatch
@@ -93,7 +97,7 @@ def _seed_fast_product(db_session, *, workspace_id: int = 1, quantity: int = 4):
             undercut_step_kzt=10,
             allow_price_raise=True,
             max_undercut_gap_percent=Decimal("35"),
-            scan_interval_seconds=10,
+            scan_interval_seconds=600,
             city_id="196220100",
             zone_id="Magnum_ZONE1",
         )
@@ -297,7 +301,7 @@ def test_fast_dumping_cancels_stale_stock_before_write(db_session) -> None:
     assert state.inventory_on_hand == 3
 
 
-def test_unconfirmed_write_latches_only_fast_product(db_session) -> None:
+def test_accepted_write_is_verified_once_after_configured_interval(db_session) -> None:
     _product, _batch, policy, state = _seed_fast_product(db_session)
     with workspace_context(1):
         job, _ = queue_scan(
@@ -321,14 +325,15 @@ def test_unconfirmed_write_latches_only_fast_product(db_session) -> None:
         db_session.commit()
     leased_apply = _claim(db_session, 1)
     with workspace_context(1):
-        assert prepare_apply(
+        prepared = prepare_apply(
             db_session,
             workspace_id=1,
             job_id=job.id,
             agent_id="fast-agent",
             lease_token=leased_apply.lease_token,
-        )["ready"]
-        complete_apply(
+        )
+        assert prepared["ready"]
+        completed = complete_apply(
             db_session,
             workspace_id=1,
             job_id=job.id,
@@ -344,7 +349,98 @@ def test_unconfirmed_write_latches_only_fast_product(db_session) -> None:
         )
         db_session.commit()
     db_session.refresh(state)
-    assert state.status == "apply_timeout"
+    db_session.refresh(job)
+    assert completed["verification_scheduled"] is True
+    assert state.status == "verifying"
+    assert state.automatic_writes_paused is False
+    assert state.active_job_id == job.id
+    assert job.status == "queued_verify"
+    assert job.not_before_at is not None
+    assert job.not_before_at >= state.last_applied_at + timedelta(seconds=600)
+
+    # A claim before the 10-minute verification deadline must not touch Kaspi.
+    assert _claim(db_session, 1) is None
+
+    job.not_before_at = datetime.now(UTC) - timedelta(seconds=1)
+    db_session.commit()
+    leased_verify = _claim(db_session, 1)
+    assert leased_verify.status == "leased_verify"
+    with workspace_context(1):
+        verified = complete_verification(
+            db_session,
+            workspace_id=1,
+            job_id=job.id,
+            agent_id="fast-agent",
+            lease_token=leased_verify.lease_token,
+            observed_own_price_kzt=prepared["target_price_kzt"],
+        )
+        db_session.commit()
+    db_session.refresh(state)
+    assert verified == {"status": "applied", "verified": True}
+    assert state.active_job_id is None
+    assert state.automatic_writes_paused is False
+
+
+def test_failed_delayed_verification_latches_only_fast_product(db_session) -> None:
+    _product, _batch, policy, state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        job, _ = queue_scan(
+            db_session,
+            policy=policy,
+            workspace_id=1,
+            reason="test",
+        )
+        db_session.commit()
+    leased_scan = _claim(db_session, 1)
+    with workspace_context(1):
+        complete_scan(
+            db_session,
+            workspace_id=1,
+            job_id=job.id,
+            agent_id="fast-agent",
+            lease_token=leased_scan.lease_token,
+            succeeded=True,
+            market_payload=_market(own="20000", competitor="19800"),
+        )
+        db_session.commit()
+    leased_apply = _claim(db_session, 1)
+    with workspace_context(1):
+        prepared = prepare_apply(
+            db_session,
+            workspace_id=1,
+            job_id=job.id,
+            agent_id="fast-agent",
+            lease_token=leased_apply.lease_token,
+        )
+        complete_apply(
+            db_session,
+            workspace_id=1,
+            job_id=job.id,
+            agent_id="fast-agent",
+            lease_token=leased_apply.lease_token,
+            write_payload={
+                "accepted": True,
+                "verified": False,
+                "status_code": 200,
+                "operation_id": "unknown-operation",
+            },
+        )
+        db_session.commit()
+    job.not_before_at = datetime.now(UTC) - timedelta(seconds=1)
+    db_session.commit()
+    leased_verify = _claim(db_session, 1)
+    with workspace_context(1):
+        complete_verification(
+            db_session,
+            workspace_id=1,
+            job_id=job.id,
+            agent_id="fast-agent",
+            lease_token=leased_verify.lease_token,
+            observed_own_price_kzt="20000",
+        )
+        db_session.commit()
+    db_session.refresh(state)
+    assert state.status == "apply_unconfirmed"
     assert state.automatic_writes_paused is True
     assert state.next_scan_at is None
 
@@ -499,6 +595,106 @@ def test_fast_dumping_list_defers_heavy_offer_diagnostics(db_session) -> None:
     assert all("offers_json" not in sql for sql in state_selects)
 
 
+def test_fast_dumping_accepts_only_safe_five_or_ten_minute_intervals() -> None:
+    assert FastDumpingPolicyUpsert(scan_interval_seconds=300).scan_interval_seconds == 300
+    assert FastDumpingPolicyUpsert(scan_interval_seconds=600).scan_interval_seconds == 600
+    try:
+        FastDumpingPolicyUpsert(scan_interval_seconds=10)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Unsafe 10-second Fast Dumping interval was accepted")
+
+
+def test_recent_price_write_blocks_manual_scan_from_queuing_apply(db_session) -> None:
+    _product, _batch, policy, state = _seed_fast_product(db_session)
+    state.last_applied_at = datetime.now(UTC)
+    db_session.commit()
+    with workspace_context(1):
+        job, _ = queue_scan(
+            db_session,
+            policy=policy,
+            workspace_id=1,
+            reason="manual",
+        )
+        db_session.commit()
+    leased = _claim(db_session, 1)
+    with workspace_context(1):
+        result = complete_scan(
+            db_session,
+            workspace_id=1,
+            job_id=job.id,
+            agent_id="fast-agent",
+            lease_token=leased.lease_token,
+            succeeded=True,
+            market_payload=_market(own="20000", competitor="19800"),
+        )
+        db_session.commit()
+    db_session.refresh(state)
+    assert result["queued_apply"] is False
+    assert result["status"] == "cooldown"
+    assert state.status == "cooldown"
+    assert state.active_job_id is None
+    assert state.next_scan_at >= state.last_applied_at + timedelta(seconds=600)
+
+
+def test_manual_run_respects_next_scan_deadline(db_session) -> None:
+    product, _batch, _policy, state = _seed_fast_product(db_session)
+    state.next_scan_at = datetime.now(UTC) + timedelta(minutes=10)
+    db_session.commit()
+    with workspace_context(1):
+        result = run_fast_dumping_now(product.id, db_session)
+
+    assert result["status"] == "cooldown"
+    assert result["queued"] is False
+    assert state.active_job_id is None
+
+
+def test_fast_dumping_completed_job_history_is_bounded(db_session) -> None:
+    product, _batch, policy, state = _seed_fast_product(db_session)
+    now = datetime.now(UTC)
+    jobs = [
+        FastDumpingJob(
+            workspace_id=1,
+            policy_id=policy.id,
+            product_id=product.id,
+            status="watching",
+            completed_at=now + timedelta(seconds=index),
+            market_json={"offers": [{"index": index}]},
+        )
+        for index in range(15)
+    ]
+    active = FastDumpingJob(
+        workspace_id=1,
+        policy_id=policy.id,
+        product_id=product.id,
+        status="queued_scan",
+    )
+    db_session.add_all([*jobs, active])
+    db_session.flush()
+    state.active_job_id = active.id
+    db_session.commit()
+
+    with workspace_context(1):
+        removed = prune_fast_dumping_history(
+            db_session,
+            workspace_id=1,
+            per_product_limit=10,
+        )
+        db_session.commit()
+
+    remaining_completed = db_session.scalars(
+        select(FastDumpingJob).where(
+            FastDumpingJob.workspace_id == 1,
+            FastDumpingJob.product_id == product.id,
+            FastDumpingJob.completed_at.is_not(None),
+        )
+    ).all()
+    assert removed == 5
+    assert len(remaining_completed) == 10
+    assert db_session.get(FastDumpingJob, active.id) is not None
+
+
 def test_fast_dumping_ui_and_agent_are_separate_from_ordinary_dumping() -> None:
     html = (ROOT / "backend/app/static/fast-dumping.html").read_text(encoding="utf-8")
     javascript = (ROOT / "backend/app/static/fast-dumping.js").read_text(encoding="utf-8")
@@ -509,5 +705,7 @@ def test_fast_dumping_ui_and_agent_are_separate_from_ordinary_dumping() -> None:
     assert "Товары, остановленные floor" in html
     assert "Изменить порог" in javascript
     assert "/api/fast-dumping" in javascript
+    assert 'value="600"' in html and 'value="300"' in html
+    assert "10 минут (рекомендуется)" in html
     assert "password_dpapi" in agent and "mc_sid_dpapi" in agent
     assert "fast_dumping" not in ordinary

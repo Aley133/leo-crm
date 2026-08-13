@@ -74,8 +74,8 @@ class FastDumpingPolicy(WorkspaceOwned, Base):
     scan_interval_seconds: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        default=10,
-        server_default="10",
+        default=600,
+        server_default="600",
     )
     city_id: Mapped[str] = mapped_column(
         String(32),
@@ -226,6 +226,13 @@ class FastDumpingJob(WorkspaceOwned, Base):
             "status",
             "id",
         ),
+        Index(
+            "ix_fast_dumping_jobs_workspace_status_due_id",
+            "workspace_id",
+            "status",
+            "not_before_at",
+            "id",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -247,6 +254,11 @@ class FastDumpingJob(WorkspaceOwned, Base):
     agent_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     lease_token: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True, index=True)
+    not_before_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True),
+        nullable=True,
+        index=True,
+    )
     scan_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     apply_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0, server_default="0")
     market_json: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)

@@ -27,14 +27,12 @@ from tools.kaspi_fast_dumping_scanner import (
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
-HEARTBEAT_SECONDS = 20
-IDLE_POLL_MAX_SECONDS = 15
+HEARTBEAT_SECONDS = 30
+IDLE_POLL_MAX_SECONDS = 60
 CRM_HTTP_TIMEOUT_SECONDS = 30
 CRM_RETRY_ATTEMPTS = 4
-VERIFY_TIMEOUT_SECONDS = 120
-VERIFY_POLL_SECONDS = 6
 SCAN_TIMEOUT_SECONDS = 120
 TRANSIENT_HTTP_STATUSES = {
     408,
@@ -555,32 +553,6 @@ async def _process_scan(
     )
 
 
-async def _verify_price(
-    *,
-    job: dict,
-    merchant_uid: str,
-    target: Decimal,
-) -> tuple[bool, Decimal | None, float]:
-    started = time.monotonic()
-    deadline = started + VERIFY_TIMEOUT_SECONDS
-    observed: Decimal | None = None
-    while time.monotonic() < deadline:
-        remaining = deadline - time.monotonic()
-        await asyncio.sleep(min(VERIFY_POLL_SECONDS, max(0.0, remaining)))
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            break
-        try:
-            async with asyncio.timeout(remaining):
-                market = await _scan(job, merchant_uid)
-        except TimeoutError:
-            break
-        observed = market.own_price_kzt
-        if observed == target:
-            return True, observed, round(time.monotonic() - started, 1)
-    return False, observed, round(time.monotonic() - started, 1)
-
-
 async def _process_apply(
     *,
     api_url: str,
@@ -613,6 +585,7 @@ async def _process_apply(
     target = Decimal(str(prepared["target_price_kzt"]))
     write_result: dict = {}
     refreshed = False
+    write_started = time.monotonic()
     try:
         async with _WRITE_LOCK:
             sid, refreshed = await asyncio.to_thread(
@@ -644,22 +617,12 @@ async def _process_apply(
                     stock_count=int(prepared["stock_count"]),
                     price=int(target),
                 )
+        # Kaspi price propagation is asynchronous. The CRM schedules one
+        # separate verification after the configured 5/10-minute interval;
+        # polling Offers every few seconds caused rate limits and false timeouts.
         verified = False
         observed = None
-        latency = 0.0
-        if write_result.get("accepted"):
-            verify_job = {
-                **job,
-                "merchant_sku": prepared["sku"],
-                "city_id": prepared["city_id"],
-                "zone_id": prepared["zone_id"],
-                "name": prepared["model"],
-            }
-            verified, observed, latency = await _verify_price(
-                job=verify_job,
-                merchant_uid=merchant_uid,
-                target=target,
-            )
+        latency = round(time.monotonic() - write_started, 1)
         payload = {
             **identity,
             "accepted": bool(write_result.get("accepted")),

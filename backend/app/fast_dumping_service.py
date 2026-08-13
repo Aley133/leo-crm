@@ -2,10 +2,12 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from threading import Lock
+from time import monotonic
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import case, or_, select
+from sqlalchemy import case, delete, or_, select
 from sqlalchemy.orm import Session
 
 from .dumping_service import (
@@ -36,6 +38,12 @@ APPLY_LEASE_SECONDS = 300
 VERIFY_LEASE_SECONDS = 180
 MAX_SCAN_ATTEMPTS = 3
 MAX_MARKET_OFFERS = 100
+MIN_SCAN_INTERVAL_SECONDS = 300
+DEFAULT_SCAN_INTERVAL_SECONDS = 600
+HISTORY_RETENTION_PER_PRODUCT = 200
+HISTORY_PRUNE_INTERVAL_SECONDS = 3600
+_HISTORY_PRUNE_LOCK = Lock()
+_HISTORY_PRUNE_NOT_BEFORE: dict[int, float] = {}
 
 
 def utcnow() -> datetime:
@@ -190,8 +198,85 @@ def _clear_active_job(state: FastDumpingState, job: FastDumpingJob) -> None:
         state.active_job_id = None
 
 
+def _policy_interval_seconds(policy: FastDumpingPolicy) -> int:
+    """Never let a legacy policy poll Kaspi more often than every five minutes."""
+
+    try:
+        configured = int(policy.scan_interval_seconds)
+    except (TypeError, ValueError):
+        configured = DEFAULT_SCAN_INTERVAL_SECONDS
+    return max(MIN_SCAN_INTERVAL_SECONDS, configured)
+
+
 def _next_scan(policy: FastDumpingPolicy, *, now: datetime | None = None) -> datetime:
-    return (now or utcnow()) + timedelta(seconds=max(8, int(policy.scan_interval_seconds)))
+    return (now or utcnow()) + timedelta(seconds=_policy_interval_seconds(policy))
+
+
+def _next_write_allowed_at(
+    state: FastDumpingState,
+    policy: FastDumpingPolicy,
+) -> datetime | None:
+    applied_at = _aware(state.last_applied_at)
+    if applied_at is None:
+        return None
+    return applied_at + timedelta(seconds=_policy_interval_seconds(policy))
+
+
+def prune_fast_dumping_history(
+    db: Session,
+    *,
+    workspace_id: int,
+    per_product_limit: int = HISTORY_RETENTION_PER_PRODUCT,
+) -> int:
+    """Bound completed scan JSON history while preserving every active job."""
+
+    keep = max(10, int(per_product_limit))
+    product_ids = db.scalars(
+        select(FastDumpingJob.product_id)
+        .where(FastDumpingJob.workspace_id == workspace_id)
+        .distinct()
+    ).all()
+    removed = 0
+    for product_id in product_ids:
+        cutoff_id = db.scalar(
+            select(FastDumpingJob.id)
+            .where(
+                FastDumpingJob.workspace_id == workspace_id,
+                FastDumpingJob.product_id == product_id,
+                FastDumpingJob.completed_at.is_not(None),
+            )
+            .order_by(FastDumpingJob.id.desc())
+            .offset(keep)
+            .limit(1)
+        )
+        if cutoff_id is None:
+            continue
+        result = db.execute(
+            delete(FastDumpingJob).where(
+                FastDumpingJob.workspace_id == workspace_id,
+                FastDumpingJob.product_id == product_id,
+                FastDumpingJob.completed_at.is_not(None),
+                FastDumpingJob.id <= cutoff_id,
+            )
+        )
+        removed += int(result.rowcount or 0)
+    return removed
+
+
+def _maybe_prune_fast_dumping_history(
+    db: Session,
+    *,
+    workspace_id: int,
+    now: float | None = None,
+) -> int:
+    checked_at = monotonic() if now is None else now
+    with _HISTORY_PRUNE_LOCK:
+        if _HISTORY_PRUNE_NOT_BEFORE.get(workspace_id, 0.0) > checked_at:
+            return 0
+        _HISTORY_PRUNE_NOT_BEFORE[workspace_id] = (
+            checked_at + HISTORY_PRUNE_INTERVAL_SECONDS
+        )
+    return prune_fast_dumping_history(db, workspace_id=workspace_id)
 
 
 def queue_scan(
@@ -297,17 +382,29 @@ def recover_expired_leases(
             job.agent_id = None
             job.lease_token = None
             job.lease_until = None
+            job.not_before_at = None
             state.status = "queued"
             state.status_reason = "Сканирование прервалось и будет безопасно повторено."
         elif job.status == "leased_apply":
             # The write may already have reached Kaspi. Verify first; never
             # submit the same unknown operation automatically a second time.
+            policy = db.get(FastDumpingPolicy, job.policy_id)
+            verify_delay = (
+                _policy_interval_seconds(policy)
+                if policy is not None and policy.workspace_id == workspace_id
+                else DEFAULT_SCAN_INTERVAL_SECONDS
+            )
             job.status = "queued_verify"
             job.agent_id = None
             job.lease_token = None
             job.lease_until = None
+            job.not_before_at = checked_at + timedelta(seconds=verify_delay)
             state.status = "verifying"
-            state.status_reason = "Проверяем результат прерванной записи без повтора."
+            state.status_reason = (
+                "Запись могла дойти до Kaspi; контрольная проверка отложена "
+                "без повторной отправки цены."
+            )
+            state.next_scan_at = job.not_before_at
         else:
             job.status = "apply_unconfirmed"
             job.completed_at = checked_at
@@ -321,6 +418,7 @@ def recover_expired_leases(
             )
             state.last_error_code = job.error_code
             state.last_error_message = job.error_message
+            state.next_scan_at = None
         recovered += 1
     return recovered
 
@@ -379,7 +477,9 @@ def claim_job(
     agent_id: str,
 ) -> FastDumpingJob | None:
     recover_expired_leases(db, workspace_id=workspace_id)
+    _maybe_prune_fast_dumping_history(db, workspace_id=workspace_id)
     schedule_due_scans(db, workspace_id=workspace_id)
+    now = utcnow()
     priority = case(
         (FastDumpingJob.status == "queued_apply", 0),
         (FastDumpingJob.status == "queued_verify", 1),
@@ -390,6 +490,10 @@ def claim_job(
         .where(
             FastDumpingJob.workspace_id == workspace_id,
             FastDumpingJob.status.in_(QUEUED_JOB_STATUSES),
+            or_(
+                FastDumpingJob.not_before_at.is_(None),
+                FastDumpingJob.not_before_at <= now,
+            ),
         )
         .order_by(priority, FastDumpingJob.id)
         .limit(1)
@@ -403,9 +507,9 @@ def claim_job(
         job.completed_at = utcnow()
         return None
 
-    now = utcnow()
     job.agent_id = _text(agent_id, limit=255)
     job.lease_token = uuid4().hex
+    job.not_before_at = None
     if job.status == "queued_scan":
         job.status = "leased_scan"
         job.scan_attempts += 1
@@ -465,6 +569,7 @@ def serialize_claimed_job(
         "merchant_sku": product.merchant_sku,
         "city_id": policy.city_id,
         "zone_id": policy.zone_id,
+        "scan_interval_seconds": _policy_interval_seconds(policy),
     }
     if stage == "verify":
         payload["target_price_kzt"] = (job.decision_json or {}).get(
@@ -505,6 +610,7 @@ def _finish_without_write(
     job.completed_at = now
     job.lease_until = None
     job.lease_token = None
+    job.not_before_at = None
     _clear_active_job(state, job)
     state.status = status
     state.status_reason = reason
@@ -558,9 +664,7 @@ def complete_scan(
         state.status_reason = "Не удалось прочитать рынок Kaspi."
         state.last_error_code = job.error_code
         state.last_error_message = job.error_message
-        state.next_scan_at = now + timedelta(
-            seconds=max(30, int(policy.scan_interval_seconds))
-        )
+        state.next_scan_at = _next_scan(policy, now=now)
         return {"status": state.status, "queued_apply": False}
 
     market = normalize_market_snapshot(market_payload or {})
@@ -718,6 +822,27 @@ def complete_scan(
         )
         return {"status": state.status, "queued_apply": False, "decision": decision_json}
 
+    write_allowed_at = _next_write_allowed_at(state, policy)
+    if write_allowed_at is not None and now < write_allowed_at:
+        _finish_without_write(
+            state=state,
+            job=job,
+            policy=policy,
+            status="cooldown",
+            reason=(
+                "Новая цена рассчитана, но запись разрешена не чаще выбранного "
+                "интервала. CRM подождёт следующую проверку."
+            ),
+            now=now,
+        )
+        state.next_scan_at = write_allowed_at
+        return {
+            "status": state.status,
+            "queued_apply": False,
+            "decision": decision_json,
+            "write_allowed_at": write_allowed_at,
+        }
+
     job.status = "queued_apply"
     job.agent_id = None
     job.lease_until = None
@@ -785,12 +910,30 @@ def prepare_apply(
     now = utcnow()
 
     stale_reason = None
+    cooldown_until = _next_write_allowed_at(state, policy)
     if state.active_job_id != job.id or state.state_version != job.state_version:
         stale_reason = "Решение уже заменено новой версией."
     elif not policy.enabled or not product.sale_enabled:
         stale_reason = "Товар или быстрый демпинг выключен."
     elif state.automatic_writes_paused:
         stale_reason = state.pause_reason or "Автозапись приостановлена."
+    elif cooldown_until is not None and now < cooldown_until:
+        job.status = "cooldown"
+        job.completed_at = now
+        job.lease_until = None
+        job.lease_token = None
+        _clear_active_job(state, job)
+        state.status = "cooldown"
+        state.status_reason = (
+            "Повторная запись цены отложена до окончания выбранного интервала."
+        )
+        state.next_scan_at = cooldown_until
+        return {
+            "ready": False,
+            "cooldown": True,
+            "reason": state.status_reason,
+            "write_allowed_at": cooldown_until,
+        }
 
     stock_count = physical_stock_count(db, product_id=product.id)
     source = resolve_cost_source(db, product_id=product.id, inventory_first=True)
@@ -913,13 +1056,14 @@ def complete_apply(
     job.write_json = safe_write
     job.lease_until = None
     job.lease_token = None
-    job.completed_at = now
-    _clear_active_job(state, job)
     state.last_operation_id = operation_id
     state.last_agent_id = agent_id
 
     if verified:
         job.status = "applied"
+        job.completed_at = now
+        job.not_before_at = None
+        _clear_active_job(state, job)
         state.status = (
             "floor_limited"
             if (job.decision_json or {}).get("status") == "floor_limited"
@@ -936,32 +1080,43 @@ def complete_apply(
         state.next_scan_at = _next_scan(policy, now=now)
         return {"status": state.status, "verified": True}
 
-    error_code = safe_write["error_code"] or (
-        "apply_timeout" if accepted else "apply_failed"
-    )
-    error_message = safe_write["error_message"] or (
-        "Kaspi принял операцию, но наша цена не подтвердилась."
-        if accepted
-        else "Kaspi отклонил realtime-запись."
-    )
+    if accepted:
+        verify_at = _next_scan(policy, now=now)
+        job.status = "queued_verify"
+        job.agent_id = None
+        job.completed_at = None
+        job.not_before_at = verify_at
+        job.error_code = None
+        job.error_message = None
+        state.status = "verifying"
+        state.status_reason = (
+            "Kaspi принял запись. CRM выполнит одну контрольную проверку цены "
+            "после выбранного интервала без частого polling."
+        )
+        state.last_applied_at = now
+        state.last_error_code = None
+        state.last_error_message = None
+        state.next_scan_at = verify_at
+        return {
+            "status": state.status,
+            "verified": False,
+            "verification_scheduled": True,
+            "verify_at": verify_at,
+        }
+
+    error_code = safe_write["error_code"] or "apply_failed"
+    error_message = safe_write["error_message"] or "Kaspi отклонил realtime-запись."
     job.status = error_code
+    job.completed_at = now
+    job.not_before_at = None
     job.error_code = error_code
     job.error_message = error_message
+    _clear_active_job(state, job)
     state.status = error_code
     state.status_reason = error_message
     state.last_error_code = error_code
     state.last_error_message = error_message
-    if accepted:
-        state.automatic_writes_paused = True
-        state.pause_reason = (
-            "Операция была принята, но итоговая цена не подтверждена. "
-            "Проверьте Kaspi и возобновите товар вручную."
-        )
-        state.next_scan_at = None
-    else:
-        state.next_scan_at = now + timedelta(
-            seconds=max(30, int(policy.scan_interval_seconds))
-        )
+    state.next_scan_at = _next_scan(policy, now=now)
     return {"status": state.status, "verified": False}
 
 
@@ -998,6 +1153,7 @@ def complete_verification(
     job.completed_at = now
     job.lease_until = None
     job.lease_token = None
+    job.not_before_at = None
     _clear_active_job(state, job)
     if target is not None and observed == target:
         job.status = "applied"
@@ -1006,19 +1162,23 @@ def complete_verification(
             if (job.decision_json or {}).get("status") == "floor_limited"
             else "applied"
         )
-        state.status_reason = "Прерванная операция найдена и подтверждена без повтора."
-        state.last_applied_at = now
+        state.status_reason = "Цена подтверждена одной отложенной проверкой без повтора записи."
+        state.last_applied_at = state.last_applied_at or now
+        state.last_error_code = None
+        state.last_error_message = None
         state.next_scan_at = _next_scan(policy, now=now)
         return {"status": state.status, "verified": True}
 
     job.status = "apply_unconfirmed"
     job.error_code = "apply_unconfirmed"
-    job.error_message = "Результат прерванной операции не подтверждён."
+    job.error_message = "Отложенная проверка не подтвердила целевую цену."
     state.status = "apply_unconfirmed"
     state.status_reason = job.error_message
+    state.last_error_code = job.error_code
+    state.last_error_message = job.error_message
     state.automatic_writes_paused = True
     state.pause_reason = (
-        "Цена после прерванной операции не подтверждена. Проверьте Kaspi и "
+        "Цена после принятой операции не подтверждена. Проверьте Kaspi и "
         "возобновите товар вручную."
     )
     state.next_scan_at = None
