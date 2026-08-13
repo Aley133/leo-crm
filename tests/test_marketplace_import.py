@@ -104,6 +104,33 @@ def test_duplicate_payload_is_idempotent(db_session) -> None:
     assert len(db_session.scalars(select(MarketplaceOrderEvent)).all()) == 1
 
 
+def test_volatile_source_revision_does_not_rewrite_unchanged_order(db_session) -> None:
+    account = _account(db_session)
+    first_payload = _payload(revision="2026-08-12T12:00:00Z")
+    first = import_kaspi_order(
+        db_session,
+        marketplace_account_id=account.id,
+        payload=first_payload,
+    )
+    db_session.commit()
+
+    second_payload = _payload(revision="2026-08-12T12:01:00Z")
+    second_payload["attributes"]["updatedAt"] = "2026-08-12T12:01:00Z"
+    second = import_kaspi_order(
+        db_session,
+        marketplace_account_id=account.id,
+        payload=second_payload,
+    )
+    db_session.commit()
+
+    order = db_session.get(MarketplaceOrder, first.order_id)
+    assert order is not None
+    assert second.changed is False
+    assert second.raw_payload_created is False
+    assert order.version == 1
+    assert len(db_session.scalars(select(MarketplaceRawPayload)).all()) == 1
+
+
 def test_changed_status_updates_order_and_appends_event(db_session) -> None:
     account = _account(db_session)
 

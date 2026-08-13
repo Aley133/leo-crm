@@ -220,17 +220,77 @@ def _offer_price(offer: dict[str, Any]) -> Decimal | None:
 
 
 def _merchant_id(offer: dict[str, Any]) -> str:
-    return str(offer.get("merchantId") or offer.get("merchantUID") or "").strip()
+    direct = (
+        offer.get("merchantId")
+        or offer.get("merchantUID")
+        or offer.get("merchantUid")
+    )
+    if direct not in (None, ""):
+        return str(direct).strip()
+    merchant = offer.get("merchant")
+    if isinstance(merchant, dict):
+        nested = (
+            merchant.get("id")
+            or merchant.get("uid")
+            or merchant.get("merchantId")
+            or merchant.get("merchantUID")
+            or merchant.get("merchantUid")
+        )
+        if nested not in (None, ""):
+            return str(nested).strip()
+    return ""
+
+
+def _identity(value: Any) -> str:
+    return "".join(str(value or "").split()).casefold()
+
+
+def _merchant_sku(offer: dict[str, Any]) -> str:
+    value = (
+        offer.get("merchantSku")
+        or offer.get("merchantSKU")
+        or offer.get("sku")
+    )
+    return str(value or "").strip()
+
+
+def _own_match(
+    offer: dict[str, Any],
+    *,
+    own_merchant_id: str,
+    own_merchant_sku: str | None,
+) -> str | None:
+    merchant_id = _merchant_id(offer)
+    normalized_merchant_id = _identity(merchant_id)
+    normalized_own_id = _identity(own_merchant_id)
+    if normalized_merchant_id and normalized_own_id == normalized_merchant_id:
+        return "merchant_uid"
+    # Some Offers API variants omit merchant identity but retain the exact
+    # seller SKU. Use that fallback only when no conflicting merchant id is
+    # present; a different explicit merchant can never become our own row.
+    if (
+        not merchant_id
+        and own_merchant_sku
+        and _identity(_merchant_sku(offer)) == _identity(own_merchant_sku)
+    ):
+        return "merchant_sku"
+    return None
 
 
 def _offer_debug(
     offer: dict[str, Any],
     own_merchant_id: str,
     *,
+    own_merchant_sku: str | None,
     page_visible_price: Decimal | None,
 ) -> dict[str, Any]:
     price = _offer_price(offer)
-    is_own = _merchant_id(offer) == own_merchant_id
+    own_match = _own_match(
+        offer,
+        own_merchant_id=own_merchant_id,
+        own_merchant_sku=own_merchant_sku,
+    )
+    is_own = own_match is not None
     ignored_reason = None
     used_for_dumping = not is_own
     if not is_own and page_visible_price is not None and price is not None and price < page_visible_price:
@@ -244,6 +304,7 @@ def _offer_debug(
         "merchant_id": _merchant_id(offer),
         "merchant_name": str(offer.get("merchantName") or "") or None,
         "is_own": is_own,
+        "own_match": own_match,
         "price_kzt": None if price is None else format(price, "f"),
         "used_for_dumping": used_for_dumping,
         "ignored_reason": ignored_reason,
@@ -311,6 +372,7 @@ async def scan_kaspi_competitors(
     *,
     kaspi_product_id: str,
     own_merchant_id: str,
+    own_merchant_sku: str | None = None,
     city_id: str,
     zone_id: str,
     product_name_hint: str | None = None,
@@ -366,7 +428,7 @@ async def scan_kaspi_competitors(
             page_rows = _offers(response.json())
             added = 0
             for offer in page_rows:
-                identity = f"{_merchant_id(offer)}|{offer.get('merchantSku') or ''}"
+                identity = f"{_merchant_id(offer)}|{_merchant_sku(offer)}"
                 if identity in seen:
                     continue
                 seen.add(identity)
@@ -376,10 +438,31 @@ async def scan_kaspi_competitors(
                 break
 
     rows.sort(key=lambda row: (_offer_price(row) if _offer_price(row) is not None else Decimal("999999999"), str(row.get("merchantName") or "")))
-    own_index = next((index for index, row in enumerate(rows) if _merchant_id(row) == own_merchant_id), None)
+    own_index = next(
+        (
+            index
+            for index, row in enumerate(rows)
+            if _own_match(
+                row,
+                own_merchant_id=own_merchant_id,
+                own_merchant_sku=own_merchant_sku,
+            )
+            is not None
+        ),
+        None,
+    )
     own = None if own_index is None else rows[own_index]
 
-    external = [row for row in rows if _merchant_id(row) != own_merchant_id]
+    external = [
+        row
+        for row in rows
+        if _own_match(
+            row,
+            own_merchant_id=own_merchant_id,
+            own_merchant_sku=own_merchant_sku,
+        )
+        is None
+    ]
     market_context_ok = False
     market_context_reason: str | None = None
     trusted_external = external
@@ -411,7 +494,12 @@ async def scan_kaspi_competitors(
 
     competitor = trusted_external[0] if trusted_external else None
     diagnostics = tuple(
-        _offer_debug(row, own_merchant_id, page_visible_price=page_visible_price)
+        _offer_debug(
+            row,
+            own_merchant_id,
+            own_merchant_sku=own_merchant_sku,
+            page_visible_price=page_visible_price,
+        )
         for row in rows
     )
     return KaspiCompetitorSnapshot(

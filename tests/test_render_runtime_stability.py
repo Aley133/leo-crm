@@ -116,6 +116,15 @@ def test_product_enrichment_keeps_blocking_database_work_off_event_loop() -> Non
     assert "database_write_semaphore = asyncio.Semaphore(1)" in source
 
 
+def test_automatic_order_loops_are_single_flight_and_use_fixed_delay() -> None:
+    source = inspect.getsource(kaspi_order_polling)
+
+    assert source.count("async with order_sync_lock()") >= 3
+    assert "await asyncio.to_thread(_workspace_connections)" in source
+    assert "await _wait_or_stop(stop_event, polling_interval_seconds())" in source
+    assert "max(0.1, polling_interval_seconds() - elapsed)" not in source
+
+
 def test_price_alert_publisher_keeps_database_work_off_event_loop() -> None:
     source = inspect.getsource(telegram_price_alerts.publish_pending_price_alerts)
 
