@@ -57,23 +57,25 @@ const statusView = (row) => {
   const labels = {
     idle:"Ожидает", queued:"В очереди", scanning:"Сканирование", queued_apply:"Цена готова",
     preparing_apply:"Сверка остатка", applying:"Запись PENDING", verifying:"Проверка цены",
-    applied:"Применено", watching:"Цена актуальна", floor_limited:"На пороге",
+    applied:"Применено", watching:"Цена актуальна", delivery_advantage:"Быстрая доставка",
+    floor_limited:"На пороге",
     cooldown:"Интервал цены",
     price_anomaly:"Аномалия цены", market_context_mismatch:"Контекст не совпал",
     own_offer_missing:"Наша строка не найдена", out_of_stock:"Нет FIFO-остатка",
     apply_timeout:"Не подтверждено", apply_unconfirmed:"Защитная пауза", error:"Ошибка",
     paused:"Отключён", stale:"Решение устарело", apply_failed:"Ошибка записи",
   };
-  const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : ["applied","watching","cooldown"].includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
+  const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : ["applied","watching","cooldown","delivery_advantage"].includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
   return {status, label:labels[status] || status, kind};
 };
 
 const offersTable = (offers) => {
   if (!Array.isArray(offers) || !offers.length) return '<p class="fast-card-reason">Диагностика офферов появится после первой проверки.</p>';
-  return `<div class="offers-wrap"><table class="offers-table"><thead><tr><th>Продавец</th><th>Цена API</th><th>Роль</th><th>В расчёте</th><th>Доставка / причина</th></tr></thead><tbody>${offers.map((offer) => {
+  return `<div class="offers-wrap"><table class="offers-table"><thead><tr><th>Продавец</th><th>Цена API</th><th>Роль</th><th>Доставка</th><th>В расчёте</th><th>Решение</th></tr></thead><tbody>${offers.map((offer) => {
     const rowClass = offer.is_own ? "offer-own" : offer.used_for_dumping ? "" : "offer-ignore";
-    const detail = offer.ignored_reason || offer.delivery || "—";
-    return `<tr class="${rowClass}"><td>${escapeHtml(offer.merchant_name || offer.merchant_id || "—")}</td><td>${money(offer.price_kzt)}</td><td>${offer.is_own ? "Наша строка" : "Конкурент"}</td><td>${offer.is_own ? "—" : offer.used_for_dumping ? "Да" : "Нет"}</td><td>${escapeHtml(detail)}</td></tr>`;
+    const delivery = offer.delivery_days == null ? (offer.delivery || "не распознано") : `${Number(offer.delivery_days)} дн. · ${offer.delivery || "срок Kaspi"}`;
+    const decision = offer.is_own ? "Наша доставка" : offer.used_for_dumping ? "Выбран как ценовой ориентир" : (offer.ignored_reason || "Не выбран");
+    return `<tr class="${rowClass}"><td>${escapeHtml(offer.merchant_name || offer.merchant_id || "—")}</td><td>${money(offer.price_kzt)}</td><td>${offer.is_own ? "Наша строка" : "Конкурент"}</td><td>${escapeHtml(delivery)}</td><td>${offer.is_own ? "—" : offer.used_for_dumping ? "Да" : "Нет"}</td><td>${escapeHtml(decision)}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 };
 
@@ -125,6 +127,7 @@ const card = (row) => {
       <div><span>Последний scan</span><strong>${dateTime(state.last_scanned_at)}</strong><small>следующий ${dateTime(state.next_scan_at)}</small></div>
       <div><span>Последний apply</span><strong>${dateTime(state.last_applied_at)}</strong><small>${state.last_operation_id ? `operation ${escapeHtml(state.last_operation_id)}` : "операций ещё нет"}</small></div>
       <div><span>Интервал</span><strong>${Number(row.policy.scan_interval_seconds) / 60} мин.</strong><small>проверка и максимум один write · аномалия ${Number(row.policy.max_undercut_gap_percent)}%</small></div>
+      <div><span>Преимущество доставки</span><strong>до ${money(row.policy.delivery_price_premium_kzt)}</strong><small>не демпинговать, если быстрее от ${Number(row.policy.delivery_advantage_days)} дн.</small></div>
       <div><span>Agent / версия решения</span><strong>${escapeHtml(state.last_agent_id || "—")}</strong><small>state v${Number(state.state_version || 0)}</small></div>
       <div><span>Канал</span><strong>Realtime API</strong><small>XML не изменяется</small></div>
     </div>
@@ -246,6 +249,8 @@ const policyPayload = (prefix="") => ({
   allow_price_raise:document.querySelector(`#${prefix}allow-raise`).checked,
   max_undercut_gap_percent:Number(document.querySelector(`#${prefix}max-gap`).value),
   scan_interval_seconds:Number(document.querySelector(`#${prefix}scan-interval`).value),
+  delivery_price_premium_kzt:Number(document.querySelector(`#${prefix}delivery-premium`).value),
+  delivery_advantage_days:Number(document.querySelector(`#${prefix}delivery-days`).value),
   city_id:document.querySelector(`#${prefix}city-id`).value.trim(),
   zone_id:document.querySelector(`#${prefix}zone-id`).value.trim(),
 });
@@ -261,6 +266,8 @@ const openEdit = (row) => {
   document.querySelector("#edit-undercut-step").value = policy.undercut_step_kzt;
   document.querySelector("#edit-scan-interval").value = policy.scan_interval_seconds;
   document.querySelector("#edit-max-gap").value = policy.max_undercut_gap_percent;
+  document.querySelector("#edit-delivery-premium").value = policy.delivery_price_premium_kzt;
+  document.querySelector("#edit-delivery-days").value = policy.delivery_advantage_days;
   document.querySelector("#edit-city-id").value = policy.city_id;
   document.querySelector("#edit-zone-id").value = policy.zone_id;
   document.querySelector("#edit-allow-raise").checked = policy.allow_price_raise;

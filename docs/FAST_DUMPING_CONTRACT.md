@@ -19,14 +19,20 @@ scheduler, or the XML projection.
 
 1. The local agent scans the public product card and Offers API.
 2. Buyer-context guards reject API prices below the public headline price.
-3. CRM reads the current FIFO source and calculates the safe floor with the
+3. The agent compares the buyer-facing `delivery` date of our offer with each
+   price-sorted competitor. A cheaper offer is excluded as a price reference
+   only when both dates are known, our delivery is faster by at least the
+   configured day threshold (default 5), and our price premium is no greater
+   than the configured amount (default 500 KZT). Unknown delivery data always
+   keeps the competitor eligible.
+4. CRM reads the current FIFO source and calculates the safe floor with the
    existing commission, tax, logistics, and minimum-profit formula.
-4. CRM persists a versioned decision before a write can be claimed.
-5. Immediately before writing, CRM recalculates the source, floor, target, and
+5. CRM persists a versioned decision before a write can be claimed.
+6. Immediately before writing, CRM recalculates the source, floor, target, and
    physical stock. A changed value makes the job stale and queues a fresh scan.
-6. The local agent writes the target price together with the freshly confirmed
+7. The local agent writes the target price together with the freshly confirmed
    physical stock.
-7. HTTP 200 is `PENDING`. The operation is `APPLIED` only after the scanner sees
+8. HTTP 200 is `PENDING`. The operation is `APPLIED` only after the scanner sees
    the target price in our own merchant row.
 
 ## Safety invariants
@@ -45,3 +51,6 @@ scheduler, or the XML projection.
   target price.
 - Market-context mismatch, missing own offer, price anomaly, missing inventory,
   or disabled sale state blocks realtime writes without changing XML.
+- Pickup dates, delivery flags, and intermediate delivery steps never qualify
+  as the final buyer-facing delivery date. Unparseable or missing delivery
+  dates fail open for competition: the seller remains a price reference.

@@ -77,6 +77,18 @@ class FastDumpingPolicy(WorkspaceOwned, Base):
         default=600,
         server_default="600",
     )
+    delivery_price_premium_kzt: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=500,
+        server_default="500",
+    )
+    delivery_advantage_days: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=5,
+        server_default="5",
+    )
     city_id: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
