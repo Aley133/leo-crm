@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
@@ -38,7 +39,7 @@ class FastDumpingPolicyUpsert(BaseModel):
     undercut_step_kzt: int = Field(default=1, ge=1, le=10000)
     allow_price_raise: bool = True
     max_undercut_gap_percent: Decimal = Field(default=35, gt=0, le=100)
-    scan_interval_seconds: int = Field(default=10, ge=8, le=3600)
+    scan_interval_seconds: Literal[300, 600] = 600
     city_id: str = Field(default="750000000", min_length=1, max_length=32)
     zone_id: str = Field(default="Magnum_ZONE1", min_length=1, max_length=64)
 
@@ -351,6 +352,17 @@ def run_fast_dumping_now(
             status_code=409,
             detail=state.pause_reason or "Сначала снимите защитную паузу.",
         )
+    next_scan_at = state.next_scan_at
+    if next_scan_at is not None:
+        if next_scan_at.tzinfo is None:
+            next_scan_at = next_scan_at.replace(tzinfo=UTC)
+        if next_scan_at > utcnow():
+            return {
+                "status": "cooldown",
+                "queued": False,
+                "product_id": product_id,
+                "next_scan_at": next_scan_at,
+            }
     _job, queued = queue_scan(
         db,
         policy=policy,

@@ -43,9 +43,9 @@ def test_server_claim_gate_bounds_busy_and_idle_polling() -> None:
         assert agent_api._reserve_claim_slot(workspace_id, now=100.0) == 0
         assert agent_api._reserve_claim_slot(workspace_id, now=100.1) == 2
 
-        agent_api._defer_claims(workspace_id, seconds=10, now=102.0)
-        assert agent_api._reserve_claim_slot(workspace_id, now=105.0) == 7
-        assert agent_api._reserve_claim_slot(workspace_id, now=112.0) == 0
+        agent_api._defer_claims(workspace_id, seconds=60, now=102.0)
+        assert agent_api._reserve_claim_slot(workspace_id, now=105.0) == 57
+        assert agent_api._reserve_claim_slot(workspace_id, now=162.0) == 0
     finally:
         with agent_api._AGENT_GUARD_LOCK:
             agent_api._CLAIM_NOT_BEFORE.pop(workspace_id, None)
@@ -96,7 +96,11 @@ def test_agent_serializes_crm_requests_behind_shared_circuit() -> None:
     assert "await _wait_for_crm_gate()" in source
     assert "_acquire_single_instance(selected_workspace)" in source
     assert "ERROR_ALREADY_EXISTS" in source
-    assert 'VERSION = "1.0.2"' in source
+    assert 'VERSION = "1.0.3"' in source
+    assert "IDLE_POLL_MAX_SECONDS = 60" in source
+    assert "VERIFY_POLL_SECONDS" not in source
+    assert "_verify_price" not in source
+    assert "separate verification after" in source
 
 
 def test_agent_scans_by_kaspi_product_id_not_merchant_sku(monkeypatch) -> None:

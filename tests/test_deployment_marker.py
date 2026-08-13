@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.23.17"
-EXPECTED_DEPLOYMENT_MARKER = "responsive-single-flight-order-sync"
+EXPECTED_APP_VERSION = "0.23.18"
+EXPECTED_DEPLOYMENT_MARKER = "bounded-fast-dumping-frequency"
 
 
 def test_application_metadata_contract() -> None:

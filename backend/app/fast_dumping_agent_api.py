@@ -82,7 +82,7 @@ _ONLINE_FOR = timedelta(seconds=45)
 _MAX_HEARTBEATS = 32
 _AGENT_GUARD_LOCK = Lock()
 _MIN_CLAIM_INTERVAL_SECONDS = 2.0
-_IDLE_CLAIM_INTERVAL_SECONDS = 10.0
+_IDLE_CLAIM_INTERVAL_SECONDS = 60.0
 _CLAIM_NOT_BEFORE: dict[int, float] = {}
 
 
@@ -249,7 +249,12 @@ def claim(
             payload.workspace_id,
             seconds=_IDLE_CLAIM_INTERVAL_SECONDS,
         )
-    return {"job": result, "retry_after_seconds": 10 if result is None else 0}
+    return {
+        "job": result,
+        "retry_after_seconds": (
+            int(_IDLE_CLAIM_INTERVAL_SECONDS) if result is None else 0
+        ),
+    }
 
 
 @router.post("/jobs/{job_id}/scan-complete")

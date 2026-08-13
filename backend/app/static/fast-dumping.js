@@ -58,12 +58,13 @@ const statusView = (row) => {
     idle:"Ожидает", queued:"В очереди", scanning:"Сканирование", queued_apply:"Цена готова",
     preparing_apply:"Сверка остатка", applying:"Запись PENDING", verifying:"Проверка цены",
     applied:"Применено", watching:"Цена актуальна", floor_limited:"На пороге",
+    cooldown:"Интервал цены",
     price_anomaly:"Аномалия цены", market_context_mismatch:"Контекст не совпал",
     own_offer_missing:"Наша строка не найдена", out_of_stock:"Нет FIFO-остатка",
     apply_timeout:"Не подтверждено", apply_unconfirmed:"Защитная пауза", error:"Ошибка",
     paused:"Отключён", stale:"Решение устарело", apply_failed:"Ошибка записи",
   };
-  const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : ["applied","watching"].includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
+  const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : ["applied","watching","cooldown"].includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
   return {status, label:labels[status] || status, kind};
 };
 
@@ -106,7 +107,8 @@ const card = (row) => {
   const state = row.state || {};
   const view = statusView(row);
   const source = row.current_source || {};
-  const canRun = row.policy.enabled && !state.automatic_writes_paused && !workingStatuses.has(view.status);
+  const scanDue = !state.next_scan_at || new Date(state.next_scan_at).getTime() <= Date.now();
+  const canRun = row.policy.enabled && !state.automatic_writes_paused && !workingStatuses.has(view.status) && scanDue;
   return `<article class="fast-card ${view.kind}" data-product-id="${row.product_id}">
     <div class="fast-card-head">
       <div class="fast-card-title"><span class="fast-status ${view.kind}">${escapeHtml(view.label)}</span><div><h3>${escapeHtml(row.name)}</h3><p>Kaspi ${escapeHtml(row.kaspi_product_id)} · SKU ${escapeHtml(row.merchant_sku || "—")}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</p></div></div>
@@ -122,7 +124,7 @@ const card = (row) => {
       <div><span>Цена карточки</span><strong>${money(state.page_visible_price_kzt)}</strong><small>${state.market_context_ok ? "контекст подтверждён" : "ожидает подтверждения"}</small></div>
       <div><span>Последний scan</span><strong>${dateTime(state.last_scanned_at)}</strong><small>следующий ${dateTime(state.next_scan_at)}</small></div>
       <div><span>Последний apply</span><strong>${dateTime(state.last_applied_at)}</strong><small>${state.last_operation_id ? `operation ${escapeHtml(state.last_operation_id)}` : "операций ещё нет"}</small></div>
-      <div><span>Интервал</span><strong>${row.policy.scan_interval_seconds} сек.</strong><small>аномалия ${Number(row.policy.max_undercut_gap_percent)}%</small></div>
+      <div><span>Интервал</span><strong>${Number(row.policy.scan_interval_seconds) / 60} мин.</strong><small>проверка и максимум один write · аномалия ${Number(row.policy.max_undercut_gap_percent)}%</small></div>
       <div><span>Agent / версия решения</span><strong>${escapeHtml(state.last_agent_id || "—")}</strong><small>state v${Number(state.state_version || 0)}</small></div>
       <div><span>Канал</span><strong>Realtime API</strong><small>XML не изменяется</small></div>
     </div>
@@ -305,8 +307,8 @@ const actionClick = async (event) => {
   if (!resume && !run) return;
   const button = resume || run; setBusy(button, true, resume ? "Возобновляю…" : "Ставлю…");
   try {
-    await request(`/api/fast-dumping/products/${productId}/${resume ? "resume" : "run"}`, {method:"POST"});
-    message.textContent = resume ? "Защитная пауза снята. Запущена новая проверка без повторения старой операции." : "Товар поставлен в очередь Fast Agent.";
+    const result = await request(`/api/fast-dumping/products/${productId}/${resume ? "resume" : "run"}`, {method:"POST"});
+    message.textContent = resume ? "Защитная пауза снята. Запущена новая проверка без повторения старой операции." : result.queued ? "Товар поставлен в очередь Fast Agent." : "Следующая проверка будет выполнена по выбранному интервалу.";
     await loadPage();
   } catch (error) { message.textContent = error.message || "Операция не выполнена"; }
   finally { setBusy(button, false, ""); }
