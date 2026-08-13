@@ -27,7 +27,7 @@ from tools.kaspi_fast_dumping_scanner import (
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 
 
-VERSION = "1.0.3"
+VERSION = "1.0.4"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -488,6 +488,10 @@ def _market_payload(market: KaspiCompetitorSnapshot) -> dict:
         "product_url": market.product_url,
         "own_delivery": market.own_delivery,
         "competitor_delivery": market.competitor_delivery,
+        "own_delivery_days": market.own_delivery_days,
+        "competitor_delivery_days": market.competitor_delivery_days,
+        "delivery_filtered_count": market.delivery_filtered_count,
+        "delivery_selection_reason": market.delivery_selection_reason,
         "offers": list(market.offers),
         "page_visible_price_kzt": money(market.page_visible_price_kzt),
         "market_context_ok": market.market_context_ok,
@@ -510,6 +514,10 @@ async def _scan(job: dict, merchant_uid: str) -> KaspiCompetitorSnapshot:
             zone_id=str(job["zone_id"]),
             product_name_hint=str(job.get("name") or "") or None,
             product_brand_hint=str(job.get("brand") or "") or None,
+            delivery_price_premium_kzt=int(
+                job.get("delivery_price_premium_kzt", 500)
+            ),
+            delivery_advantage_days=int(job.get("delivery_advantage_days", 5)),
         )
 
 

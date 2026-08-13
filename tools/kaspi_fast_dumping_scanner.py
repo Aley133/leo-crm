@@ -7,9 +7,11 @@ import random
 import re
 import uuid
 from dataclasses import dataclass
+from datetime import date, datetime
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -21,6 +23,7 @@ HEADERS = {
     "Origin": "https://kaspi.kz",
     "Referer": "https://kaspi.kz/shop/",
 }
+KASPI_TIMEZONE = ZoneInfo("Asia/Almaty")
 
 
 @dataclass(frozen=True, slots=True)
@@ -39,6 +42,20 @@ class KaspiCompetitorSnapshot:
     page_visible_price_kzt: Decimal | None = None
     market_context_ok: bool = False
     market_context_reason: str | None = None
+    own_delivery_days: int | None = None
+    competitor_delivery_days: int | None = None
+    delivery_filtered_count: int = 0
+    delivery_selection_reason: str | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class DeliveryAssessment:
+    own_delivery_days: int | None
+    competitor_delivery_days: int | None
+    price_gap_kzt: Decimal | None
+    delivery_gap_days: int | None
+    ignored: bool
+    reason: str | None = None
 
 
 def _slugify(value: str) -> str:
@@ -215,6 +232,214 @@ def _delivery_summary(offer: dict[str, Any] | None) -> str | None:
     return "; ".join(parts[:4]) or None
 
 
+def _kaspi_today() -> date:
+    return datetime.now(KASPI_TIMEZONE).date()
+
+
+def _delivery_value_days(value: Any, *, today: date) -> int | None:
+    """Normalize one explicit delivery value to calendar days from today."""
+
+    if isinstance(value, bool) or value in (None, ""):
+        return None
+    if isinstance(value, (int, float, Decimal)):
+        try:
+            days = int(value)
+        except (TypeError, ValueError, OverflowError):
+            return None
+        return days if float(value) == days and 0 <= days <= 60 else None
+
+    rendered = str(value).strip()
+    lowered = rendered.casefold()
+    if not rendered:
+        return None
+    if "послезавтра" in lowered:
+        return 2
+    if "завтра" in lowered:
+        return 1
+    if "сегодня" in lowered:
+        return 0
+
+    day_match = re.search(
+        r"(?<!\d)(\d{1,2})(?:\s*[-–—]\s*(\d{1,2}))?\s*(?:дн(?:я|ей)?|день)",
+        lowered,
+    )
+    if day_match:
+        # For a range use the earliest promised day. A competitor is ignored
+        # only when even its fastest stated delivery is sufficiently slower.
+        days = int(day_match.group(1))
+        return days if 0 <= days <= 60 else None
+
+    parsed: datetime | None = None
+    try:
+        parsed = datetime.fromisoformat(rendered.replace("Z", "+00:00"))
+    except ValueError:
+        parsed = None
+    if parsed is not None:
+        delivery_date = (
+            parsed.astimezone(KASPI_TIMEZONE).date()
+            if parsed.tzinfo is not None
+            else parsed.date()
+        )
+        days = (delivery_date - today).days
+        return days if 0 <= days <= 60 else None
+
+    date_match = re.fullmatch(r"(\d{1,2})[./-](\d{1,2})[./-](\d{4})", rendered)
+    if date_match:
+        try:
+            delivery_date = date(
+                int(date_match.group(3)),
+                int(date_match.group(2)),
+                int(date_match.group(1)),
+            )
+        except ValueError:
+            return None
+        days = (delivery_date - today).days
+        return days if 0 <= days <= 60 else None
+    return None
+
+
+def _delivery_days(offer: dict[str, Any] | None, *, today: date | None = None) -> int | None:
+    """Return buyer-facing delivery time without confusing it with pickup.
+
+    Kaspi currently returns an ISO timestamp in the top-level `delivery` field.
+    Explicit delivery date/duration variants are accepted as fallbacks. Boolean
+    flags and intermediate `deliverySteps` values are deliberately ignored.
+    """
+
+    if not offer:
+        return None
+    reference = today or _kaspi_today()
+    candidates: list[tuple[int, int]] = []
+
+    def visit(value: Any, *, parent_is_delivery: bool = False, depth: int = 0) -> None:
+        if depth > 3 or not isinstance(value, dict):
+            return
+        for raw_key, nested in value.items():
+            key = re.sub(r"[^a-zа-я0-9]", "", str(raw_key).casefold())
+            is_delivery = key == "delivery"
+            is_explicit_detail = (
+                "delivery" in key
+                and any(
+                    token in key
+                    for token in ("date", "time", "deadline", "duration", "day", "term", "period", "text")
+                )
+            ) or (
+                parent_is_delivery
+                and any(
+                    token in key
+                    for token in ("date", "time", "deadline", "duration", "day", "term", "period", "text")
+                )
+            )
+            if isinstance(nested, dict):
+                visit(
+                    nested,
+                    parent_is_delivery=is_delivery or is_explicit_detail,
+                    depth=depth + 1,
+                )
+                continue
+            if not is_delivery and not is_explicit_detail:
+                continue
+            days = _delivery_value_days(nested, today=reference)
+            if days is not None:
+                candidates.append((0 if is_delivery else 1, days))
+
+    visit(offer)
+    if not candidates:
+        return None
+    best_priority = min(priority for priority, _days in candidates)
+    return min(days for priority, days in candidates if priority == best_priority)
+
+
+def _assess_delivery_advantage(
+    own: dict[str, Any] | None,
+    competitor: dict[str, Any],
+    *,
+    max_price_premium_kzt: Decimal | int | str,
+    min_delivery_advantage_days: int,
+    today: date | None = None,
+) -> DeliveryAssessment:
+    """Decide whether a slower, slightly cheaper offer should be ignored."""
+
+    own_price = None if own is None else _offer_price(own)
+    competitor_price = _offer_price(competitor)
+    own_days = _delivery_days(own, today=today)
+    competitor_days = _delivery_days(competitor, today=today)
+    price_gap = (
+        None
+        if own_price is None or competitor_price is None
+        else own_price - competitor_price
+    )
+    delivery_gap = (
+        None
+        if own_days is None or competitor_days is None
+        else competitor_days - own_days
+    )
+    premium = max(Decimal("0"), Decimal(str(max_price_premium_kzt)))
+    advantage = max(1, int(min_delivery_advantage_days))
+    ignored = bool(
+        price_gap is not None
+        and Decimal("0") <= price_gap <= premium
+        and delivery_gap is not None
+        and delivery_gap >= advantage
+    )
+    reason = None
+    if ignored:
+        reason = (
+            f"Исключён из ценового ориентира: наша доставка быстрее на "
+            f"{delivery_gap} дн., а разница цены {format(price_gap, 'f')} ₸ "
+            f"не превышает порог {format(premium, 'f')} ₸."
+        )
+    return DeliveryAssessment(
+        own_delivery_days=own_days,
+        competitor_delivery_days=competitor_days,
+        price_gap_kzt=price_gap,
+        delivery_gap_days=delivery_gap,
+        ignored=ignored,
+        reason=reason,
+    )
+
+
+def _select_delivery_aware_competitor(
+    own: dict[str, Any] | None,
+    competitors: list[dict[str, Any]],
+    *,
+    max_price_premium_kzt: Decimal | int | str,
+    min_delivery_advantage_days: int,
+    today: date | None = None,
+) -> tuple[dict[str, Any] | None, dict[int, DeliveryAssessment]]:
+    assessments: dict[int, DeliveryAssessment] = {}
+    selected: dict[str, Any] | None = None
+    ignored_before_selection = False
+    own_price = None if own is None else _offer_price(own)
+    for candidate in competitors:
+        assessment = _assess_delivery_advantage(
+            own,
+            candidate,
+            max_price_premium_kzt=max_price_premium_kzt,
+            min_delivery_advantage_days=min_delivery_advantage_days,
+            today=today,
+        )
+        assessments[id(candidate)] = assessment
+        if selected is not None:
+            continue
+        if assessment.ignored:
+            ignored_before_selection = True
+            continue
+        candidate_price = _offer_price(candidate)
+        if (
+            ignored_before_selection
+            and own_price is not None
+            and candidate_price is not None
+            and candidate_price >= own_price
+        ):
+            # A slower cheap offer sets the maximum premium we are currently
+            # willing to defend. Do not use a later expensive offer to raise
+            # our price beyond that already-validated premium.
+            continue
+        selected = candidate
+    return selected, assessments
+
+
 def _offer_price(offer: dict[str, Any]) -> Decimal | None:
     return _to_decimal_price(offer.get("price"))
 
@@ -283,6 +508,9 @@ def _offer_debug(
     *,
     own_merchant_sku: str | None,
     page_visible_price: Decimal | None,
+    selected_competitor: dict[str, Any] | None = None,
+    delivery_assessment: DeliveryAssessment | None = None,
+    delivery_days: int | None = None,
 ) -> dict[str, Any]:
     price = _offer_price(offer)
     own_match = _own_match(
@@ -292,10 +520,26 @@ def _offer_debug(
     )
     is_own = own_match is not None
     ignored_reason = None
-    used_for_dumping = not is_own
+    used_for_dumping = not is_own and offer is selected_competitor
     if not is_own and page_visible_price is not None and price is not None and price < page_visible_price:
         ignored_reason = "API price ниже цены, видимой на карточке; другой price/delivery context"
         used_for_dumping = False
+    elif not is_own and delivery_assessment is not None and delivery_assessment.ignored:
+        ignored_reason = delivery_assessment.reason
+        used_for_dumping = False
+    elif (
+        not is_own
+        and selected_competitor is None
+        and delivery_assessment is not None
+        and delivery_assessment.price_gap_kzt is not None
+        and delivery_assessment.price_gap_kzt <= 0
+    ):
+        ignored_reason = (
+            "Не выбран: наша текущая цена уже не выше этого оффера; "
+            "повышение сверх защищённой доплаты за доставку запрещено."
+        )
+    elif not is_own and offer is not selected_competitor:
+        ignored_reason = "Не выбран: найден более выгодный допустимый ценовой ориентир."
     price_fields: dict[str, str] = {}
     for key, value in offer.items():
         if "price" in str(key).lower() and isinstance(value, (str, int, float)):
@@ -310,6 +554,19 @@ def _offer_debug(
         "ignored_reason": ignored_reason,
         "price_fields": price_fields,
         "delivery": _delivery_summary(offer),
+        "delivery_days": (
+            delivery_days
+            if is_own
+            else None if delivery_assessment is None else delivery_assessment.competitor_delivery_days
+        ),
+        "delivery_gap_days": (
+            None if delivery_assessment is None else delivery_assessment.delivery_gap_days
+        ),
+        "price_gap_kzt": (
+            None
+            if delivery_assessment is None or delivery_assessment.price_gap_kzt is None
+            else format(delivery_assessment.price_gap_kzt, "f")
+        ),
     }
 
 
@@ -378,6 +635,8 @@ async def scan_kaspi_competitors(
     product_name_hint: str | None = None,
     product_brand_hint: str | None = None,
     max_pages: int = 20,
+    delivery_price_premium_kzt: Decimal | int | str = 500,
+    delivery_advantage_days: int = 5,
 ) -> KaspiCompetitorSnapshot:
     master_id = kaspi_product_id.split("_", 1)[0].strip()
     if not master_id:
@@ -492,13 +751,41 @@ async def scan_kaspi_competitors(
                 "live-write заблокирован до совпадения контекста."
             )
 
-    competitor = trusted_external[0] if trusted_external else None
+    scan_date = _kaspi_today()
+    competitor, delivery_assessments = _select_delivery_aware_competitor(
+        own,
+        trusted_external,
+        max_price_premium_kzt=delivery_price_premium_kzt,
+        min_delivery_advantage_days=delivery_advantage_days,
+        today=scan_date,
+    )
+    delivery_filtered_count = sum(
+        assessment.ignored for assessment in delivery_assessments.values()
+    )
+    delivery_selection_reason = None
+    if delivery_filtered_count:
+        if competitor is None:
+            delivery_selection_reason = (
+                f"Цена сохранена: {delivery_filtered_count} более дешёвых офферов "
+                f"исключены, потому что наша доставка быстрее минимум на "
+                f"{int(delivery_advantage_days)} дн. при разнице до "
+                f"{format(Decimal(str(delivery_price_premium_kzt)), 'f')} ₸."
+            )
+        else:
+            delivery_selection_reason = (
+                f"Офферов исключено по преимуществу доставки: "
+                f"{delivery_filtered_count}; выбран следующий допустимый конкурент."
+            )
+    own_delivery_days = _delivery_days(own, today=scan_date)
     diagnostics = tuple(
         _offer_debug(
             row,
             own_merchant_id,
             own_merchant_sku=own_merchant_sku,
             page_visible_price=page_visible_price,
+            selected_competitor=competitor,
+            delivery_assessment=delivery_assessments.get(id(row)),
+            delivery_days=own_delivery_days,
         )
         for row in rows
     )
@@ -517,4 +804,8 @@ async def scan_kaspi_competitors(
         page_visible_price_kzt=page_visible_price,
         market_context_ok=market_context_ok,
         market_context_reason=market_context_reason,
+        own_delivery_days=own_delivery_days,
+        competitor_delivery_days=_delivery_days(competitor, today=scan_date),
+        delivery_filtered_count=delivery_filtered_count,
+        delivery_selection_reason=delivery_selection_reason,
     )

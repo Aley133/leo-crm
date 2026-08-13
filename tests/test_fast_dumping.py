@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
@@ -29,12 +29,19 @@ from backend.app.fast_dumping_service import (
     prepare_apply,
     prune_fast_dumping_history,
     queue_scan,
+    serialize_claimed_job,
 )
 from backend.app.inventory_models import InventoryBatch
 from backend.app.models import MarketplaceAccount, Product
 from backend.app.workspace_context import workspace_context
 from backend.app.workspace_models import KaspiAccountCredential, Workspace
-from tools.kaspi_fast_dumping_scanner import _merchant_id, _own_match, _page_visible_price
+from tools.kaspi_fast_dumping_scanner import (
+    _delivery_days,
+    _merchant_id,
+    _own_match,
+    _page_visible_price,
+    _select_delivery_aware_competitor,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +76,95 @@ def test_scanner_recognizes_nested_merchant_uid_and_safe_sku_fallback() -> None:
         own_merchant_sku="SKU-1",
     ) is None
 
+
+def test_scanner_normalizes_real_kaspi_delivery_date_and_ignores_pickup_steps() -> None:
+    today = date(2026, 8, 13)
+
+    assert _delivery_days(
+        {
+            "delivery": "2026-08-15T18:00:00.000+00:00",
+            "deliveryMovedBySlot": False,
+            "kdPickupDate": "2026-08-14T15:00:00.000+00:00",
+            "kaspiDelivery": True,
+        },
+        today=today,
+    ) == 2
+    assert _delivery_days(
+        {
+            "deliverySteps": {"PO": "2026-08-15T19:00:00.000+00:00"},
+            "kdPickupDate": "2026-08-14T15:00:00.000+00:00",
+        },
+        today=today,
+    ) is None
+    assert _delivery_days({"deliveryText": "доставка 5–7 дней"}, today=today) == 5
+
+
+def test_scanner_skips_slightly_cheaper_slow_offer_for_faster_delivery() -> None:
+    today = date(2026, 8, 13)
+    own = {
+        "price": "20000",
+        "delivery": "2026-08-13T19:00:00.000+00:00",
+    }
+    slow_cheaper = {
+        "price": "19500",
+        "delivery": "2026-08-18T19:00:00.000+00:00",
+    }
+    acceptable = {
+        "price": "19700",
+        "delivery": "2026-08-15T19:00:00.000+00:00",
+    }
+
+    selected, assessments = _select_delivery_aware_competitor(
+        own,
+        [slow_cheaper, acceptable],
+        max_price_premium_kzt=500,
+        min_delivery_advantage_days=5,
+        today=today,
+    )
+
+    assert selected is acceptable
+    assert assessments[id(slow_cheaper)].ignored is True
+    assert assessments[id(slow_cheaper)].price_gap_kzt == Decimal("500")
+    assert assessments[id(slow_cheaper)].delivery_gap_days == 5
+    assert assessments[id(acceptable)].ignored is False
+
+
+def test_scanner_keeps_competitor_when_threshold_or_delivery_is_unknown() -> None:
+    today = date(2026, 8, 13)
+    own = {"price": "20000", "delivery": "2026-08-13T19:00:00+00:00"}
+    too_cheap = {"price": "19499", "delivery": "2026-08-20T19:00:00+00:00"}
+    unknown_delivery = {"price": "19500", "kaspiDelivery": True}
+
+    selected, assessments = _select_delivery_aware_competitor(
+        own,
+        [too_cheap, unknown_delivery],
+        max_price_premium_kzt=500,
+        min_delivery_advantage_days=5,
+        today=today,
+    )
+
+    assert selected is too_cheap
+    assert assessments[id(too_cheap)].ignored is False
+    assert assessments[id(unknown_delivery)].ignored is False
+
+
+def test_delivery_filter_never_raises_price_above_the_protected_premium() -> None:
+    today = date(2026, 8, 13)
+    own = {"price": "20000", "delivery": "2026-08-13T19:00:00+00:00"}
+    slow_cheaper = {"price": "19500", "delivery": "2026-08-18T19:00:00+00:00"}
+    expensive = {"price": "22000", "delivery": "2026-08-14T19:00:00+00:00"}
+
+    selected, assessments = _select_delivery_aware_competitor(
+        own,
+        [slow_cheaper, expensive],
+        max_price_premium_kzt=500,
+        min_delivery_advantage_days=5,
+        today=today,
+    )
+
+    assert assessments[id(slow_cheaper)].ignored is True
+    assert assessments[id(expensive)].ignored is False
+    assert selected is None
 
 def _seed_fast_product(db_session, *, workspace_id: int = 1, quantity: int = 4):
     with workspace_context(workspace_id):
@@ -207,6 +303,14 @@ def test_fast_dumping_full_scan_prepare_apply_cycle(db_session) -> None:
     leased_scan = _claim(db_session, 1)
     assert leased_scan.id == job.id
     assert leased_scan.status == "leased_scan"
+    with workspace_context(1):
+        claimed_payload = serialize_claimed_job(
+            db_session,
+            job=leased_scan,
+            workspace_id=1,
+        )
+    assert claimed_payload["delivery_price_premium_kzt"] == 500
+    assert claimed_payload["delivery_advantage_days"] == 5
     with workspace_context(1):
         result = complete_scan(
             db_session,
@@ -606,6 +710,70 @@ def test_fast_dumping_accepts_only_safe_five_or_ten_minute_intervals() -> None:
         raise AssertionError("Unsafe 10-second Fast Dumping interval was accepted")
 
 
+def test_fast_dumping_validates_delivery_advantage_thresholds() -> None:
+    defaults = FastDumpingPolicyUpsert()
+    custom = FastDumpingPolicyUpsert(
+        delivery_price_premium_kzt=750,
+        delivery_advantage_days=7,
+    )
+
+    assert defaults.delivery_price_premium_kzt == 500
+    assert defaults.delivery_advantage_days == 5
+    assert custom.delivery_price_premium_kzt == 750
+    assert custom.delivery_advantage_days == 7
+    for invalid in (
+        {"delivery_price_premium_kzt": -1},
+        {"delivery_advantage_days": 0},
+        {"delivery_advantage_days": 31},
+    ):
+        try:
+            FastDumpingPolicyUpsert(**invalid)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Unsafe delivery threshold was accepted: {invalid}")
+
+
+def test_delivery_advantage_holds_price_when_all_cheaper_offers_are_slow(db_session) -> None:
+    _product, _batch, policy, state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        job, _ = queue_scan(
+            db_session,
+            policy=policy,
+            workspace_id=1,
+            reason="test",
+        )
+        db_session.commit()
+    leased = _claim(db_session, 1)
+    market = _market(own="20000", competitor="19500")
+    market["competitor_price_kzt"] = None
+    market["competitor_name"] = None
+    market["delivery_filtered_count"] = 1
+    market["delivery_selection_reason"] = (
+        "Цена сохранена: более дешёвый оффер доставляет на 5 дней позже."
+    )
+    market["offers"][1]["used_for_dumping"] = False
+    market["offers"][1]["ignored_reason"] = market["delivery_selection_reason"]
+
+    with workspace_context(1):
+        result = complete_scan(
+            db_session,
+            workspace_id=1,
+            job_id=job.id,
+            agent_id="fast-agent",
+            lease_token=leased.lease_token,
+            succeeded=True,
+            market_payload=market,
+        )
+        db_session.commit()
+
+    db_session.refresh(state)
+    assert result["status"] == "delivery_advantage"
+    assert result["queued_apply"] is False
+    assert state.target_price_kzt == Decimal("20000")
+    assert "5 дней позже" in state.status_reason
+
+
 def test_recent_price_write_blocks_manual_scan_from_queuing_apply(db_session) -> None:
     _product, _batch, policy, state = _seed_fast_product(db_session)
     state.last_applied_at = datetime.now(UTC)
@@ -707,5 +875,9 @@ def test_fast_dumping_ui_and_agent_are_separate_from_ordinary_dumping() -> None:
     assert "/api/fast-dumping" in javascript
     assert 'value="600"' in html and 'value="300"' in html
     assert "10 минут (рекомендуется)" in html
+    assert 'id="delivery-premium"' in html
+    assert 'id="delivery-days"' in html
+    assert "delivery_price_premium_kzt" in javascript
+    assert "delivery_advantage_days" in javascript
     assert "password_dpapi" in agent and "mc_sid_dpapi" in agent
     assert "fast_dumping" not in ordinary

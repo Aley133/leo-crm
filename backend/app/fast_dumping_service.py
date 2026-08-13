@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from threading import Lock
@@ -77,6 +78,21 @@ def _text(value: object, *, limit: int) -> str | None:
     return rendered[:limit] or None
 
 
+def _bounded_int(
+    value: object,
+    *,
+    minimum: int,
+    maximum: int,
+) -> int | None:
+    if value in (None, "") or isinstance(value, bool):
+        return None
+    try:
+        result = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return result if minimum <= result <= maximum else None
+
+
 def _json_money(value: Decimal | None) -> str | None:
     return None if value is None else format(value, "f")
 
@@ -108,6 +124,13 @@ def normalize_market_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                     "ignored_reason": _text(raw.get("ignored_reason"), limit=500),
                     "price_fields": safe_price_fields,
                     "delivery": _text(raw.get("delivery"), limit=500),
+                    "delivery_days": _bounded_int(
+                        raw.get("delivery_days"), minimum=0, maximum=60
+                    ),
+                    "delivery_gap_days": _bounded_int(
+                        raw.get("delivery_gap_days"), minimum=-60, maximum=60
+                    ),
+                    "price_gap_kzt": _text(raw.get("price_gap_kzt"), limit=40),
                 }
             )
 
@@ -139,6 +162,19 @@ def normalize_market_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
         "product_url": product_url,
         "own_delivery": _text(payload.get("own_delivery"), limit=500),
         "competitor_delivery": _text(payload.get("competitor_delivery"), limit=500),
+        "own_delivery_days": _bounded_int(
+            payload.get("own_delivery_days"), minimum=0, maximum=60
+        ),
+        "competitor_delivery_days": _bounded_int(
+            payload.get("competitor_delivery_days"), minimum=0, maximum=60
+        ),
+        "delivery_filtered_count": (
+            _bounded_int(payload.get("delivery_filtered_count"), minimum=0, maximum=100)
+            or 0
+        ),
+        "delivery_selection_reason": _text(
+            payload.get("delivery_selection_reason"), limit=2000
+        ),
         "offers": offers,
         "page_visible_price_kzt": _json_money(
             _decimal(payload.get("page_visible_price_kzt"), field="page_visible_price_kzt")
@@ -570,6 +606,8 @@ def serialize_claimed_job(
         "city_id": policy.city_id,
         "zone_id": policy.zone_id,
         "scan_interval_seconds": _policy_interval_seconds(policy),
+        "delivery_price_premium_kzt": policy.delivery_price_premium_kzt,
+        "delivery_advantage_days": policy.delivery_advantage_days,
     }
     if stage == "verify":
         payload["target_price_kzt"] = (job.decision_json or {}).get(
@@ -793,6 +831,17 @@ def complete_scan(
         allow_price_raise=policy.allow_price_raise,
         max_undercut_gap_percent=Decimal(policy.max_undercut_gap_percent),
     )
+    delivery_selection_reason = market.get("delivery_selection_reason")
+    if delivery_selection_reason:
+        decision = replace(
+            decision,
+            status=(
+                "delivery_advantage"
+                if decision.status == "no_competitor"
+                else decision.status
+            ),
+            reason=f"{decision.reason} {delivery_selection_reason}",
+        )
     state.target_price_kzt = decision.target_price_kzt
     state.decision_status = decision.status
     decision_json = _decision_json(decision, stock_count=stock_count)

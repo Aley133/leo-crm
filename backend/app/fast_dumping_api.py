@@ -40,6 +40,8 @@ class FastDumpingPolicyUpsert(BaseModel):
     allow_price_raise: bool = True
     max_undercut_gap_percent: Decimal = Field(default=35, gt=0, le=100)
     scan_interval_seconds: Literal[300, 600] = 600
+    delivery_price_premium_kzt: int = Field(default=500, ge=0, le=100000)
+    delivery_advantage_days: int = Field(default=5, ge=1, le=30)
     city_id: str = Field(default="750000000", min_length=1, max_length=32)
     zone_id: str = Field(default="Magnum_ZONE1", min_length=1, max_length=64)
 
@@ -80,6 +82,8 @@ def _policy_payload(policy: FastDumpingPolicy) -> dict:
         "allow_price_raise": policy.allow_price_raise,
         "max_undercut_gap_percent": policy.max_undercut_gap_percent,
         "scan_interval_seconds": policy.scan_interval_seconds,
+        "delivery_price_premium_kzt": policy.delivery_price_premium_kzt,
+        "delivery_advantage_days": policy.delivery_advantage_days,
         "city_id": policy.city_id,
         "zone_id": policy.zone_id,
         "created_at": policy.created_at,
