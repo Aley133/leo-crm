@@ -30,10 +30,40 @@ from backend.app.inventory_models import InventoryBatch
 from backend.app.models import MarketplaceAccount, Product
 from backend.app.workspace_context import workspace_context
 from backend.app.workspace_models import KaspiAccountCredential, Workspace
-from tools.kaspi_fast_dumping_scanner import _page_visible_price
+from tools.kaspi_fast_dumping_scanner import _merchant_id, _own_match, _page_visible_price
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_scanner_recognizes_nested_merchant_uid_and_safe_sku_fallback() -> None:
+    nested = {"merchant": {"merchantUid": "  BAR-WORK  "}, "merchantSku": "SKU-1"}
+    assert _merchant_id(nested) == "BAR-WORK"
+    assert _own_match(
+        nested,
+        own_merchant_id="bar-work",
+        own_merchant_sku="SKU-1",
+    ) == "merchant_uid"
+
+    missing_uid = {"merchantSKU": "SKU-1"}
+    assert _own_match(
+        missing_uid,
+        own_merchant_id="bar-work",
+        own_merchant_sku="SKU-1",
+    ) == "merchant_sku"
+
+    assert _own_match(
+        {},
+        own_merchant_id="",
+        own_merchant_sku=None,
+    ) is None
+
+    conflicting_uid = {"merchantId": "competitor", "merchantSku": "SKU-1"}
+    assert _own_match(
+        conflicting_uid,
+        own_merchant_id="bar-work",
+        own_merchant_sku="SKU-1",
+    ) is None
 
 
 def _seed_fast_product(db_session, *, workspace_id: int = 1, quantity: int = 4):

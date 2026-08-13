@@ -58,6 +58,7 @@ _PLACEHOLDER_TITLES = {"", "unknown product", "название не получ�
 @dataclass(frozen=True, slots=True)
 class NormalizedOrderLine:
     external_line_id: str
+    external_line_id_is_fallback: bool
     external_product_id: str | None
     merchant_sku: str | None
     title: str
@@ -131,7 +132,24 @@ def _as_decimal(value: Any, *, default: str = "0") -> Decimal:
 
 
 def _canonical_hash(payload: dict[str, Any]) -> str:
-    canonical = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+    # Kaspi can advance source revision timestamps even when the order facts are
+    # byte-for-byte identical.  Treat those observation markers as metadata so
+    # minute polling does not append another raw snapshot for every old order.
+    # Status, prices, delivery facts, entries and all other source fields remain
+    # part of the immutable audit identity.
+    canonical_payload = dict(payload)
+    source_attributes = payload.get("attributes")
+    if isinstance(source_attributes, dict):
+        attributes = dict(source_attributes)
+        for key in ("revision", "version", "updatedAt", "modifiedAt"):
+            attributes.pop(key, None)
+        canonical_payload["attributes"] = attributes
+    canonical = json.dumps(
+        canonical_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
     return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
@@ -168,14 +186,23 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
             _first(line_attributes, "totalPrice", "lineTotal"),
             default=str(unit_price * quantity),
         )
+        source_line_id = _first(raw_line, "id") or _first(
+            line_attributes,
+            "id",
+            "entryId",
+        )
+        external_line_id_is_fallback = source_line_id in (None, "") or str(
+            source_line_id
+        ) == f"{external_order_id}:{index}"
         external_line_id = str(
-            _first(raw_line, "id")
-            or _first(line_attributes, "id", "entryId")
-            or f"{external_order_id}:{index}"
+            source_line_id
+            if not external_line_id_is_fallback
+            else f"{external_order_id}:{index}"
         )
         lines.append(
             NormalizedOrderLine(
                 external_line_id=external_line_id,
+                external_line_id_is_fallback=external_line_id_is_fallback,
                 external_product_id=_clean_text(_first(line_attributes, "productId", "externalProductId")),
                 merchant_sku=_clean_text(_first(line_attributes, "offerCode", "merchantSku", "sku", "code")),
                 title=_clean_text(_first(line_attributes, "name", "title", "productName")) or "Unknown product",
@@ -232,7 +259,15 @@ def _find_existing_line(
 
 def _merge_line(line: MarketplaceOrderLine, incoming: NormalizedOrderLine) -> bool:
     changed = False
-    if incoming.external_line_id and line.external_line_id != incoming.external_line_id:
+    # A list response can temporarily omit the real entry id.  Never replace an
+    # id previously learned from Kaspi's detail endpoint with our synthetic
+    # ``order:index`` fallback; doing so made raw polling and enrichment toggle
+    # the same 60+ lines every minute and repeatedly rerun FIFO/feed work.
+    if (
+        incoming.external_line_id
+        and not incoming.external_line_id_is_fallback
+        and line.external_line_id != incoming.external_line_id
+    ):
         line.external_line_id = incoming.external_line_id
         changed = True
     if incoming.external_product_id and line.external_product_id != incoming.external_product_id:
@@ -325,25 +360,21 @@ def import_kaspi_order(
             order.external_code,
             order.status,
             order.original_status,
-            order.source_revision,
             str(order.currency),
             Decimal(order.total_amount),
             order.ordered_at,
             order.planned_delivery_at,
             order.delivered_at,
-            order.source_updated_at,
         )
         after = (
             normalized.external_code,
             normalized.status,
             normalized.original_status,
-            normalized.source_revision,
             normalized.currency,
             normalized.total_amount,
             normalized.ordered_at,
             normalized.planned_delivery_at,
             normalized.delivered_at,
-            normalized.source_updated_at,
         )
         changed = before != after
         if changed:
@@ -358,6 +389,15 @@ def import_kaspi_order(
             order.delivered_at = normalized.delivered_at
             order.source_updated_at = normalized.source_updated_at
             order.version += 1
+        else:
+            # Fill absent source metadata once, but do not turn a volatile
+            # revision/timestamp alone into an order update.  The raw snapshot
+            # keeps the exact source document whenever its business content
+            # actually differs.
+            if order.source_revision is None and normalized.source_revision is not None:
+                order.source_revision = normalized.source_revision
+            if order.source_updated_at is None and normalized.source_updated_at is not None:
+                order.source_updated_at = normalized.source_updated_at
         if previous_manual_stage is not None and (
             previous_status != normalized.status
             or previous_manual_stage == normalized.status

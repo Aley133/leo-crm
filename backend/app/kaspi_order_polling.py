@@ -28,11 +28,14 @@ from .workspace_kaspi import (
 POLL_INTERVAL_SECONDS = 60
 STARTUP_DELAY_SECONDS = 30
 FAST_LOOKBACK_MINUTES = 20
+FAST_ACCOUNT_TIMEOUT_SECONDS = 90
 ENRICHMENT_LOOKBACK_DAYS = 31
 ENRICHMENT_STARTUP_OFFSET_SECONDS = 15
+ENRICHMENT_INTERVAL_SECONDS = 5 * 60
 MAINTENANCE_INTERVAL_SECONDS = 10 * 60
 MAINTENANCE_STARTUP_DELAY_SECONDS = 90
-DEEP_REFRESH_EVERY_MAINTENANCE_CYCLES = 6
+MAINTENANCE_ACCOUNT_TIMEOUT_SECONDS = 60
+MAINTENANCE_RECONCILIATION_BATCH_SIZE = 6
 FAST_ORDER_STATES = (
     "NEW",
     "SIGN_REQUIRED",
@@ -70,6 +73,19 @@ MAINTENANCE_LAST_RUN: dict[str, Any] = {
     "mode": None,
     "message": "Kaspi order maintenance has not started",
 }
+_ORDER_SYNC_LOCK: asyncio.Lock | None = None
+_ORDER_SYNC_LOOP: asyncio.AbstractEventLoop | None = None
+
+
+def order_sync_lock() -> asyncio.Lock:
+    """Return the single-flight lock for all in-process Kaspi order work."""
+
+    global _ORDER_SYNC_LOCK, _ORDER_SYNC_LOOP
+    loop = asyncio.get_running_loop()
+    if _ORDER_SYNC_LOCK is None or _ORDER_SYNC_LOOP is not loop:
+        _ORDER_SYNC_LOCK = asyncio.Lock()
+        _ORDER_SYNC_LOOP = loop
+    return _ORDER_SYNC_LOCK
 
 
 def polling_enabled() -> bool:
@@ -96,6 +112,30 @@ def polling_startup_delay_seconds() -> float:
     except ValueError:
         return float(STARTUP_DELAY_SECONDS)
     return max(0.0, min(300.0, value))
+
+
+def fast_account_timeout_seconds() -> float:
+    raw = os.getenv(
+        "KASPI_ORDER_FAST_ACCOUNT_TIMEOUT_SECONDS",
+        str(FAST_ACCOUNT_TIMEOUT_SECONDS),
+    ).strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(FAST_ACCOUNT_TIMEOUT_SECONDS)
+    return max(30.0, min(300.0, value))
+
+
+def enrichment_interval_seconds() -> float:
+    raw = os.getenv(
+        "KASPI_ORDER_ENRICHMENT_INTERVAL_SECONDS",
+        str(ENRICHMENT_INTERVAL_SECONDS),
+    ).strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return float(ENRICHMENT_INTERVAL_SECONDS)
+    return max(60.0, min(3600.0, value))
 
 
 def maintenance_interval_seconds() -> int:
@@ -131,6 +171,13 @@ async def _wait_or_stop(stop_event: asyncio.Event, seconds: float) -> bool:
         return True
     except TimeoutError:
         return False
+
+
+def _workspace_connections() -> list[WorkspaceKaspiConnection]:
+    """Load configured accounts without blocking the asyncio event loop."""
+
+    with SessionLocal() as session:
+        return list_workspace_kaspi_connections(session)
 
 
 async def _run_account_cycle(
@@ -257,8 +304,7 @@ async def run_poll_cycle(
         }
     )
 
-    with SessionLocal() as session:
-        connections = list_workspace_kaspi_connections(session)
+    connections = await asyncio.to_thread(_workspace_connections)
     if not connections:
         status.update(
             {
@@ -273,15 +319,21 @@ async def run_poll_cycle(
     results: list[dict[str, Any]] = []
     for connection in connections:
         try:
-            results.append(
-                await _run_account_cycle(
-                    connection,
-                    days=days,
-                    mode=mode,
-                    lookback_minutes=lookback_minutes,
-                    enrich_products=enrich_products,
-                )
+            operation = _run_account_cycle(
+                connection,
+                days=days,
+                mode=mode,
+                lookback_minutes=lookback_minutes,
+                enrich_products=enrich_products,
             )
+            if mode == "fast":
+                result = await asyncio.wait_for(
+                    operation,
+                    timeout=fast_account_timeout_seconds(),
+                )
+            else:
+                result = await operation
+            results.append(result)
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -359,12 +411,13 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
         cycle += 1
         LAST_RUN["cycle"] = cycle
         try:
-            await run_poll_cycle(
-                days=1,
-                mode="fast",
-                lookback_minutes=FAST_LOOKBACK_MINUTES,
-                enrich_products=False,
-            )
+            async with order_sync_lock():
+                await run_poll_cycle(
+                    days=1,
+                    mode="fast",
+                    lookback_minutes=FAST_LOOKBACK_MINUTES,
+                    enrich_products=False,
+                )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -376,17 +429,90 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
                 }
             )
 
-        elapsed = monotonic() - cycle_started
-        wait_seconds = max(0.1, polling_interval_seconds() - elapsed)
-        await _wait_or_stop(stop_event, wait_seconds)
+        LAST_RUN["cycle_elapsed_seconds"] = round(monotonic() - cycle_started, 3)
+        # Fixed delay is intentional. A slow or timed-out Kaspi cycle must not
+        # immediately start another cycle and keep Render permanently busy.
+        await _wait_or_stop(stop_event, polling_interval_seconds())
+
+
+async def run_enrichment_cycle() -> None:
+    """Run one bounded unresolved-product repair pass for every account."""
+
+    ENRICHMENT_LAST_RUN.update(
+        {
+            "status": "running",
+            "started_at": datetime.now(UTC).isoformat(),
+            "finished_at": None,
+            "lookback_days": ENRICHMENT_LOOKBACK_DAYS,
+            "message": "Kaspi product enrichment started",
+        }
+    )
+    connections = await asyncio.to_thread(_workspace_connections)
+    results: list[dict[str, Any]] = []
+    for connection in connections:
+        try:
+            with workspace_context(connection.workspace_id):
+                job_id = create_enrichment_job(
+                    days=ENRICHMENT_LOOKBACK_DAYS,
+                    marketplace_account_id=connection.account_id,
+                    workspace_id=connection.workspace_id,
+                )
+                await asyncio.wait_for(
+                    run_enrichment_job(
+                        job_id,
+                        api_token=connection.api_token,
+                        marketplace_account_id=connection.account_id,
+                    ),
+                    timeout=120,
+                )
+                result = public_enrichment_job(job_id) or {}
+            results.append(
+                {
+                    "workspace_id": connection.workspace_id,
+                    "account_id": connection.account_id,
+                    "status": result.get("status", "unknown"),
+                    "total": result.get("total", 0),
+                    "processed": result.get("processed", 0),
+                    "updated": result.get("updated", 0),
+                    "linked": result.get("linked", 0),
+                    "allocated": result.get("allocated", 0),
+                    "request_count": result.get("request_count", 0),
+                    "errors": len(result.get("errors") or []),
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            results.append(
+                {
+                    "workspace_id": connection.workspace_id,
+                    "account_id": connection.account_id,
+                    "status": "failed",
+                    "errors": 1,
+                    "message": f"{type(exc).__name__}: {str(exc)[:500]}",
+                }
+            )
+    error_count = sum(int(item["errors"]) for item in results)
+    ENRICHMENT_LAST_RUN.update(
+        {
+            "status": "completed_with_errors" if error_count else "completed",
+            "finished_at": datetime.now(UTC).isoformat(),
+            "accounts": results,
+            "message": (
+                f"Kaspi product enrichment completed for {len(results)} account(s): "
+                f"linked={sum(int(item.get('linked') or 0) for item in results)}, "
+                f"errors={error_count}"
+            ),
+        }
+    )
 
 
 async def enrichment_polling_loop(stop_event: asyncio.Event) -> None:
-    """Enrich unresolved order lines without delaying the next raw intake."""
+    """Enrich unresolved lines without overlapping another order sync."""
+
     if not polling_enabled():
         ENRICHMENT_LAST_RUN["message"] = "Kaspi product enrichment is disabled"
         return
-
     startup_delay = polling_startup_delay_seconds() + ENRICHMENT_STARTUP_OFFSET_SECONDS
     if await _wait_or_stop(stop_event, startup_delay):
         return
@@ -395,60 +521,10 @@ async def enrichment_polling_loop(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         cycle_started = monotonic()
         cycle += 1
-        ENRICHMENT_LAST_RUN.update(
-            {
-                "status": "running",
-                "cycle": cycle,
-                "started_at": datetime.now(UTC).isoformat(),
-                "finished_at": None,
-                "lookback_days": ENRICHMENT_LOOKBACK_DAYS,
-                "message": "Kaspi product enrichment started",
-            }
-        )
+        ENRICHMENT_LAST_RUN["cycle"] = cycle
         try:
-            with SessionLocal() as session:
-                connections = list_workspace_kaspi_connections(session)
-            results: list[dict[str, Any]] = []
-            for connection in connections:
-                with workspace_context(connection.workspace_id):
-                    job_id = create_enrichment_job(
-                        days=ENRICHMENT_LOOKBACK_DAYS,
-                        marketplace_account_id=connection.account_id,
-                        workspace_id=connection.workspace_id,
-                    )
-                    await run_enrichment_job(
-                        job_id,
-                        api_token=connection.api_token,
-                        marketplace_account_id=connection.account_id,
-                    )
-                    result = public_enrichment_job(job_id) or {}
-                results.append(
-                    {
-                        "workspace_id": connection.workspace_id,
-                        "account_id": connection.account_id,
-                        "status": result.get("status", "unknown"),
-                        "total": result.get("total", 0),
-                        "processed": result.get("processed", 0),
-                        "updated": result.get("updated", 0),
-                        "linked": result.get("linked", 0),
-                        "allocated": result.get("allocated", 0),
-                        "request_count": result.get("request_count", 0),
-                        "errors": len(result.get("errors") or []),
-                    }
-                )
-            error_count = sum(int(item["errors"]) for item in results)
-            ENRICHMENT_LAST_RUN.update(
-                {
-                    "status": "completed_with_errors" if error_count else "completed",
-                    "finished_at": datetime.now(UTC).isoformat(),
-                    "accounts": results,
-                    "message": (
-                        f"Kaspi product enrichment completed for {len(results)} account(s): "
-                        f"linked={sum(int(item['linked']) for item in results)}, "
-                        f"errors={error_count}"
-                    ),
-                }
-            )
+            async with order_sync_lock():
+                await run_enrichment_cycle()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -459,20 +535,84 @@ async def enrichment_polling_loop(stop_event: asyncio.Event) -> None:
                     "message": f"Kaspi product enrichment failed: {type(exc).__name__}: {exc}",
                 }
             )
-
-        elapsed = monotonic() - cycle_started
-        await _wait_or_stop(
-            stop_event,
-            max(0.1, polling_interval_seconds() - elapsed),
+        ENRICHMENT_LAST_RUN["cycle_elapsed_seconds"] = round(
+            monotonic() - cycle_started,
+            3,
         )
+        await _wait_or_stop(stop_event, enrichment_interval_seconds())
+
+
+async def run_maintenance_cycle() -> None:
+    """Repair a small slice of active orders without a second full raw import."""
+
+    MAINTENANCE_LAST_RUN.update(
+        {
+            "status": "running",
+            "started_at": datetime.now(UTC).isoformat(),
+            "finished_at": None,
+            "mode": "active_reconciliation",
+            "message": "Kaspi active-order reconciliation started",
+        }
+    )
+    connections = await asyncio.to_thread(_workspace_connections)
+    results: list[dict[str, Any]] = []
+    for connection in connections:
+        try:
+            with workspace_context(connection.workspace_id):
+                result = await asyncio.wait_for(
+                    reconcile_active_orders(
+                        connection,
+                        batch_size=MAINTENANCE_RECONCILIATION_BATCH_SIZE,
+                    ),
+                    timeout=MAINTENANCE_ACCOUNT_TIMEOUT_SECONDS,
+                )
+            results.append(
+                {
+                    "workspace_id": connection.workspace_id,
+                    "account_id": connection.account_id,
+                    "status": "completed_with_errors" if result.errors else "completed",
+                    "checked": result.checked,
+                    "found": result.found,
+                    "imported": result.imported,
+                    "updated": result.updated,
+                    "missing": result.missing,
+                    "errors": len(result.errors),
+                }
+            )
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            results.append(
+                {
+                    "workspace_id": connection.workspace_id,
+                    "account_id": connection.account_id,
+                    "status": "failed",
+                    "errors": 1,
+                    "message": f"{type(exc).__name__}: {str(exc)[:500]}",
+                }
+            )
+    error_count = sum(int(item["errors"]) for item in results)
+    MAINTENANCE_LAST_RUN.update(
+        {
+            "status": "completed_with_errors" if error_count else "completed",
+            "finished_at": datetime.now(UTC).isoformat(),
+            "accounts": results,
+            "message": (
+                f"Kaspi active-order reconciliation completed for {len(results)} account(s): "
+                f"checked={sum(int(item.get('checked') or 0) for item in results)}, "
+                f"updated={sum(int(item.get('updated') or 0) for item in results)}, "
+                f"errors={error_count}"
+            ),
+        }
+    )
 
 
 async def maintenance_polling_loop(stop_event: asyncio.Event) -> None:
-    """Repair older order lifecycle state independently from minute intake."""
+    """Run bounded lifecycle repair without overlapping minute intake."""
+
     if not polling_enabled():
         MAINTENANCE_LAST_RUN["message"] = "Kaspi order maintenance is disabled"
         return
-
     startup_delay = maintenance_startup_delay_seconds()
     MAINTENANCE_LAST_RUN["message"] = (
         f"Kaspi order maintenance will start after {startup_delay:g} seconds"
@@ -485,18 +625,9 @@ async def maintenance_polling_loop(stop_event: asyncio.Event) -> None:
         cycle_started = monotonic()
         cycle += 1
         MAINTENANCE_LAST_RUN["cycle"] = cycle
-        mode = (
-            "deep"
-            if cycle % DEEP_REFRESH_EVERY_MAINTENANCE_CYCLES == 0
-            else "full"
-        )
         try:
-            await run_poll_cycle(
-                days=7 if mode == "deep" else 1,
-                mode=mode,
-                enrich_products=True,
-                status_store=MAINTENANCE_LAST_RUN,
-            )
+            async with order_sync_lock():
+                await run_maintenance_cycle()
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -507,9 +638,8 @@ async def maintenance_polling_loop(stop_event: asyncio.Event) -> None:
                     "message": f"Kaspi order maintenance failed: {type(exc).__name__}: {exc}",
                 }
             )
-
-        elapsed = monotonic() - cycle_started
-        await _wait_or_stop(
-            stop_event,
-            max(0.1, maintenance_interval_seconds() - elapsed),
+        MAINTENANCE_LAST_RUN["cycle_elapsed_seconds"] = round(
+            monotonic() - cycle_started,
+            3,
         )
+        await _wait_or_stop(stop_event, maintenance_interval_seconds())

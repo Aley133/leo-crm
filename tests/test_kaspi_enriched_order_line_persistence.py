@@ -75,6 +75,7 @@ def test_raw_reimport_cannot_downgrade_enriched_title_or_sku(db_session) -> None
     assert order is not None
     assert len(order.lines) == 1
     line = order.lines[0]
+    assert line.external_line_id == "entry-real-1"
     assert line.title == "Органайзер пластик"
     assert line.merchant_sku == "854792406"
     assert line.external_product_id == "master-product-1"

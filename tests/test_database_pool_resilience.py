@@ -81,8 +81,9 @@ def test_readiness_checks_database_without_crashing_process() -> None:
     source = (ROOT / "backend" / "app" / "main.py").read_text(encoding="utf-8")
     ready_block = source.split('@app.get("/ready")', 1)[1]
 
-    assert "with engine.connect() as connection" in ready_block
-    assert 'connection.execute(text("SELECT 1"))' in ready_block
+    assert "await asyncio.to_thread(_database_is_ready)" in ready_block
+    assert "with engine.connect() as connection" in source
+    assert 'connection.execute(text("SELECT 1"))' in source
     assert "except SQLAlchemyError" in ready_block
     assert "status_code=503" in ready_block
     assert '"database": "unavailable"' in ready_block

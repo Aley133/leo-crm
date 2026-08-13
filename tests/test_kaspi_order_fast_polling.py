@@ -63,41 +63,39 @@ def test_fast_polling_never_runs_maintenance_inline(
     assert all(call["enrich_products"] is False for call in calls)
 
 
-def test_maintenance_runs_independently_and_uses_deep_cycle_every_hour(
-    monkeypatch,
-) -> None:
-    calls: list[dict] = []
-    stop_event = asyncio.Event()
-
-    async def run_cycle(**options):
-        calls.append(options)
-        if len(calls) == 6:
-            stop_event.set()
-
-    monkeypatch.setattr(kaspi_order_polling, "polling_enabled", lambda: True)
-    monkeypatch.setattr(
-        kaspi_order_polling,
-        "maintenance_startup_delay_seconds",
-        lambda: 0,
-    )
-    monkeypatch.setattr(
-        kaspi_order_polling,
-        "maintenance_interval_seconds",
-        lambda: 0.001,
-    )
-    monkeypatch.setattr(kaspi_order_polling, "run_poll_cycle", run_cycle)
-
-    asyncio.run(kaspi_order_polling.maintenance_polling_loop(stop_event))
-
-    assert [call["mode"] for call in calls] == [
-        "full",
-        "full",
-        "full",
-        "full",
-        "full",
-        "deep",
+def test_maintenance_uses_only_bounded_active_reconciliation(monkeypatch) -> None:
+    connections = [
+        SimpleNamespace(workspace_id=1, account_id=11),
+        SimpleNamespace(workspace_id=3, account_id=33),
     ]
-    assert all(call["status_store"] is kaspi_order_polling.MAINTENANCE_LAST_RUN for call in calls)
+    calls: list[tuple[int, int]] = []
+
+    monkeypatch.setattr(
+        kaspi_order_polling,
+        "list_workspace_kaspi_connections",
+        lambda _session: connections,
+    )
+
+    async def reconcile(connection, *, batch_size):
+        calls.append((connection.workspace_id, batch_size))
+        return SimpleNamespace(
+            checked=batch_size,
+            found=batch_size,
+            imported=0,
+            updated=0,
+            missing=0,
+            errors=(),
+        )
+
+    monkeypatch.setattr(kaspi_order_polling, "reconcile_active_orders", reconcile)
+    asyncio.run(kaspi_order_polling.run_maintenance_cycle())
+
+    assert calls == [
+        (1, kaspi_order_polling.MAINTENANCE_RECONCILIATION_BATCH_SIZE),
+        (3, kaspi_order_polling.MAINTENANCE_RECONCILIATION_BATCH_SIZE),
+    ]
+    assert kaspi_order_polling.MAINTENANCE_LAST_RUN["mode"] == "active_reconciliation"
+    assert kaspi_order_polling.MAINTENANCE_LAST_RUN["status"] == "completed"
 
 
 def test_fast_polling_applies_the_same_cycle_to_every_kaspi_workspace(monkeypatch) -> None:

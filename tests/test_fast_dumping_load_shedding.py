@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from time import monotonic
 
@@ -95,4 +96,31 @@ def test_agent_serializes_crm_requests_behind_shared_circuit() -> None:
     assert "await _wait_for_crm_gate()" in source
     assert "_acquire_single_instance(selected_workspace)" in source
     assert "ERROR_ALREADY_EXISTS" in source
-    assert 'VERSION = "1.0.1"' in source
+    assert 'VERSION = "1.0.2"' in source
+
+
+def test_agent_scans_by_kaspi_product_id_not_merchant_sku(monkeypatch) -> None:
+    observed: list[dict] = []
+
+    async def scan(**options):
+        observed.append(options)
+        return object()
+
+    monkeypatch.setattr(desktop_agent, "scan_kaspi_competitors", scan)
+    result = asyncio.run(
+        desktop_agent._scan(
+            {
+                "kaspi_product_id": "105579941",
+                "merchant_sku": "105579941_BARWORK-SKU",
+                "city_id": "196220100",
+                "zone_id": "Magnum_ZONE1",
+                "name": "Test product",
+                "brand": "LEO",
+            },
+            "merchant-uid",
+        )
+    )
+
+    assert result is not None
+    assert observed[0]["kaspi_product_id"] == "105579941"
+    assert observed[0]["own_merchant_sku"] == "105579941_BARWORK-SKU"

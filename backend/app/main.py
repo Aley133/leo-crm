@@ -72,8 +72,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.16"
-DEPLOYMENT_MARKER = "bounded-fast-dumping-agent-load"
+APP_VERSION = "0.23.17"
+DEPLOYMENT_MARKER = "responsive-single-flight-order-sync"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -190,6 +190,17 @@ def _configure_thread_pool() -> int:
     return limit
 
 
+def _bootstrap_workspace_connection() -> None:
+    with SessionLocal() as session:
+        with session.begin():
+            bootstrap_legacy_workspace_connection(session)
+
+
+def _database_is_ready() -> None:
+    with engine.connect() as connection:
+        connection.execute(text("SELECT 1"))
+
+
 @app.exception_handler(SQLAlchemyTimeoutError)
 async def database_pool_timeout(
     _request: Request,
@@ -211,9 +222,7 @@ async def database_pool_timeout(
 @app.on_event("startup")
 async def start_background_services() -> None:
     app.state.thread_pool_limit = _configure_thread_pool()
-    with SessionLocal() as session:
-        with session.begin():
-            bootstrap_legacy_workspace_connection(session)
+    await asyncio.to_thread(_bootstrap_workspace_connection)
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
@@ -301,8 +310,7 @@ async def health() -> dict[str, object]:
 @app.get("/ready")
 async def ready():
     try:
-        with engine.connect() as connection:
-            connection.execute(text("SELECT 1"))
+        await asyncio.to_thread(_database_is_ready)
     except SQLAlchemyError:
         return JSONResponse(
             status_code=503,

@@ -21,11 +21,12 @@ from ..kaspi_product_enrichment_jobs import (
     public_job as public_product_enrichment_job,
     run_job as run_product_enrichment_job,
 )
+from ..kaspi_order_polling import order_sync_lock
 from ..kaspi_raw_receiver_jobs import JOBS as RAW_JOBS
 from ..kaspi_raw_receiver_jobs import create_job, public_job, run_job
-from ..workspace_kaspi import load_workspace_kaspi_connection
 from ..models import MarketplaceOrder, MarketplaceOrderEvent
 from ..product_inventory_group import inventory_owner_product_id
+from ..workspace_kaspi import WorkspaceKaspiConnection, load_workspace_kaspi_connection
 from .repository import SqlAlchemyCommerceRepository
 from .schemas import CommerceOrderLineRead, CommerceOrderRead, CommerceOrdersResponse, CommerceSummaryRead
 from .service import CommerceService
@@ -56,6 +57,21 @@ class OrderStageOverrideRequest(BaseModel):
     reason: str | None = Field(default=None, min_length=3, max_length=500)
 
 
+def _prepare_order_job(*, clear_browser_jobs: bool = False) -> WorkspaceKaspiConnection | None:
+    """Load the selected Kaspi account off the event loop."""
+
+    with SessionLocal() as session:
+        connection = load_workspace_kaspi_connection(session)
+        if connection is not None and clear_browser_jobs:
+            session.execute(
+                delete(BrowserAgentJob).where(
+                    BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%")
+                )
+            )
+            session.commit()
+        return connection
+
+
 def _rebuild_order_inventory(db: Session, order: MarketplaceOrder) -> int:
     owner_ids = {
         inventory_owner_product_id(db, int(line.product_id))
@@ -75,64 +91,62 @@ async def _run_full_kaspi_rebuild(
     api_token: str,
     marketplace_account_id: int,
 ) -> None:
-    await run_job(
-        job_id,
-        api_token=api_token,
-        marketplace_account_id=marketplace_account_id,
-    )
-    raw_job = RAW_JOBS.get(job_id)
-    if raw_job is None or raw_job.get("status") == "failed":
-        return
-    # Orders are already persisted at this point. Product enrichment is useful
-    # maintenance, but the Orders screen must not remain locked while it runs.
-    raw_job["orders_ready"] = True
-    enrichment_job_id = create_product_enrichment_job(
-        days=days,
-        marketplace_account_id=marketplace_account_id,
-    )
-    raw_job["status"] = "enriching_products"
-    raw_job["enrichment_job_id"] = enrichment_job_id
-    raw_job["message"] = "Заказы загружены. Получаем точные названия, артикулы и выполняем складское списание"
-    await run_product_enrichment_job(
-        enrichment_job_id,
-        api_token=api_token,
-        marketplace_account_id=marketplace_account_id,
-    )
-    enrichment = public_product_enrichment_job(enrichment_job_id) or {}
-    enrichment_status = str(enrichment.get("status") or "failed")
-    enrichment_errors = list(enrichment.get("errors") or [])
-    raw_job["product_enrichment"] = {
-        "job_id": enrichment_job_id,
-        "status": enrichment_status,
-        "processed": enrichment.get("processed", 0),
-        "total": enrichment.get("total", 0),
-        "updated": enrichment.get("updated", 0),
-        "linked": enrichment.get("linked", 0),
-        "allocated": enrichment.get("allocated", 0),
-        "request_count": enrichment.get("request_count", 0),
-        "errors": enrichment_errors,
-    }
-    raw_job["status"] = "completed" if not enrichment_errors else "completed_with_errors"
-    raw_job["message"] = (
-        f"Готово: заказов {raw_job.get('orders_count', 0)}; "
-        f"обновлено товарных строк {enrichment.get('updated', 0)}; "
-        f"привязано {enrichment.get('linked', 0)}; "
-        f"списано со склада {enrichment.get('allocated', 0)}; "
-        f"ошибок enrichment {len(enrichment_errors)}"
-    )
+    async with order_sync_lock():
+        await run_job(
+            job_id,
+            api_token=api_token,
+            marketplace_account_id=marketplace_account_id,
+        )
+        raw_job = RAW_JOBS.get(job_id)
+        if raw_job is None or raw_job.get("status") == "failed":
+            return
+        # Orders are already persisted at this point. Product enrichment is useful
+        # maintenance, but the Orders screen must not remain locked while it runs.
+        raw_job["orders_ready"] = True
+        enrichment_job_id = create_product_enrichment_job(
+            days=days,
+            marketplace_account_id=marketplace_account_id,
+        )
+        raw_job["status"] = "enriching_products"
+        raw_job["enrichment_job_id"] = enrichment_job_id
+        raw_job["message"] = "Заказы загружены. Получаем точные названия, артикулы и выполняем складское списание"
+        await run_product_enrichment_job(
+            enrichment_job_id,
+            api_token=api_token,
+            marketplace_account_id=marketplace_account_id,
+        )
+        enrichment = public_product_enrichment_job(enrichment_job_id) or {}
+        enrichment_status = str(enrichment.get("status") or "failed")
+        enrichment_errors = list(enrichment.get("errors") or [])
+        raw_job["product_enrichment"] = {
+            "job_id": enrichment_job_id,
+            "status": enrichment_status,
+            "processed": enrichment.get("processed", 0),
+            "total": enrichment.get("total", 0),
+            "updated": enrichment.get("updated", 0),
+            "linked": enrichment.get("linked", 0),
+            "allocated": enrichment.get("allocated", 0),
+            "request_count": enrichment.get("request_count", 0),
+            "errors": enrichment_errors,
+        }
+        raw_job["status"] = "completed" if not enrichment_errors else "completed_with_errors"
+        raw_job["message"] = (
+            f"Готово: заказов {raw_job.get('orders_count', 0)}; "
+            f"обновлено товарных строк {enrichment.get('updated', 0)}; "
+            f"привязано {enrichment.get('linked', 0)}; "
+            f"списано со склада {enrichment.get('allocated', 0)}; "
+            f"ошибок enrichment {len(enrichment_errors)}"
+        )
 
 
 @router.post("/orders/rebuild", status_code=status.HTTP_202_ACCEPTED)
 async def rebuild_kaspi_orders(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
-    with SessionLocal() as session:
-        connection = load_workspace_kaspi_connection(session)
-        if connection is None:
-            raise HTTPException(
-                status_code=status.HTTP_409_CONFLICT,
-                detail="Kaspi API is not configured for the selected account",
-            )
-        session.execute(delete(BrowserAgentJob).where(BrowserAgentJob.url.like("leo-job://kaspi_seller_order_details%")))
-        session.commit()
+    connection = await asyncio.to_thread(_prepare_order_job, clear_browser_jobs=True)
+    if connection is None:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Kaspi API is not configured for the selected account",
+        )
     try:
         job_id = create_job(
             days=days,
@@ -163,8 +177,7 @@ def read_rebuild_job(job_id: str) -> dict[str, object]:
 
 @router.post("/orders/enrich-products", status_code=status.HTTP_202_ACCEPTED)
 async def enrich_kaspi_order_products(days: int = Query(default=7, ge=1, le=31)) -> dict[str, object]:
-    with SessionLocal() as session:
-        connection = load_workspace_kaspi_connection(session)
+    connection = await asyncio.to_thread(_prepare_order_job)
     if connection is None:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,

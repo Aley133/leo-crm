@@ -92,6 +92,7 @@ def normalize_market_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                     "merchant_id": _text(raw.get("merchant_id"), limit=128),
                     "merchant_name": _text(raw.get("merchant_name"), limit=255),
                     "is_own": bool(raw.get("is_own")),
+                    "own_match": _text(raw.get("own_match"), limit=32),
                     "price_kzt": _json_money(
                         _decimal(raw.get("price_kzt"), field="offer.price_kzt")
                     ),

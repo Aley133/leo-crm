@@ -27,7 +27,7 @@ from tools.kaspi_fast_dumping_scanner import (
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 
 
-VERSION = "1.0.1"
+VERSION = "1.0.2"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
 IDLE_POLL_MAX_SECONDS = 15
@@ -35,6 +35,7 @@ CRM_HTTP_TIMEOUT_SECONDS = 30
 CRM_RETRY_ATTEMPTS = 4
 VERIFY_TIMEOUT_SECONDS = 120
 VERIFY_POLL_SECONDS = 6
+SCAN_TIMEOUT_SECONDS = 120
 TRANSIENT_HTTP_STATUSES = {
     408,
     425,
@@ -497,15 +498,21 @@ def _market_payload(market: KaspiCompetitorSnapshot) -> dict:
 
 
 async def _scan(job: dict, merchant_uid: str) -> KaspiCompetitorSnapshot:
-    sku = str(job.get("merchant_sku") or job["kaspi_product_id"])
-    return await scan_kaspi_competitors(
-        kaspi_product_id=sku,
-        own_merchant_id=merchant_uid,
-        city_id=str(job["city_id"]),
-        zone_id=str(job["zone_id"]),
-        product_name_hint=str(job.get("name") or "") or None,
-        product_brand_hint=str(job.get("brand") or "") or None,
-    )
+    kaspi_product_id = str(job.get("kaspi_product_id") or "").strip()
+    if not kaspi_product_id:
+        raise ValueError("Kaspi product id is missing from Fast Dumping job")
+    async with asyncio.timeout(SCAN_TIMEOUT_SECONDS):
+        return await scan_kaspi_competitors(
+            kaspi_product_id=kaspi_product_id,
+            own_merchant_id=merchant_uid,
+            own_merchant_sku=(
+                str(job.get("merchant_sku") or "").strip() or None
+            ),
+            city_id=str(job["city_id"]),
+            zone_id=str(job["zone_id"]),
+            product_name_hint=str(job.get("name") or "") or None,
+            product_brand_hint=str(job.get("brand") or "") or None,
+        )
 
 
 async def _process_scan(
@@ -555,10 +562,19 @@ async def _verify_price(
     target: Decimal,
 ) -> tuple[bool, Decimal | None, float]:
     started = time.monotonic()
+    deadline = started + VERIFY_TIMEOUT_SECONDS
     observed: Decimal | None = None
-    while time.monotonic() - started < VERIFY_TIMEOUT_SECONDS:
-        await asyncio.sleep(VERIFY_POLL_SECONDS)
-        market = await _scan(job, merchant_uid)
+    while time.monotonic() < deadline:
+        remaining = deadline - time.monotonic()
+        await asyncio.sleep(min(VERIFY_POLL_SECONDS, max(0.0, remaining)))
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            break
+        try:
+            async with asyncio.timeout(remaining):
+                market = await _scan(job, merchant_uid)
+        except TimeoutError:
+            break
         observed = market.own_price_kzt
         if observed == target:
             return True, observed, round(time.monotonic() - started, 1)
