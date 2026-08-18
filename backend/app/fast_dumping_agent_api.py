@@ -67,7 +67,10 @@ class FastApplyComplete(FastPrepareApply):
 
 
 class FastVerifyComplete(FastPrepareApply):
+    status: Literal["succeeded", "failed"] = "succeeded"
     observed_own_price_kzt: str | None = Field(default=None, max_length=64)
+    error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=2000)
 
 
 router = APIRouter(
@@ -345,6 +348,9 @@ def verify_complete(
                 agent_id=payload.agent_id,
                 lease_token=payload.lease_token,
                 observed_own_price_kzt=payload.observed_own_price_kzt,
+                verification_succeeded=payload.status == "succeeded",
+                error_code=payload.error_code,
+                error_message=payload.error_message,
             )
             db.commit()
             return result

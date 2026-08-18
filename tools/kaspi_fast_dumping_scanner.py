@@ -243,10 +243,26 @@ def _delivery_value_days(value: Any, *, today: date) -> int | None:
         return None
     if isinstance(value, (int, float, Decimal)):
         try:
-            days = int(value)
+            numeric = float(value)
+            days = int(numeric)
         except (TypeError, ValueError, OverflowError):
             return None
-        return days if float(value) == days and 0 <= days <= 60 else None
+        if numeric == days and 0 <= days <= 60:
+            return days
+        # Some Offers API variants serialize the promised delivery date as a
+        # Unix timestamp instead of ISO-8601. Accept seconds and milliseconds,
+        # while keeping small numeric values reserved for explicit durations.
+        timestamp = numeric / 1000 if numeric >= 100_000_000_000 else numeric
+        if timestamp >= 1_000_000_000:
+            try:
+                delivery_date = datetime.fromtimestamp(
+                    timestamp, tz=KASPI_TIMEZONE
+                ).date()
+            except (OSError, OverflowError, ValueError):
+                return None
+            distance = (delivery_date - today).days
+            return distance if 0 <= distance <= 60 else None
+        return None
 
     rendered = str(value).strip()
     lowered = rendered.casefold()
@@ -258,6 +274,9 @@ def _delivery_value_days(value: Any, *, today: date) -> int | None:
         return 1
     if "сегодня" in lowered:
         return 0
+
+    if re.fullmatch(r"\d{10}|\d{13}", rendered):
+        return _delivery_value_days(int(rendered), today=today)
 
     day_match = re.search(
         r"(?<!\d)(\d{1,2})(?:\s*[-–—]\s*(\d{1,2}))?\s*(?:дн(?:я|ей)?|день)",
@@ -382,12 +401,33 @@ def _assess_delivery_advantage(
         and delivery_gap is not None
         and delivery_gap >= advantage
     )
-    reason = None
+    price_gap_text = "—" if price_gap is None else format(price_gap, "f")
+    premium_text = format(premium, "f")
     if ignored:
         reason = (
             f"Исключён из ценового ориентира: наша доставка быстрее на "
-            f"{delivery_gap} дн., а разница цены {format(price_gap, 'f')} ₸ "
-            f"не превышает порог {format(premium, 'f')} ₸."
+            f"{delivery_gap} дн., а разница цены {price_gap_text} ₸ "
+            f"не превышает порог {premium_text} ₸."
+        )
+    elif own_price is None or competitor_price is None:
+        reason = "Защита доставки не применена: цена одной из сторон не распознана."
+    elif own_days is None:
+        reason = "Защита доставки не применена: срок нашей доставки не распознан."
+    elif competitor_days is None:
+        reason = "Защита доставки не применена: срок доставки конкурента не распознан."
+    elif price_gap is not None and price_gap < 0:
+        reason = "Защита доставки не нужна: наша цена уже ниже цены конкурента."
+    elif price_gap is not None and price_gap > premium:
+        reason = (
+            f"Выбран: разница цены {price_gap_text} ₸ превышает допустимую "
+            f"доплату {premium_text} ₸."
+        )
+    elif delivery_gap is not None and delivery_gap <= 0:
+        reason = "Выбран: конкурент доставляет не позже нашей строки."
+    else:
+        reason = (
+            f"Выбран: наша доставка быстрее только на {delivery_gap} дн., "
+            f"что меньше порога {advantage} дн."
         )
     return DeliveryAssessment(
         own_delivery_days=own_days,
@@ -519,13 +559,15 @@ def _offer_debug(
         own_merchant_sku=own_merchant_sku,
     )
     is_own = own_match is not None
-    ignored_reason = None
+    decision_reason = (
+        None if delivery_assessment is None else delivery_assessment.reason
+    )
     used_for_dumping = not is_own and offer is selected_competitor
     if not is_own and page_visible_price is not None and price is not None and price < page_visible_price:
-        ignored_reason = "API price ниже цены, видимой на карточке; другой price/delivery context"
+        decision_reason = "API price ниже цены, видимой на карточке; другой price/delivery context"
         used_for_dumping = False
     elif not is_own and delivery_assessment is not None and delivery_assessment.ignored:
-        ignored_reason = delivery_assessment.reason
+        decision_reason = delivery_assessment.reason
         used_for_dumping = False
     elif (
         not is_own
@@ -534,12 +576,12 @@ def _offer_debug(
         and delivery_assessment.price_gap_kzt is not None
         and delivery_assessment.price_gap_kzt <= 0
     ):
-        ignored_reason = (
+        decision_reason = (
             "Не выбран: наша текущая цена уже не выше этого оффера; "
             "повышение сверх защищённой доплаты за доставку запрещено."
         )
     elif not is_own and offer is not selected_competitor:
-        ignored_reason = "Не выбран: найден более выгодный допустимый ценовой ориентир."
+        decision_reason = "Не выбран: найден более выгодный допустимый ценовой ориентир."
     price_fields: dict[str, str] = {}
     for key, value in offer.items():
         if "price" in str(key).lower() and isinstance(value, (str, int, float)):
@@ -551,7 +593,8 @@ def _offer_debug(
         "own_match": own_match,
         "price_kzt": None if price is None else format(price, "f"),
         "used_for_dumping": used_for_dumping,
-        "ignored_reason": ignored_reason,
+        "ignored_reason": None if used_for_dumping else decision_reason,
+        "decision_reason": decision_reason,
         "price_fields": price_fields,
         "delivery": _delivery_summary(offer),
         "delivery_days": (

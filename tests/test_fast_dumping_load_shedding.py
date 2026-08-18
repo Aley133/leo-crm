@@ -96,7 +96,7 @@ def test_agent_serializes_crm_requests_behind_shared_circuit() -> None:
     assert "await _wait_for_crm_gate()" in source
     assert "_acquire_single_instance(selected_workspace)" in source
     assert "ERROR_ALREADY_EXISTS" in source
-    assert 'VERSION = "1.0.4"' in source
+    assert 'VERSION = "1.0.5"' in source
     assert "IDLE_POLL_MAX_SECONDS = 60" in source
     assert "VERIFY_POLL_SECONDS" not in source
     assert "_verify_price" not in source
@@ -132,3 +132,33 @@ def test_agent_scans_by_kaspi_product_id_not_merchant_sku(monkeypatch) -> None:
     assert observed[0]["own_merchant_sku"] == "105579941_BARWORK-SKU"
     assert observed[0]["delivery_price_premium_kzt"] == 750
     assert observed[0]["delivery_advantage_days"] == 7
+
+
+def test_agent_reports_verification_scan_failure_without_hiding_it(monkeypatch) -> None:
+    sent: list[dict] = []
+
+    async def failed_scan(_job, _merchant_uid):
+        raise RuntimeError("temporary Kaspi failure")
+
+    async def post(_url, _token, payload, *, operation):
+        sent.append({"payload": payload, "operation": operation})
+        return {"status": "verification_retry"}
+
+    monkeypatch.setattr(desktop_agent, "_scan", failed_scan)
+    monkeypatch.setattr(desktop_agent, "_post_json_with_retry", post)
+
+    asyncio.run(
+        desktop_agent._process_verify(
+            api_url="https://crm.example",
+            token="token",
+            job={"id": 77, "lease_token": "verification-lease-token"},
+            agent_id="fast-agent",
+            workspace_id=1,
+            merchant_uid="merchant",
+        )
+    )
+
+    assert sent[0]["payload"]["status"] == "failed"
+    assert sent[0]["payload"]["observed_own_price_kzt"] is None
+    assert sent[0]["payload"]["error_code"] == "RuntimeError"
+    assert sent[0]["payload"]["error_message"] == "temporary Kaspi failure"

@@ -29,6 +29,7 @@ from backend.app.fast_dumping_service import (
     prepare_apply,
     prune_fast_dumping_history,
     queue_scan,
+    recover_expired_leases,
     serialize_claimed_job,
 )
 from backend.app.inventory_models import InventoryBatch
@@ -97,6 +98,11 @@ def test_scanner_normalizes_real_kaspi_delivery_date_and_ignores_pickup_steps() 
         today=today,
     ) is None
     assert _delivery_days({"deliveryText": "доставка 5–7 дней"}, today=today) == 5
+    timestamp_ms = int(
+        datetime(2026, 8, 15, 18, tzinfo=UTC).timestamp() * 1000
+    )
+    assert _delivery_days({"delivery": timestamp_ms}, today=today) == 2
+    assert _delivery_days({"delivery": str(timestamp_ms)}, today=today) == 2
 
 
 def test_scanner_skips_slightly_cheaper_slow_offer_for_faster_delivery() -> None:
@@ -126,7 +132,9 @@ def test_scanner_skips_slightly_cheaper_slow_offer_for_faster_delivery() -> None
     assert assessments[id(slow_cheaper)].ignored is True
     assert assessments[id(slow_cheaper)].price_gap_kzt == Decimal("500")
     assert assessments[id(slow_cheaper)].delivery_gap_days == 5
+    assert "Исключён из ценового ориентира" in assessments[id(slow_cheaper)].reason
     assert assessments[id(acceptable)].ignored is False
+    assert "быстрее только на 2 дн." in assessments[id(acceptable)].reason
 
 
 def test_scanner_keeps_competitor_when_threshold_or_delivery_is_unknown() -> None:
@@ -145,7 +153,9 @@ def test_scanner_keeps_competitor_when_threshold_or_delivery_is_unknown() -> Non
 
     assert selected is too_cheap
     assert assessments[id(too_cheap)].ignored is False
+    assert "превышает допустимую доплату" in assessments[id(too_cheap)].reason
     assert assessments[id(unknown_delivery)].ignored is False
+    assert "срок доставки конкурента не распознан" in assessments[id(unknown_delivery)].reason
 
 
 def test_delivery_filter_never_raises_price_above_the_protected_premium() -> None:
@@ -485,7 +495,7 @@ def test_accepted_write_is_verified_once_after_configured_interval(db_session) -
     assert state.automatic_writes_paused is False
 
 
-def test_failed_delayed_verification_latches_only_fast_product(db_session) -> None:
+def test_failed_delayed_verification_schedules_fresh_scan_without_latch(db_session) -> None:
     _product, _batch, policy, state = _seed_fast_product(db_session)
     with workspace_context(1):
         job, _ = queue_scan(
@@ -534,7 +544,7 @@ def test_failed_delayed_verification_latches_only_fast_product(db_session) -> No
     db_session.commit()
     leased_verify = _claim(db_session, 1)
     with workspace_context(1):
-        complete_verification(
+        result = complete_verification(
             db_session,
             workspace_id=1,
             job_id=job.id,
@@ -544,9 +554,57 @@ def test_failed_delayed_verification_latches_only_fast_product(db_session) -> No
         )
         db_session.commit()
     db_session.refresh(state)
-    assert state.status == "apply_unconfirmed"
-    assert state.automatic_writes_paused is True
-    assert state.next_scan_at is None
+    db_session.refresh(job)
+    assert result["status"] == "verification_retry"
+    assert result["verified"] is False
+    assert job.status == "verification_missed"
+    assert state.status == "verification_retry"
+    assert state.own_price_kzt == Decimal("20000")
+    assert state.automatic_writes_paused is False
+    assert state.pause_reason is None
+    assert state.next_scan_at is not None
+    assert result["retry_at"] >= datetime.now(UTC) + timedelta(seconds=590)
+
+
+def test_expired_verification_lease_schedules_fresh_scan_without_latch(db_session) -> None:
+    product, _batch, policy, state = _seed_fast_product(db_session)
+    job = FastDumpingJob(
+        workspace_id=1,
+        policy_id=policy.id,
+        product_id=product.id,
+        status="leased_verify",
+        agent_id="fast-agent",
+        lease_token="expired-verification-token",
+        lease_until=datetime.now(UTC) - timedelta(seconds=1),
+    )
+    db_session.add(job)
+    db_session.flush()
+    state.active_job_id = job.id
+    db_session.commit()
+
+    checked_at = datetime.now(UTC)
+    db_session.info["include_all_workspaces"] = True
+    try:
+        with workspace_context(1):
+            recovered = recover_expired_leases(
+                db_session,
+                workspace_id=1,
+                now=checked_at,
+            )
+            db_session.commit()
+    finally:
+        db_session.info.pop("include_all_workspaces", None)
+
+    db_session.refresh(job)
+    db_session.refresh(state)
+    assert recovered == 1
+    assert job.status == "verification_failed"
+    assert state.status == "verification_retry"
+    assert state.automatic_writes_paused is False
+    retry_at = state.next_scan_at
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=UTC)
+    assert retry_at == checked_at + timedelta(seconds=600)
 
 
 def test_missing_own_offer_pauses_repeated_fast_scans(db_session) -> None:
@@ -699,15 +757,26 @@ def test_fast_dumping_list_defers_heavy_offer_diagnostics(db_session) -> None:
     assert all("offers_json" not in sql for sql in state_selects)
 
 
-def test_fast_dumping_accepts_only_safe_five_or_ten_minute_intervals() -> None:
-    assert FastDumpingPolicyUpsert(scan_interval_seconds=300).scan_interval_seconds == 300
-    assert FastDumpingPolicyUpsert(scan_interval_seconds=600).scan_interval_seconds == 600
-    try:
-        FastDumpingPolicyUpsert(scan_interval_seconds=10)
-    except ValueError:
-        pass
-    else:
-        raise AssertionError("Unsafe 10-second Fast Dumping interval was accepted")
+def test_fast_dumping_accepts_only_configured_safe_intervals() -> None:
+    for seconds in (300, 600, 900, 1800, 2100, 3600):
+        assert (
+            FastDumpingPolicyUpsert(scan_interval_seconds=seconds).scan_interval_seconds
+            == seconds
+        )
+    for unsafe in (10, 1200, 7200):
+        try:
+            FastDumpingPolicyUpsert(scan_interval_seconds=unsafe)
+        except ValueError:
+            pass
+        else:
+            raise AssertionError(f"Unsupported Fast Dumping interval was accepted: {unsafe}")
+
+
+def test_fast_dumping_defaults_to_safe_kaspi_city() -> None:
+    assert FastDumpingPolicyUpsert().city_id == "196220100"
+    city_column = FastDumpingPolicy.__table__.c.city_id
+    assert city_column.default.arg == "196220100"
+    assert "196220100" in str(city_column.server_default.arg)
 
 
 def test_fast_dumping_validates_delivery_advantage_thresholds() -> None:
@@ -874,10 +943,14 @@ def test_fast_dumping_ui_and_agent_are_separate_from_ordinary_dumping() -> None:
     assert "Изменить порог" in javascript
     assert "/api/fast-dumping" in javascript
     assert 'value="600"' in html and 'value="300"' in html
+    assert all(f'value="{seconds}"' in html for seconds in (900, 1800, 2100, 3600))
     assert "10 минут (рекомендуется)" in html
+    assert 'id="city-id" maxlength="32" value="196220100"' in html
     assert 'id="delivery-premium"' in html
     assert 'id="delivery-days"' in html
     assert "delivery_price_premium_kzt" in javascript
     assert "delivery_advantage_days" in javascript
+    assert "decision_reason" in javascript
+    assert 'document.querySelector("#city-id").value = ordinary.policy.city_id' not in javascript
     assert "password_dpapi" in agent and "mc_sid_dpapi" in agent
     assert "fast_dumping" not in ordinary

@@ -92,8 +92,8 @@ class FastDumpingPolicy(WorkspaceOwned, Base):
     city_id: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
-        default="750000000",
-        server_default="750000000",
+        default="196220100",
+        server_default="196220100",
     )
     zone_id: Mapped[str] = mapped_column(
         String(64),

@@ -27,7 +27,7 @@ from tools.kaspi_fast_dumping_scanner import (
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -680,10 +680,14 @@ async def _process_verify(
     merchant_uid: str,
 ) -> None:
     observed = None
+    error_code = None
+    error_message = None
     try:
         market = await _scan(job, merchant_uid)
         observed = market.own_price_kzt
     except Exception as exc:
+        error_code = type(exc).__name__
+        error_message = str(exc)[:2000]
         _log(f"Проверка #{job['id']}: {exc}", workspace_id=workspace_id)
     await _post_json_with_retry(
         f"{api_url}/api/fast-dumping-agent/jobs/{job['id']}/verify-complete",
@@ -692,9 +696,12 @@ async def _process_verify(
             "agent_id": agent_id,
             "workspace_id": workspace_id,
             "lease_token": job["lease_token"],
+            "status": "failed" if error_code else "succeeded",
             "observed_own_price_kzt": (
                 None if observed is None else format(observed, "f")
             ),
+            "error_code": error_code,
+            "error_message": error_message,
         },
         operation=f"Сохранение проверки #{job['id']}",
     )

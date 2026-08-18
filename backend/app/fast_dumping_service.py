@@ -122,6 +122,7 @@ def normalize_market_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                     ),
                     "used_for_dumping": bool(raw.get("used_for_dumping")),
                     "ignored_reason": _text(raw.get("ignored_reason"), limit=500),
+                    "decision_reason": _text(raw.get("decision_reason"), limit=500),
                     "price_fields": safe_price_fields,
                     "delivery": _text(raw.get("delivery"), limit=500),
                     "delivery_days": _bounded_int(
@@ -441,20 +442,54 @@ def recover_expired_leases(
                 "без повторной отправки цены."
             )
             state.next_scan_at = job.not_before_at
-        else:
-            job.status = "apply_unconfirmed"
+        elif job.status == "leased_scan":
+            policy = db.get(FastDumpingPolicy, job.policy_id)
+            retry_delay = (
+                _policy_interval_seconds(policy)
+                if policy is not None and policy.workspace_id == workspace_id
+                else DEFAULT_SCAN_INTERVAL_SECONDS
+            )
+            job.status = "failed"
             job.completed_at = checked_at
-            job.error_code = "lease_expired"
-            job.error_message = "Агент не подтвердил результат операции."
+            job.error_code = "scan_attempts_exhausted"
+            job.error_message = "Сканирование исчерпало безопасный лимит повторов."
+            job.lease_until = None
+            job.lease_token = None
+            job.not_before_at = None
             _clear_active_job(state, job)
-            state.status = "apply_unconfirmed"
-            state.automatic_writes_paused = True
-            state.pause_reason = (
-                "Результат записи не подтверждён. Проверьте цену и нажмите «Возобновить»."
+            state.status = "error"
+            state.status_reason = (
+                "Сканирование несколько раз прервалось; новый scan будет "
+                "выполнен после выбранного интервала."
             )
             state.last_error_code = job.error_code
             state.last_error_message = job.error_message
-            state.next_scan_at = None
+            state.next_scan_at = checked_at + timedelta(seconds=retry_delay)
+        else:
+            policy = db.get(FastDumpingPolicy, job.policy_id)
+            retry_delay = (
+                _policy_interval_seconds(policy)
+                if policy is not None and policy.workspace_id == workspace_id
+                else DEFAULT_SCAN_INTERVAL_SECONDS
+            )
+            job.status = "verification_failed"
+            job.completed_at = checked_at
+            job.error_code = "lease_expired"
+            job.error_message = "Агент не завершил контрольную проверку цены."
+            job.lease_until = None
+            job.lease_token = None
+            job.not_before_at = None
+            _clear_active_job(state, job)
+            state.status = "verification_retry"
+            state.status_reason = (
+                "Контрольная проверка прервалась. Старая операция не повторяется; "
+                "после выбранного интервала будет выполнен новый полный scan."
+            )
+            state.last_error_code = job.error_code
+            state.last_error_message = job.error_message
+            state.automatic_writes_paused = False
+            state.pause_reason = None
+            state.next_scan_at = checked_at + timedelta(seconds=retry_delay)
         recovered += 1
     return recovered
 
@@ -1177,6 +1212,9 @@ def complete_verification(
     agent_id: str,
     lease_token: str,
     observed_own_price_kzt: object,
+    verification_succeeded: bool = True,
+    error_code: str | None = None,
+    error_message: str | None = None,
 ) -> dict[str, Any]:
     job = _validate_lease(
         db.get(FastDumpingJob, job_id),
@@ -1204,7 +1242,7 @@ def complete_verification(
     job.lease_token = None
     job.not_before_at = None
     _clear_active_job(state, job)
-    if target is not None and observed == target:
+    if verification_succeeded and target is not None and observed == target:
         job.status = "applied"
         state.status = (
             "floor_limited"
@@ -1215,23 +1253,41 @@ def complete_verification(
         state.last_applied_at = state.last_applied_at or now
         state.last_error_code = None
         state.last_error_message = None
+        state.automatic_writes_paused = False
+        state.pause_reason = None
         state.next_scan_at = _next_scan(policy, now=now)
         return {"status": state.status, "verified": True}
 
-    job.status = "apply_unconfirmed"
-    job.error_code = "apply_unconfirmed"
-    job.error_message = "Отложенная проверка не подтвердила целевую цену."
-    state.status = "apply_unconfirmed"
-    state.status_reason = job.error_message
+    if verification_succeeded and observed is not None:
+        job.status = "verification_missed"
+        job.error_code = "verification_missed"
+        job.error_message = (
+            f"Ожидалась цена {_json_money(target)} ₸, но Kaspi показал "
+            f"{_json_money(observed)} ₸."
+        )
+        state.own_price_kzt = observed
+    else:
+        job.status = "verification_failed"
+        job.error_code = _text(error_code, limit=128) or "verification_failed"
+        job.error_message = (
+            _text(error_message, limit=2000)
+            or "Контрольная проверка не смогла прочитать нашу цену."
+        )
+    state.status = "verification_retry"
+    state.status_reason = (
+        "Целевая цена пока не подтверждена. Старая операция не повторяется; "
+        "после выбранного интервала будет выполнен новый полный scan."
+    )
     state.last_error_code = job.error_code
     state.last_error_message = job.error_message
-    state.automatic_writes_paused = True
-    state.pause_reason = (
-        "Цена после принятой операции не подтверждена. Проверьте Kaspi и "
-        "возобновите товар вручную."
-    )
-    state.next_scan_at = None
-    return {"status": state.status, "verified": False}
+    state.automatic_writes_paused = False
+    state.pause_reason = None
+    state.next_scan_at = _next_scan(policy, now=now)
+    return {
+        "status": state.status,
+        "verified": False,
+        "retry_at": state.next_scan_at,
+    }
 
 
 def resume_automatic_writes(
