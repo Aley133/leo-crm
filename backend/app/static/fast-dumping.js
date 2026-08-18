@@ -25,7 +25,7 @@ let searchController = null;
 let loading = false;
 const offersCache = new Map();
 
-const attentionStatuses = new Set(["floor_limited","price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","error"]);
+const attentionStatuses = new Set(["floor_limited","price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error"]);
 const workingStatuses = new Set(["queued","scanning","queued_apply","preparing_apply","applying","verifying"]);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
@@ -62,7 +62,7 @@ const statusView = (row) => {
     cooldown:"Интервал цены",
     price_anomaly:"Аномалия цены", market_context_mismatch:"Контекст не совпал",
     own_offer_missing:"Наша строка не найдена", out_of_stock:"Нет FIFO-остатка",
-    apply_timeout:"Не подтверждено", apply_unconfirmed:"Защитная пауза", error:"Ошибка",
+    apply_timeout:"Не подтверждено", apply_unconfirmed:"Защитная пауза", verification_retry:"Перепроверка", error:"Ошибка",
     paused:"Отключён", stale:"Решение устарело", apply_failed:"Ошибка записи",
   };
   const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : ["applied","watching","cooldown","delivery_advantage"].includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
@@ -74,7 +74,10 @@ const offersTable = (offers) => {
   return `<div class="offers-wrap"><table class="offers-table"><thead><tr><th>Продавец</th><th>Цена API</th><th>Роль</th><th>Доставка</th><th>В расчёте</th><th>Решение</th></tr></thead><tbody>${offers.map((offer) => {
     const rowClass = offer.is_own ? "offer-own" : offer.used_for_dumping ? "" : "offer-ignore";
     const delivery = offer.delivery_days == null ? (offer.delivery || "не распознано") : `${Number(offer.delivery_days)} дн. · ${offer.delivery || "срок Kaspi"}`;
-    const decision = offer.is_own ? "Наша доставка" : offer.used_for_dumping ? "Выбран как ценовой ориентир" : (offer.ignored_reason || "Не выбран");
+    const deliveryGap = offer.delivery_gap_days == null ? null : Number(offer.delivery_gap_days) > 0 ? `наша быстрее на ${Number(offer.delivery_gap_days)} дн.` : Number(offer.delivery_gap_days) < 0 ? `конкурент быстрее на ${Math.abs(Number(offer.delivery_gap_days))} дн.` : "одинаковый срок";
+    const comparison = offer.is_own ? "" : [offer.price_gap_kzt == null ? null : `разница ${money(offer.price_gap_kzt)}`, deliveryGap].filter(Boolean).join(" · ");
+    const reason = offer.decision_reason || offer.ignored_reason || (offer.used_for_dumping ? "Выбран как ценовой ориентир" : "Не выбран");
+    const decision = offer.is_own ? "Наша доставка" : comparison ? `${comparison}. ${reason}` : reason;
     return `<tr class="${rowClass}"><td>${escapeHtml(offer.merchant_name || offer.merchant_id || "—")}</td><td>${money(offer.price_kzt)}</td><td>${offer.is_own ? "Наша строка" : "Конкурент"}</td><td>${escapeHtml(delivery)}</td><td>${offer.is_own ? "—" : offer.used_for_dumping ? "Да" : "Нет"}</td><td>${escapeHtml(decision)}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 };
@@ -208,9 +211,8 @@ const selectProduct = async (row) => {
     if (ordinary.policy) {
       document.querySelector("#minimum-profit").value = ordinary.policy.minimum_profit_kzt;
       document.querySelector("#undercut-step").value = ordinary.policy.undercut_step_kzt;
-      document.querySelector("#city-id").value = ordinary.policy.city_id;
       document.querySelector("#zone-id").value = ordinary.policy.zone_id;
-      selectedProduct.textContent += " · порог и зона взяты из обычного демпинга";
+      selectedProduct.textContent += " · порог и зона взяты из обычного демпинга; город Fast Dumping сохранён";
     }
   } catch (_) {
     // A product does not need an ordinary dumping policy to use Fast Dumping.
