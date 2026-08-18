@@ -137,6 +137,56 @@ def test_scanner_skips_slightly_cheaper_slow_offer_for_faster_delivery() -> None
     assert "быстрее только на 2 дн." in assessments[id(acceptable)].reason
 
 
+def test_delivery_filter_returns_to_second_place_after_undercutting_slow_offer() -> None:
+    today = date(2026, 8, 18)
+    own = {"price": "8532", "delivery": "2026-08-19T18:00:00+00:00"}
+    zecar = {"price": "8533", "delivery": "2026-08-28T18:00:00+00:00"}
+    dmg = {"price": "8538", "delivery": "2026-08-19T18:00:00+00:00"}
+
+    selected, assessments = _select_delivery_aware_competitor(
+        own,
+        [zecar, dmg],
+        max_price_premium_kzt=500,
+        min_delivery_advantage_days=5,
+        today=today,
+    )
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("8532"),
+        competitor_price_kzt=Decimal(str(selected["price"])),
+        safe_floor_kzt=Decimal("5000"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("35"),
+    )
+
+    assert assessments[id(zecar)].ignored is True
+    assert assessments[id(zecar)].price_gap_kzt == Decimal("-1")
+    assert assessments[id(zecar)].delivery_gap_days == 9
+    assert selected is dmg
+    assert decision.target_price_kzt == Decimal("8537.00")
+
+
+def test_delivery_rebound_stays_below_slow_offer_premium_ceiling() -> None:
+    today = date(2026, 8, 18)
+    own = {"price": "10000", "delivery": "2026-08-19T18:00:00+00:00"}
+    slow_nearby = {"price": "10001", "delivery": "2026-08-28T18:00:00+00:00"}
+    fast_but_too_expensive = {
+        "price": "11000",
+        "delivery": "2026-08-19T18:00:00+00:00",
+    }
+
+    selected, assessments = _select_delivery_aware_competitor(
+        own,
+        [slow_nearby, fast_but_too_expensive],
+        max_price_premium_kzt=500,
+        min_delivery_advantage_days=5,
+        today=today,
+    )
+
+    assert assessments[id(slow_nearby)].ignored is True
+    assert selected is None
+
+
 def test_scanner_keeps_competitor_when_threshold_or_delivery_is_unknown() -> None:
     today = date(2026, 8, 13)
     own = {"price": "20000", "delivery": "2026-08-13T19:00:00+00:00"}

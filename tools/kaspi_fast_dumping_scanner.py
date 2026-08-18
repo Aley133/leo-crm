@@ -377,7 +377,7 @@ def _assess_delivery_advantage(
     min_delivery_advantage_days: int,
     today: date | None = None,
 ) -> DeliveryAssessment:
-    """Decide whether a slower, slightly cheaper offer should be ignored."""
+    """Decide whether a slower, nearby-priced offer should be ignored."""
 
     own_price = None if own is None else _offer_price(own)
     competitor_price = _offer_price(competitor)
@@ -395,18 +395,21 @@ def _assess_delivery_advantage(
     )
     premium = max(Decimal("0"), Decimal(str(max_price_premium_kzt)))
     advantage = max(1, int(min_delivery_advantage_days))
+    price_distance = None if price_gap is None else abs(price_gap)
     ignored = bool(
-        price_gap is not None
-        and Decimal("0") <= price_gap <= premium
+        price_distance is not None
+        and price_distance <= premium
         and delivery_gap is not None
         and delivery_gap >= advantage
     )
-    price_gap_text = "—" if price_gap is None else format(price_gap, "f")
+    price_distance_text = (
+        "—" if price_distance is None else format(price_distance, "f")
+    )
     premium_text = format(premium, "f")
     if ignored:
         reason = (
             f"Исключён из ценового ориентира: наша доставка быстрее на "
-            f"{delivery_gap} дн., а разница цены {price_gap_text} ₸ "
+            f"{delivery_gap} дн., а разница цен {price_distance_text} ₸ "
             f"не превышает порог {premium_text} ₸."
         )
     elif own_price is None or competitor_price is None:
@@ -415,11 +418,9 @@ def _assess_delivery_advantage(
         reason = "Защита доставки не применена: срок нашей доставки не распознан."
     elif competitor_days is None:
         reason = "Защита доставки не применена: срок доставки конкурента не распознан."
-    elif price_gap is not None and price_gap < 0:
-        reason = "Защита доставки не нужна: наша цена уже ниже цены конкурента."
-    elif price_gap is not None and price_gap > premium:
+    elif price_distance is not None and price_distance > premium:
         reason = (
-            f"Выбран: разница цены {price_gap_text} ₸ превышает допустимую "
+            f"Выбран: разница цен {price_distance_text} ₸ превышает допустимую "
             f"доплату {premium_text} ₸."
         )
     elif delivery_gap is not None and delivery_gap <= 0:
@@ -449,8 +450,8 @@ def _select_delivery_aware_competitor(
 ) -> tuple[dict[str, Any] | None, dict[int, DeliveryAssessment]]:
     assessments: dict[int, DeliveryAssessment] = {}
     selected: dict[str, Any] | None = None
-    ignored_before_selection = False
-    own_price = None if own is None else _offer_price(own)
+    premium = max(Decimal("0"), Decimal(str(max_price_premium_kzt)))
+    protected_price_ceiling: Decimal | None = None
     for candidate in competitors:
         assessment = _assess_delivery_advantage(
             own,
@@ -463,18 +464,23 @@ def _select_delivery_aware_competitor(
         if selected is not None:
             continue
         if assessment.ignored:
-            ignored_before_selection = True
+            ignored_price = _offer_price(candidate)
+            if ignored_price is not None:
+                ceiling = ignored_price + premium
+                protected_price_ceiling = (
+                    ceiling
+                    if protected_price_ceiling is None
+                    else min(protected_price_ceiling, ceiling)
+                )
             continue
         candidate_price = _offer_price(candidate)
         if (
-            ignored_before_selection
-            and own_price is not None
+            protected_price_ceiling is not None
             and candidate_price is not None
-            and candidate_price >= own_price
+            and candidate_price > protected_price_ceiling
         ):
-            # A slower cheap offer sets the maximum premium we are currently
-            # willing to defend. Do not use a later expensive offer to raise
-            # our price beyond that already-validated premium.
+            # A nearby slow offer may be ignored, but it still caps how far a
+            # later fast offer may pull our price upward.
             continue
         selected = candidate
     return selected, assessments
