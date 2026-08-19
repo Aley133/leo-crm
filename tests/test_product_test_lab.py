@@ -130,17 +130,21 @@ def test_public_photo_card_does_not_require_promo_conditions(monkeypatch) -> Non
     assert _meta_content(page.text, "property", "og:image") == "https://resources.cdn-kaspi.kz/img/p/photo.jpg"
 
 
-def test_backend_photo_reader_uses_one_canonical_request(monkeypatch) -> None:
+def test_backend_photo_reader_prefers_mobile_json_endpoint(monkeypatch) -> None:
     requests: list[httpx.Request] = []
 
     def handler(request: httpx.Request) -> httpx.Response:
         requests.append(request)
         return httpx.Response(
             200,
-            text=(
-                '<html><head><meta property="og:image" '
-                'content="https://resources.cdn-kaspi.kz/img/m/p/photo.jpg"></head></html>'
-            ),
+            json={
+                "data": {
+                    "card": {"id": "102020267"},
+                    "galleryImages": [{
+                        "large": "https://resources.cdn-kaspi.kz/img/m/p/photo.jpg",
+                    }],
+                },
+            },
             request=request,
         )
 
@@ -163,8 +167,77 @@ def test_backend_photo_reader_uses_one_canonical_request(monkeypatch) -> None:
 
     assert image_url == "https://resources.cdn-kaspi.kz/img/m/p/photo.jpg"
     assert len(requests) == 1
-    assert requests[0].url.path.endswith("-102020267/")
-    assert requests[0].url.params["c"] == "196220100"
+    assert requests[0].url.path == "/shop/rest/misc/product/mobile"
+    assert requests[0].url.params["productCode"] == "102020267"
+    assert requests[0].url.params["cityId"] == "196220100"
+
+
+def test_backend_photo_reader_falls_back_to_public_card(monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        if request.url.path == "/shop/rest/misc/product/mobile":
+            return httpx.Response(404, request=request)
+        return httpx.Response(
+            200,
+            text=(
+                '<html><head><meta property="og:image" '
+                'content="https://resources.cdn-kaspi.kz/img/m/p/fallback.jpg"></head></html>'
+            ),
+            request=httpx.Request(
+                "GET",
+                "https://kaspi.kz/shop/p/test-product-102020267/?c=196220100",
+            ),
+        )
+
+    real_async_client = httpx.AsyncClient
+
+    def client_factory(**kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(**kwargs)
+
+    monkeypatch.setattr(kaspi_product_photo.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(kaspi_product_photo, "_REQUEST_SPACING_SECONDS", 0)
+    kaspi_product_photo._NEXT_REQUEST_AT = 0
+    image_url = asyncio.run(
+        kaspi_product_photo.fetch_kaspi_product_photo(
+            kaspi_product_id="102020267",
+            product_name="Test product",
+        )
+    )
+
+    assert image_url == "https://resources.cdn-kaspi.kz/img/m/p/fallback.jpg"
+    assert len(requests) == 2
+    assert requests[1].url.path.endswith("-102020267/")
+
+
+def test_backend_photo_reader_does_not_amplify_mobile_rate_limit(monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(429, request=request)
+
+    real_async_client = httpx.AsyncClient
+
+    def client_factory(**kwargs):
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(**kwargs)
+
+    monkeypatch.setattr(kaspi_product_photo.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(kaspi_product_photo, "_REQUEST_SPACING_SECONDS", 0)
+    kaspi_product_photo._NEXT_REQUEST_AT = 0
+    with pytest.raises(kaspi_product_photo.KaspiPhotoReadError, match="429"):
+        asyncio.run(
+            kaspi_product_photo.fetch_kaspi_product_photo(
+                kaspi_product_id="102020267",
+                product_name="Test product",
+            )
+        )
+
+    assert len(requests) == 1
+    assert requests[0].url.path == "/shop/rest/misc/product/mobile"
 
 
 def test_backend_photo_reader_preserves_empty_timeout_name() -> None:
