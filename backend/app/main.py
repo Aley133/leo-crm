@@ -74,8 +74,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.24.0"
-DEPLOYMENT_MARKER = "product-test-lab-and-product-photos"
+APP_VERSION = "0.24.1"
+DEPLOYMENT_MARKER = "direct-http-product-test-images"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
