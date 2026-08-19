@@ -7,7 +7,9 @@ from sqlalchemy import select
 
 from backend.app.kaspi_xml_import import parse_kaspi_products
 from backend.app.fast_dumping_agent_api import FastAgentIdentity
+from backend.app.models import Product
 from backend.app.product_images import normalize_product_image_url
+from backend.app.product_registry_api import resolve_product_image
 from backend.app.product_test_api import (
     ProductTestInspectRequest,
     build_product_test_xml,
@@ -152,6 +154,38 @@ def test_product_test_inspection_runs_directly_in_crm(db_session, monkeypatch) -
     assert job.agent_id == "crm-http"
 
 
+def test_missing_product_photo_is_resolved_once_and_cached(db_session, monkeypatch) -> None:
+    product = Product(
+        workspace_id=1,
+        kaspi_product_id="110563850",
+        merchant_sku="110563850_272949101",
+        name="Test existing product",
+    )
+    db_session.add(product)
+    db_session.commit()
+    calls: list[dict] = []
+
+    async def fake_inspect(**options):
+        calls.append(options)
+        return {"image_url": "https://resources.cdn-kaspi.kz/img/existing-product.jpg"}
+
+    monkeypatch.setattr("backend.app.product_registry_api.inspect_kaspi_product", fake_inspect)
+    first = asyncio.run(resolve_product_image(product.id, db_session))
+    second = asyncio.run(resolve_product_image(product.id, db_session))
+
+    assert first.image_url == "https://resources.cdn-kaspi.kz/img/existing-product.jpg"
+    assert first.cached is False
+    assert second.cached is True
+    assert calls == [{
+        "reference": "110563850",
+        "city_id": "196220100",
+        "zone_id": "Magnum_ZONE1",
+        "max_pages": 0,
+    }]
+    db_session.refresh(product)
+    assert product.image_url == first.image_url
+
+
 def test_product_photos_are_lazy_in_core_crm_surfaces() -> None:
     for filename in ("products.js", "orders.js", "dumping.js", "fast-dumping.js", "product-test.js"):
         source = (ROOT / "backend/app/static" / filename).read_text(encoding="utf-8")
@@ -160,3 +194,10 @@ def test_product_photos_are_lazy_in_core_crm_surfaces() -> None:
     detail = (ROOT / "backend/app/static/product-detail.html").read_text(encoding="utf-8")
     assert 'id="product-photo"' in detail
     assert 'loading="lazy"' in detail
+    resolver = (ROOT / "backend/app/static/product-image-resolver.js").read_text(encoding="utf-8")
+    assert "IntersectionObserver" in resolver
+    assert "activeRequests < 2" in resolver
+    assert "/resolve-image" in resolver
+    for filename in ("orders.html", "products.html", "product-detail.html", "dumping.html", "fast-dumping.html"):
+        page = (ROOT / "backend/app/static" / filename).read_text(encoding="utf-8")
+        assert "product-image-resolver.js" in page

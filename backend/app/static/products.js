@@ -24,7 +24,9 @@ const money = (value, currency = "KZT") => value == null ? "—" : `${Number(val
 const checkedAt = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "Никогда";
 const statusLabel = (status) => ({active:"Активен",draft:"Черновик",paused:"Приостановлен",archived:"Архив"}[status] || status || "—");
 const statusClass = (status) => status === "active" ? "ok" : status === "paused" ? "warn" : status === "archived" ? "bad" : "";
-const productPhoto = (row) => row.image_url ? `<img class="product-thumb" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : '<span class="product-thumb placeholder">Нет фото</span>';
+const productPhoto = (row) => row.image_url
+  ? `<img class="product-thumb" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
+  : `<span class="product-thumb placeholder" data-resolve-product-image data-product-id="${Number(row.product_id)}" data-image-class="product-thumb">Фото…</span>`;
 
 const setLoading = (loading) => {
   productsPage.setAttribute("aria-busy", String(loading));

@@ -116,7 +116,18 @@ const renderObservations = (observations) => {
 
 const render = (data, action) => {
   const { product, sales, bindings, observations, best_offer: bestOffer, supplier_scores: supplierScores, best_offer_decision: bestOfferDecision, decision_timeline: decisionTimeline } = data;
-  const productPhoto = document.querySelector("#product-photo"); productPhoto.classList.toggle("hidden", !product.image_url); if (product.image_url) productPhoto.src = product.image_url;
+  const productPhoto = document.querySelector("#product-photo");
+  if (product.image_url) {
+    productPhoto.src = product.image_url;
+    productPhoto.classList.remove("hidden");
+    productPhoto.removeAttribute("data-resolve-product-image");
+  } else {
+    productPhoto.removeAttribute("src");
+    productPhoto.classList.add("hidden");
+    productPhoto.dataset.resolveProductImage = "";
+    productPhoto.dataset.productId = String(product.id);
+    window.LEOProductImageResolver?.observe(productPhoto);
+  }
   setText("product-name", product.name); setText("product-meta", `Kaspi ${product.kaspi_product_id}${product.brand ? ` · ${product.brand}` : ""}${product.merchant_sku ? ` · SKU ${product.merchant_sku}` : ""}`);
   setText("kaspi-product-id", product.kaspi_product_id); setText("merchant-sku", product.merchant_sku || "—"); setText("product-brand", product.brand || "—"); setText("product-status", statusLabel(product.status)); setText("product-updated-at", `Обновлено в CRM ${dateTime(product.updated_at)}`);
   priceDropAlertToggle.checked = Boolean(product.sudden_price_alert_enabled);
