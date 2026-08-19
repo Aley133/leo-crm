@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-import secrets
-from datetime import UTC, datetime, timedelta
+import asyncio
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree
 
@@ -13,17 +13,17 @@ from sqlalchemy.orm import Session
 from .auth import require_service_token
 from .db import get_db, get_unscoped_db
 from .dumping_models import KaspiXmlFeed
-from .fast_dumping_agent_api import FastAgentIdentity, _validate_workspace_merchant
+from .fast_dumping_agent_api import FastAgentIdentity
 from .kaspi_xml_schema import catalog_store_id, ensure_offer_availability, repair_kaspi_catalog_tree
 from .models import Product
 from .product_images import normalize_product_image_url
 from .product_test_models import ProductTestItem, ProductTestJob
 from .workspace_context import workspace_context
+from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
 
 
 DEFAULT_CITY_ID = "196220100"
 DEFAULT_ZONE_ID = "Magnum_ZONE1"
-LEASE_SECONDS = 180
 MAX_XML_BYTES = 25 * 1024 * 1024
 
 
@@ -228,27 +228,117 @@ def read_product_test_state(db: Session = Depends(get_db)) -> dict:
     }
 
 
-@router.post("/inspect", status_code=202)
-def queue_product_inspection(payload: ProductTestInspectRequest, db: Session = Depends(get_db)) -> dict:
+def _persist_product_inspection(db: Session, *, job: ProductTestJob, result: dict) -> dict:
+    kaspi_id = str(result.get("kaspi_product_id") or "").strip()[:64]
+    merchant_sku = str(result.get("merchant_sku") or kaspi_id).strip()[:128]
+    name = str(result.get("product_name") or kaspi_id).strip()[:500]
+    kaspi_url = str(result.get("product_url") or "").strip()[:4000]
+    if not kaspi_id or not merchant_sku or not name or not kaspi_url:
+        raise ValueError("Kaspi вернул неполные данные публичной карточки")
+
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.workspace_id == job.workspace_id,
+            ProductTestItem.merchant_sku == merchant_sku,
+        ).with_for_update()
+    )
+    observed = _money(result.get("page_visible_price_kzt"))
+    image_url = normalize_product_image_url(result.get("image_url"))
+    if item is None:
+        item = ProductTestItem(
+            workspace_id=job.workspace_id,
+            input_reference=job.input_reference,
+            kaspi_product_id=kaspi_id,
+            merchant_sku=merchant_sku,
+            name=name,
+            brand=(str(result.get("brand") or "").strip()[:255] or None),
+            image_url=image_url,
+            kaspi_url=kaspi_url,
+            observed_price_kzt=observed,
+            test_price_kzt=observed,
+            city_id=job.city_id,
+            zone_id=job.zone_id,
+            offers_json=result.get("offers") if isinstance(result.get("offers"), dict) else {},
+        )
+        db.add(item)
+    else:
+        item.input_reference = job.input_reference
+        item.kaspi_product_id = kaspi_id
+        item.name = name
+        item.brand = str(result.get("brand") or "").strip()[:255] or None
+        item.image_url = image_url
+        item.kaspi_url = kaspi_url
+        item.observed_price_kzt = observed
+        item.offers_json = result.get("offers") if isinstance(result.get("offers"), dict) else {}
+        item.active = True
+
+    product = db.scalar(
+        select(Product).where(
+            Product.workspace_id == job.workspace_id,
+            or_(Product.kaspi_product_id == kaspi_id, Product.merchant_sku == merchant_sku),
+        ).limit(1)
+    )
+    if product is not None and item.image_url:
+        product.image_url = item.image_url
+
+    job.result_json = result
+    job.status = "succeeded"
+    job.completed_at = _now()
+    job.error_code = None
+    job.error_message = None
+    db.commit()
+    db.refresh(item)
+    return {"job": _job_payload(job), "item": _item_payload(item)}
+
+
+@router.post("/inspect")
+async def inspect_product(payload: ProductTestInspectRequest, db: Session = Depends(get_db)) -> dict:
+    """Read a public Kaspi card directly over HTTP from the CRM backend.
+
+    This is a manual, one-shot operation. It does not enqueue work for the
+    Windows Fast Dumping Agent and it does not start background polling.
+    """
+
     reference = payload.reference.strip()
-    pending = db.scalar(
+    running = db.scalar(
         select(ProductTestJob).where(
             ProductTestJob.input_reference == reference,
-            ProductTestJob.status.in_(("queued", "leased")),
+            ProductTestJob.status == "running_http",
         ).order_by(ProductTestJob.id.desc()).limit(1)
     )
-    if pending is None:
-        pending = ProductTestJob(
-            input_reference=reference,
-            city_id=payload.city_id.strip(),
-            zone_id=payload.zone_id.strip(),
-            status="queued",
-            result_json={},
-        )
-        db.add(pending)
+    if running is not None:
+        raise HTTPException(status_code=409, detail="Эта карточка уже читается по HTTP")
+
+    job = ProductTestJob(
+        input_reference=reference,
+        city_id=payload.city_id.strip(),
+        zone_id=payload.zone_id.strip(),
+        status="running_http",
+        agent_id="crm-http",
+        result_json={},
+    )
+    db.add(job)
+    db.commit()
+    db.refresh(job)
+
+    try:
+        async with asyncio.timeout(60):
+            result = await inspect_kaspi_product(
+                reference=reference,
+                city_id=job.city_id,
+                zone_id=job.zone_id,
+            )
+        return _persist_product_inspection(db, job=job, result=result)
+    except Exception as exc:
+        job.status = "failed"
+        job.error_code = type(exc).__name__[:128]
+        job.error_message = str(exc)[:4000]
+        job.completed_at = _now()
         db.commit()
-        db.refresh(pending)
-    return _job_payload(pending)
+        raise HTTPException(
+            status_code=502,
+            detail=f"Не удалось прочитать публичную карточку Kaspi: {job.error_message}",
+        ) from exc
 
 
 @router.patch("/items/{item_id}")
@@ -283,39 +373,16 @@ def download_product_test_xml(db: Session = Depends(get_db)) -> Response:
 
 
 @agent_router.post("/claim")
-def claim_product_test_job(payload: FastAgentIdentity, db: Session = Depends(get_unscoped_db)) -> dict:
-    try:
-        _validate_workspace_merchant(db, workspace_id=payload.workspace_id, merchant_uid=payload.merchant_uid)
-    except ValueError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
-    with workspace_context(payload.workspace_id):
-        now = _now()
-        job = db.scalar(
-            select(ProductTestJob)
-            .where(
-                ProductTestJob.workspace_id == payload.workspace_id,
-                or_(ProductTestJob.status == "queued", (ProductTestJob.status == "leased") & (ProductTestJob.lease_until < now)),
-            )
-            .order_by(ProductTestJob.id)
-            .with_for_update(skip_locked=True)
-            .limit(1)
-        )
-        if job is None:
-            return {"job": None}
-        job.status = "leased"
-        job.agent_id = payload.agent_id
-        job.lease_token = secrets.token_hex(16)
-        job.lease_until = now + timedelta(seconds=LEASE_SECONDS)
-        db.commit()
-        return {
-            "job": {
-                "id": job.id,
-                "reference": job.input_reference,
-                "city_id": job.city_id,
-                "zone_id": job.zone_id,
-                "lease_token": job.lease_token,
-            }
-        }
+def claim_product_test_job(payload: FastAgentIdentity) -> dict:
+    """Compatibility response for Agent 1.0.8 during the upgrade window.
+
+    New Product Test work is never queued here: CRM performs the explicit
+    public-card HTTP request itself. Keeping a no-op response prevents an old
+    desktop Agent from treating the rolling server upgrade as an error.
+    """
+
+    del payload
+    return {"job": None, "retired": True}
 
 
 @agent_router.post("/jobs/{job_id}/complete")
@@ -340,56 +407,7 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
             db.commit()
             return _job_payload(job)
 
-        result = payload.result
-        kaspi_id = str(result.get("kaspi_product_id") or "").strip()[:64]
-        merchant_sku = str(result.get("merchant_sku") or kaspi_id).strip()[:128]
-        name = str(result.get("product_name") or kaspi_id).strip()[:500]
-        kaspi_url = str(result.get("product_url") or "").strip()[:4000]
-        if not kaspi_id or not merchant_sku or not name or not kaspi_url:
-            raise HTTPException(status_code=422, detail="Agent вернул неполные данные карточки")
-        item = db.scalar(
-            select(ProductTestItem).where(
-                ProductTestItem.workspace_id == payload.workspace_id,
-                ProductTestItem.merchant_sku == merchant_sku,
-            ).with_for_update()
-        )
-        observed = _money(result.get("page_visible_price_kzt"))
-        if item is None:
-            item = ProductTestItem(
-                workspace_id=payload.workspace_id,
-                input_reference=job.input_reference,
-                kaspi_product_id=kaspi_id,
-                merchant_sku=merchant_sku,
-                name=name,
-                brand=(str(result.get("brand") or "").strip()[:255] or None),
-                image_url=normalize_product_image_url(result.get("image_url")),
-                kaspi_url=kaspi_url,
-                observed_price_kzt=observed,
-                test_price_kzt=observed,
-                city_id=job.city_id,
-                zone_id=job.zone_id,
-                offers_json=result.get("offers") if isinstance(result.get("offers"), dict) else {},
-            )
-            db.add(item)
-        else:
-            item.input_reference = job.input_reference
-            item.kaspi_product_id = kaspi_id
-            item.name = name
-            item.brand = str(result.get("brand") or "").strip()[:255] or None
-            item.image_url = normalize_product_image_url(result.get("image_url"))
-            item.kaspi_url = kaspi_url
-            item.observed_price_kzt = observed
-            item.offers_json = result.get("offers") if isinstance(result.get("offers"), dict) else {}
-            item.active = True
-        product = db.scalar(
-            select(Product).where(
-                Product.workspace_id == payload.workspace_id,
-                or_(Product.kaspi_product_id == kaspi_id, Product.merchant_sku == merchant_sku),
-            ).limit(1)
-        )
-        if product is not None and item.image_url:
-            product.image_url = item.image_url
-        job.status = "succeeded"
-        db.commit()
-        db.refresh(item)
-        return {"job": _job_payload(job), "item": _item_payload(item)}
+        try:
+            return _persist_product_inspection(db, job=job, result=payload.result)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc

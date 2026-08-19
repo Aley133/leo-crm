@@ -771,7 +771,7 @@ async def inspect_kaspi_product(
     zone_id: str,
     max_pages: int = 3,
 ) -> dict[str, Any]:
-    """Read a new product card for Product Test Lab in the local Agent."""
+    """Read a public Kaspi product card with ordinary HTTP requests."""
 
     raw_reference = str(reference or "").strip()
     if not raw_reference:
