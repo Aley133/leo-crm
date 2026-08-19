@@ -22,12 +22,13 @@ from urllib.request import Request, urlopen
 
 from tools.kaspi_fast_dumping_scanner import (
     KaspiCompetitorSnapshot,
+    inspect_kaspi_product,
     scan_kaspi_competitors,
 )
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 
 
-VERSION = "1.0.7"
+VERSION = "1.0.8"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -480,6 +481,7 @@ def _market_payload(market: KaspiCompetitorSnapshot) -> dict:
     return {
         "product_name": market.product_name,
         "product_brand": market.product_brand,
+        "image_url": market.image_url,
         "own_price_kzt": money(market.own_price_kzt),
         "competitor_price_kzt": money(market.competitor_price_kzt),
         "competitor_name": market.competitor_name,
@@ -707,6 +709,51 @@ async def _process_verify(
     )
 
 
+async def _process_product_test(
+    *,
+    api_url: str,
+    token: str,
+    job: dict,
+    agent_id: str,
+    workspace_id: int,
+) -> None:
+    _log(f"Тест товара #{job['id']}: {job['reference']}", workspace_id=workspace_id)
+    try:
+        async with asyncio.timeout(SCAN_TIMEOUT_SECONDS):
+            result = await inspect_kaspi_product(
+                reference=str(job["reference"]),
+                city_id=str(job["city_id"]),
+                zone_id=str(job["zone_id"]),
+            )
+        payload = {
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "lease_token": job["lease_token"],
+            "status": "succeeded",
+            "result": result,
+        }
+    except Exception as exc:
+        payload = {
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "lease_token": job["lease_token"],
+            "status": "failed",
+            "error_code": type(exc).__name__,
+            "error_message": str(exc)[:4000],
+        }
+    completed = await _post_json_with_retry(
+        f"{api_url}/api/product-test-agent/jobs/{job['id']}/complete",
+        token,
+        payload,
+        operation=f"Сохранение теста товара #{job['id']}",
+    )
+    completed_job = completed.get("job", completed)
+    _log(
+        f"Тест товара #{job['id']}: {completed_job.get('status')}",
+        workspace_id=workspace_id,
+    )
+
+
 async def main(
     *,
     once: bool = False,
@@ -842,6 +889,30 @@ async def main(
                 )
                 job = claim.get("job")
                 if not job:
+                    product_test_claim = await _post_json_with_retry(
+                        f"{api_url}/api/product-test-agent/claim",
+                        token,
+                        _agent_payload(
+                            worker_id,
+                            selected_workspace,
+                            concurrency,
+                            merchant_uid,
+                        ),
+                        operation="Получение теста товара",
+                    )
+                    product_test_job = product_test_claim.get("job")
+                    if product_test_job:
+                        await _process_product_test(
+                            api_url=api_url,
+                            token=token,
+                            job=product_test_job,
+                            agent_id=worker_id,
+                            workspace_id=selected_workspace,
+                        )
+                        if once:
+                            return
+                        idle_seconds = 2.0
+                        continue
                     if once:
                         return
                     idle_seconds = min(

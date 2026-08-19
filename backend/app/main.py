@@ -54,6 +54,8 @@ from .product_economics_api import router as product_economics_router
 from .product_identity_api import router as product_identity_router
 from .product_registry_api import router as product_registry_router
 from .product_supplier_binding_api import router as product_supplier_binding_router
+from .product_test_api import agent_router as product_test_agent_router
+from .product_test_api import router as product_test_router
 from .product_xml_import_api import router as product_xml_import_router
 from .products import router as products_router
 from .purchase_api import router as purchase_router
@@ -72,8 +74,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.23.21"
-DEPLOYMENT_MARKER = "delivery-second-place-fast-dumping"
+APP_VERSION = "0.24.0"
+DEPLOYMENT_MARKER = "product-test-lab-and-product-photos"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -123,6 +125,8 @@ app.include_router(action_router)
 app.include_router(product_registry_router)
 app.include_router(product_supplier_binding_router)
 app.include_router(product_xml_import_router)
+app.include_router(product_test_router)
+app.include_router(product_test_agent_router)
 app.include_router(catalog_router)
 app.include_router(suppliers_router)
 app.include_router(supplier_products_router)

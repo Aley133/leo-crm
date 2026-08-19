@@ -88,6 +88,7 @@ const setBusy = (button, busy, text) => {
 };
 
 const productCaption = (row) => `${row.name} · ${row.merchant_sku || row.kaspi_product_id || "без артикула"}`;
+const productPhoto = (row, css = "dumping-product-photo") => row.image_url ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : "";
 const closeProductResults = () => { productResults.classList.add("hidden"); productSearch.setAttribute("aria-expanded", "false"); };
 const clearProductSelection = ({keepQuery=false}={}) => {
   productIdInput.value = "";
@@ -112,8 +113,8 @@ const renderProductResults = (rows, query) => {
       : "Можно подключить к демпингу";
     return `
     <button class="product-result" type="button" role="option" data-product-id="${row.product_id}" data-configured="${Boolean(configured)}">
-      <strong>${escapeHtml(row.name)}</strong>
-      <span>Артикул: ${escapeHtml(row.merchant_sku || "—")} · Kaspi ID: ${escapeHtml(row.kaspi_product_id)} · ${escapeHtml(dumpingState)}</span>
+      ${productPhoto(row, "product-result-photo")}<span><strong>${escapeHtml(row.name)}</strong>
+      <span>Артикул: ${escapeHtml(row.merchant_sku || "—")} · Kaspi ID: ${escapeHtml(row.kaspi_product_id)} · ${escapeHtml(dumpingState)}</span></span>
     </button>`;
   }).join("") : `<div class="product-result-empty">По запросу «${escapeHtml(query)}» товары не найдены.</div>`;
   productResults.classList.remove("hidden");
@@ -303,7 +304,7 @@ const render = (rows) => {
     return `
     <article class="dumping-card" data-product-id="${row.product_id}">
       <div class="dumping-head">
-        <div class="dumping-title"><h2>${escapeHtml(row.name)}</h2><span>Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}</span></div>
+        <div class="dumping-title product-heading">${productPhoto(row)}<div><h2>${escapeHtml(row.name)}</h2><span>Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}</span></div></div>
         <div class="dumping-actions"><button class="button secondary edit-policy" type="button">Настроить</button>${runButton}</div>
       </div>
       <div class="dumping-grid">

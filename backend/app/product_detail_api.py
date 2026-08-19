@@ -32,6 +32,7 @@ class ProductDetailHeader(BaseModel):
     merchant_sku: str | None
     name: str
     brand: str | None
+    image_url: str | None
     status: str
     sudden_price_alert_enabled: bool
     created_at: datetime
@@ -341,6 +342,7 @@ def get_product_detail(
             merchant_sku=product.merchant_sku,
             name=product.name,
             brand=product.brand,
+            image_url=product.image_url,
             status=product.status,
             sudden_price_alert_enabled=product.sudden_price_alert_enabled,
             created_at=product.created_at,

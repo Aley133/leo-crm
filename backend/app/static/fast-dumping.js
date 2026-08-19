@@ -32,6 +32,7 @@ const money = (value) => value == null || value === "" ? "—" : `${Number(value
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU") : "—";
 const statusOf = (row) => row.state?.status || (row.policy.enabled ? "idle" : "paused");
 const isFloor = (row) => statusOf(row) === "floor_limited" || row.state?.decision_status === "floor_limited";
+const productPhoto = (row, css = "fast-product-photo") => row.image_url ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : "";
 
 const request = async (url, options = {}) => {
   const token = localStorage.getItem(storageKey) || "";
@@ -116,7 +117,7 @@ const card = (row) => {
   const canRun = row.policy.enabled && !state.automatic_writes_paused && !workingStatuses.has(view.status) && scanDue;
   return `<article class="fast-card ${view.kind}" data-product-id="${row.product_id}">
     <div class="fast-card-head">
-      <div class="fast-card-title"><span class="fast-status ${view.kind}">${escapeHtml(view.label)}</span><div><h3>${escapeHtml(row.name)}</h3><p>Kaspi ${escapeHtml(row.kaspi_product_id)} · SKU ${escapeHtml(row.merchant_sku || "—")}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</p></div></div>
+      <div class="fast-card-title"><span class="fast-status ${view.kind}">${escapeHtml(view.label)}</span>${productPhoto(row)}<div><h3>${escapeHtml(row.name)}</h3><p>Kaspi ${escapeHtml(row.kaspi_product_id)} · SKU ${escapeHtml(row.merchant_sku || "—")}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</p></div></div>
       <div class="fast-card-actions"><button class="button secondary edit-policy" type="button">Настроить</button>${state.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : `<button class="button run-now" type="button" ${canRun ? "" : "disabled"}>Проверить сейчас</button>`}</div>
     </div>
     <div class="fast-card-grid">
@@ -231,7 +232,7 @@ const searchProducts = async () => {
   try {
     const found = await request(`/api/product-registry/products?q=${encodeURIComponent(query)}&limit=20`, {signal:searchController.signal});
     const configured = new Map(rows.map((row) => [Number(row.product_id), row]));
-    productResults.innerHTML = found.length ? found.map((row) => `<button class="product-result" type="button" data-product-id="${row.product_id}"><strong>${escapeHtml(row.name)}</strong><span>SKU ${escapeHtml(row.merchant_sku || "нет")} · Kaspi ${escapeHtml(row.kaspi_product_id)} · ${configured.has(Number(row.product_id)) ? "уже подключён" : "можно подключить"}</span></button>`).join("") : `<div class="product-result-empty">По запросу «${escapeHtml(query)}» ничего не найдено.</div>`;
+    productResults.innerHTML = found.length ? found.map((row) => `<button class="product-result" type="button" data-product-id="${row.product_id}">${productPhoto(row, "product-result-photo")}<span><strong>${escapeHtml(row.name)}</strong><span>SKU ${escapeHtml(row.merchant_sku || "нет")} · Kaspi ${escapeHtml(row.kaspi_product_id)} · ${configured.has(Number(row.product_id)) ? "уже подключён" : "можно подключить"}</span></span></button>`).join("") : `<div class="product-result-empty">По запросу «${escapeHtml(query)}» ничего не найдено.</div>`;
     productResults.querySelectorAll(".product-result").forEach((button) => button.addEventListener("click", async () => {
       const id = Number(button.dataset.productId);
       const existing = configured.get(id);

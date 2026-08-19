@@ -453,6 +453,7 @@ class SqlAlchemyCommerceRepository:
                     external_product_id=line.external_product_id,
                     merchant_sku=line.merchant_sku,
                     title=title,
+                    image_url=None if product is None else product.image_url,
                     quantity=line.quantity,
                     unit_price=Decimal(line.unit_price),
                     line_total=Decimal(line.line_total),

@@ -44,6 +44,11 @@ def crm_fast_dumping() -> FileResponse:
     return FileResponse(STATIC_DIR / "fast-dumping.html")
 
 
+@router.get("/crm/product-test", response_class=FileResponse)
+def crm_product_test() -> FileResponse:
+    return FileResponse(STATIC_DIR / "product-test.html")
+
+
 @router.get("/crm/suppliers", response_class=FileResponse)
 def crm_suppliers() -> FileResponse:
     return FileResponse(STATIC_DIR / "suppliers.html")

@@ -24,6 +24,7 @@ const money = (value, currency = "KZT") => value == null ? "—" : `${Number(val
 const checkedAt = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : "Никогда";
 const statusLabel = (status) => ({active:"Активен",draft:"Черновик",paused:"Приостановлен",archived:"Архив"}[status] || status || "—");
 const statusClass = (status) => status === "active" ? "ok" : status === "paused" ? "warn" : status === "archived" ? "bad" : "";
+const productPhoto = (row) => row.image_url ? `<img class="product-thumb" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : '<span class="product-thumb placeholder">Нет фото</span>';
 
 const setLoading = (loading) => {
   productsPage.setAttribute("aria-busy", String(loading));
@@ -76,7 +77,7 @@ const render = (rows) => {
   renderSummary(rows);
   body.innerHTML = rows.map((row) => `
     <tr>
-      <td><a class="product-title" href="/crm/products/${row.product_id}">${escapeHtml(row.name)}</a><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></td>
+      <td><div class="product-cell">${productPhoto(row)}<div><a class="product-title" href="/crm/products/${row.product_id}">${escapeHtml(row.name)}</a><span class="muted">Kaspi ${escapeHtml(row.kaspi_product_id)}${row.merchant_sku ? ` · SKU ${escapeHtml(row.merchant_sku)}` : ""}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</span></div></div></td>
       <td><span class="badge ${statusClass(row.status)}">${escapeHtml(statusLabel(row.status))}</span></td>
       <td>${saleControl(row)}</td>
       <td><strong>${Number(row.units_sold || 0).toLocaleString("ru-RU")}</strong><span class="muted">строк заказов: ${Number(row.orders_count || 0).toLocaleString("ru-RU")}</span></td>

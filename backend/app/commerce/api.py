@@ -275,6 +275,7 @@ def list_commerce_orders(
                         external_product_id=line.external_product_id,
                         merchant_sku=line.merchant_sku,
                         title=line.title,
+                        image_url=line.image_url,
                         quantity=line.quantity,
                         unit_price=line.unit_price,
                         line_total=line.line_total,

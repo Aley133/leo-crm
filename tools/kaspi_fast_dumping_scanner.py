@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import parse_qs, quote, urlencode, urlparse, urlunparse
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
@@ -60,6 +60,7 @@ class KaspiCompetitorSnapshot:
     competitor_delivery_days: int | None = None
     delivery_filtered_count: int = 0
     delivery_selection_reason: str | None = None
+    image_url: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -160,6 +161,56 @@ def _page_title(page_html: str) -> str | None:
             ).strip()
             if value:
                 return value
+    return None
+
+
+def _meta_content(page_html: str, key: str, value: str) -> str | None:
+    escaped_key = re.escape(key)
+    escaped_value = re.escape(value)
+    patterns = (
+        rf'<meta[^>]+{escaped_key}=["\']{escaped_value}["\'][^>]+content=["\']([^"\']+)',
+        rf'<meta[^>]+content=["\']([^"\']+)["\'][^>]+{escaped_key}=["\']{escaped_value}["\']',
+    )
+    for pattern in patterns:
+        match = re.search(pattern, page_html, flags=re.I | re.S)
+        if match:
+            return html.unescape(match.group(1)).strip() or None
+    return None
+
+
+def _product_id_from_url(value: str) -> str | None:
+    parsed = urlparse(value)
+    query = parse_qs(parsed.query)
+    for key in ("masterSku", "productCode"):
+        candidate = str((query.get(key) or [""])[0]).strip()
+        if re.fullmatch(r"\d{6,18}", candidate):
+            return candidate
+    match = re.search(r"-(\d{6,18})/?$", parsed.path.rstrip("/"))
+    if match:
+        return match.group(1)
+    match = re.search(r"/(\d{6,18})/?$", parsed.path.rstrip("/"))
+    return match.group(1) if match else None
+
+
+def _city_url(value: str, city_id: str) -> str:
+    parsed = urlparse(value)
+    query = parse_qs(parsed.query)
+    query.setdefault("c", [city_id])
+    pairs = [(key, item) for key, values in query.items() for item in values]
+    return urlunparse(parsed._replace(query=urlencode(pairs)))
+
+
+def _product_link_from_search_html(page_html: str, master_id: str) -> str | None:
+    normalized = html.unescape(page_html).replace("\\/", "/").replace("\\u002F", "/")
+    escaped_id = re.escape(master_id)
+    for pattern in (
+        rf'https?://(?:www\.)?kaspi\.kz/shop/p/[^"\'< >\s]*-{escaped_id}/?',
+        rf'/shop/p/[^"\'< >\s]*-{escaped_id}/?',
+    ):
+        match = re.search(pattern, normalized, flags=re.I)
+        if match:
+            candidate = match.group(0).rstrip("\\")
+            return candidate if candidate.startswith("http") else f"https://kaspi.kz{candidate}"
     return None
 
 
@@ -683,9 +734,158 @@ async def _open_product_page(
         promo = _promo_conditions(page.text)
         if promo is not None:
             return page, promo, str(page.url)
+    # Some Kaspi variants do not resolve id-only paths. Search only as a
+    # fallback, then open the exact card link carrying the requested master ID.
+    for search_url in (
+        f"https://kaspi.kz/shop/search/?text={quote(master_id)}&c={quote(city_id)}",
+        f"https://kaspi.kz/shop/?text={quote(master_id)}&c={quote(city_id)}",
+    ):
+        try:
+            search = await _request_with_retry(client, "GET", search_url, headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": HEADERS["Accept-Language"],
+            })
+        except httpx.HTTPStatusError:
+            continue
+        card_url = _product_link_from_search_html(search.text, master_id)
+        if not card_url:
+            continue
+        page = await _request_with_retry(client, "GET", _city_url(card_url, city_id), headers={
+            "User-Agent": HEADERS["User-Agent"],
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": HEADERS["Accept-Language"],
+        })
+        promo = _promo_conditions(page.text)
+        if promo is not None:
+            return page, promo, str(page.url)
     raise ValueError(
         "Kaspi product page was not resolved from SKU. Set KASPI_PRODUCT_NAME in .env once for this test SKU and retry."
     )
+
+
+async def inspect_kaspi_product(
+    *,
+    reference: str,
+    city_id: str,
+    zone_id: str,
+    max_pages: int = 3,
+) -> dict[str, Any]:
+    """Read a new product card for Product Test Lab in the local Agent."""
+
+    raw_reference = str(reference or "").strip()
+    if not raw_reference:
+        raise ValueError("SKU или ссылка Kaspi не указаны")
+    merchant_sku: str | None = None
+    direct_url: str | None = None
+    if "://" in raw_reference:
+        parsed = urlparse(raw_reference)
+        host = (parsed.hostname or "").casefold()
+        if parsed.scheme not in {"http", "https"} or (host != "kaspi.kz" and not host.endswith(".kaspi.kz")):
+            raise ValueError("Разрешены только ссылки на kaspi.kz")
+        direct_url = _city_url(raw_reference, city_id)
+        query = parse_qs(parsed.query)
+        merchant_sku = str((query.get("merchantSku") or [""])[0]).strip() or None
+        master_id = _product_id_from_url(raw_reference)
+    else:
+        merchant_sku = raw_reference[:128]
+        master_id = raw_reference.split("_", 1)[0].strip()
+        if not re.fullmatch(r"\d{6,18}", master_id):
+            raise ValueError("SKU должен начинаться с Kaspi master ID")
+    if not master_id:
+        raise ValueError("Не удалось определить Kaspi master ID")
+
+    timeout = httpx.Timeout(25.0, connect=15.0)
+    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+        if direct_url:
+            page = await _request_with_retry(
+                client,
+                "GET",
+                direct_url,
+                headers={
+                    "User-Agent": HEADERS["User-Agent"],
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                    "Accept-Language": HEADERS["Accept-Language"],
+                },
+            )
+            promo = _promo_conditions(page.text) or {}
+            product_url = str(page.url)
+        else:
+            page, promo, product_url = await _open_product_page(
+                client,
+                master_id=master_id,
+                city_id=city_id,
+                product_name_hint=None,
+            )
+        final_host = (urlparse(product_url).hostname or "").casefold()
+        if final_host != "kaspi.kz" and not final_host.endswith(".kaspi.kz"):
+            raise ValueError("Kaspi перенаправил карточку на внешний домен")
+        title = _page_title(page.text) or f"Kaspi product {master_id}"
+        brand = str(promo.get("brand") or "").strip() or _meta_content(page.text, "property", "product:brand")
+        image_url = _meta_content(page.text, "property", "og:image")
+        visible_price = _page_visible_price(page.text)
+
+        headers = dict(HEADERS)
+        headers["Referer"] = product_url
+        headers["X-KS-City"] = city_id
+        endpoint = f"https://kaspi.kz/yml/offer-view/offers/{quote(master_id)}"
+        body_base = {
+            "cityId": city_id,
+            "id": master_id,
+            "merchantUID": [],
+            "limit": 5,
+            "product": {
+                "brand": promo.get("brand") or brand or "",
+                "categoryCodes": promo.get("categoryCodes") or [],
+                "baseProductCodes": promo.get("baseProductCodes") or [],
+                "groups": promo.get("groups"),
+                "productSeries": promo.get("productSeries") or [],
+            },
+            "sortOption": "PRICE",
+            "highRating": None,
+            "searchText": None,
+            "isExcellentMerchant": False,
+            "zoneId": [zone_id],
+            "installationId": "-1",
+        }
+        rows: list[dict[str, Any]] = []
+        try:
+            for page_no in range(max_pages):
+                body = dict(body_base)
+                body["page"] = page_no
+                response = await _request_with_retry(client, "POST", endpoint, headers=headers, json=body)
+                page_rows = _offers(response.json())
+                rows.extend(page_rows)
+                if len(page_rows) < 5:
+                    break
+        except Exception:
+            rows = []
+    rows.sort(key=lambda row: _offer_price(row) or Decimal("999999999"))
+    top_offers = [
+        {
+            "merchant_id": _merchant_id(row) or None,
+            "merchant_name": str(row.get("merchantName") or "").strip() or None,
+            "merchant_sku": _merchant_sku(row) or None,
+            "price_kzt": None if _offer_price(row) is None else format(_offer_price(row), "f"),
+            "delivery": _delivery_summary(row),
+        }
+        for row in rows[:10]
+    ]
+    return {
+        "kaspi_product_id": master_id,
+        "merchant_sku": merchant_sku or master_id,
+        "product_name": title,
+        "brand": brand,
+        "image_url": image_url,
+        "product_url": product_url,
+        "page_visible_price_kzt": None if visible_price is None else format(visible_price, "f"),
+        "city_id": city_id,
+        "offers": {
+            "seller_count_scanned": len(rows),
+            "best_offer_price_kzt": None if not rows or _offer_price(rows[0]) is None else format(_offer_price(rows[0]), "f"),
+            "top_offers": top_offers,
+        },
+    }
 
 
 async def scan_kaspi_competitors(
@@ -715,6 +915,7 @@ async def scan_kaspi_competitors(
         product_name = product_name_hint or _page_title(page.text) or f"Kaspi product {master_id}"
         product_brand = str(promo.get("brand") or product_brand_hint or "").strip() or None
         page_visible_price = _page_visible_price(page.text)
+        image_url = _meta_content(page.text, "property", "og:image")
 
         headers = dict(HEADERS)
         headers["Referer"] = str(page.url)
@@ -871,4 +1072,5 @@ async def scan_kaspi_competitors(
         competitor_delivery_days=_delivery_days(competitor, today=scan_date),
         delivery_filtered_count=delivery_filtered_count,
         delivery_selection_reason=delivery_selection_reason,
+        image_url=image_url,
     )
