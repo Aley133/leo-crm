@@ -77,6 +77,7 @@ class Product(Base):
     )
     name: Mapped[str] = mapped_column(String(500))
     brand: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
+    image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
     status: Mapped[str] = mapped_column(String(32), default=ProductStatus.DRAFT.value, index=True)
     sale_enabled: Mapped[bool] = mapped_column(
         Boolean,

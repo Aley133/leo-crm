@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Тест товара</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
+  <link rel="stylesheet" href="/static/product-test.css?v=20260819-1">
+  <link rel="stylesheet" href="/static/product-images.css?v=20260819-1">
+  <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
+  <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
+  <script src="/static/theme.js?v=20260803-2"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a class="active" href="/crm/product-test">Тест товара</a><a href="/crm/orders">Заказы</a><a href="/crm/revenue">Выручка</a><a href="/crm/dumping">Демпинг</a><a href="/crm/fast-dumping">Быстрый демпинг</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Product Lab</span></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div><p class="eyebrow">PRODUCT LAB</p><h1>Тест товара</h1><p class="subtitle">Проверяйте новую карточку Kaspi до закупки и добавляйте её в отдельный накопительный XML.</p></div>
+        <button id="refresh" class="button" type="button">Обновить</button>
+      </header>
+
+      <section id="auth-panel" class="auth-panel">
+        <div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div>
+        <form id="token-form"><input id="token" type="password" autocomplete="current-password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form>
+      </section>
+      <div id="message" class="message" role="status" aria-live="polite"></div>
+
+      <section id="lab-page" class="hidden">
+        <section id="agent-card" class="lab-agent missing">
+          <div><span class="lab-kicker">LOCAL AGENT</span><h2 id="agent-title">Проверяем Agent…</h2><p id="agent-meta">Kaspi открывается локально; сервер CRM не создаёт лишних запросов.</p></div>
+          <a class="button secondary" href="https://github.com/Aley133/leo-crm/releases/download/kaspi-fast-dumping-agent-latest/LEO-Kaspi-Fast-Dumping-Agent.exe" target="_blank" rel="noopener">Скачать Agent 1.0.8</a>
+        </section>
+
+        <section class="lab-section">
+          <div class="lab-head"><div><span class="lab-kicker">НОВАЯ КАРТОЧКА</span><h2>Найти товар</h2><p>Поддерживаются Kaspi SKU, составной SKU и полная ссылка на карточку.</p></div></div>
+          <form id="inspect-form" class="inspect-form">
+            <label class="wide"><span>SKU или ссылка Kaspi</span><input id="reference" maxlength="2000" placeholder="102591400_177620711 или https://kaspi.kz/shop/p/…" required></label>
+            <label><span>Город Kaspi</span><input id="city-id" maxlength="32" value="196220100" required></label>
+            <label><span>Зона Kaspi</span><input id="zone-id" maxlength="64" value="Magnum_ZONE1" required></label>
+            <button id="inspect-button" class="button" type="submit">Считать карточку</button>
+          </form>
+        </section>
+
+        <section class="metrics lab-metrics">
+          <article class="metric"><span>В лаборатории</span><strong id="total-count">0</strong><small>карточек</small></article>
+          <article class="metric"><span>В тестовом XML</span><strong id="xml-count">0</strong><small>активных цен</small></article>
+          <article class="metric"><span>В очереди</span><strong id="job-count">0</strong><small>заданий Agent</small></article>
+          <article class="metric"><span>Основной XML</span><strong id="feed-state">—</strong><small id="feed-meta">не загружен</small></article>
+        </section>
+
+        <section class="lab-section">
+          <div class="lab-head controls"><div><span class="lab-kicker">НАКОПИТЕЛЬНЫЙ XML</span><h2>Тестовые товары</h2><p>Скачивание создаёт копию основного XML и не меняет действующий каталог.</p></div><a id="download-xml" class="button" href="/api/product-test/xml">Скачать тестовый XML</a></div>
+          <div id="jobs" class="jobs"></div>
+          <div id="items" class="lab-list"></div>
+          <div id="empty" class="empty hidden">Пока нет тестовых карточек. Добавьте SKU или ссылку выше.</div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script src="/static/workspace-context.js?v=20260731-1"></script>
+  <script src="/static/product-test.js?v=20260819-1" defer></script>
+</body>
+</html>

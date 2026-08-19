@@ -192,6 +192,7 @@ def _sample(products: list[KaspiXmlProduct], *, limit: int = 10) -> list[dict]:
             "merchant_sku": item.merchant_sku,
             "name": item.name,
             "brand": item.brand,
+            "image_url": item.image_url,
         }
         for item in products[:limit]
     ]
@@ -385,6 +386,7 @@ def _commit_xml_import(
                     merchant_sku=item.merchant_sku,
                     name=item.name,
                     brand=item.brand,
+                    image_url=item.image_url,
                     status=ProductStatus.ACTIVE.value,
                     sale_enabled=item.available is not False,
                     sale_state_overridden=False,
@@ -398,6 +400,7 @@ def _commit_xml_import(
                     ("merchant_sku", item.merchant_sku),
                     ("name", item.name),
                     ("brand", item.brand),
+                    ("image_url", item.image_url),
                 ):
                     if value is not None and getattr(product, field) != value:
                         setattr(product, field, value)

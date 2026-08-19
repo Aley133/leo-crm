@@ -23,6 +23,7 @@ class ProductRegistryRow(BaseModel):
     merchant_sku: str | None
     name: str
     brand: str | None
+    image_url: str | None
     status: str
     sale_enabled: bool
     inventory_on_hand: int
@@ -133,6 +134,7 @@ def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryR
                 merchant_sku=product.merchant_sku,
                 name=product.name,
                 brand=product.brand,
+                image_url=product.image_url,
                 status=product.status,
                 sale_enabled=bool(product.sale_enabled),
                 inventory_on_hand=stock_counts.get(int(product.id), 0),

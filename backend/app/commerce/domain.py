@@ -53,6 +53,7 @@ class CommerceOrderLine:
     production_completed_quantity: int = 0
     incoming_reserved_quantity: int = 0
     order_logistics_share: Decimal | None = None
+    image_url: str | None = None
 
     @property
     def is_resolved(self) -> bool:

@@ -12,6 +12,7 @@ class CommerceOrderLineRead(BaseModel):
     external_product_id: str | None
     merchant_sku: str | None
     title: str
+    image_url: str | None
     quantity: int
     unit_price: Decimal
     line_total: Decimal

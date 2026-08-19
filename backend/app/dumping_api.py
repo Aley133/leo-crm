@@ -239,6 +239,7 @@ def _product_payload(product: Product) -> dict:
         "kaspi_product_id": product.kaspi_product_id,
         "merchant_sku": product.merchant_sku,
         "brand": product.brand,
+        "image_url": product.image_url,
         "status": product.status,
         "sale_enabled": bool(product.sale_enabled),
     }
@@ -345,6 +346,7 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
         result.append({
             "product_id": product.id,
             "name": product.name,
+            "image_url": product.image_url,
             "kaspi_product_id": product.kaspi_product_id,
             "merchant_sku": product.merchant_sku,
             "sale_enabled": bool(product.sale_enabled),

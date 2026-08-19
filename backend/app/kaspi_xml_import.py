@@ -3,6 +3,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from xml.etree import ElementTree
 
+from .product_images import normalize_product_image_url
+
 
 MAX_XML_BYTES = 25 * 1024 * 1024
 
@@ -13,6 +15,7 @@ class KaspiXmlProduct:
     merchant_sku: str | None
     name: str
     brand: str | None
+    image_url: str | None
     available: bool | None
 
 
@@ -108,12 +111,23 @@ def parse_kaspi_products(xml_bytes: bytes) -> tuple[list[KaspiXmlProduct], list[
             warnings.append(f"Товар {kaspi_id}: название не найдено, использован Kaspi ID")
 
         brand = _child_text(element, "brand", "vendor", limit=255)
+        image_url = normalize_product_image_url(
+            _child_text(
+                element,
+                "picture",
+                "image",
+                "imageurl",
+                "pictureurl",
+                limit=2048,
+            )
+        )
         merchant_sku = _child_text(element, "merchantsku", "merchant_sku", limit=128) or attribute_sku
         products_by_id[kaspi_id] = KaspiXmlProduct(
             kaspi_product_id=kaspi_id,
             merchant_sku=merchant_sku,
             name=name,
             brand=brand,
+            image_url=image_url,
             available=_offer_availability(element),
         )
 

@@ -23,6 +23,7 @@ from .fast_dumping_models import (
 )
 from .fast_dumping_pricing import FastPriceDecision, decide_fast_price
 from .models import Product
+from .product_images import normalize_product_image_url
 
 
 ACTIVE_JOB_STATUSES = {
@@ -143,6 +144,7 @@ def normalize_market_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
     return {
         "product_name": _text(payload.get("product_name"), limit=500),
         "product_brand": _text(payload.get("product_brand"), limit=255),
+        "image_url": normalize_product_image_url(_text(payload.get("image_url"), limit=2048)),
         "own_price_kzt": _json_money(
             _decimal(payload.get("own_price_kzt"), field="own_price_kzt")
         ),
@@ -752,6 +754,8 @@ def complete_scan(
     state.seller_count = market.get("seller_count")
     state.product_url = market.get("product_url")
     state.product_model = market.get("product_name") or product.name
+    if market.get("image_url"):
+        product.image_url = market["image_url"]
     state.page_visible_price_kzt = _decimal(
         market.get("page_visible_price_kzt"), field="page_visible_price_kzt"
     )

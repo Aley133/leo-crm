@@ -187,6 +187,7 @@ def list_fast_dumping_products(db: Session = Depends(get_db)) -> dict:
                 "product_id": product.id,
                 "name": product.name,
                 "brand": product.brand,
+                "image_url": product.image_url,
                 "kaspi_product_id": product.kaspi_product_id,
                 "merchant_sku": product.merchant_sku,
                 "sale_enabled": bool(product.sale_enabled),
