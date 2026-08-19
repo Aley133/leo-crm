@@ -7,11 +7,11 @@ import random
 import re
 import uuid
 from dataclasses import dataclass
-from datetime import date, datetime
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from typing import Any
 from urllib.parse import quote
-from zoneinfo import ZoneInfo
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
@@ -23,7 +23,21 @@ HEADERS = {
     "Origin": "https://kaspi.kz",
     "Referer": "https://kaspi.kz/shop/",
 }
-KASPI_TIMEZONE = ZoneInfo("Asia/Almaty")
+
+
+def _kaspi_timezone():
+    """Resolve Almaty time even in a minimal Windows/PyInstaller runtime."""
+
+    try:
+        return ZoneInfo("Asia/Almaty")
+    except ZoneInfoNotFoundError:
+        # Windows has no system IANA timezone database. The standalone agent
+        # normally bundles tzdata, but a fixed UTC+5 fallback keeps startup
+        # and delivery-date calculations safe if that package is unavailable.
+        return timezone(timedelta(hours=5), name="Asia/Almaty")
+
+
+KASPI_TIMEZONE = _kaspi_timezone()
 
 
 @dataclass(frozen=True, slots=True)

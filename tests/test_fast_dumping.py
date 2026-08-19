@@ -38,6 +38,7 @@ from backend.app.workspace_context import workspace_context
 from backend.app.workspace_models import KaspiAccountCredential, Workspace
 from tools.kaspi_fast_dumping_scanner import (
     _delivery_days,
+    _kaspi_timezone,
     _merchant_id,
     _own_match,
     _page_visible_price,
@@ -46,6 +47,25 @@ from tools.kaspi_fast_dumping_scanner import (
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def test_scanner_falls_back_to_utc_plus_five_without_tzdata(monkeypatch) -> None:
+    def missing_zone(_name: str):
+        from zoneinfo import ZoneInfoNotFoundError
+
+        raise ZoneInfoNotFoundError("tzdata is unavailable")
+
+    monkeypatch.setattr(
+        "tools.kaspi_fast_dumping_scanner.ZoneInfo",
+        missing_zone,
+    )
+
+    fallback = _kaspi_timezone()
+
+    assert fallback.utcoffset(None) == timedelta(hours=5)
+    assert datetime(2026, 8, 19, 20, tzinfo=UTC).astimezone(fallback).date() == date(
+        2026, 8, 20
+    )
 
 
 def test_scanner_recognizes_nested_merchant_uid_and_safe_sku_fallback() -> None:
@@ -164,6 +184,34 @@ def test_delivery_filter_returns_to_second_place_after_undercutting_slow_offer()
     assert assessments[id(zecar)].delivery_gap_days == 9
     assert selected is dmg
     assert decision.target_price_kzt == Decimal("8537.00")
+
+
+def test_delivery_filter_matches_august_19_suprenamin_market() -> None:
+    today = date(2026, 8, 19)
+    own = {"price": "8421", "delivery": "2026-08-20T18:00:00+00:00"}
+    zecar = {"price": "8422", "delivery": "2026-08-29T18:00:00+00:00"}
+    dmg = {"price": "8454", "delivery": "2026-08-20T18:00:00+00:00"}
+
+    selected, assessments = _select_delivery_aware_competitor(
+        own,
+        [zecar, dmg],
+        max_price_premium_kzt=500,
+        min_delivery_advantage_days=3,
+        today=today,
+    )
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("8421"),
+        competitor_price_kzt=Decimal(str(selected["price"])),
+        safe_floor_kzt=Decimal("8262"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("35"),
+    )
+
+    assert assessments[id(zecar)].ignored is True
+    assert assessments[id(zecar)].delivery_gap_days == 9
+    assert selected is dmg
+    assert decision.target_price_kzt == Decimal("8453.00")
 
 
 def test_delivery_rebound_stays_below_slow_offer_premium_ceiling() -> None:
