@@ -3,6 +3,8 @@ from decimal import Decimal
 from pathlib import Path
 from xml.etree import ElementTree
 
+import httpx
+import pytest
 from sqlalchemy import select
 
 from backend.app.kaspi_xml_import import parse_kaspi_products
@@ -18,7 +20,12 @@ from backend.app.product_test_api import (
 )
 from backend.app.product_test_models import ProductTestItem, ProductTestJob
 from backend.app import product_test_api
-from tools.kaspi_fast_dumping_scanner import _meta_content, _product_id_from_url
+from tools import kaspi_fast_dumping_scanner
+from tools.kaspi_fast_dumping_scanner import (
+    _meta_content,
+    _open_product_page,
+    _product_id_from_url,
+)
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -87,6 +94,55 @@ def test_agent_reader_supports_composite_and_full_kaspi_references() -> None:
     assert _product_id_from_url(url) == "101268790"
     html = '<meta property="og:image" content="https://resources.cdn-kaspi.kz/img/p.jpg">'
     assert _meta_content(html, "property", "og:image") == "https://resources.cdn-kaspi.kz/img/p.jpg"
+
+
+def test_public_photo_card_does_not_require_promo_conditions(monkeypatch) -> None:
+    calls: list[str] = []
+    card_html = (
+        '<html><head><meta property="og:image" '
+        'content="https://resources.cdn-kaspi.kz/img/p/photo.jpg"></head></html>'
+    )
+
+    async def fake_request(_client, _method, url, **_kwargs):
+        calls.append(url)
+        canonical = "https://kaspi.kz/shop/p/test-product-110563850/?c=196220100"
+        return httpx.Response(
+            200,
+            text=card_html,
+            request=httpx.Request("GET", canonical),
+        )
+
+    monkeypatch.setattr(kaspi_fast_dumping_scanner, "_request_with_retry", fake_request)
+    page, promo, product_url = asyncio.run(
+        _open_product_page(
+            object(),
+            master_id="110563850",
+            city_id="196220100",
+            product_name_hint=None,
+            require_promo=False,
+        )
+    )
+
+    assert len(calls) == 1
+    assert promo == {}
+    assert _product_id_from_url(product_url) == "110563850"
+    assert _meta_content(page.text, "property", "og:image") == "https://resources.cdn-kaspi.kz/img/p/photo.jpg"
+
+
+def test_fast_dumping_still_requires_promo_conditions(monkeypatch) -> None:
+    async def fake_request(_client, _method, url, **_kwargs):
+        return httpx.Response(200, text="<html></html>", request=httpx.Request("GET", url))
+
+    monkeypatch.setattr(kaspi_fast_dumping_scanner, "_request_with_retry", fake_request)
+    with pytest.raises(ValueError, match="not resolved"):
+        asyncio.run(
+                _open_product_page(
+                    object(),
+                master_id="110563850",
+                city_id="196220100",
+                product_name_hint=None,
+            )
+        )
 
 
 def test_legacy_product_test_agent_claim_is_retired() -> None:
@@ -201,3 +257,5 @@ def test_product_photos_are_lazy_in_core_crm_surfaces() -> None:
     for filename in ("orders.html", "products.html", "product-detail.html", "dumping.html", "fast-dumping.html"):
         page = (ROOT / "backend/app/static" / filename).read_text(encoding="utf-8")
         assert "product-image-resolver.js" in page
+    photo_css = (ROOT / "backend/app/static/product-images.css").read_text(encoding="utf-8")
+    assert ".product-thumb,.order-product-photo,.product-photo,.fast-product-photo,.dumping-product-photo{width:100px;height:100px" in photo_css
