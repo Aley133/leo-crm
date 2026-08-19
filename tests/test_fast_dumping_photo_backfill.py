@@ -16,9 +16,15 @@ from backend.app.models import Product
 from tools import kaspi_fast_dumping_agent as agent
 
 
-def _product(*, kaspi_id: str, name: str, image_url: str | None = None) -> Product:
+def _product(
+    *,
+    kaspi_id: str,
+    name: str,
+    image_url: str | None = None,
+    workspace_id: int = 1,
+) -> Product:
     return Product(
-        workspace_id=1,
+        workspace_id=workspace_id,
         kaspi_product_id=kaspi_id,
         merchant_sku=f"{kaspi_id}_SKU",
         name=name,
@@ -38,11 +44,12 @@ def test_photo_claim_prioritizes_visible_missing_product_and_leases_it(db_sessio
     db_session.add_all([cached, backlog, visible])
     db_session.commit()
 
-    job = _claim_photo_job(db_session, workspace_id=1, agent_id="agent-w1")
+    job = _claim_photo_job(db_session, agent_id="agent-w1")
     db_session.commit()
 
     assert job is not None
     assert job["product_id"] == visible.id
+    assert job["catalog_workspace_id"] == 1
     assert job["kaspi_product_id"] == "110000003"
     assert job["city_id"] == "196220100"
     assert len(job["lease_token"]) == 32
@@ -52,11 +59,57 @@ def test_photo_claim_prioritizes_visible_missing_product_and_leases_it(db_sessio
     assert visible.image_backfill_after > datetime.now(UTC)
 
 
+def test_photo_claim_covers_the_full_catalog_across_workspaces(db_session) -> None:
+    db_session.info["include_all_workspaces"] = True
+    leoxpress_product = _product(
+        kaspi_id="110000004",
+        name="LeoXpress product without dumping",
+        workspace_id=3,
+    )
+    db_session.add(leoxpress_product)
+    db_session.commit()
+
+    job = _claim_photo_job(db_session, agent_id="agent-w1")
+
+    assert job is not None
+    assert job["product_id"] == leoxpress_product.id
+    assert job["catalog_workspace_id"] == 3
+
+
+def test_photo_claim_reuses_a_cached_image_across_workspaces_without_http(db_session) -> None:
+    db_session.info["include_all_workspaces"] = True
+    cached = _product(
+        kaspi_id="110000005_111",
+        name="BARWORK cached product",
+        image_url="https://resources.cdn-kaspi.kz/img/shared.jpg",
+        workspace_id=1,
+    )
+    leoxpress_product = _product(
+        kaspi_id="110000005_222",
+        name="LeoXpress duplicate",
+        workspace_id=3,
+    )
+    next_product = _product(
+        kaspi_id="110000006",
+        name="Next global product",
+        workspace_id=3,
+    )
+    db_session.add_all([cached, leoxpress_product, next_product])
+    db_session.commit()
+
+    job = _claim_photo_job(db_session, agent_id="agent-w1")
+    db_session.commit()
+
+    assert leoxpress_product.image_url == cached.image_url
+    assert leoxpress_product.image_backfill_after is None
+    assert job is not None and job["product_id"] == next_product.id
+
+
 def test_photo_completion_saves_url_atomically_and_never_reclaims_product(db_session) -> None:
     product = _product(kaspi_id="110000010", name="Needs photo")
     db_session.add(product)
     db_session.commit()
-    job = _claim_photo_job(db_session, workspace_id=1, agent_id="agent-w1")
+    job = _claim_photo_job(db_session, agent_id="agent-w1")
     db_session.commit()
     assert job is not None
 
@@ -79,7 +132,43 @@ def test_photo_completion_saves_url_atomically_and_never_reclaims_product(db_ses
     assert product.image_backfill_lease_token is None
     assert product.image_backfill_agent_id is None
     assert product.image_backfill_error is None
-    assert _claim_photo_job(db_session, workspace_id=1, agent_id="agent-w1") is None
+    assert _claim_photo_job(db_session, agent_id="agent-w1") is None
+
+
+def test_photo_completion_shares_the_image_with_leoxpress(db_session) -> None:
+    db_session.info["include_all_workspaces"] = True
+    barwork_product = _product(
+        kaspi_id="110000011",
+        name="BARWORK product",
+        workspace_id=1,
+    )
+    leoxpress_product = _product(
+        kaspi_id="110000011_999",
+        name="LeoXpress product",
+        workspace_id=3,
+    )
+    db_session.add_all([barwork_product, leoxpress_product])
+    db_session.commit()
+    job = _claim_photo_job(db_session, agent_id="agent-w1")
+    db_session.commit()
+    assert job is not None
+
+    result = complete_photo(
+        barwork_product.id,
+        FastPhotoComplete(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=job["lease_token"],
+            status="succeeded",
+            image_url="https://resources.cdn-kaspi.kz/img/m/p/shared-photo.jpg",
+        ),
+        db_session,
+    )
+
+    assert result["status"] == "saved"
+    assert result["updated_products"] == 2
+    assert barwork_product.image_url == result["image_url"]
+    assert leoxpress_product.image_url == result["image_url"]
 
 
 def test_photo_failure_is_deferred_without_blocking_other_products(db_session) -> None:
@@ -87,7 +176,7 @@ def test_photo_failure_is_deferred_without_blocking_other_products(db_session) -
     next_product = _product(kaspi_id="110000021", name="Next")
     db_session.add_all([failed, next_product])
     db_session.commit()
-    job = _claim_photo_job(db_session, workspace_id=1, agent_id="agent-w1")
+    job = _claim_photo_job(db_session, agent_id="agent-w1")
     db_session.commit()
     assert job is not None and job["product_id"] == failed.id
 
@@ -110,7 +199,7 @@ def test_photo_failure_is_deferred_without_blocking_other_products(db_session) -
     assert failed.image_url is None
     assert failed.image_backfill_error == "Kaspi returned 429"
     assert failed.image_backfill_after > datetime.now(UTC)
-    next_job = _claim_photo_job(db_session, workspace_id=1, agent_id="agent-w1")
+    next_job = _claim_photo_job(db_session, agent_id="agent-w1")
     assert next_job is not None and next_job["product_id"] == next_product.id
 
 
