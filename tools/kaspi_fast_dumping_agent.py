@@ -9,6 +9,7 @@ import json
 import os
 import platform
 import random
+import re
 import socket
 import sys
 import time
@@ -18,6 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 from threading import Lock
 from urllib.error import HTTPError, URLError
+from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
 from tools.kaspi_fast_dumping_scanner import (
@@ -27,13 +29,19 @@ from tools.kaspi_fast_dumping_scanner import (
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 
 
-VERSION = "1.0.9"
+VERSION = "1.0.10"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
 CRM_HTTP_TIMEOUT_SECONDS = 30
 CRM_RETRY_ATTEMPTS = 4
 SCAN_TIMEOUT_SECONDS = 120
+PHOTO_HTTP_TIMEOUT_SECONDS = 20
+PHOTO_REQUEST_SPACING_SECONDS = 1.5
+PHOTO_IDLE_SECONDS = 60
+PHOTO_FAILURE_RETRY_SECONDS = 6 * 60 * 60
+PHOTO_TRANSIENT_RETRY_SECONDS = 30 * 60
+KASPI_PHOTO_ENDPOINT = "https://kaspi.kz/shop/rest/misc/product/mobile"
 TRANSIENT_HTTP_STATUSES = {
     408,
     425,
@@ -73,6 +81,12 @@ class CRMRequestError(RuntimeError):
         super().__init__(message)
         self.retryable = retryable
         self.retry_after = retry_after
+
+
+class KaspiPhotoRequestError(RuntimeError):
+    def __init__(self, message: str, *, retry_after_seconds: int) -> None:
+        super().__init__(message)
+        self.retry_after_seconds = retry_after_seconds
 
 
 def _acquire_single_instance(workspace_id: int) -> None:
@@ -417,6 +431,74 @@ def _post_json(url: str, token: str, payload: dict) -> dict:
         ) from exc
 
 
+def _fetch_kaspi_photo(kaspi_product_id: str, city_id: str) -> str:
+    """Fetch one compact Kaspi JSON document through the local machine IP."""
+
+    master_id = str(kaspi_product_id or "").split("_", 1)[0].strip()
+    if not re.fullmatch(r"\d{6,18}", master_id):
+        raise KaspiPhotoRequestError(
+            "Kaspi product ID имеет неверный формат",
+            retry_after_seconds=PHOTO_FAILURE_RETRY_SECONDS,
+        )
+    url = f"{KASPI_PHOTO_ENDPOINT}?{urlencode({'productCode': master_id, 'cityId': city_id})}"
+    request = Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) "
+                "Chrome/151.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "ru-RU,ru;q=0.9",
+            "Referer": "https://kaspi.kz/shop/",
+        },
+        method="GET",
+    )
+    try:
+        with urlopen(request, timeout=PHOTO_HTTP_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except HTTPError as exc:
+        retry_seconds = (
+            PHOTO_TRANSIENT_RETRY_SECONDS
+            if exc.code == 429 or exc.code >= 500
+            else PHOTO_FAILURE_RETRY_SECONDS
+        )
+        raise KaspiPhotoRequestError(
+            f"Kaspi photo JSON returned HTTP {exc.code}",
+            retry_after_seconds=retry_seconds,
+        ) from exc
+    except (URLError, TimeoutError, json.JSONDecodeError) as exc:
+        raise KaspiPhotoRequestError(
+            f"Kaspi photo JSON недоступен: {exc}",
+            retry_after_seconds=PHOTO_TRANSIENT_RETRY_SECONDS,
+        ) from exc
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    card = data.get("card") if isinstance(data, dict) else None
+    returned_id = str(card.get("id") if isinstance(card, dict) else "").strip()
+    if returned_id != master_id:
+        raise KaspiPhotoRequestError(
+            f"Kaspi вернул другой товар: {returned_id or 'ID отсутствует'}",
+            retry_after_seconds=PHOTO_FAILURE_RETRY_SECONDS,
+        )
+    gallery = data.get("galleryImages") if isinstance(data, dict) else None
+    first = gallery[0] if isinstance(gallery, list) and gallery else None
+    if not isinstance(first, dict):
+        raise KaspiPhotoRequestError(
+            "Kaspi не вернул galleryImages[0]",
+            retry_after_seconds=PHOTO_FAILURE_RETRY_SECONDS,
+        )
+    for size in ("large", "medium", "small"):
+        image_url = str(first.get(size) or "").strip()
+        if image_url:
+            return image_url
+    raise KaspiPhotoRequestError(
+        "Kaspi не вернул URL фотографии",
+        retry_after_seconds=PHOTO_FAILURE_RETRY_SECONDS,
+    )
+
+
 async def _post_json_with_retry(
     url: str,
     token: str,
@@ -708,6 +790,60 @@ async def _process_verify(
     )
 
 
+async def _process_photo(
+    *,
+    api_url: str,
+    token: str,
+    job: dict,
+    agent_id: str,
+    workspace_id: int,
+) -> None:
+    product_id = int(job["product_id"])
+    try:
+        image_url = await asyncio.to_thread(
+            _fetch_kaspi_photo,
+            str(job.get("kaspi_product_id") or ""),
+            str(job.get("city_id") or "196220100"),
+        )
+        payload = {
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "lease_token": job["lease_token"],
+            "status": "succeeded",
+            "image_url": image_url,
+        }
+    except KaspiPhotoRequestError as exc:
+        payload = {
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "lease_token": job["lease_token"],
+            "status": "failed",
+            "error_code": type(exc).__name__,
+            "error_message": str(exc)[:1000],
+            "retry_after_seconds": exc.retry_after_seconds,
+        }
+    except Exception as exc:
+        payload = {
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "lease_token": job["lease_token"],
+            "status": "failed",
+            "error_code": type(exc).__name__,
+            "error_message": str(exc)[:1000],
+            "retry_after_seconds": PHOTO_FAILURE_RETRY_SECONDS,
+        }
+    result = await _post_json_with_retry(
+        f"{api_url}/api/fast-dumping-agent/photo-jobs/{product_id}/complete",
+        token,
+        payload,
+        operation=f"Сохранение фото товара #{product_id}",
+    )
+    _log(
+        f"Фото товара #{product_id}: {result.get('status')}",
+        workspace_id=workspace_id,
+    )
+
+
 async def main(
     *,
     once: bool = False,
@@ -806,6 +942,10 @@ async def main(
         "Realtime-записи изолированы от обычного демпинга и XML.",
         workspace_id=selected_workspace,
     )
+    _log(
+        "Фото: локальный JSON-backfill включён; ценовые задания всегда первыми.",
+        workspace_id=selected_workspace,
+    )
     if os.name == "nt" and not once:
         _show_message(
             "LEO Fast Dumping Agent",
@@ -828,33 +968,89 @@ async def main(
     async def worker(number: int) -> None:
         idle_seconds = 2.0
         worker_id = f"{agent_id}-w{number}"
+        price_claim_not_before = 0.0
+        photo_claim_not_before = 0.0
+        price_idle_confirmed_until = 0.0
         while True:
             try:
-                claim = await _post_json_with_retry(
-                    f"{api_url}/api/fast-dumping-agent/claim",
-                    token,
-                    _agent_payload(
-                        worker_id,
-                        selected_workspace,
-                        concurrency,
-                        merchant_uid,
-                    ),
-                    operation="Получение задания",
-                )
-                job = claim.get("job")
-                if not job:
-                    if once:
-                        return
-                    idle_seconds = min(
-                        IDLE_POLL_MAX_SECONDS,
-                        max(
-                            2.0,
-                            float(claim.get("retry_after_seconds") or 2),
-                            idle_seconds * 1.5,
+                now = time.monotonic()
+                job = None
+                if now >= price_claim_not_before:
+                    claim = await _post_json_with_retry(
+                        f"{api_url}/api/fast-dumping-agent/claim",
+                        token,
+                        _agent_payload(
+                            worker_id,
+                            selected_workspace,
+                            concurrency,
+                            merchant_uid,
                         ),
+                        operation="Получение задания",
                     )
-                    await asyncio.sleep(idle_seconds)
+                    job = claim.get("job")
+                    if job:
+                        price_claim_not_before = 0.0
+                        price_idle_confirmed_until = 0.0
+                    else:
+                        if once:
+                            return
+                        idle_seconds = min(
+                            IDLE_POLL_MAX_SECONDS,
+                            max(
+                                2.0,
+                                float(claim.get("retry_after_seconds") or 2),
+                                idle_seconds * 1.5,
+                            ),
+                        )
+                        price_claim_not_before = now + idle_seconds
+                        if not claim.get("throttled"):
+                            price_idle_confirmed_until = price_claim_not_before
+
+                if not job:
+                    now = time.monotonic()
+                    if (
+                        number == 1
+                        and now < price_idle_confirmed_until
+                        and now >= photo_claim_not_before
+                    ):
+                        photo_claim = await _post_json_with_retry(
+                            f"{api_url}/api/fast-dumping-agent/photo-claim",
+                            token,
+                            _agent_payload(
+                                worker_id,
+                                selected_workspace,
+                                concurrency,
+                                merchant_uid,
+                            ),
+                            operation="Получение фонового фото-задания",
+                        )
+                        photo_job = photo_claim.get("job")
+                        if photo_job:
+                            await _process_photo(
+                                api_url=api_url,
+                                token=token,
+                                job=photo_job,
+                                agent_id=worker_id,
+                                workspace_id=selected_workspace,
+                            )
+                            photo_claim_not_before = (
+                                time.monotonic() + PHOTO_REQUEST_SPACING_SECONDS
+                            )
+                            continue
+                        photo_claim_not_before = now + max(
+                            2.0,
+                            float(
+                                photo_claim.get("retry_after_seconds")
+                                or PHOTO_IDLE_SECONDS
+                            ),
+                        )
+                    due = [price_claim_not_before]
+                    if number == 1 and price_idle_confirmed_until > now:
+                        due.append(photo_claim_not_before)
+                    delay = max(0.5, min(due) - time.monotonic())
+                    await asyncio.sleep(min(IDLE_POLL_MAX_SECONDS, delay))
                     continue
+
                 idle_seconds = 2.0
                 common = {
                     "api_url": api_url,

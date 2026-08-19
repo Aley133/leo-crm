@@ -228,6 +228,7 @@ def test_backend_photo_reader_does_not_amplify_mobile_rate_limit(monkeypatch) ->
     monkeypatch.setattr(kaspi_product_photo.httpx, "AsyncClient", client_factory)
     monkeypatch.setattr(kaspi_product_photo, "_REQUEST_SPACING_SECONDS", 0)
     kaspi_product_photo._NEXT_REQUEST_AT = 0
+
     with pytest.raises(kaspi_product_photo.KaspiPhotoReadError, match="429"):
         asyncio.run(
             kaspi_product_photo.fetch_kaspi_product_photo(
@@ -325,7 +326,7 @@ def test_product_test_inspection_runs_directly_in_crm(db_session, monkeypatch) -
     assert job.agent_id == "crm-http"
 
 
-def test_missing_product_photo_is_resolved_once_and_cached(db_session, monkeypatch) -> None:
+def test_missing_product_photo_is_prioritized_for_local_agent_and_cached(db_session) -> None:
     product = Product(
         workspace_id=1,
         kaspi_product_id="110563850",
@@ -334,26 +335,22 @@ def test_missing_product_photo_is_resolved_once_and_cached(db_session, monkeypat
     )
     db_session.add(product)
     db_session.commit()
-    calls: list[dict] = []
 
-    async def fake_photo(**options):
-        calls.append(options)
-        return "https://resources.cdn-kaspi.kz/img/existing-product.jpg"
+    first = resolve_product_image(product.id, db_session)
 
-    monkeypatch.setattr("backend.app.product_registry_api.fetch_kaspi_product_photo", fake_photo)
-    first = asyncio.run(resolve_product_image(product.id, db_session))
-    second = asyncio.run(resolve_product_image(product.id, db_session))
-
-    assert first.image_url == "https://resources.cdn-kaspi.kz/img/existing-product.jpg"
+    assert first.image_url is None
     assert first.cached is False
-    assert second.cached is True
-    assert calls == [{
-        "kaspi_product_id": "110563850",
-        "product_name": "Test existing product",
-        "city_id": "196220100",
-    }]
+    assert first.pending is True
     db_session.refresh(product)
-    assert product.image_url == first.image_url
+    assert product.image_backfill_after is not None
+
+    product.image_url = "https://resources.cdn-kaspi.kz/img/existing-product.jpg"
+    db_session.commit()
+    second = resolve_product_image(product.id, db_session)
+
+    assert second.cached is True
+    assert second.pending is False
+    assert second.image_url == product.image_url
 
 
 def test_product_photos_are_lazy_in_core_crm_surfaces() -> None:
@@ -368,6 +365,7 @@ def test_product_photos_are_lazy_in_core_crm_surfaces() -> None:
     assert "IntersectionObserver" in resolver
     assert "activeRequests < 2" in resolver
     assert "/resolve-image" in resolver
+    assert "Ожидает Agent" in resolver
     for filename in ("orders.html", "products.html", "product-detail.html", "dumping.html", "fast-dumping.html"):
         page = (ROOT / "backend/app/static" / filename).read_text(encoding="utf-8")
         assert "product-image-resolver.js" in page
