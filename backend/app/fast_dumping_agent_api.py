@@ -102,6 +102,7 @@ _MIN_CLAIM_INTERVAL_SECONDS = 2.0
 _IDLE_CLAIM_INTERVAL_SECONDS = 60.0
 _CLAIM_NOT_BEFORE: dict[int, float] = {}
 _PHOTO_LEASE_SECONDS = 30 * 60
+_PHOTO_CACHE_REUSE_LIMIT = 100
 
 
 def _now() -> datetime:
@@ -200,46 +201,111 @@ def _defer_claims(
         )
 
 
+def _master_kaspi_product_id(value: str | None) -> str:
+    return str(value or "").split("_", 1)[0].strip()
+
+
+def _shared_product_statement(master_product_id: str):
+    escaped = (
+        master_product_id.replace("\\", "\\\\")
+        .replace("%", "\\%")
+        .replace("_", "\\_")
+    )
+    return select(Product).where(
+        or_(
+            Product.kaspi_product_id == master_product_id,
+            Product.kaspi_product_id.like(f"{escaped}\\_%", escape="\\"),
+        )
+    )
+
+
+def _shared_products(db: Session, master_product_id: str) -> list[Product]:
+    return list(
+        db.scalars(
+            _shared_product_statement(master_product_id).order_by(Product.id)
+        ).all()
+    )
+
+
+def _cached_shared_image(db: Session, master_product_id: str) -> str | None:
+    for product in _shared_products(db, master_product_id):
+        image_url = normalize_product_image_url(product.image_url)
+        if image_url:
+            return image_url
+    return None
+
+
+def _apply_shared_image(
+    db: Session,
+    *,
+    master_product_id: str,
+    image_url: str,
+) -> int:
+    updated = 0
+    for product in _shared_products(db, master_product_id):
+        if product.image_url != image_url:
+            product.image_url = image_url
+            updated += 1
+        product.image_backfill_after = None
+        product.image_backfill_lease_token = None
+        product.image_backfill_agent_id = None
+        product.image_backfill_error = None
+    return updated
+
+
 def _claim_photo_job(
     db: Session,
     *,
-    workspace_id: int,
     agent_id: str,
 ) -> dict | None:
-    now = _now()
-    product = db.scalar(
-        select(Product)
-        .where(
-            Product.workspace_id == workspace_id,
-            or_(Product.image_url.is_(None), Product.image_url == ""),
-            or_(
+    for _ in range(_PHOTO_CACHE_REUSE_LIMIT):
+        now = _now()
+        product = db.scalar(
+            select(Product)
+            .where(
+                or_(Product.image_url.is_(None), Product.image_url == ""),
+                or_(
+                    Product.image_backfill_after.is_(None),
+                    Product.image_backfill_after <= now,
+                ),
+            )
+            # A visible CRM placeholder sets image_backfill_after, so non-null
+            # due rows are served before the one-time global catalog backlog.
+            .order_by(
                 Product.image_backfill_after.is_(None),
-                Product.image_backfill_after <= now,
-            ),
+                Product.image_backfill_after.desc(),
+                Product.id,
+            )
+            .limit(1)
+            .with_for_update(skip_locked=True)
         )
-        # A visible CRM placeholder sets image_backfill_after, so non-null due
-        # rows are served before the one-time legacy backlog.
-        .order_by(
-            Product.image_backfill_after.is_(None),
-            Product.image_backfill_after.desc(),
-            Product.id,
-        )
-        .limit(1)
-        .with_for_update(skip_locked=True)
-    )
-    if product is None:
-        return None
-    lease_token = uuid4().hex
-    product.image_backfill_after = now + timedelta(seconds=_PHOTO_LEASE_SECONDS)
-    product.image_backfill_lease_token = lease_token
-    product.image_backfill_agent_id = agent_id
-    return {
-        "product_id": product.id,
-        "kaspi_product_id": product.kaspi_product_id,
-        "name": product.name,
-        "city_id": "196220100",
-        "lease_token": lease_token,
-    }
+        if product is None:
+            return None
+
+        master_product_id = _master_kaspi_product_id(product.kaspi_product_id)
+        cached_image = _cached_shared_image(db, master_product_id)
+        if cached_image:
+            _apply_shared_image(
+                db,
+                master_product_id=master_product_id,
+                image_url=cached_image,
+            )
+            db.flush()
+            continue
+
+        lease_token = uuid4().hex
+        product.image_backfill_after = now + timedelta(seconds=_PHOTO_LEASE_SECONDS)
+        product.image_backfill_lease_token = lease_token
+        product.image_backfill_agent_id = agent_id
+        return {
+            "product_id": product.id,
+            "catalog_workspace_id": product.workspace_id,
+            "kaspi_product_id": product.kaspi_product_id,
+            "name": product.name,
+            "city_id": "196220100",
+            "lease_token": lease_token,
+        }
+    return None
 
 
 @router.post("/heartbeat")
@@ -332,7 +398,6 @@ def claim_photo(
         with workspace_context(payload.workspace_id):
             job = _claim_photo_job(
                 db,
-                workspace_id=payload.workspace_id,
                 agent_id=payload.agent_id,
             )
             db.commit()
@@ -357,7 +422,6 @@ def complete_photo(
                 select(Product)
                 .where(
                     Product.id == product_id,
-                    Product.workspace_id == payload.workspace_id,
                 )
                 .with_for_update()
             )
@@ -372,10 +436,18 @@ def complete_photo(
                 image_url = normalize_product_image_url(payload.image_url)
                 if not image_url:
                     raise ValueError("Agent вернул недопустимый URL фотографии")
-                product.image_url = image_url
-                product.image_backfill_after = None
-                product.image_backfill_error = None
-                result = {"status": "saved", "image_url": image_url}
+                updated_products = _apply_shared_image(
+                    db,
+                    master_product_id=_master_kaspi_product_id(
+                        product.kaspi_product_id
+                    ),
+                    image_url=image_url,
+                )
+                result = {
+                    "status": "saved",
+                    "image_url": image_url,
+                    "updated_products": updated_products,
+                }
             else:
                 product.image_backfill_after = _now() + timedelta(
                     seconds=payload.retry_after_seconds

@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.24.6"
-EXPECTED_DEPLOYMENT_MARKER = "local-agent-photo-backfill"
+EXPECTED_APP_VERSION = "0.24.7"
+EXPECTED_DEPLOYMENT_MARKER = "shared-catalog-photo-backfill"
 
 
 def test_application_metadata_contract() -> None:
