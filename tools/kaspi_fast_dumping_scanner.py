@@ -710,6 +710,7 @@ async def _open_product_page(
     master_id: str,
     city_id: str,
     product_name_hint: str | None,
+    require_promo: bool = True,
 ) -> tuple[httpx.Response, dict[str, Any], str]:
     candidates: list[str] = []
     if product_name_hint:
@@ -729,11 +730,18 @@ async def _open_product_page(
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": HEADERS["Accept-Language"],
             })
-        except httpx.HTTPStatusError:
+        except httpx.HTTPError:
             continue
         promo = _promo_conditions(page.text)
-        if promo is not None:
-            return page, promo, str(page.url)
+        resolved_id = _product_id_from_url(str(page.url))
+        # The public photo is independent from the offers payload. Kaspi can
+        # omit promoConditions while still returning the exact public card and
+        # its og:image. Product Test and the lazy CRM photo resolver therefore
+        # accept an exact master-id match, just like the standalone lab. Fast
+        # Dumping keeps require_promo=True because its offers request needs the
+        # category context from promoConditions.
+        if promo is not None or (not require_promo and resolved_id == master_id):
+            return page, promo or {}, str(page.url)
     # Some Kaspi variants do not resolve id-only paths. Search only as a
     # fallback, then open the exact card link carrying the requested master ID.
     for search_url in (
@@ -746,19 +754,25 @@ async def _open_product_page(
                 "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
                 "Accept-Language": HEADERS["Accept-Language"],
             })
-        except httpx.HTTPStatusError:
+        except httpx.HTTPError:
             continue
+        if not require_promo and _product_id_from_url(str(search.url)) == master_id:
+            return search, _promo_conditions(search.text) or {}, str(search.url)
         card_url = _product_link_from_search_html(search.text, master_id)
         if not card_url:
             continue
-        page = await _request_with_retry(client, "GET", _city_url(card_url, city_id), headers={
-            "User-Agent": HEADERS["User-Agent"],
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-            "Accept-Language": HEADERS["Accept-Language"],
-        })
+        try:
+            page = await _request_with_retry(client, "GET", _city_url(card_url, city_id), headers={
+                "User-Agent": HEADERS["User-Agent"],
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": HEADERS["Accept-Language"],
+            })
+        except httpx.HTTPError:
+            continue
         promo = _promo_conditions(page.text)
-        if promo is not None:
-            return page, promo, str(page.url)
+        resolved_id = _product_id_from_url(str(page.url)) or _product_id_from_url(card_url)
+        if promo is not None or (not require_promo and resolved_id == master_id):
+            return page, promo or {}, str(page.url)
     raise ValueError(
         "Kaspi product page was not resolved from SKU. Set KASPI_PRODUCT_NAME in .env once for this test SKU and retry."
     )
@@ -816,6 +830,7 @@ async def inspect_kaspi_product(
                 master_id=master_id,
                 city_id=city_id,
                 product_name_hint=None,
+                require_promo=False,
             )
         final_host = (urlparse(product_url).hostname or "").casefold()
         if final_host != "kaspi.kz" and not final_host.endswith(".kaspi.kz"):
