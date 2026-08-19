@@ -74,7 +74,7 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.24.3"
+APP_VERSION = "0.24.4"
 DEPLOYMENT_MARKER = "lazy-kaspi-image-backfill"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 

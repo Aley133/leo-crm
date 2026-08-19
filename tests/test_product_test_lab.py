@@ -12,6 +12,7 @@ from backend.app.fast_dumping_agent_api import FastAgentIdentity
 from backend.app.models import Product
 from backend.app.product_images import normalize_product_image_url
 from backend.app.product_registry_api import resolve_product_image
+from backend.app import kaspi_product_photo
 from backend.app.product_test_api import (
     ProductTestInspectRequest,
     build_product_test_xml,
@@ -129,6 +130,47 @@ def test_public_photo_card_does_not_require_promo_conditions(monkeypatch) -> Non
     assert _meta_content(page.text, "property", "og:image") == "https://resources.cdn-kaspi.kz/img/p/photo.jpg"
 
 
+def test_backend_photo_reader_uses_one_canonical_request(monkeypatch) -> None:
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(
+            200,
+            text=(
+                '<html><head><meta property="og:image" '
+                'content="https://resources.cdn-kaspi.kz/img/m/p/photo.jpg"></head></html>'
+            ),
+            request=request,
+        )
+
+    real_async_client = httpx.AsyncClient
+
+    def client_factory(**kwargs):
+        assert kwargs["trust_env"] is False
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(**kwargs)
+
+    monkeypatch.setattr(kaspi_product_photo.httpx, "AsyncClient", client_factory)
+    monkeypatch.setattr(kaspi_product_photo, "_REQUEST_SPACING_SECONDS", 0)
+    kaspi_product_photo._NEXT_REQUEST_AT = 0
+    image_url = asyncio.run(
+        kaspi_product_photo.fetch_kaspi_product_photo(
+            kaspi_product_id="102020267",
+            product_name="GLS Pharmaceuticals Кальций D3 600 мг",
+        )
+    )
+
+    assert image_url == "https://resources.cdn-kaspi.kz/img/m/p/photo.jpg"
+    assert len(requests) == 1
+    assert requests[0].url.path.endswith("-102020267/")
+    assert requests[0].url.params["c"] == "196220100"
+
+
+def test_backend_photo_reader_preserves_empty_timeout_name() -> None:
+    assert kaspi_product_photo._error_text(asyncio.TimeoutError()) == "TimeoutError"
+
+
 def test_fast_dumping_still_requires_promo_conditions(monkeypatch) -> None:
     async def fake_request(_client, _method, url, **_kwargs):
         return httpx.Response(200, text="<html></html>", request=httpx.Request("GET", url))
@@ -221,11 +263,11 @@ def test_missing_product_photo_is_resolved_once_and_cached(db_session, monkeypat
     db_session.commit()
     calls: list[dict] = []
 
-    async def fake_inspect(**options):
+    async def fake_photo(**options):
         calls.append(options)
-        return {"image_url": "https://resources.cdn-kaspi.kz/img/existing-product.jpg"}
+        return "https://resources.cdn-kaspi.kz/img/existing-product.jpg"
 
-    monkeypatch.setattr("backend.app.product_registry_api.inspect_kaspi_product", fake_inspect)
+    monkeypatch.setattr("backend.app.product_registry_api.fetch_kaspi_product_photo", fake_photo)
     first = asyncio.run(resolve_product_image(product.id, db_session))
     second = asyncio.run(resolve_product_image(product.id, db_session))
 
@@ -233,10 +275,9 @@ def test_missing_product_photo_is_resolved_once_and_cached(db_session, monkeypat
     assert first.cached is False
     assert second.cached is True
     assert calls == [{
-        "reference": "110563850",
+        "kaspi_product_id": "110563850",
+        "product_name": "Test existing product",
         "city_id": "196220100",
-        "zone_id": "Magnum_ZONE1",
-        "max_pages": 0,
     }]
     db_session.refresh(product)
     assert product.image_url == first.image_url

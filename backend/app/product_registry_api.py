@@ -16,9 +16,9 @@ from .dumping_models import DumpingPolicy
 from .dumping_service import physical_stock_counts, set_product_sale_enabled
 from .models import MarketplaceOrderLine, Product, ProductStatus
 from .monitoring import MonitorTarget, SupplierOfferState
+from .kaspi_product_photo import fetch_kaspi_product_photo
 from .product_images import normalize_product_image_url
 from .suppliers import ProductBinding, Supplier, SupplierProduct
-from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
 
 
 class ProductRegistryRow(BaseModel):
@@ -69,7 +69,7 @@ router = APIRouter(
 )
 
 _VISIBLE_BINDING_STATUSES = ("active", "confirmed", "degraded")
-_IMAGE_RESOLVE_SEMAPHORE = asyncio.Semaphore(2)
+_IMAGE_RESOLVE_SEMAPHORE = asyncio.Semaphore(1)
 _IMAGE_RESOLVE_LOCKS: dict[int, asyncio.Lock] = {}
 _IMAGE_FAILURE_NOT_BEFORE: dict[int, float] = {}
 _IMAGE_FAILURE_COOLDOWN_SECONDS = 10 * 60
@@ -278,26 +278,27 @@ async def resolve_product_image(product_id: int, db: Session = Depends(get_db)) 
         kaspi_product_id = str(product.kaspi_product_id or "").strip()
         if not kaspi_product_id:
             raise HTTPException(status_code=422, detail="У товара отсутствует Kaspi product ID")
+        product_name = str(product.name or "").strip()
 
         # Release the database connection before the external HTTP operation.
         db.commit()
         try:
             async with _IMAGE_RESOLVE_SEMAPHORE:
-                async with asyncio.timeout(60):
-                    card = await inspect_kaspi_product(
-                        reference=kaspi_product_id,
+                async with asyncio.timeout(40):
+                    resolved_image = await fetch_kaspi_product_photo(
+                        kaspi_product_id=kaspi_product_id,
+                        product_name=product_name,
                         city_id="196220100",
-                        zone_id="Magnum_ZONE1",
-                        max_pages=0,
                     )
-            image_url = normalize_product_image_url(card.get("image_url"))
+            image_url = normalize_product_image_url(resolved_image)
             if not image_url:
                 raise ValueError("в HTML публичной карточки отсутствует допустимый og:image")
         except Exception as exc:
             _IMAGE_FAILURE_NOT_BEFORE[product_id] = time.monotonic() + _IMAGE_FAILURE_COOLDOWN_SECONDS
+            error_detail = str(exc).strip() or type(exc).__name__
             raise HTTPException(
                 status_code=502,
-                detail=f"Не удалось получить фотографию Kaspi: {str(exc)[:500]}",
+                detail=f"Не удалось получить фотографию Kaspi: {error_detail[:500]}",
             ) from exc
 
         db.expire_all()
