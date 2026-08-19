@@ -19,11 +19,11 @@
     `[data-resolve-product-image][data-product-id="${productId}"]`,
   );
 
-  const finish = (productId, imageUrl = null, errorMessage = "") => {
+  const finish = (productId, imageUrl = null, errorMessage = "", pending = false) => {
     targetsFor(productId).forEach((target) => {
       target.removeAttribute("data-resolve-product-image");
       if (!imageUrl) {
-        if (target.tagName !== "IMG") target.textContent = "Нет фото";
+        if (target.tagName !== "IMG") target.textContent = pending ? "Ожидает Agent" : "Нет фото";
         if (errorMessage) target.title = errorMessage;
         return;
       }
@@ -56,7 +56,7 @@
           if (!response.ok) throw await errorFrom(response);
           return response.json();
         })
-        .then((payload) => finish(productId, payload.image_url))
+        .then((payload) => finish(productId, payload.image_url, "", Boolean(payload.pending)))
         .catch((error) => finish(productId, null, error.message || "Фото Kaspi не получено"))
         .finally(() => { activeRequests -= 1; pump(); });
     }

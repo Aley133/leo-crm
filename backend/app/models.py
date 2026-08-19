@@ -78,6 +78,23 @@ class Product(Base):
     name: Mapped[str] = mapped_column(String(500))
     brand: Mapped[str | None] = mapped_column(String(255), index=True, nullable=True)
     image_url: Mapped[str | None] = mapped_column(String(2048), nullable=True)
+    image_backfill_after: Mapped[datetime | None] = mapped_column(
+        UTCDateTime(),
+        index=True,
+        nullable=True,
+    )
+    image_backfill_lease_token: Mapped[str | None] = mapped_column(
+        String(64),
+        nullable=True,
+    )
+    image_backfill_agent_id: Mapped[str | None] = mapped_column(
+        String(255),
+        nullable=True,
+    )
+    image_backfill_error: Mapped[str | None] = mapped_column(
+        String(1000),
+        nullable=True,
+    )
     status: Mapped[str] = mapped_column(String(32), default=ProductStatus.DRAFT.value, index=True)
     sale_enabled: Mapped[bool] = mapped_column(
         Boolean,

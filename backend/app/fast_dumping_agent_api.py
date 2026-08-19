@@ -4,10 +4,11 @@ from datetime import UTC, datetime, timedelta
 from threading import Lock
 from time import monotonic
 from typing import Literal
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -20,6 +21,8 @@ from .fast_dumping_service import (
     prepare_apply,
     serialize_claimed_job,
 )
+from .models import Product
+from .product_images import normalize_product_image_url
 from .workspace_context import LEGACY_WORKSPACE_ID, current_workspace_id, workspace_context
 from .workspace_models import KaspiAccountCredential
 
@@ -73,6 +76,17 @@ class FastVerifyComplete(FastPrepareApply):
     error_message: str | None = Field(default=None, max_length=2000)
 
 
+class FastPhotoComplete(BaseModel):
+    agent_id: str = Field(min_length=1, max_length=255)
+    workspace_id: int = Field(ge=1)
+    lease_token: str = Field(min_length=16, max_length=64)
+    status: Literal["succeeded", "failed"]
+    image_url: str | None = Field(default=None, max_length=2048)
+    error_code: str | None = Field(default=None, max_length=128)
+    error_message: str | None = Field(default=None, max_length=1000)
+    retry_after_seconds: int = Field(default=21600, ge=60, le=86400)
+
+
 router = APIRouter(
     prefix="/api/fast-dumping-agent",
     tags=["fast-dumping-agent"],
@@ -87,6 +101,7 @@ _AGENT_GUARD_LOCK = Lock()
 _MIN_CLAIM_INTERVAL_SECONDS = 2.0
 _IDLE_CLAIM_INTERVAL_SECONDS = 60.0
 _CLAIM_NOT_BEFORE: dict[int, float] = {}
+_PHOTO_LEASE_SECONDS = 30 * 60
 
 
 def _now() -> datetime:
@@ -185,6 +200,48 @@ def _defer_claims(
         )
 
 
+def _claim_photo_job(
+    db: Session,
+    *,
+    workspace_id: int,
+    agent_id: str,
+) -> dict | None:
+    now = _now()
+    product = db.scalar(
+        select(Product)
+        .where(
+            Product.workspace_id == workspace_id,
+            or_(Product.image_url.is_(None), Product.image_url == ""),
+            or_(
+                Product.image_backfill_after.is_(None),
+                Product.image_backfill_after <= now,
+            ),
+        )
+        # A visible CRM placeholder sets image_backfill_after, so non-null due
+        # rows are served before the one-time legacy backlog.
+        .order_by(
+            Product.image_backfill_after.is_(None),
+            Product.image_backfill_after.desc(),
+            Product.id,
+        )
+        .limit(1)
+        .with_for_update(skip_locked=True)
+    )
+    if product is None:
+        return None
+    lease_token = uuid4().hex
+    product.image_backfill_after = now + timedelta(seconds=_PHOTO_LEASE_SECONDS)
+    product.image_backfill_lease_token = lease_token
+    product.image_backfill_agent_id = agent_id
+    return {
+        "product_id": product.id,
+        "kaspi_product_id": product.kaspi_product_id,
+        "name": product.name,
+        "city_id": "196220100",
+        "lease_token": lease_token,
+    }
+
+
 @router.post("/heartbeat")
 def heartbeat(
     payload: FastAgentHeartbeat,
@@ -258,6 +315,85 @@ def claim(
             int(_IDLE_CLAIM_INTERVAL_SECONDS) if result is None else 0
         ),
     }
+
+
+@router.post("/photo-claim")
+def claim_photo(
+    payload: FastAgentIdentity,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    try:
+        _validate_workspace_merchant(
+            db,
+            workspace_id=payload.workspace_id,
+            merchant_uid=payload.merchant_uid,
+        )
+        _touch_agent(payload)
+        with workspace_context(payload.workspace_id):
+            job = _claim_photo_job(
+                db,
+                workspace_id=payload.workspace_id,
+                agent_id=payload.agent_id,
+            )
+            db.commit()
+    except ValueError as exc:
+        db.rollback()
+        raise _conflict(exc) from exc
+    return {
+        "job": job,
+        "retry_after_seconds": 60 if job is None else 0,
+    }
+
+
+@router.post("/photo-jobs/{product_id}/complete")
+def complete_photo(
+    product_id: int,
+    payload: FastPhotoComplete,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    try:
+        with workspace_context(payload.workspace_id):
+            product = db.scalar(
+                select(Product)
+                .where(
+                    Product.id == product_id,
+                    Product.workspace_id == payload.workspace_id,
+                )
+                .with_for_update()
+            )
+            if product is None:
+                raise ValueError("Товар фото-задания не найден")
+            if product.image_backfill_lease_token != payload.lease_token:
+                raise ValueError("Lease фото-задания устарел")
+            if product.image_backfill_agent_id != payload.agent_id:
+                raise ValueError("Фото-задание принадлежит другому Agent")
+
+            if payload.status == "succeeded":
+                image_url = normalize_product_image_url(payload.image_url)
+                if not image_url:
+                    raise ValueError("Agent вернул недопустимый URL фотографии")
+                product.image_url = image_url
+                product.image_backfill_after = None
+                product.image_backfill_error = None
+                result = {"status": "saved", "image_url": image_url}
+            else:
+                product.image_backfill_after = _now() + timedelta(
+                    seconds=payload.retry_after_seconds
+                )
+                product.image_backfill_error = (
+                    payload.error_message or payload.error_code or "photo_failed"
+                )[:1000]
+                result = {
+                    "status": "deferred",
+                    "retry_after_seconds": payload.retry_after_seconds,
+                }
+            product.image_backfill_lease_token = None
+            product.image_backfill_agent_id = None
+            db.commit()
+            return result
+    except ValueError as exc:
+        db.rollback()
+        raise _conflict(exc) from exc
 
 
 @router.post("/jobs/{job_id}/scan-complete")

@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import asyncio
-import time
-from datetime import datetime
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
@@ -16,7 +14,6 @@ from .dumping_models import DumpingPolicy
 from .dumping_service import physical_stock_counts, set_product_sale_enabled
 from .models import MarketplaceOrderLine, Product, ProductStatus
 from .monitoring import MonitorTarget, SupplierOfferState
-from .kaspi_product_photo import fetch_kaspi_product_photo
 from .product_images import normalize_product_image_url
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
@@ -58,8 +55,9 @@ class ProductSaleStateUpdate(BaseModel):
 
 class ProductImageResolution(BaseModel):
     product_id: int
-    image_url: str
+    image_url: str | None
     cached: bool
+    pending: bool = False
 
 
 router = APIRouter(
@@ -69,12 +67,6 @@ router = APIRouter(
 )
 
 _VISIBLE_BINDING_STATUSES = ("active", "confirmed", "degraded")
-_IMAGE_RESOLVE_SEMAPHORE = asyncio.Semaphore(1)
-_IMAGE_RESOLVE_LOCKS: dict[int, asyncio.Lock] = {}
-_IMAGE_FAILURE_NOT_BEFORE: dict[int, float] = {}
-_IMAGE_FAILURE_COOLDOWN_SECONDS = 10 * 60
-
-
 def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryRow]:
     if not products:
         return []
@@ -247,68 +239,34 @@ def read_product(product_id: int, db: Session = Depends(get_db)) -> ProductRegis
 
 
 @router.post("/products/{product_id}/resolve-image", response_model=ProductImageResolution)
-async def resolve_product_image(product_id: int, db: Session = Depends(get_db)) -> ProductImageResolution:
-    """Resolve one missing Kaspi photo through public HTTP without an Agent.
+def resolve_product_image(product_id: int, db: Session = Depends(get_db)) -> ProductImageResolution:
+    """Read a cached photo and prioritize a miss for the local Agent.
 
-    The browser calls this endpoint only when a missing-photo placeholder enters
-    the viewport. A per-product lock deduplicates concurrent order lines, the
-    global semaphore bounds Kaspi traffic, and a successful URL is persisted so
-    future screens use the database without another Kaspi request.
+    Render never contacts Kaspi here. The visible placeholder only moves this
+    product to the front of the leased local-agent backfill queue.
     """
 
-    lock = _IMAGE_RESOLVE_LOCKS.setdefault(product_id, asyncio.Lock())
-    async with lock:
-        product = db.get(Product, product_id)
-        if product is None:
-            raise HTTPException(status_code=404, detail="Product not found")
-        current_image = normalize_product_image_url(product.image_url)
-        if current_image:
-            return ProductImageResolution(product_id=product.id, image_url=current_image, cached=True)
+    product = db.get(Product, product_id)
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+    current_image = normalize_product_image_url(product.image_url)
+    if current_image:
+        return ProductImageResolution(
+            product_id=product.id,
+            image_url=current_image,
+            cached=True,
+        )
 
-        now = time.monotonic()
-        retry_at = _IMAGE_FAILURE_NOT_BEFORE.get(product_id, 0.0)
-        if retry_at > now:
-            retry_after = max(1, int(retry_at - now))
-            raise HTTPException(
-                status_code=429,
-                detail=f"Повторное чтение фотографии доступно через {retry_after} сек.",
-                headers={"Retry-After": str(retry_after)},
-            )
-
-        kaspi_product_id = str(product.kaspi_product_id or "").strip()
-        if not kaspi_product_id:
-            raise HTTPException(status_code=422, detail="У товара отсутствует Kaspi product ID")
-        product_name = str(product.name or "").strip()
-
-        # Release the database connection before the external HTTP operation.
+    now = datetime.now(UTC)
+    if product.image_backfill_after is None:
+        product.image_backfill_after = now
         db.commit()
-        try:
-            async with _IMAGE_RESOLVE_SEMAPHORE:
-                async with asyncio.timeout(40):
-                    resolved_image = await fetch_kaspi_product_photo(
-                        kaspi_product_id=kaspi_product_id,
-                        product_name=product_name,
-                        city_id="196220100",
-                    )
-            image_url = normalize_product_image_url(resolved_image)
-            if not image_url:
-                raise ValueError("Kaspi вернул недопустимый URL фотографии")
-        except Exception as exc:
-            _IMAGE_FAILURE_NOT_BEFORE[product_id] = time.monotonic() + _IMAGE_FAILURE_COOLDOWN_SECONDS
-            error_detail = str(exc).strip() or type(exc).__name__
-            raise HTTPException(
-                status_code=502,
-                detail=f"Не удалось получить фотографию Kaspi: {error_detail[:500]}",
-            ) from exc
-
-        db.expire_all()
-        product = db.get(Product, product_id)
-        if product is None:
-            raise HTTPException(status_code=404, detail="Product not found")
-        product.image_url = image_url
-        db.commit()
-        _IMAGE_FAILURE_NOT_BEFORE.pop(product_id, None)
-        return ProductImageResolution(product_id=product.id, image_url=image_url, cached=False)
+    return ProductImageResolution(
+        product_id=product.id,
+        image_url=None,
+        cached=False,
+        pending=True,
+    )
 
 
 @router.patch("/products/{product_id}", response_model=ProductRegistryRow)

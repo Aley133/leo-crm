@@ -111,11 +111,11 @@ jobs:
             gh release create kaspi-fast-dumping-agent-latest `
               --target "$env:GITHUB_SHA" `
               --title "LEO Kaspi Fast Dumping Agent" `
-              --notes "LEO Agent 1.0.9: только realtime-демпинг. Тест товара теперь читает публичную карточку прямым HTTP-запросом CRM и не зависит от Agent. Обычный XML-демпинг не изменяет; секреты Merchant Cabinet защищены Windows DPAPI."
+              --notes "LEO Agent 1.0.10: realtime-демпинг и фоновое заполнение фотографий через локальный IP. Ценовые задания всегда имеют приоритет; успешные фото сохраняются в CRM и повторно не запрашиваются. Обычный XML-демпинг не изменяется; секреты Merchant Cabinet защищены Windows DPAPI."
           } else {
             gh release edit kaspi-fast-dumping-agent-latest `
               --target "$env:GITHUB_SHA" `
               --title "LEO Kaspi Fast Dumping Agent" `
-              --notes "LEO Agent 1.0.9: только realtime-демпинг. Тест товара теперь читает публичную карточку прямым HTTP-запросом CRM и не зависит от Agent. Обычный XML-демпинг не изменяет; секреты Merchant Cabinet защищены Windows DPAPI."
+              --notes "LEO Agent 1.0.10: realtime-демпинг и фоновое заполнение фотографий через локальный IP. Ценовые задания всегда имеют приоритет; успешные фото сохраняются в CRM и повторно не запрашиваются. Обычный XML-демпинг не изменяется; секреты Merchant Cabinet защищены Windows DPAPI."
           }
           gh release upload kaspi-fast-dumping-agent-latest "dist/LEO-Kaspi-Fast-Dumping-Agent.exe" --clobber
