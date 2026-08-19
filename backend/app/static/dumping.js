@@ -88,7 +88,9 @@ const setBusy = (button, busy, text) => {
 };
 
 const productCaption = (row) => `${row.name} · ${row.merchant_sku || row.kaspi_product_id || "без артикула"}`;
-const productPhoto = (row, css = "dumping-product-photo") => row.image_url ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : "";
+const productPhoto = (row, css = "dumping-product-photo") => row.image_url
+  ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
+  : `<span class="${css} placeholder" data-resolve-product-image data-product-id="${Number(row.product_id)}" data-image-class="${css}">Фото…</span>`;
 const closeProductResults = () => { productResults.classList.add("hidden"); productSearch.setAttribute("aria-expanded", "false"); };
 const clearProductSelection = ({keepQuery=false}={}) => {
   productIdInput.value = "";

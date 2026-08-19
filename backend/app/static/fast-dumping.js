@@ -32,7 +32,9 @@ const money = (value) => value == null || value === "" ? "—" : `${Number(value
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU") : "—";
 const statusOf = (row) => row.state?.status || (row.policy.enabled ? "idle" : "paused");
 const isFloor = (row) => statusOf(row) === "floor_limited" || row.state?.decision_status === "floor_limited";
-const productPhoto = (row, css = "fast-product-photo") => row.image_url ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : "";
+const productPhoto = (row, css = "fast-product-photo") => row.image_url
+  ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
+  : `<span class="${css} placeholder" data-resolve-product-image data-product-id="${Number(row.product_id)}" data-image-class="${css}">Фото…</span>`;
 
 const request = async (url, options = {}) => {
   const token = localStorage.getItem(storageKey) || "";

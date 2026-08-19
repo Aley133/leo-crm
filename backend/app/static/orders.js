@@ -98,7 +98,11 @@ const renderLine = (line, multiLineOrder = false) => {
   const netProfit = line.net_profit == null ? "—" : `${money(line.net_profit)} · ${percent(line.net_margin_pct)}`;
   const logisticsLabel = multiLineOrder ? "доля логистики" : "логистика";
   const fees = `Комиссия ${money(line.kaspi_commission)} · налог ${money(line.tax)} · ${logisticsLabel} ${money(line.logistics)}`;
-  const photo = line.image_url ? `<img class="order-product-photo" src="${escapeHtml(line.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">` : '<span class="order-product-photo placeholder">Нет фото</span>';
+  const photo = line.image_url
+    ? `<img class="order-product-photo" src="${escapeHtml(line.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
+    : line.product_id
+      ? `<span class="order-product-photo placeholder" data-resolve-product-image data-product-id="${Number(line.product_id)}" data-image-class="order-product-photo">Фото…</span>`
+      : '<span class="order-product-photo placeholder">Нет фото</span>';
   return `<div class="order-line"><div class="order-product">${photo}<div>${title}<span class="muted">${identity}</span></div></div><div><span class="muted">Количество</span><strong>${Number(line.quantity || 0)}</strong></div><div><span class="muted">Цена продажи</span><strong>${money(line.unit_price)}</strong></div><div><span class="muted">Закупочная цена</span><strong>${cost}</strong><span class="muted">${source}</span></div><div><span class="muted">Чистая прибыль</span><strong>${netProfit}</strong><span class="muted">${fees}</span><span class="muted">${escapeHtml(procurementLabel(line.procurement_state))}</span>${line.purchase_status ? `<span class="muted">${escapeHtml(purchaseStatusLabel(line.purchase_status))}</span>` : ""}${renderPurchaseAction(line)}</div></div>`;
 };
 
@@ -218,6 +222,7 @@ const render = (payload) => {
   document.querySelector("#updated-at").textContent = `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`;
   authPanel.classList.add("hidden");
   ordersPage.classList.remove("hidden");
+  window.LEOProductImageResolver?.observe(ordersList);
   if (pendingScrollTop > 0) {
     const scrollTop = pendingScrollTop;
     pendingScrollTop = 0;
@@ -241,7 +246,9 @@ const refreshSingleOrder = async (orderId, currentCard) => {
   } else {
     const wrapper = document.createElement("div");
     wrapper.innerHTML = renderOrder(order);
-    currentCard?.replaceWith(wrapper.firstElementChild);
+    const nextCard = wrapper.firstElementChild;
+    currentCard?.replaceWith(nextCard);
+    window.LEOProductImageResolver?.observe(nextCard);
   }
   const visibleCount = ordersList.querySelectorAll(".order-card").length;
   empty.classList.toggle("hidden", visibleCount > 0);

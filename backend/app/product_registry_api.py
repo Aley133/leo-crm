@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import time
 from datetime import datetime
 from decimal import Decimal
 
@@ -14,7 +16,9 @@ from .dumping_models import DumpingPolicy
 from .dumping_service import physical_stock_counts, set_product_sale_enabled
 from .models import MarketplaceOrderLine, Product, ProductStatus
 from .monitoring import MonitorTarget, SupplierOfferState
+from .product_images import normalize_product_image_url
 from .suppliers import ProductBinding, Supplier, SupplierProduct
+from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
 
 
 class ProductRegistryRow(BaseModel):
@@ -52,6 +56,12 @@ class ProductSaleStateUpdate(BaseModel):
     sale_enabled: bool
 
 
+class ProductImageResolution(BaseModel):
+    product_id: int
+    image_url: str
+    cached: bool
+
+
 router = APIRouter(
     prefix="/api/product-registry",
     tags=["product-registry"],
@@ -59,6 +69,10 @@ router = APIRouter(
 )
 
 _VISIBLE_BINDING_STATUSES = ("active", "confirmed", "degraded")
+_IMAGE_RESOLVE_SEMAPHORE = asyncio.Semaphore(2)
+_IMAGE_RESOLVE_LOCKS: dict[int, asyncio.Lock] = {}
+_IMAGE_FAILURE_NOT_BEFORE: dict[int, float] = {}
+_IMAGE_FAILURE_COOLDOWN_SECONDS = 10 * 60
 
 
 def _product_rows(db: Session, products: list[Product]) -> list[ProductRegistryRow]:
@@ -230,6 +244,70 @@ def read_product(product_id: int, db: Session = Depends(get_db)) -> ProductRegis
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
     return _product_rows(db, [product])[0]
+
+
+@router.post("/products/{product_id}/resolve-image", response_model=ProductImageResolution)
+async def resolve_product_image(product_id: int, db: Session = Depends(get_db)) -> ProductImageResolution:
+    """Resolve one missing Kaspi photo from public-card HTML without an Agent.
+
+    The browser calls this endpoint only when a missing-photo placeholder enters
+    the viewport. A per-product lock deduplicates concurrent order lines, the
+    global semaphore bounds Kaspi traffic, and a successful URL is persisted so
+    future screens use the database without another Kaspi request.
+    """
+
+    lock = _IMAGE_RESOLVE_LOCKS.setdefault(product_id, asyncio.Lock())
+    async with lock:
+        product = db.get(Product, product_id)
+        if product is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+        current_image = normalize_product_image_url(product.image_url)
+        if current_image:
+            return ProductImageResolution(product_id=product.id, image_url=current_image, cached=True)
+
+        now = time.monotonic()
+        retry_at = _IMAGE_FAILURE_NOT_BEFORE.get(product_id, 0.0)
+        if retry_at > now:
+            retry_after = max(1, int(retry_at - now))
+            raise HTTPException(
+                status_code=429,
+                detail=f"Повторное чтение фотографии доступно через {retry_after} сек.",
+                headers={"Retry-After": str(retry_after)},
+            )
+
+        kaspi_product_id = str(product.kaspi_product_id or "").strip()
+        if not kaspi_product_id:
+            raise HTTPException(status_code=422, detail="У товара отсутствует Kaspi product ID")
+
+        # Release the database connection before the external HTTP operation.
+        db.commit()
+        try:
+            async with _IMAGE_RESOLVE_SEMAPHORE:
+                async with asyncio.timeout(60):
+                    card = await inspect_kaspi_product(
+                        reference=kaspi_product_id,
+                        city_id="196220100",
+                        zone_id="Magnum_ZONE1",
+                        max_pages=0,
+                    )
+            image_url = normalize_product_image_url(card.get("image_url"))
+            if not image_url:
+                raise ValueError("в HTML публичной карточки отсутствует допустимый og:image")
+        except Exception as exc:
+            _IMAGE_FAILURE_NOT_BEFORE[product_id] = time.monotonic() + _IMAGE_FAILURE_COOLDOWN_SECONDS
+            raise HTTPException(
+                status_code=502,
+                detail=f"Не удалось получить фотографию Kaspi: {str(exc)[:500]}",
+            ) from exc
+
+        db.expire_all()
+        product = db.get(Product, product_id)
+        if product is None:
+            raise HTTPException(status_code=404, detail="Product not found")
+        product.image_url = image_url
+        db.commit()
+        _IMAGE_FAILURE_NOT_BEFORE.pop(product_id, None)
+        return ProductImageResolution(product_id=product.id, image_url=image_url, cached=False)
 
 
 @router.patch("/products/{product_id}", response_model=ProductRegistryRow)
