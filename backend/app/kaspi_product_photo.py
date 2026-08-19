@@ -6,6 +6,7 @@ import random
 import re
 import time
 import uuid
+from typing import Any
 from urllib.parse import parse_qs, urlencode, urlparse, urlunparse
 
 import httpx
@@ -26,6 +27,13 @@ _BROWSER_HEADERS = {
     "Cache-Control": "no-cache",
     "Referer": "https://kaspi.kz/shop/",
 }
+_JSON_HEADERS = {
+    "User-Agent": _BROWSER_HEADERS["User-Agent"],
+    "Accept": "application/json, text/plain, */*",
+    "Accept-Language": _BROWSER_HEADERS["Accept-Language"],
+    "Referer": "https://kaspi.kz/shop/",
+}
+_MOBILE_PRODUCT_ENDPOINT = "https://kaspi.kz/shop/rest/misc/product/mobile"
 _REQUEST_SPACING_SECONDS = 1.5
 _REQUEST_GATE = asyncio.Lock()
 _NEXT_REQUEST_AT = 0.0
@@ -83,14 +91,44 @@ def _error_text(exc: Exception) -> str:
     return f"{type(exc).__name__}: {detail}" if detail else type(exc).__name__
 
 
-async def _spaced_get(client: httpx.AsyncClient, url: str) -> httpx.Response:
+def _mobile_gallery_image(payload: Any, *, expected_product_id: str) -> str:
+    if not isinstance(payload, dict):
+        raise KaspiPhotoReadError("JSON ответа Kaspi имеет неверный формат")
+    data = payload.get("data")
+    if not isinstance(data, dict):
+        raise KaspiPhotoReadError("в JSON ответа Kaspi отсутствует data")
+    card = data.get("card")
+    returned_product_id = str(card.get("id") if isinstance(card, dict) else "").strip()
+    if returned_product_id != expected_product_id:
+        raise KaspiPhotoReadError(
+            f"Kaspi вернул другой товар: {returned_product_id or 'ID отсутствует'}"
+        )
+    gallery = data.get("galleryImages")
+    if not isinstance(gallery, list) or not gallery:
+        raise KaspiPhotoReadError("в JSON ответа Kaspi отсутствует galleryImages")
+    first = gallery[0]
+    if not isinstance(first, dict):
+        raise KaspiPhotoReadError("первое изображение Kaspi имеет неверный формат")
+    for size in ("large", "medium", "small"):
+        candidate = str(first.get(size) or "").strip()
+        if candidate:
+            return candidate
+    raise KaspiPhotoReadError("в galleryImages отсутствует URL фотографии")
+
+
+async def _spaced_get(
+    client: httpx.AsyncClient,
+    url: str,
+    *,
+    headers: dict[str, str] | None = None,
+) -> httpx.Response:
     global _NEXT_REQUEST_AT
     async with _REQUEST_GATE:
         delay = _NEXT_REQUEST_AT - time.monotonic()
         if delay > 0:
             await asyncio.sleep(delay)
         try:
-            response = await client.get(url, headers=_BROWSER_HEADERS)
+            response = await client.get(url, headers=headers or _BROWSER_HEADERS)
         finally:
             _NEXT_REQUEST_AT = time.monotonic() + _REQUEST_SPACING_SECONDS
     return response
@@ -122,11 +160,12 @@ async def fetch_kaspi_product_photo(
     product_name: str,
     city_id: str = "196220100",
 ) -> str:
-    """Read only og:image from a public Kaspi card with bounded HTTP traffic.
+    """Read a public Kaspi image URL with bounded backend-only HTTP traffic.
 
-    The canonical name-based path is attempted first so Kaspi does not need to
-    redirect an id-only URL. Requests are fully serialized and spaced because
-    a CRM screen can expose many missing-photo placeholders at once.
+    Kaspi's compact product JSON is preferred because its public HTML card is
+    rate-limited more aggressively. HTML/og:image remains a compatibility
+    fallback. Requests are serialized because one CRM page can expose many
+    missing-photo placeholders at once.
     """
 
     master_id = str(kaspi_product_id or "").split("_", 1)[0].strip()
@@ -150,6 +189,19 @@ async def fetch_kaspi_product_photo(
     ) as client:
         client.cookies.set("k_stat", str(uuid.uuid4()), domain="kaspi.kz", path="/")
         client.cookies.set("ks.tg", "27", domain="kaspi.kz", path="/")
+        mobile_url = f"{_MOBILE_PRODUCT_ENDPOINT}?{urlencode({'productCode': master_id, 'cityId': city_id})}"
+        try:
+            response = await _spaced_get(client, mobile_url, headers=_JSON_HEADERS)
+            response.raise_for_status()
+            return _mobile_gallery_image(response.json(), expected_product_id=master_id)
+        except httpx.HTTPStatusError as exc:
+            errors.append(f"JSON endpoint: {_error_text(exc)}")
+            if exc.response.status_code == 429:
+                detail = "; ".join(errors)
+                raise KaspiPhotoReadError(f"JSON Kaspi временно ограничен ({detail})") from exc
+        except (ValueError, httpx.HTTPError, KaspiPhotoReadError) as exc:
+            errors.append(f"JSON endpoint: {_error_text(exc)}")
+
         for candidate in candidates:
             try:
                 page = await _request_card(client, candidate)
@@ -170,4 +222,4 @@ async def fetch_kaspi_product_photo(
                 errors.append(_error_text(exc))
 
     detail = "; ".join(errors[-2:]) or "неизвестная ошибка"
-    raise KaspiPhotoReadError(f"публичная карточка не прочитана ({detail})")
+    raise KaspiPhotoReadError(f"фотография Kaspi не прочитана ({detail})")

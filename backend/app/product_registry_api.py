@@ -248,7 +248,7 @@ def read_product(product_id: int, db: Session = Depends(get_db)) -> ProductRegis
 
 @router.post("/products/{product_id}/resolve-image", response_model=ProductImageResolution)
 async def resolve_product_image(product_id: int, db: Session = Depends(get_db)) -> ProductImageResolution:
-    """Resolve one missing Kaspi photo from public-card HTML without an Agent.
+    """Resolve one missing Kaspi photo through public HTTP without an Agent.
 
     The browser calls this endpoint only when a missing-photo placeholder enters
     the viewport. A per-product lock deduplicates concurrent order lines, the
@@ -292,7 +292,7 @@ async def resolve_product_image(product_id: int, db: Session = Depends(get_db)) 
                     )
             image_url = normalize_product_image_url(resolved_image)
             if not image_url:
-                raise ValueError("в HTML публичной карточки отсутствует допустимый og:image")
+                raise ValueError("Kaspi вернул недопустимый URL фотографии")
         except Exception as exc:
             _IMAGE_FAILURE_NOT_BEFORE[product_id] = time.monotonic() + _IMAGE_FAILURE_COOLDOWN_SECONDS
             error_detail = str(exc).strip() or type(exc).__name__
