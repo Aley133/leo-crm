@@ -35,7 +35,7 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install httpx pyinstaller
+          pip install httpx pyinstaller tzdata
 
       - name: Verify isolated imports
         shell: pwsh
@@ -75,6 +75,7 @@ jobs:
             --hidden-import tools.kaspi_fast_dumping_scanner `
             --hidden-import tools.kaspi_fast_dumping_session `
             --collect-submodules httpx `
+            --collect-all tzdata `
             tools/kaspi_fast_dumping_agent.py
 
       - name: Verify executable
