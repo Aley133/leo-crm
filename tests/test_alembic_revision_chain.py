@@ -39,3 +39,12 @@ def test_alembic_revision_chain_is_linear_and_complete() -> None:
     assert all(len(items) <= 1 for items in children.values()), "Alembic chain contains a branch"
     assert "20260718_0004" in revisions
     assert revisions["20260718_0004"] == "20260718_0003"
+
+
+def test_storage_retention_migration_has_a_deploy_time_bound() -> None:
+    migration = (
+        VERSIONS_DIR / "20260820_0039_storage_retention.py"
+    ).read_text(encoding="utf-8")
+
+    assert "max_batches: int = 8" in migration
+    assert "for _batch_number in range(max_batches):" in migration
