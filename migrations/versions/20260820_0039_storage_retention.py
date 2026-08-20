@@ -24,11 +24,14 @@ def _delete_ranked_history(
     keep: int,
     where: str = "1=1",
     batch_size: int = 500,
+    max_batches: int = 8,
 ) -> None:
     # Keep each DELETE small. Supabase's SQL proxy and low-end Postgres compute
     # can time out when a single statement removes the complete JSON history.
-    # Alembic uses the direct database connection, so bounded statements may be
-    # repeated safely inside the migration transaction.
+    # Alembic uses the direct database connection, but a deploy must not spend
+    # an unbounded amount of time cleaning legacy data. Clear a useful bounded
+    # slice here; docs/SUPABASE_STORAGE_RECOVERY.sql handles the remaining old
+    # rows in user-controlled batches after the new runtime is online.
     statement = sa.text(
         f"DELETE FROM {table} WHERE id IN ("
         "SELECT id FROM ("
@@ -39,7 +42,7 @@ def _delete_ranked_history(
         ")"
     )
     connection = op.get_bind()
-    while True:
+    for _batch_number in range(max_batches):
         result = connection.execute(statement)
         removed = int(result.rowcount or 0)
         if removed < batch_size:
