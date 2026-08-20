@@ -24,12 +24,13 @@ from urllib.request import Request, urlopen
 
 from tools.kaspi_fast_dumping_scanner import (
     KaspiCompetitorSnapshot,
+    inspect_kaspi_product,
     scan_kaspi_competitors,
 )
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 
 
-VERSION = "1.0.10"
+VERSION = "1.0.11"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -41,6 +42,7 @@ PHOTO_REQUEST_SPACING_SECONDS = 1.5
 PHOTO_IDLE_SECONDS = 60
 PHOTO_FAILURE_RETRY_SECONDS = 6 * 60 * 60
 PHOTO_TRANSIENT_RETRY_SECONDS = 30 * 60
+PRODUCT_TEST_IDLE_SECONDS = 5
 KASPI_PHOTO_ENDPOINT = "https://kaspi.kz/shop/rest/misc/product/mobile"
 TRANSIENT_HTTP_STATUSES = {
     408,
@@ -87,6 +89,10 @@ class KaspiPhotoRequestError(RuntimeError):
     def __init__(self, message: str, *, retry_after_seconds: int) -> None:
         super().__init__(message)
         self.retry_after_seconds = retry_after_seconds
+
+
+class AgentReconfigureRequired(RuntimeError):
+    """Stop workers after the user chose to clear invalid saved settings."""
 
 
 def _acquire_single_instance(workspace_id: int) -> None:
@@ -321,6 +327,45 @@ def _show_message(title: str, message: str, *, error: bool = False) -> None:
         except Exception:
             pass
     print(f"{title}: {message}", flush=True)
+
+
+def _confirm_and_clear_config(workspace_id: int, reason: str) -> bool:
+    """Offer a recoverable re-registration path from the standalone EXE."""
+
+    if os.name != "nt":
+        return False
+    try:
+        from tkinter import Tk, messagebox
+
+        root = Tk()
+        root.withdraw()
+        root.attributes("-topmost", True)
+        confirmed = messagebox.askyesno(
+            "LEO Fast Dumping Agent — настройки",
+            (
+                f"Kaspi отклонил настройки аккаунта {workspace_id}.\n\n"
+                f"{reason}\n\n"
+                "Сбросить сохранённые данные этого аккаунта? После этого "
+                "запустите Agent снова и заново введите Merchant UID, Store ID, "
+                "email и пароль."
+            ),
+            parent=root,
+        )
+        root.destroy()
+    except Exception:
+        return False
+    if not confirmed:
+        return False
+    try:
+        _config_path(workspace_id).unlink(missing_ok=True)
+    except OSError as exc:
+        _show_message(
+            "LEO Fast Dumping Agent — ошибка",
+            f"Не удалось удалить сохранённые настройки: {exc}",
+            error=True,
+        )
+        return False
+    return True
 
 
 def _workspace_id(requested: int | None) -> int:
@@ -708,6 +753,18 @@ async def _process_apply(
                     stock_count=int(prepared["stock_count"]),
                     price=int(target),
                 )
+        if (
+            not write_result.get("accepted")
+            and write_result.get("status_code") in (400, 401, 403, 422)
+            and await asyncio.to_thread(
+                _confirm_and_clear_config,
+                workspace_id,
+                str(write_result.get("error_message") or "Kaspi отклонил запись цены"),
+            )
+        ):
+            raise AgentReconfigureRequired(
+                f"Настройки workspace {workspace_id} сброшены; перезапустите Agent"
+            )
         # Kaspi price propagation is asynchronous. The CRM schedules one
         # separate verification after the configured 5/10-minute interval;
         # polling Offers every few seconds caused rate limits and false timeouts.
@@ -732,6 +789,8 @@ async def _process_apply(
             ),
             "error_message": write_result.get("error_message"),
         }
+    except AgentReconfigureRequired:
+        raise
     except Exception as exc:
         payload = {
             **identity,
@@ -844,6 +903,52 @@ async def _process_photo(
     )
 
 
+async def _process_product_test(
+    *,
+    api_url: str,
+    token: str,
+    job: dict,
+    agent_id: str,
+    workspace_id: int,
+) -> None:
+    job_id = int(job["id"])
+    try:
+        async with asyncio.timeout(SCAN_TIMEOUT_SECONDS):
+            inspection = await inspect_kaspi_product(
+                reference=str(job.get("reference") or ""),
+                city_id=str(job.get("city_id") or "196220100"),
+                zone_id=str(job.get("zone_id") or "Magnum_ZONE1"),
+            )
+        payload = {
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "lease_token": job["lease_token"],
+            "status": "succeeded",
+            "result": inspection,
+        }
+    except Exception as exc:
+        payload = {
+            "agent_id": agent_id,
+            "workspace_id": workspace_id,
+            "lease_token": job["lease_token"],
+            "status": "failed",
+            "result": {},
+            "error_code": type(exc).__name__,
+            "error_message": str(exc)[:4000],
+        }
+    result = await _post_json_with_retry(
+        f"{api_url}/api/product-test-agent/jobs/{job_id}/complete",
+        token,
+        payload,
+        operation=f"Сохранение тестовой карточки #{job_id}",
+    )
+    _log(
+        f"Тестовая карточка #{job_id}: "
+        f"{(result.get('job') or result).get('status')}",
+        workspace_id=workspace_id,
+    )
+
+
 async def main(
     *,
     once: bool = False,
@@ -928,12 +1033,30 @@ async def main(
         merchant_uid,
     )
 
-    await _post_json_with_retry(
-        f"{api_url}/api/fast-dumping-agent/heartbeat",
-        token,
-        {**base_identity, "status": "online"},
-        operation="Подключение к CRM",
-    )
+    try:
+        await _post_json_with_retry(
+            f"{api_url}/api/fast-dumping-agent/heartbeat",
+            token,
+            {**base_identity, "status": "online"},
+            operation="Подключение к CRM",
+        )
+    except CRMRequestError as exc:
+        if (
+            not reconfigure
+            and any(
+                marker in str(exc)
+                for marker in ("HTTP 401", "HTTP 403", "HTTP 409", "HTTP 422")
+            )
+            and await asyncio.to_thread(
+                _confirm_and_clear_config,
+                selected_workspace,
+                str(exc),
+            )
+        ):
+            raise AgentReconfigureRequired(
+                f"Настройки workspace {selected_workspace} сброшены; перезапустите Agent"
+            ) from exc
+        raise
     _log(
         f"LEO Kaspi Fast Dumping Agent {VERSION} · workspace {selected_workspace}",
         workspace_id=selected_workspace,
@@ -943,7 +1066,7 @@ async def main(
         workspace_id=selected_workspace,
     )
     _log(
-        "Фото: локальный JSON-backfill включён; ценовые задания всегда первыми.",
+        "Очереди: цены → ручной тест товара → фото; повторные фото ограничены CRM.",
         workspace_id=selected_workspace,
     )
     if os.name == "nt" and not once:
@@ -969,6 +1092,7 @@ async def main(
         idle_seconds = 2.0
         worker_id = f"{agent_id}-w{number}"
         price_claim_not_before = 0.0
+        product_test_claim_not_before = 0.0
         photo_claim_not_before = 0.0
         price_idle_confirmed_until = 0.0
         while True:
@@ -1011,42 +1135,70 @@ async def main(
                     if (
                         number == 1
                         and now < price_idle_confirmed_until
-                        and now >= photo_claim_not_before
                     ):
-                        photo_claim = await _post_json_with_retry(
-                            f"{api_url}/api/fast-dumping-agent/photo-claim",
-                            token,
-                            _agent_payload(
-                                worker_id,
-                                selected_workspace,
-                                concurrency,
-                                merchant_uid,
-                            ),
-                            operation="Получение фонового фото-задания",
+                        identity = _agent_payload(
+                            worker_id,
+                            selected_workspace,
+                            concurrency,
+                            merchant_uid,
                         )
-                        photo_job = photo_claim.get("job")
-                        if photo_job:
-                            await _process_photo(
-                                api_url=api_url,
-                                token=token,
-                                job=photo_job,
-                                agent_id=worker_id,
-                                workspace_id=selected_workspace,
+                        if now >= product_test_claim_not_before:
+                            product_test_claim = await _post_json_with_retry(
+                                f"{api_url}/api/product-test-agent/claim",
+                                token,
+                                identity,
+                                operation="Получение ручного теста товара",
                             )
-                            photo_claim_not_before = (
-                                time.monotonic() + PHOTO_REQUEST_SPACING_SECONDS
+                            product_test_job = product_test_claim.get("job")
+                            if product_test_job:
+                                await _process_product_test(
+                                    api_url=api_url,
+                                    token=token,
+                                    job=product_test_job,
+                                    agent_id=worker_id,
+                                    workspace_id=selected_workspace,
+                                )
+                                product_test_claim_not_before = time.monotonic()
+                                continue
+                            product_test_claim_not_before = now + max(
+                                2.0,
+                                float(
+                                    product_test_claim.get("retry_after_seconds")
+                                    or PRODUCT_TEST_IDLE_SECONDS
+                                ),
                             )
-                            continue
-                        photo_claim_not_before = now + max(
-                            2.0,
-                            float(
-                                photo_claim.get("retry_after_seconds")
-                                or PHOTO_IDLE_SECONDS
-                            ),
-                        )
+                        if now >= photo_claim_not_before:
+                            photo_claim = await _post_json_with_retry(
+                                f"{api_url}/api/fast-dumping-agent/photo-claim",
+                                token,
+                                identity,
+                                operation="Получение фонового фото-задания",
+                            )
+                            photo_job = photo_claim.get("job")
+                            if photo_job:
+                                await _process_photo(
+                                    api_url=api_url,
+                                    token=token,
+                                    job=photo_job,
+                                    agent_id=worker_id,
+                                    workspace_id=selected_workspace,
+                                )
+                                photo_claim_not_before = (
+                                    time.monotonic() + PHOTO_REQUEST_SPACING_SECONDS
+                                )
+                                continue
+                            photo_claim_not_before = now + max(
+                                2.0,
+                                float(
+                                    photo_claim.get("retry_after_seconds")
+                                    or PHOTO_IDLE_SECONDS
+                                ),
+                            )
                     due = [price_claim_not_before]
                     if number == 1 and price_idle_confirmed_until > now:
-                        due.append(photo_claim_not_before)
+                        due.extend(
+                            (product_test_claim_not_before, photo_claim_not_before)
+                        )
                     delay = max(0.5, min(due) - time.monotonic())
                     await asyncio.sleep(min(IDLE_POLL_MAX_SECONDS, delay))
                     continue
@@ -1070,6 +1222,8 @@ async def main(
                     )
                 else:
                     await _process_verify(**common)
+            except AgentReconfigureRequired:
+                raise
             except Exception as exc:
                 _log(f"Worker {number}: {exc}", workspace_id=selected_workspace)
                 if once:
@@ -1117,6 +1271,13 @@ if __name__ == "__main__":
         )
     except KeyboardInterrupt:
         _log(f"Агент остановлен через {int(time.time() - started)} сек.")
+    except AgentReconfigureRequired as exc:
+        _log(str(exc), workspace_id=args.workspace_id)
+        _show_message(
+            "LEO Fast Dumping Agent — настройки сброшены",
+            "Запустите Agent ещё раз и заново зарегистрируйте этот аккаунт.",
+        )
+        raise SystemExit(2)
     except Exception as exc:
         details = "".join(traceback.format_exception(exc)).strip()
         _log(details)

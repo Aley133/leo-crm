@@ -3,9 +3,11 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import event
+from sqlalchemy import func, select
 
 from backend.app.commerce.repository import _latest_order_raw_payloads
 from backend.app.kaspi_raw_receiver_jobs import _history_record
+from backend.app.marketplace_import import prune_order_raw_payload_history
 from backend.app.models import MarketplaceAccount, MarketplaceRawPayload
 
 
@@ -147,3 +149,33 @@ def test_delivery_transition_reads_scalar_history_instead_of_full_json(
         "select marketplace_raw_payloads.payload_json," not in statement.casefold()
         for statement in statements
     )
+
+
+def test_order_raw_payload_history_is_bounded_per_order(db_session) -> None:
+    account = _account(db_session, "partner-retention")
+    started_at = datetime(2026, 8, 20, 12, 0, tzinfo=UTC)
+    for index in range(25):
+        _raw_payload(
+            db_session,
+            account_id=account.id,
+            order_id="bounded-order",
+            content_hash=f"retention-{index}",
+            received_at=started_at + timedelta(minutes=index),
+            marker=f"retention-{index}",
+        )
+    db_session.flush()
+
+    removed = prune_order_raw_payload_history(
+        db_session,
+        marketplace_account_id=account.id,
+        external_order_id="bounded-order",
+    )
+    remaining = db_session.scalar(
+        select(func.count(MarketplaceRawPayload.id)).where(
+            MarketplaceRawPayload.marketplace_account_id == account.id,
+            MarketplaceRawPayload.external_object_id == "bounded-order",
+        )
+    )
+
+    assert removed == 5
+    assert remaining == 20

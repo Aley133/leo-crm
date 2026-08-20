@@ -103,6 +103,7 @@ _IDLE_CLAIM_INTERVAL_SECONDS = 60.0
 _CLAIM_NOT_BEFORE: dict[int, float] = {}
 _PHOTO_LEASE_SECONDS = 30 * 60
 _PHOTO_CACHE_REUSE_LIMIT = 100
+_PHOTO_MAX_ATTEMPTS = 2
 
 
 def _now() -> datetime:
@@ -264,6 +265,7 @@ def _claim_photo_job(
             select(Product)
             .where(
                 or_(Product.image_url.is_(None), Product.image_url == ""),
+                Product.image_backfill_attempts < _PHOTO_MAX_ATTEMPTS,
                 or_(
                     Product.image_backfill_after.is_(None),
                     Product.image_backfill_after <= now,
@@ -297,6 +299,7 @@ def _claim_photo_job(
         product.image_backfill_after = now + timedelta(seconds=_PHOTO_LEASE_SECONDS)
         product.image_backfill_lease_token = lease_token
         product.image_backfill_agent_id = agent_id
+        product.image_backfill_attempts += 1
         return {
             "product_id": product.id,
             "catalog_workspace_id": product.workspace_id,
@@ -449,15 +452,24 @@ def complete_photo(
                     "updated_products": updated_products,
                 }
             else:
-                product.image_backfill_after = _now() + timedelta(
-                    seconds=payload.retry_after_seconds
+                attempts_remaining = max(
+                    0,
+                    _PHOTO_MAX_ATTEMPTS - int(product.image_backfill_attempts or 0),
+                )
+                product.image_backfill_after = (
+                    _now() + timedelta(seconds=payload.retry_after_seconds)
+                    if attempts_remaining > 0
+                    else None
                 )
                 product.image_backfill_error = (
                     payload.error_message or payload.error_code or "photo_failed"
                 )[:1000]
                 result = {
-                    "status": "deferred",
-                    "retry_after_seconds": payload.retry_after_seconds,
+                    "status": "deferred" if attempts_remaining else "stopped",
+                    "retry_after_seconds": (
+                        payload.retry_after_seconds if attempts_remaining else None
+                    ),
+                    "attempts_remaining": attempts_remaining,
                 }
             product.image_backfill_lease_token = None
             product.image_backfill_agent_id = None

@@ -194,13 +194,64 @@ def test_photo_failure_is_deferred_without_blocking_other_products(db_session) -
         db_session,
     )
 
-    assert result == {"status": "deferred", "retry_after_seconds": 1800}
+    assert result == {
+        "status": "deferred",
+        "retry_after_seconds": 1800,
+        "attempts_remaining": 1,
+    }
     db_session.refresh(failed)
     assert failed.image_url is None
     assert failed.image_backfill_error == "Kaspi returned 429"
     assert failed.image_backfill_after > datetime.now(UTC)
     next_job = _claim_photo_job(db_session, agent_id="agent-w1")
     assert next_job is not None and next_job["product_id"] == next_product.id
+
+
+def test_photo_backfill_stops_after_two_failed_requests(db_session) -> None:
+    product = _product(kaspi_id="110000022", name="Bounded failure")
+    db_session.add(product)
+    db_session.commit()
+
+    first = _claim_photo_job(db_session, agent_id="agent-w1")
+    db_session.commit()
+    assert first is not None
+    complete_photo(
+        product.id,
+        FastPhotoComplete(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=first["lease_token"],
+            status="failed",
+            error_code="HTTPError",
+            retry_after_seconds=60,
+        ),
+        db_session,
+    )
+    product.image_backfill_after = datetime.now(UTC) - timedelta(seconds=1)
+    db_session.commit()
+
+    second = _claim_photo_job(db_session, agent_id="agent-w1")
+    db_session.commit()
+    assert second is not None
+    stopped = complete_photo(
+        product.id,
+        FastPhotoComplete(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=second["lease_token"],
+            status="failed",
+            error_code="HTTPError",
+            retry_after_seconds=60,
+        ),
+        db_session,
+    )
+
+    assert stopped == {
+        "status": "stopped",
+        "retry_after_seconds": None,
+        "attempts_remaining": 0,
+    }
+    assert _claim_photo_job(db_session, agent_id="agent-w1") is None
 
 
 def test_local_agent_reads_large_photo_from_one_json_request(monkeypatch) -> None:
