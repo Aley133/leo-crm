@@ -23,26 +23,33 @@ def _delete_ranked_history(
     order_by: str,
     keep: int,
     where: str = "1=1",
+    batch_size: int = 500,
 ) -> None:
-    # Every identifier and predicate is a migration-owned constant, never user
-    # input. The nested SELECT keeps this portable across PostgreSQL and SQLite
-    # migration tests while deleting only rows beyond the explicit boundary.
-    op.execute(
-        sa.text(
-            f"DELETE FROM {table} WHERE id IN ("
-            "SELECT id FROM ("
-            f"SELECT id, ROW_NUMBER() OVER (PARTITION BY {partition_by} "
-            f"ORDER BY {order_by}) AS history_rank FROM {table} WHERE {where}"
-            f") AS ranked WHERE history_rank > {int(keep)}"
-            ")"
-        )
+    # Keep each DELETE small. Supabase's SQL proxy and low-end Postgres compute
+    # can time out when a single statement removes the complete JSON history.
+    # Alembic uses the direct database connection, so bounded statements may be
+    # repeated safely inside the migration transaction.
+    statement = sa.text(
+        f"DELETE FROM {table} WHERE id IN ("
+        "SELECT id FROM ("
+        f"SELECT id, ROW_NUMBER() OVER (PARTITION BY {partition_by} "
+        f"ORDER BY {order_by}) AS history_rank FROM {table} WHERE {where}"
+        f") AS ranked WHERE history_rank > {int(keep)} "
+        f"LIMIT {int(batch_size)}"
+        ")"
     )
+    connection = op.get_bind()
+    while True:
+        result = connection.execute(statement)
+        removed = int(result.rowcount or 0)
+        if removed < batch_size:
+            break
 
 
 def upgrade() -> None:
     _delete_ranked_history(
         table="marketplace_raw_payloads",
-        partition_by="marketplace_account_id, payload_type, external_object_id",
+        partition_by="workspace_id, marketplace_account_id, payload_type, external_object_id",
         order_by="received_at DESC, id DESC",
         keep=20,
         where="payload_type = 'order'",

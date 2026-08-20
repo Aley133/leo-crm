@@ -18,7 +18,7 @@ from .kaspi_xml_schema import catalog_store_id, ensure_offer_availability, repai
 from .models import Product
 from .product_images import normalize_product_image_url
 from .product_test_models import ProductTestItem, ProductTestJob
-from .workspace_context import workspace_context
+from .workspace_context import current_workspace_id, workspace_context
 DEFAULT_CITY_ID = "196220100"
 DEFAULT_ZONE_ID = "Magnum_ZONE1"
 MAX_XML_BYTES = 25 * 1024 * 1024
@@ -329,8 +329,10 @@ def inspect_product(payload: ProductTestInspectRequest, db: Session = Depends(ge
     """Queue one explicit card read for the local Windows Fast Agent."""
 
     reference = payload.reference.strip()
+    workspace_id = current_workspace_id()
     running = db.scalar(
         select(ProductTestJob).where(
+            ProductTestJob.workspace_id == workspace_id,
             ProductTestJob.input_reference == reference,
             ProductTestJob.status.in_(("queued", "leased")),
         ).order_by(ProductTestJob.id.desc()).limit(1)
@@ -339,6 +341,7 @@ def inspect_product(payload: ProductTestInspectRequest, db: Session = Depends(ge
         raise HTTPException(status_code=409, detail="Эта карточка уже ожидает локальный Agent")
 
     job = ProductTestJob(
+        workspace_id=workspace_id,
         input_reference=reference,
         city_id=payload.city_id.strip(),
         zone_id=payload.zone_id.strip(),

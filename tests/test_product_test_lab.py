@@ -24,6 +24,7 @@ from backend.app.product_test_api import (
 from backend.app.product_test_models import ProductTestItem, ProductTestJob
 from backend.app import product_test_api
 from backend.app.workspace_models import KaspiAccountCredential, Workspace
+from backend.app.workspace_context import workspace_context
 from tools import kaspi_fast_dumping_scanner
 from tools.kaspi_fast_dumping_scanner import (
     _meta_content,
@@ -305,6 +306,58 @@ def test_product_test_agent_claim_leases_workspace_job(db_session) -> None:
     assert queued["job"]["status"] == "queued"
     assert result["job"]["reference"] == "102591400_177620711"
     assert len(result["job"]["lease_token"]) == 32
+
+
+def test_two_fast_agents_cannot_cross_workspace_product_test_jobs(db_session) -> None:
+    _seed_agent_account(db_session, workspace_id=1, partner_id="merchant-1")
+    _seed_agent_account(db_session, workspace_id=3, partner_id="merchant-3")
+
+    with workspace_context(1):
+        first = inspect_product(
+            ProductTestInspectRequest(reference="111111111_111111111"),
+            db_session,
+        )
+    with workspace_context(3):
+        third = inspect_product(
+            ProductTestInspectRequest(reference="333333333_333333333"),
+            db_session,
+        )
+
+    third_claim = claim_product_test_job(
+        FastAgentIdentity(
+            agent_id="agent-w3",
+            workspace_id=3,
+            merchant_uid="merchant-3",
+        ),
+        db_session,
+    )
+    first_claim = claim_product_test_job(
+        FastAgentIdentity(
+            agent_id="agent-w1",
+            workspace_id=1,
+            merchant_uid="merchant-1",
+        ),
+        db_session,
+    )
+
+    assert third["job"]["id"] == third_claim["job"]["id"]
+    assert third_claim["job"]["reference"] == "333333333_333333333"
+    assert first["job"]["id"] == first_claim["job"]["id"]
+    assert first_claim["job"]["reference"] == "111111111_111111111"
+
+    with pytest.raises(product_test_api.HTTPException) as caught:
+        complete_product_test_job(
+            first_claim["job"]["id"],
+            ProductTestAgentResult(
+                agent_id="agent-w3",
+                workspace_id=3,
+                lease_token=first_claim["job"]["lease_token"],
+                status="failed",
+                error_message="must stay isolated",
+            ),
+            db_session,
+        )
+    assert caught.value.status_code == 404
 
 
 def test_product_test_ui_uses_local_fast_agent() -> None:

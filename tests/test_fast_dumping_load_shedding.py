@@ -104,6 +104,24 @@ def test_agent_serializes_crm_requests_behind_shared_circuit() -> None:
     assert "separate verification after" in source
 
 
+def test_agent_keeps_workspace_processes_and_secrets_isolated(
+    monkeypatch,
+    tmp_path,
+) -> None:
+    monkeypatch.setenv("APPDATA", str(tmp_path))
+    workspace_one = desktop_agent._config_path(1)
+    workspace_three = desktop_agent._config_path(3)
+
+    assert workspace_one != workspace_three
+    assert workspace_one.name.endswith("workspace-1.json")
+    assert workspace_three.name.endswith("workspace-3.json")
+    assert desktop_agent._log_path(1) != desktop_agent._log_path(3)
+
+    source = Path(desktop_agent.__file__).read_text(encoding="utf-8")
+    assert "LEO-Kaspi-Fast-Dumping-Agent-workspace-{workspace_id}" in source
+    assert "kaspi-fast-dumping-{socket.gethostname()}-workspace-{selected_workspace}" in source
+
+
 def test_agent_scans_by_kaspi_product_id_not_merchant_sku(monkeypatch) -> None:
     observed: list[dict] = []
 
