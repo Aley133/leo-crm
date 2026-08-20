@@ -3,7 +3,7 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.24.7"
+EXPECTED_APP_VERSION = "0.24.8"
 EXPECTED_DEPLOYMENT_MARKER = "shared-catalog-photo-backfill"
 
 

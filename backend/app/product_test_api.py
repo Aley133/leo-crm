@@ -1,30 +1,29 @@
 from __future__ import annotations
 
-import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree
+from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, Response
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
 from .db import get_db, get_unscoped_db
 from .dumping_models import KaspiXmlFeed
-from .fast_dumping_agent_api import FastAgentIdentity
+from .fast_dumping_agent_api import FastAgentIdentity, _validate_workspace_merchant
 from .kaspi_xml_schema import catalog_store_id, ensure_offer_availability, repair_kaspi_catalog_tree
 from .models import Product
 from .product_images import normalize_product_image_url
 from .product_test_models import ProductTestItem, ProductTestJob
 from .workspace_context import workspace_context
-from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
-
-
 DEFAULT_CITY_ID = "196220100"
 DEFAULT_ZONE_ID = "Magnum_ZONE1"
 MAX_XML_BYTES = 25 * 1024 * 1024
+PRODUCT_TEST_LEASE_SECONDS = 180
+PRODUCT_TEST_HISTORY_LIMIT = 40
 
 
 class ProductTestInspectRequest(BaseModel):
@@ -114,6 +113,34 @@ def _job_payload(job: ProductTestJob) -> dict:
         "updated_at": job.updated_at,
         "completed_at": job.completed_at,
     }
+
+
+def _prune_product_test_history(
+    db: Session,
+    *,
+    workspace_id: int,
+    keep: int = PRODUCT_TEST_HISTORY_LIMIT,
+) -> int:
+    cutoff_id = db.scalar(
+        select(ProductTestJob.id)
+        .where(
+            ProductTestJob.workspace_id == workspace_id,
+            ProductTestJob.completed_at.is_not(None),
+        )
+        .order_by(ProductTestJob.id.desc())
+        .offset(max(10, int(keep)))
+        .limit(1)
+    )
+    if cutoff_id is None:
+        return 0
+    result = db.execute(
+        delete(ProductTestJob).where(
+            ProductTestJob.workspace_id == workspace_id,
+            ProductTestJob.completed_at.is_not(None),
+            ProductTestJob.id <= cutoff_id,
+        )
+    )
+    return int(result.rowcount or 0)
 
 
 def _local_name(tag: str) -> str:
@@ -281,7 +308,13 @@ def _persist_product_inspection(db: Session, *, job: ProductTestJob, result: dic
     if product is not None and item.image_url:
         product.image_url = item.image_url
 
-    job.result_json = result
+    # The normalized item already owns the useful offers summary. Keeping the
+    # complete scanner response in every historical job duplicated the same
+    # JSON and let a manual lab feature grow without a retention boundary.
+    job.result_json = {
+        "kaspi_product_id": kaspi_id,
+        "merchant_sku": merchant_sku,
+    }
     job.status = "succeeded"
     job.completed_at = _now()
     job.error_code = None
@@ -292,53 +325,32 @@ def _persist_product_inspection(db: Session, *, job: ProductTestJob, result: dic
 
 
 @router.post("/inspect")
-async def inspect_product(payload: ProductTestInspectRequest, db: Session = Depends(get_db)) -> dict:
-    """Read a public Kaspi card directly over HTTP from the CRM backend.
-
-    This is a manual, one-shot operation. It does not enqueue work for the
-    Windows Fast Dumping Agent and it does not start background polling.
-    """
+def inspect_product(payload: ProductTestInspectRequest, db: Session = Depends(get_db)) -> dict:
+    """Queue one explicit card read for the local Windows Fast Agent."""
 
     reference = payload.reference.strip()
     running = db.scalar(
         select(ProductTestJob).where(
             ProductTestJob.input_reference == reference,
-            ProductTestJob.status == "running_http",
+            ProductTestJob.status.in_(("queued", "leased")),
         ).order_by(ProductTestJob.id.desc()).limit(1)
     )
     if running is not None:
-        raise HTTPException(status_code=409, detail="Эта карточка уже читается по HTTP")
+        raise HTTPException(status_code=409, detail="Эта карточка уже ожидает локальный Agent")
 
     job = ProductTestJob(
         input_reference=reference,
         city_id=payload.city_id.strip(),
         zone_id=payload.zone_id.strip(),
-        status="running_http",
-        agent_id="crm-http",
+        status="queued",
         result_json={},
     )
     db.add(job)
+    db.flush()
+    _prune_product_test_history(db, workspace_id=job.workspace_id)
     db.commit()
     db.refresh(job)
-
-    try:
-        async with asyncio.timeout(60):
-            result = await inspect_kaspi_product(
-                reference=reference,
-                city_id=job.city_id,
-                zone_id=job.zone_id,
-            )
-        return _persist_product_inspection(db, job=job, result=result)
-    except Exception as exc:
-        job.status = "failed"
-        job.error_code = type(exc).__name__[:128]
-        job.error_message = str(exc)[:4000]
-        job.completed_at = _now()
-        db.commit()
-        raise HTTPException(
-            status_code=502,
-            detail=f"Не удалось прочитать публичную карточку Kaspi: {job.error_message}",
-        ) from exc
+    return {"job": _job_payload(job), "queued": True}
 
 
 @router.patch("/items/{item_id}")
@@ -373,16 +385,64 @@ def download_product_test_xml(db: Session = Depends(get_db)) -> Response:
 
 
 @agent_router.post("/claim")
-def claim_product_test_job(payload: FastAgentIdentity) -> dict:
-    """Compatibility response for Agent 1.0.8 during the upgrade window.
+def claim_product_test_job(
+    payload: FastAgentIdentity,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    """Lease one manual Product Test read to the matching workspace Agent."""
 
-    New Product Test work is never queued here: CRM performs the explicit
-    public-card HTTP request itself. Keeping a no-op response prevents an old
-    desktop Agent from treating the rolling server upgrade as an error.
-    """
-
-    del payload
-    return {"job": None, "retired": True}
+    try:
+        _validate_workspace_merchant(
+            db,
+            workspace_id=payload.workspace_id,
+            merchant_uid=payload.merchant_uid,
+        )
+        now = _now()
+        with workspace_context(payload.workspace_id):
+            db.execute(
+                update(ProductTestJob)
+                .where(
+                    ProductTestJob.workspace_id == payload.workspace_id,
+                    ProductTestJob.status == "leased",
+                    ProductTestJob.lease_until.is_not(None),
+                    ProductTestJob.lease_until <= now,
+                )
+                .values(
+                    status="queued",
+                    agent_id=None,
+                    lease_token=None,
+                    lease_until=None,
+                )
+            )
+            job = db.scalar(
+                select(ProductTestJob)
+                .where(
+                    ProductTestJob.workspace_id == payload.workspace_id,
+                    ProductTestJob.status == "queued",
+                )
+                .order_by(ProductTestJob.id)
+                .limit(1)
+                .with_for_update(skip_locked=True)
+            )
+            if job is None:
+                db.commit()
+                return {"job": None, "retry_after_seconds": 5}
+            job.status = "leased"
+            job.agent_id = payload.agent_id
+            job.lease_token = uuid4().hex
+            job.lease_until = now + timedelta(seconds=PRODUCT_TEST_LEASE_SECONDS)
+            result = {
+                "id": job.id,
+                "reference": job.input_reference,
+                "city_id": job.city_id,
+                "zone_id": job.zone_id,
+                "lease_token": job.lease_token,
+            }
+            db.commit()
+            return {"job": result, "retry_after_seconds": 0}
+    except ValueError as exc:
+        db.rollback()
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @agent_router.post("/jobs/{job_id}/complete")
@@ -402,6 +462,8 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
         job.error_code = payload.error_code
         job.error_message = payload.error_message
         job.completed_at = _now()
+        job.lease_token = None
+        job.lease_until = None
         if payload.status == "failed":
             job.status = "failed"
             db.commit()

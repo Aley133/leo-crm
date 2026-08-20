@@ -58,6 +58,7 @@ class ProductImageResolution(BaseModel):
     image_url: str | None
     cached: bool
     pending: bool = False
+    exhausted: bool = False
 
 
 router = APIRouter(
@@ -255,6 +256,18 @@ def resolve_product_image(product_id: int, db: Session = Depends(get_db)) -> Pro
             product_id=product.id,
             image_url=current_image,
             cached=True,
+        )
+
+    if (
+        int(product.image_backfill_attempts or 0) >= 2
+        and not product.image_backfill_lease_token
+    ):
+        return ProductImageResolution(
+            product_id=product.id,
+            image_url=None,
+            cached=False,
+            pending=False,
+            exhausted=True,
         )
 
     now = datetime.now(UTC)

@@ -56,7 +56,12 @@
           if (!response.ok) throw await errorFrom(response);
           return response.json();
         })
-        .then((payload) => finish(productId, payload.image_url, "", Boolean(payload.pending)))
+        .then((payload) => finish(
+          productId,
+          payload.image_url,
+          payload.exhausted ? "Автоматические попытки исчерпаны" : "",
+          Boolean(payload.pending),
+        ))
         .catch((error) => finish(productId, null, error.message || "Фото Kaspi не получено"))
         .finally(() => { activeRequests -= 1; pump(); });
     }

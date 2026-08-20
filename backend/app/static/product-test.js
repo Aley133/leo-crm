@@ -4,6 +4,7 @@ const storageKey = "leo_crm_service_token";
 const authPanel = document.querySelector("#auth-panel");
 const page = document.querySelector("#lab-page");
 const message = document.querySelector("#message");
+let refreshTimer = null;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
@@ -36,9 +37,13 @@ const itemCard = (item) => `<article class="lab-card" data-id="${item.id}">
 </article>`;
 
 const renderJobs = (jobs) => {
-  const active = jobs.filter((job) => ["running_http","failed"].includes(job.status)).slice(0, 5);
-  document.querySelector("#jobs").innerHTML = active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${job.status === "failed" ? "Ошибка HTTP" : "CRM читает публичную карточку"}</strong> · ${escapeHtml(job.reference)}${job.error_message ? ` · ${escapeHtml(job.error_message)}` : ""}</div>`).join("");
-  document.querySelector("#job-count").textContent = jobs.filter((job) => job.status === "running_http").length;
+  const active = jobs.filter((job) => ["queued","leased","failed"].includes(job.status)).slice(0, 5);
+  const pending = jobs.filter((job) => ["queued","leased"].includes(job.status));
+  document.querySelector("#jobs").innerHTML = active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${job.status === "failed" ? "Ошибка локального чтения" : job.status === "leased" ? "Локальный Agent читает карточку" : "Ожидает локальный Agent"}</strong> · ${escapeHtml(job.reference)}${job.error_message ? ` · ${escapeHtml(job.error_message)}` : ""}</div>`).join("");
+  document.querySelector("#job-count").textContent = pending.length;
+  if (pending.length && !refreshTimer) {
+    refreshTimer = window.setTimeout(() => { refreshTimer = null; load(); }, 3000);
+  }
 };
 
 const render = (payload) => {
@@ -64,10 +69,10 @@ async function load() {
 document.querySelector("#token-form").addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, document.querySelector("#token").value.trim()); load(); });
 document.querySelector("#refresh").addEventListener("click", load);
 document.querySelector("#inspect-form").addEventListener("submit", async (event) => {
-  event.preventDefault(); const button = document.querySelector("#inspect-button"); setBusy(button, true, "Читаю HTML Kaspi…");
+  event.preventDefault(); const button = document.querySelector("#inspect-button"); setBusy(button, true, "Передаю локальному Agent…");
   try {
     await request("/api/product-test/inspect", {method:"POST", body:JSON.stringify({reference:document.querySelector("#reference").value.trim(), city_id:document.querySelector("#city-id").value.trim(), zone_id:document.querySelector("#zone-id").value.trim()})});
-    document.querySelector("#reference").value = ""; notify("Карточка получена обычным HTTP-запросом. Фото прочитано из og:image.", "success"); await load();
+    document.querySelector("#reference").value = ""; notify("Задание передано локальному Agent. Карточка появится автоматически.", "success"); await load();
   } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 document.querySelector("#items").addEventListener("click", async (event) => {

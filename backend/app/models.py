@@ -95,6 +95,12 @@ class Product(Base):
         String(1000),
         nullable=True,
     )
+    image_backfill_attempts: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default="0",
+    )
     status: Mapped[str] = mapped_column(String(32), default=ProductStatus.DRAFT.value, index=True)
     sale_enabled: Mapped[bool] = mapped_column(
         Boolean,

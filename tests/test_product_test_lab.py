@@ -9,18 +9,21 @@ from sqlalchemy import select
 
 from backend.app.kaspi_xml_import import parse_kaspi_products
 from backend.app.fast_dumping_agent_api import FastAgentIdentity
-from backend.app.models import Product
+from backend.app.models import MarketplaceAccount, Product
 from backend.app.product_images import normalize_product_image_url
 from backend.app.product_registry_api import resolve_product_image
 from backend.app import kaspi_product_photo
 from backend.app.product_test_api import (
     ProductTestInspectRequest,
+    ProductTestAgentResult,
     build_product_test_xml,
     claim_product_test_job,
+    complete_product_test_job,
     inspect_product,
 )
 from backend.app.product_test_models import ProductTestItem, ProductTestJob
 from backend.app import product_test_api
+from backend.app.workspace_models import KaspiAccountCredential, Workspace
 from tools import kaspi_fast_dumping_scanner
 from tools.kaspi_fast_dumping_scanner import (
     _meta_content,
@@ -34,6 +37,34 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def _children(element):
     return [str(child.tag).rsplit("}", 1)[-1] for child in list(element)]
+
+
+def _seed_agent_account(db_session, *, workspace_id: int = 1, partner_id: str = "merchant-1") -> None:
+    db_session.info["include_all_workspaces"] = True
+    workspace = Workspace(
+        id=workspace_id,
+        name=f"Workspace {workspace_id}",
+        slug=f"workspace-{workspace_id}",
+        is_active=True,
+    )
+    account = MarketplaceAccount(
+        workspace_id=workspace_id,
+        provider="kaspi",
+        external_account_id=partner_id,
+        display_name=partner_id,
+        timezone="Asia/Almaty",
+    )
+    db_session.add_all((workspace, account))
+    db_session.flush()
+    db_session.add(
+        KaspiAccountCredential(
+            workspace_id=workspace_id,
+            marketplace_account_id=account.id,
+            partner_id=partner_id,
+            api_token_encrypted="test",
+        )
+    )
+    db_session.commit()
 
 
 def test_product_image_urls_are_https_and_kaspi_owned() -> None:
@@ -261,14 +292,22 @@ def test_fast_dumping_still_requires_promo_conditions(monkeypatch) -> None:
         )
 
 
-def test_legacy_product_test_agent_claim_is_retired() -> None:
-    result = claim_product_test_job(
-        FastAgentIdentity(agent_id="agent-w2", workspace_id=2, merchant_uid="merchant-2"),
+def test_product_test_agent_claim_leases_workspace_job(db_session) -> None:
+    _seed_agent_account(db_session)
+    queued = inspect_product(
+        ProductTestInspectRequest(reference="102591400_177620711"),
+        db_session,
     )
-    assert result == {"job": None, "retired": True}
+    result = claim_product_test_job(
+        FastAgentIdentity(agent_id="agent-w1", workspace_id=1, merchant_uid="merchant-1"),
+        db_session,
+    )
+    assert queued["job"]["status"] == "queued"
+    assert result["job"]["reference"] == "102591400_177620711"
+    assert len(result["job"]["lease_token"]) == 32
 
 
-def test_product_test_ui_uses_direct_http_without_fast_agent() -> None:
+def test_product_test_ui_uses_local_fast_agent() -> None:
     main = (ROOT / "backend/app/main.py").read_text(encoding="utf-8")
     ui = (ROOT / "backend/app/ui.py").read_text(encoding="utf-8")
     html = (ROOT / "backend/app/static/product-test.html").read_text(encoding="utf-8")
@@ -278,52 +317,59 @@ def test_product_test_ui_uses_direct_http_without_fast_agent() -> None:
     assert '@router.get("/crm/product-test"' in ui
     assert 'id="inspect-form"' in html
     assert 'id="download-xml"' in html
-    assert "ПРЯМОЙ HTTP" in html
+    assert "ЛОКАЛЬНЫЙ IP" in html
     assert "/api/product-test/inspect" in script
     assert "/api/fast-dumping-agent/agents/status" not in script
-    assert "/api/product-test-agent/claim" not in agent
-    assert "inspect_kaspi_product" not in agent
+    assert "/api/product-test-agent/claim" in agent
+    assert "inspect_kaspi_product" in agent
     api = (ROOT / "backend/app/product_test_api.py").read_text(encoding="utf-8")
-    assert "await inspect_kaspi_product" in api
+    assert 'status="queued"' in api
     assert "ProductTestJob.workspace_id == payload.workspace_id" in api
     assert "ProductTestItem.workspace_id == job.workspace_id" in api
     assert "Product.workspace_id == job.workspace_id" in api
 
 
-def test_product_test_inspection_runs_directly_in_crm(db_session, monkeypatch) -> None:
-    calls: list[dict] = []
-
-    async def fake_inspect(**options):
-        calls.append(options)
-        return {
-            "kaspi_product_id": "102591400",
-            "merchant_sku": "102591400_177620711",
-            "product_name": "Test product",
-            "brand": "LEO",
-            "image_url": "https://resources.cdn-kaspi.kz/img/direct-http.jpg",
-            "product_url": "https://kaspi.kz/shop/p/test-product-102591400/",
-            "page_visible_price_kzt": "8538",
-            "offers": {"seller_count_scanned": 0, "top_offers": []},
-        }
-
-    monkeypatch.setattr(product_test_api, "inspect_kaspi_product", fake_inspect)
-    result = asyncio.run(
-        inspect_product(
-            ProductTestInspectRequest(reference="102591400_177620711"),
-            db_session,
-        )
+def test_product_test_inspection_completes_from_local_agent(db_session) -> None:
+    _seed_agent_account(db_session)
+    queued = inspect_product(
+        ProductTestInspectRequest(reference="102591400_177620711"),
+        db_session,
+    )
+    claim = claim_product_test_job(
+        FastAgentIdentity(agent_id="agent-w1", workspace_id=1, merchant_uid="merchant-1"),
+        db_session,
+    )
+    result = complete_product_test_job(
+        claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "kaspi_product_id": "102591400",
+                "merchant_sku": "102591400_177620711",
+                "product_name": "Test product",
+                "brand": "LEO",
+                "image_url": "https://resources.cdn-kaspi.kz/img/local-agent.jpg",
+                "product_url": "https://kaspi.kz/shop/p/test-product-102591400/",
+                "page_visible_price_kzt": "8538",
+                "offers": {"seller_count_scanned": 0, "top_offers": []},
+            },
+        ),
+        db_session,
     )
 
-    assert calls == [{
-        "reference": "102591400_177620711",
-        "city_id": "196220100",
-        "zone_id": "Magnum_ZONE1",
-    }]
+    assert queued["queued"] is True
     assert result["job"]["status"] == "succeeded"
-    assert result["item"]["image_url"] == "https://resources.cdn-kaspi.kz/img/direct-http.jpg"
+    assert result["item"]["image_url"] == "https://resources.cdn-kaspi.kz/img/local-agent.jpg"
     job = db_session.scalar(select(ProductTestJob))
     assert job is not None
-    assert job.agent_id == "crm-http"
+    assert job.agent_id == "agent-w1"
+    assert job.result_json == {
+        "kaspi_product_id": "102591400",
+        "merchant_sku": "102591400_177620711",
+    }
 
 
 def test_missing_product_photo_is_prioritized_for_local_agent_and_cached(db_session) -> None:

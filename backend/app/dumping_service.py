@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from decimal import Decimal, ROUND_CEILING
 from xml.etree import ElementTree
 
-from sqlalchemy import func, or_, select
+from sqlalchemy import delete, func, or_, select
 from sqlalchemy.orm import Session
 
 from .browser_agent_dispatch import queue_browser_target_now
@@ -27,6 +27,29 @@ from .product_inventory_group import (
 MONEY = Decimal("0.01")
 ONE = Decimal("1")
 SUPPLIER_PREORDER_STOCK_COUNT = 5
+DUMPING_RUN_HISTORY_PER_PRODUCT = 100
+_ACTIVE_LOCAL_RUN_STATUSES = ("queued_local", "leased_local")
+
+
+def prune_dumping_run_history(
+    db: Session,
+    *,
+    product_id: int,
+    keep: int = DUMPING_RUN_HISTORY_PER_PRODUCT,
+) -> int:
+    stale_ids = (
+        select(DumpingRun.id)
+        .where(
+            DumpingRun.product_id == product_id,
+            DumpingRun.status.not_in(_ACTIVE_LOCAL_RUN_STATUSES),
+        )
+        .order_by(DumpingRun.id.desc())
+        .offset(max(20, int(keep)))
+    )
+    result = db.execute(
+        delete(DumpingRun).where(DumpingRun.id.in_(stale_ids))
+    )
+    return int(result.rowcount or 0)
 
 
 def workspace_feed_url(db: Session) -> str:
@@ -1096,6 +1119,7 @@ def suspend_product_removed_from_seller(
     )
     db.add(run)
     db.flush()
+    prune_dumping_run_history(db, product_id=product.id)
     return run
 
 
@@ -1279,4 +1303,5 @@ def publish_decision(db: Session, *, product: Product, policy: DumpingPolicy, de
     )
     db.add(run)
     db.flush()
+    prune_dumping_run_history(db, product_id=product.id)
     return run

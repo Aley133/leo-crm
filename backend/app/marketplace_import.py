@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import Any
 from uuid import UUID
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from .models import (
@@ -53,6 +53,40 @@ KASPI_STATE_FALLBACK_MAP: dict[str, str] = {
 }
 
 _PLACEHOLDER_TITLES = {"", "unknown product", "название не получено"}
+RAW_PAYLOAD_HISTORY_PER_ORDER = 20
+
+
+def prune_order_raw_payload_history(
+    session: Session,
+    *,
+    marketplace_account_id: int,
+    external_order_id: str,
+    keep: int = RAW_PAYLOAD_HISTORY_PER_ORDER,
+) -> int:
+    """Keep bounded audit snapshots for one order instead of endless JSON."""
+
+    cutoff_id = session.scalar(
+        select(MarketplaceRawPayload.id)
+        .where(
+            MarketplaceRawPayload.marketplace_account_id == marketplace_account_id,
+            MarketplaceRawPayload.payload_type == "order",
+            MarketplaceRawPayload.external_object_id == external_order_id,
+        )
+        .order_by(MarketplaceRawPayload.received_at.desc(), MarketplaceRawPayload.id.desc())
+        .offset(max(5, int(keep)))
+        .limit(1)
+    )
+    if cutoff_id is None:
+        return 0
+    result = session.execute(
+        delete(MarketplaceRawPayload).where(
+            MarketplaceRawPayload.marketplace_account_id == marketplace_account_id,
+            MarketplaceRawPayload.payload_type == "order",
+            MarketplaceRawPayload.external_object_id == external_order_id,
+            MarketplaceRawPayload.id <= cutoff_id,
+        )
+    )
+    return int(result.rowcount or 0)
 
 
 @dataclass(frozen=True, slots=True)
@@ -492,6 +526,12 @@ def import_kaspi_order(
         checkpoint.watermark_at = checkpoint_watermark_at
 
     session.flush()
+    if raw_payload_created:
+        prune_order_raw_payload_history(
+            session,
+            marketplace_account_id=marketplace_account_id,
+            external_order_id=normalized.external_order_id,
+        )
     return ImportResult(
         order_id=order.id,
         created=created,
