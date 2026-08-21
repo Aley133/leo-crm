@@ -87,7 +87,7 @@
             <label><span>Шаг ниже конкурента, ₸</span><input id="undercut-step" type="number" min="1" max="10000" step="1" value="1" required></label>
             <label><span>Интервал проверки и записи</span><select id="scan-interval" required><option value="300">5 минут</option><option value="600" selected>10 минут (рекомендуется)</option><option value="900">15 минут</option><option value="1800">30 минут</option><option value="2100">35 минут</option><option value="3600">1 час</option></select><small>Цена меняется не чаще выбранного интервала</small></label>
             <label><span>Доплата за быструю доставку, ₸</span><input id="delivery-premium" type="number" min="0" max="100000" step="1" value="500" required><small>Более дешёвый продавец может быть пропущен в пределах этой разницы</small></label>
-            <label><span>Преимущество доставки, дней</span><input id="delivery-days" type="number" min="1" max="30" step="1" value="5" required><small>Наша доставка должна быть быстрее минимум на столько дней</small></label>
+            <label><span>Преимущество доставки, дней</span><input id="delivery-days" type="number" min="1" max="30" step="1" value="3" required><small>Наша доставка должна быть быстрее минимум на столько дней</small></label>
             <label><span>Защита аномалии, %</span><input id="max-gap" type="number" min="0.01" max="100" step="0.01" value="35" required></label>
             <label><span>Город Kaspi</span><input id="city-id" maxlength="32" value="196220100" required></label>
             <label><span>Зона Kaspi</span><input id="zone-id" maxlength="64" value="Magnum_ZONE1" required></label>
@@ -119,7 +119,7 @@
         <label><span>Шаг ниже конкурента, ₸</span><input id="edit-undercut-step" type="number" min="1" max="10000" step="1" required></label>
         <label><span>Интервал проверки и записи</span><select id="edit-scan-interval" required><option value="300">5 минут</option><option value="600">10 минут (рекомендуется)</option><option value="900">15 минут</option><option value="1800">30 минут</option><option value="2100">35 минут</option><option value="3600">1 час</option></select><small>Один запрос рынка и максимум одна запись за интервал</small></label>
         <label><span>Доплата за быструю доставку, ₸</span><input id="edit-delivery-premium" type="number" min="0" max="100000" step="1" required><small>По умолчанию 500 ₸</small></label>
-        <label><span>Преимущество доставки, дней</span><input id="edit-delivery-days" type="number" min="1" max="30" step="1" required><small>По умолчанию 5 дней</small></label>
+        <label><span>Преимущество доставки, дней</span><input id="edit-delivery-days" type="number" min="1" max="30" step="1" required><small>По умолчанию 3 дня</small></label>
         <label><span>Аномалия, %</span><input id="edit-max-gap" type="number" min="0.01" max="100" step="0.01" required></label>
         <label><span>Город Kaspi</span><input id="edit-city-id" maxlength="32" required></label>
         <label><span>Зона Kaspi</span><input id="edit-zone-id" maxlength="64" required></label>

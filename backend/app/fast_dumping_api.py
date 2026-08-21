@@ -41,7 +41,7 @@ class FastDumpingPolicyUpsert(BaseModel):
     max_undercut_gap_percent: Decimal = Field(default=35, gt=0, le=100)
     scan_interval_seconds: Literal[300, 600, 900, 1800, 2100, 3600] = 600
     delivery_price_premium_kzt: int = Field(default=500, ge=0, le=100000)
-    delivery_advantage_days: int = Field(default=5, ge=1, le=30)
+    delivery_advantage_days: int = Field(default=3, ge=1, le=30)
     city_id: str = Field(default="196220100", min_length=1, max_length=32)
     zone_id: str = Field(default="Magnum_ZONE1", min_length=1, max_length=64)
 

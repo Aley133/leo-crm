@@ -86,8 +86,8 @@ class FastDumpingPolicy(WorkspaceOwned, Base):
     delivery_advantage_days: Mapped[int] = mapped_column(
         Integer,
         nullable=False,
-        default=5,
-        server_default="5",
+        default=3,
+        server_default="3",
     )
     city_id: Mapped[str] = mapped_column(
         String(32),
