@@ -425,8 +425,6 @@ def recover_expired_leases(
             state.status = "queued"
             state.status_reason = "Сканирование прервалось и будет безопасно повторено."
         elif job.status == "leased_apply":
-            # The write may already have reached Kaspi. Verify first; never
-            # submit the same unknown operation automatically a second time.
             policy = db.get(FastDumpingPolicy, job.policy_id)
             verify_delay = (
                 _policy_interval_seconds(policy)
@@ -869,6 +867,10 @@ def complete_scan(
         undercut_step_kzt=Decimal(policy.undercut_step_kzt),
         allow_price_raise=policy.allow_price_raise,
         max_undercut_gap_percent=Decimal(policy.max_undercut_gap_percent),
+        market_offers=state.offers_json,
+        delivery_price_premium_kzt=policy.delivery_price_premium_kzt,
+        delivery_advantage_days=policy.delivery_advantage_days,
+        page_visible_price_kzt=state.page_visible_price_kzt,
     )
     delivery_selection_reason = market.get("delivery_selection_reason")
     if delivery_selection_reason:
@@ -1033,18 +1035,24 @@ def prepare_apply(
             unit_cost_kzt=source.unit_cost_kzt,
             minimum_profit_kzt=Decimal(policy.minimum_profit_kzt),
         )
+        market = job.market_json or {}
         decision = decide_fast_price(
             own_price_kzt=_decimal(
-                (job.market_json or {}).get("own_price_kzt"), field="own_price_kzt"
+                market.get("own_price_kzt"), field="own_price_kzt"
             ),
             competitor_price_kzt=_decimal(
-                (job.market_json or {}).get("competitor_price_kzt"),
-                field="competitor_price_kzt",
+                market.get("competitor_price_kzt"), field="competitor_price_kzt"
             ),
             safe_floor_kzt=floor,
             undercut_step_kzt=Decimal(policy.undercut_step_kzt),
             allow_price_raise=policy.allow_price_raise,
             max_undercut_gap_percent=Decimal(policy.max_undercut_gap_percent),
+            market_offers=market.get("offers") or [],
+            delivery_price_premium_kzt=policy.delivery_price_premium_kzt,
+            delivery_advantage_days=policy.delivery_advantage_days,
+            page_visible_price_kzt=_decimal(
+                market.get("page_visible_price_kzt"), field="page_visible_price_kzt"
+            ),
         )
         previous_target = _decimal(
             (job.decision_json or {}).get("target_price_kzt"),
