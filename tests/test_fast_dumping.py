@@ -274,6 +274,7 @@ def test_delivery_filter_never_raises_price_above_the_protected_premium() -> Non
     assert assessments[id(expensive)].ignored is False
     assert selected is None
 
+
 def _seed_fast_product(db_session, *, workspace_id: int = 1, quantity: int = 4):
     with workspace_context(workspace_id):
         product = Product(
@@ -418,7 +419,7 @@ def test_fast_dumping_full_scan_prepare_apply_cycle(db_session) -> None:
             workspace_id=1,
         )
     assert claimed_payload["delivery_price_premium_kzt"] == 500
-    assert claimed_payload["delivery_advantage_days"] == 5
+    assert claimed_payload["delivery_advantage_days"] == 3
     with workspace_context(1):
         result = complete_scan(
             db_session,
@@ -570,7 +571,6 @@ def test_accepted_write_is_verified_once_after_configured_interval(db_session) -
     assert job.not_before_at is not None
     assert job.not_before_at >= state.last_applied_at + timedelta(seconds=600)
 
-    # A claim before the 10-minute verification deadline must not touch Kaspi.
     assert _claim(db_session, 1) is None
 
     job.not_before_at = datetime.now(UTC) - timedelta(seconds=1)
@@ -885,7 +885,7 @@ def test_fast_dumping_validates_delivery_advantage_thresholds() -> None:
     )
 
     assert defaults.delivery_price_premium_kzt == 500
-    assert defaults.delivery_advantage_days == 5
+    assert defaults.delivery_advantage_days == 3
     assert custom.delivery_price_premium_kzt == 750
     assert custom.delivery_advantage_days == 7
     for invalid in (
