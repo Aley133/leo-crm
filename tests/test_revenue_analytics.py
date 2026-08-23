@@ -68,7 +68,9 @@ def test_revenue_analytics_is_workspace_scoped_and_values_stock(db_session):
                     product_id=product_1.id,
                     received_at=datetime(2026, 8, 30, tzinfo=UTC),
                     quantity_received=3,
-                    quantity_remaining=3,
+                    # Expected batches are not physical FIFO yet. Analytics must
+                    # count what was ordered, even if quantity_remaining is zero.
+                    quantity_remaining=0,
                     unit_cost=Decimal("2600.00"),
                     batch_type="purchase",
                     is_received=False,
@@ -118,5 +120,6 @@ def test_revenue_analytics_is_workspace_scoped_and_values_stock(db_session):
     assert payload["inventory"]["on_hand_cost"] == Decimal("15000.00")
     assert payload["inventory"]["incoming_units"] == 3
     assert payload["inventory"]["incoming_cost"] == Decimal("7800.00")
+    assert payload["inventory"]["incoming_known_units"] == 3
     assert payload["inventory"]["sku_count"] == 1
     assert payload["inventory"]["top_capital"][0]["merchant_sku"] == "SKU-one"

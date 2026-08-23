@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Аналитика</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260724-1">
-  <link rel="stylesheet" href="/static/revenue.css?v=20260823-1">
+  <link rel="stylesheet" href="/static/revenue.css?v=20260823-2">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
   <script src="/static/theme.js?v=20260803-2"></script>
@@ -62,13 +62,13 @@
             <canvas id="business-chart" aria-label="График динамики бизнеса"></canvas>
             <div id="chart-tooltip" class="chart-tooltip hidden"></div>
           </div>
-          <div class="chart-legend"><span><i class="legend-line"></i>День</span><span><i class="legend-trend"></i>Средняя за 7 дней</span></div>
+          <div class="chart-legend"><span><i class="legend-line"></i>Дневное значение</span><span><i class="legend-up"></i>Рост к предыдущему дню</span><span><i class="legend-down"></i>Снижение</span><span><i class="legend-trend"></i>Средняя за 7 дней</span></div>
         </section>
 
         <section class="analytics-grid">
           <article class="insight-card growth-card">
             <div class="section-heading"><div><span class="section-kicker">ДРАЙВЕРЫ</span><h2>Почему меняется оборот</h2></div><strong id="growth-total">—</strong></div>
-            <p class="section-note">Разница с предыдущим таким же периодом раскладывается на три фактора.</p>
+            <p id="growth-note" class="section-note">Разница с предыдущим таким же периодом раскладывается на три фактора.</p>
             <div class="driver-list">
               <div class="driver-row"><div><strong>Количество заказов</strong><small>Больше или меньше покупателей</small></div><span id="driver-orders">—</span></div>
               <div class="driver-row"><div><strong>Товаров в заказе</strong><small>Изменение среднего размера корзины</small></div><span id="driver-basket">—</span></div>
@@ -80,11 +80,11 @@
             <div class="section-heading"><div><span class="section-kicker">КАПИТАЛ</span><h2>Деньги в товаре</h2></div></div>
             <div class="capital-stats">
               <div><span>Физический склад</span><strong id="capital-stock">0 KZT</strong></div>
-              <div><span>Товар в пути</span><strong id="capital-incoming">0 KZT</strong></div>
+              <div><span>Товар в пути</span><strong id="capital-incoming">0 KZT</strong><small id="capital-incoming-meta">0 ед. в пути</small></div>
               <div><span>Выручка / текущий склад</span><strong id="capital-ratio">—</strong></div>
               <div><span>Средний чек</span><strong id="average-order">0 KZT</strong></div>
             </div>
-            <p class="section-note capital-note">Коэффициент «выручка / текущий склад» — ориентир, а не бухгалтерская оборачиваемость. Для точного оборота капитала нужен средний запас за период.</p>
+            <p class="section-note capital-note">Товар в пути считается сразу после создания ожидаемой партии. Если финальная закупочная цена ещё не внесена, используется текущая цена привязанного поставщика и значение помечается как предварительное.</p>
           </article>
         </section>
 
@@ -118,6 +118,6 @@
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/revenue.js?v=20260823-1" defer></script>
+  <script src="/static/revenue.js?v=20260823-2" defer></script>
 </body>
 </html>
