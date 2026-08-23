@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>LEO CRM — Выручка</title>
+  <title>LEO CRM — Аналитика</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260724-1">
-  <link rel="stylesheet" href="/static/revenue.css?v=20260724-1">
+  <link rel="stylesheet" href="/static/revenue.css?v=20260823-1">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
   <script src="/static/theme.js?v=20260803-2"></script>
@@ -15,32 +15,109 @@
     <aside class="sidebar">
       <div class="brand"><span>LEO</span><small>CRM</small></div>
       <nav aria-label="Основная навигация">
-        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/product-test">Тест товара</a><a href="/crm/orders">Заказы</a><a class="active" href="/crm/revenue">Выручка</a><a href="/crm/dumping">Демпинг</a><a href="/crm/fast-dumping">Быстрый демпинг</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/product-test">Тест товара</a><a href="/crm/orders">Заказы</a><a class="active" href="/crm/revenue">Аналитика</a><a href="/crm/dumping">Демпинг</a><a href="/crm/fast-dumping">Быстрый демпинг</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
       </nav>
       <div class="runtime-status"><span class="dot"></span><span>Finance Core</span></div>
     </aside>
     <main>
-      <header class="topbar">
-        <div><p class="eyebrow">DAILY REVENUE</p><h1>Выручка</h1><p class="subtitle">Сохранённые дневные итоги по заказам, находившимся в упаковке.</p></div>
-        <div><a class="button secondary" href="/crm/orders">Назад к заказам</a><button id="refresh" class="button" type="button">Обновить</button></div>
+      <header class="topbar analytics-topbar">
+        <div><p class="eyebrow">BUSINESS ANALYTICS</p><h1>Аналитика</h1><p class="subtitle">Оборот, прибыль, динамика заказов и капитал в товаре — в одном месте.</p></div>
+        <div><a class="button secondary" href="/crm/orders">К заказам</a><button id="refresh" class="button" type="button">Обновить</button></div>
       </header>
       <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
       <div id="message" class="message" role="status"></div>
-      <section id="revenue-page" class="hidden">
-        <section class="metrics">
-          <article class="metric"><span>Сохранено дней</span><strong id="summary-days">0</strong><small>дневных фиксаций</small></article>
-          <article class="metric"><span>Выручка</span><strong id="summary-revenue">0 KZT</strong><small>за сохранённые дни</small></article>
-          <article class="metric"><span>Чистая прибыль</span><strong id="summary-profit">0 KZT</strong><small id="summary-margin">маржа 0%</small></article>
+
+      <section id="revenue-page" class="hidden analytics-page">
+        <div class="analytics-toolbar">
+          <div class="period-switch" id="period-switch" aria-label="Период аналитики">
+            <button data-days="7" type="button">7Д</button>
+            <button data-days="30" class="active" type="button">30Д</button>
+            <button data-days="90" type="button">90Д</button>
+            <button data-days="365" type="button">1Г</button>
+            <button data-days="0" type="button">ВСЁ</button>
+          </div>
+          <span id="period-caption" class="period-caption">Последние 30 дней</span>
+        </div>
+
+        <section class="metrics analytics-metrics">
+          <article class="metric analytics-metric"><span>Выручка</span><strong id="summary-revenue">0 KZT</strong><small id="revenue-change">— к прошлому периоду</small></article>
+          <article class="metric analytics-metric"><span>Чистая прибыль</span><strong id="summary-profit">0 KZT</strong><small id="profit-change">— к прошлому периоду</small></article>
+          <article class="metric analytics-metric"><span>Маржа</span><strong id="summary-margin-value">0%</strong><small id="summary-margin">за выбранный период</small></article>
+          <article class="metric analytics-metric"><span>Заказы</span><strong id="summary-orders">0</strong><small id="orders-change">— к прошлому периоду</small></article>
+          <article class="metric analytics-metric"><span>Продано единиц</span><strong id="summary-units">0</strong><small id="avg-basket">0 ед. на заказ</small></article>
+          <article class="metric analytics-metric capital-metric"><span>Товар на складе</span><strong id="inventory-cost">0 KZT</strong><small id="inventory-units">0 ед. · 0 SKU</small></article>
         </section>
-        <section class="revenue-card">
-          <div class="revenue-head"><span>Дата</span><span>Заказы</span><span>Единицы</span><span>Выручка</span><span>Чистая прибыль</span><span>Маржа</span><span>Зафиксировано</span></div>
-          <div id="revenue-list"></div>
-          <div id="empty" class="empty hidden">Дневная выручка ещё не сохранялась.</div>
+
+        <section class="chart-card">
+          <div class="chart-head">
+            <div><span class="section-kicker">ДИНАМИКА</span><h2 id="chart-title">Выручка</h2><div class="chart-value-line"><strong id="chart-total">0 KZT</strong><span id="chart-change">—</span></div></div>
+            <div class="metric-switch" id="metric-switch">
+              <button data-metric="revenue" class="active" type="button">Выручка</button>
+              <button data-metric="profit" type="button">Прибыль</button>
+              <button data-metric="orders" type="button">Заказы</button>
+              <button data-metric="units" type="button">Единицы</button>
+            </div>
+          </div>
+          <div class="chart-wrap">
+            <canvas id="business-chart" aria-label="График динамики бизнеса"></canvas>
+            <div id="chart-tooltip" class="chart-tooltip hidden"></div>
+          </div>
+          <div class="chart-legend"><span><i class="legend-line"></i>День</span><span><i class="legend-trend"></i>Средняя за 7 дней</span></div>
         </section>
+
+        <section class="analytics-grid">
+          <article class="insight-card growth-card">
+            <div class="section-heading"><div><span class="section-kicker">ДРАЙВЕРЫ</span><h2>Почему меняется оборот</h2></div><strong id="growth-total">—</strong></div>
+            <p class="section-note">Разница с предыдущим таким же периодом раскладывается на три фактора.</p>
+            <div class="driver-list">
+              <div class="driver-row"><div><strong>Количество заказов</strong><small>Больше или меньше покупателей</small></div><span id="driver-orders">—</span></div>
+              <div class="driver-row"><div><strong>Товаров в заказе</strong><small>Изменение среднего размера корзины</small></div><span id="driver-basket">—</span></div>
+              <div class="driver-row"><div><strong>Средняя цена единицы</strong><small>Изменение среднего чека на товар</small></div><span id="driver-price">—</span></div>
+            </div>
+          </article>
+
+          <article class="insight-card capital-card">
+            <div class="section-heading"><div><span class="section-kicker">КАПИТАЛ</span><h2>Деньги в товаре</h2></div></div>
+            <div class="capital-stats">
+              <div><span>Физический склад</span><strong id="capital-stock">0 KZT</strong></div>
+              <div><span>Товар в пути</span><strong id="capital-incoming">0 KZT</strong></div>
+              <div><span>Выручка / текущий склад</span><strong id="capital-ratio">—</strong></div>
+              <div><span>Средний чек</span><strong id="average-order">0 KZT</strong></div>
+            </div>
+            <p class="section-note capital-note">Коэффициент «выручка / текущий склад» — ориентир, а не бухгалтерская оборачиваемость. Для точного оборота капитала нужен средний запас за период.</p>
+          </article>
+        </section>
+
+        <section class="analytics-grid lower-grid">
+          <article class="insight-card">
+            <div class="section-heading"><div><span class="section-kicker">СКЛАД</span><h2>Где лежит капитал</h2></div></div>
+            <div id="capital-products" class="capital-products"></div>
+            <div id="capital-empty" class="empty hidden">На физическом складе нет принятых остатков.</div>
+          </article>
+
+          <article class="insight-card business-pulse-card">
+            <div class="section-heading"><div><span class="section-kicker">ПУЛЬС</span><h2>Коротко о периоде</h2></div></div>
+            <div class="pulse-list">
+              <div><span>Дней с продажами</span><strong id="summary-days">0</strong></div>
+              <div><span>Средняя выручка / день</span><strong id="average-day-revenue">0 KZT</strong></div>
+              <div><span>Средняя прибыль / день</span><strong id="average-day-profit">0 KZT</strong></div>
+              <div><span>Прибыль на 1 KZT выручки</span><strong id="profit-per-revenue">0 KZT</strong></div>
+            </div>
+          </article>
+        </section>
+
+        <details class="daily-details">
+          <summary>Дневная статистика <span>для сверки и детализации</span></summary>
+          <section class="revenue-card">
+            <div class="revenue-head"><span>Дата</span><span>Заказы</span><span>Единицы</span><span>Выручка</span><span>Чистая прибыль</span><span>Маржа</span><span>Зафиксировано</span></div>
+            <div id="revenue-list"></div>
+            <div id="empty" class="empty hidden">Дневная выручка ещё не сохранялась.</div>
+          </section>
+        </details>
       </section>
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/revenue.js?v=20260724-1" defer></script>
+  <script src="/static/revenue.js?v=20260823-1" defer></script>
 </body>
 </html>
