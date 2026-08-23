@@ -135,7 +135,7 @@ def test_supplier_decision_uses_policy_position_and_keeps_preorder_fulfillment()
 
     decision = _supplier_decision(state=state, policy=policy, source=source)
 
-    assert decision["target_price_kzt"] == Decimal("11999.00")
+    assert decision["target_price_kzt"] == "11999.00"
     assert decision["stock_count"] == 5
     assert decision["preorder_days"] == 6
     assert decision["fulfillment_mode"] == "preorder"
