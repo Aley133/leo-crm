@@ -16,6 +16,7 @@ _RUNTIME_STORE_ID: str | None = None
 
 _original_plain_setting = base._plain_setting
 _original_session_class = base.KaspiMerchantSession
+_original_post_json_with_retry = base._post_json_with_retry
 
 
 def _tracked_plain_setting(config: dict, *, key: str, env_name: str, prompt: str, reconfigure: bool) -> str:
@@ -37,6 +38,35 @@ class TrackedMerchantSession(_original_session_class):
         global _RUNTIME_SESSION
         super().__init__(*args, **kwargs)
         _RUNTIME_SESSION = self
+
+
+async def _post_json_with_offer_marker(
+    url: str,
+    token: str,
+    payload: dict,
+    *,
+    operation: str,
+) -> dict:
+    # Agent 1.1 explicitly marks accepted-but-not-yet-observed Merchant writes.
+    # The backend uses this marker to switch from the legacy 5-60 minute price
+    # verify cadence to the new 15-second single-flight Merchant BFF verify.
+    if (
+        url.endswith("/apply-complete")
+        and payload.get("accepted")
+        and not payload.get("verified")
+        and not payload.get("error_code")
+    ):
+        payload = {
+            **payload,
+            "error_code": "offer_state_pending",
+            "error_message": "Kaspi accepted realtime offer-state; Merchant BFF confirmation is pending.",
+        }
+    return await _original_post_json_with_retry(
+        url,
+        token,
+        payload,
+        operation=operation,
+    )
 
 
 async def _verify_proxy(
@@ -65,6 +95,7 @@ async def _verify_proxy(
 base.VERSION = VERSION
 base._plain_setting = _tracked_plain_setting
 base.KaspiMerchantSession = TrackedMerchantSession
+base._post_json_with_retry = _post_json_with_offer_marker
 base._process_apply = offer_runtime.process_apply
 base._process_verify = _verify_proxy
 
