@@ -23,11 +23,15 @@ def _supplier_decision(*, state: Any, policy: Any, source: Any) -> dict[str, Any
         safe_floor_kzt=floor,
         undercut_step_kzt=Decimal(policy.undercut_step_kzt),
         allow_price_raise=bool(policy.allow_price_raise),
-        max_undercut_gap_percent=Decimal(policy.max_undercut_gap_percent),
-        market_offers=state.offers_json or [],
-        delivery_price_premium_kzt=policy.delivery_price_premium_kzt,
-        delivery_advantage_days=policy.delivery_advantage_days,
-        page_visible_price_kzt=state.page_visible_price_kzt,
+        max_undercut_gap_percent=Decimal(
+            getattr(policy, "max_undercut_gap_percent", Decimal("35"))
+        ),
+        market_offers=getattr(state, "offers_json", None) or [],
+        delivery_price_premium_kzt=getattr(
+            policy, "delivery_price_premium_kzt", 500
+        ),
+        delivery_advantage_days=getattr(policy, "delivery_advantage_days", 3),
+        page_visible_price_kzt=getattr(state, "page_visible_price_kzt", None),
     )
     target = decision.target_price_kzt or own
     preorder = max(1, offer_runtime._clamp_preorder(source.delivery_days))
