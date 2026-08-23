@@ -19,7 +19,14 @@ let chartPoints = [];
 
 const headers = () => ({"Authorization": `Bearer ${localStorage.getItem(storageKey) || ""}`});
 const money = (value) => `${Number(value || 0).toLocaleString("ru-RU", {maximumFractionDigits:2})} KZT`;
-const compactMoney = (value) => `${Number(value || 0).toLocaleString("ru-RU", {notation:"compact",maximumFractionDigits:1})} KZT`;
+const axisMoney = (value) => {
+  const numberValue = Number(value || 0);
+  const abs = Math.abs(numberValue);
+  if (abs >= 1_000_000_000) return `${number(numberValue / 1_000_000_000, 1)} млрд KZT`;
+  if (abs >= 1_000_000) return `${number(numberValue / 1_000_000, 1)} млн KZT`;
+  if (abs >= 1_000) return `${number(numberValue / 1_000, 1)} тыс. KZT`;
+  return `${number(numberValue)} KZT`;
+};
 const percent = (value) => `${Number(value || 0).toLocaleString("ru-RU", {maximumFractionDigits:2})}%`;
 const number = (value, digits = 0) => Number(value || 0).toLocaleString("ru-RU", {maximumFractionDigits:digits});
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
@@ -77,6 +84,20 @@ const previousPeriod = (rows, days, currentLength) => {
   return rows.slice(start, end);
 };
 
+const comparisonPeriods = (allRows, currentRows) => {
+  const previousRows = previousPeriod(allRows, selectedDays, currentRows.length);
+  if (previousRows.length && previousRows.length === currentRows.length) {
+    return {current:currentRows, previous:previousRows, mode:"previous_period"};
+  }
+  if (currentRows.length >= 8) {
+    const half = Math.floor(currentRows.length / 2);
+    const previous = currentRows.slice(0, half);
+    const current = currentRows.slice(currentRows.length - half);
+    return {current, previous, mode:"within_period"};
+  }
+  return {current:currentRows, previous:previousRows, mode:"none"};
+};
+
 const summarize = (rows) => {
   const orders = rows.reduce((sum,row) => sum + row.orders_count, 0);
   const units = rows.reduce((sum,row) => sum + row.units_count, 0);
@@ -103,7 +124,7 @@ const pctChange = (current, previous) => {
 const setChange = (selector, current, previous) => {
   const node = document.querySelector(selector);
   const value = previous > 0 ? pctChange(current, previous) : NaN;
-  node.textContent = Number.isFinite(value) ? `${signedPercent(value)} к прошлому периоду` : "нет базы для сравнения";
+  node.textContent = Number.isFinite(value) ? `${signedPercent(value)} к прошлому периоду` : "нет полного прошлого периода";
   node.className = changeClass(value);
 };
 
@@ -122,12 +143,20 @@ const decomposeRevenue = (current, previous) => {
   };
 };
 
-const renderDrivers = (current, previous) => {
+const renderDrivers = (current, previous, mode) => {
   const totalNode = document.querySelector("#growth-total");
+  const note = document.querySelector("#growth-note");
   const diff = current.revenue - previous.revenue;
   const totalPct = previous.revenue > 0 ? pctChange(current.revenue, previous.revenue) : NaN;
   totalNode.textContent = Number.isFinite(totalPct) ? signedPercent(totalPct) : "—";
   totalNode.className = changeClass(totalPct);
+  if (note) {
+    note.textContent = mode === "previous_period"
+      ? "Разница с предыдущим таким же периодом раскладывается на три фактора."
+      : mode === "within_period"
+        ? "Полного прошлого периода ещё нет — сравниваем вторую половину выбранного периода с первой."
+        : "Для расчёта драйверов нужно хотя бы несколько дней истории продаж.";
+  }
 
   const parts = decomposeRevenue(current, previous);
   for (const [key, value] of Object.entries(parts)) {
@@ -139,8 +168,8 @@ const renderDrivers = (current, previous) => {
 };
 
 const metricConfig = {
-  revenue:{title:"Выручка", value:(row)=>row.revenue, total:(summary)=>summary.revenue, format:money, axis:compactMoney},
-  profit:{title:"Чистая прибыль", value:(row)=>row.net_profit, total:(summary)=>summary.profit, format:money, axis:compactMoney},
+  revenue:{title:"Выручка", value:(row)=>row.revenue, total:(summary)=>summary.revenue, format:money, axis:axisMoney},
+  profit:{title:"Чистая прибыль", value:(row)=>row.net_profit, total:(summary)=>summary.profit, format:money, axis:axisMoney},
   orders:{title:"Заказы", value:(row)=>row.orders_count, total:(summary)=>summary.orders, format:(v)=>number(v), axis:(v)=>number(v)},
   units:{title:"Продано единиц", value:(row)=>row.units_count, total:(summary)=>summary.units, format:(v)=>number(v), axis:(v)=>number(v)},
 };
@@ -160,7 +189,7 @@ const drawChart = (rows, summary, previousSummary) => {
   const previousTotal = config.total(previousSummary);
   const chartChange = previousTotal > 0 ? pctChange(currentTotal, previousTotal) : NaN;
   const changeNode = document.querySelector("#chart-change");
-  changeNode.textContent = Number.isFinite(chartChange) ? `${signedPercent(chartChange)} к прошлому периоду` : "нет базы сравнения";
+  changeNode.textContent = Number.isFinite(chartChange) ? `${signedPercent(chartChange)} к прошлому периоду` : "нет полного прошлого периода";
   changeNode.className = changeClass(chartChange);
 
   const rect = canvas.parentElement.getBoundingClientRect();
@@ -186,9 +215,13 @@ const drawChart = (rows, summary, previousSummary) => {
   const maxValue = Math.max(...values, ...trend, 1);
   const minValue = Math.min(...values, ...trend, 0);
   const range = Math.max(maxValue - minValue, 1);
-  const pad = {left:58,right:18,top:20,bottom:32};
-  const innerW = width - pad.left - pad.right;
-  const innerH = height - pad.top - pad.bottom;
+
+  ctx.font = "10px sans-serif";
+  const axisLabels = Array.from({length:5}, (_, i) => config.axis(maxValue - range * i / 4));
+  const widestAxisLabel = Math.max(...axisLabels.map((label)=>ctx.measureText(label).width), 48);
+  const pad = {left:Math.ceil(widestAxisLabel + 22),right:18,top:20,bottom:32};
+  const innerW = Math.max(width - pad.left - pad.right, 20);
+  const innerH = Math.max(height - pad.top - pad.bottom, 20);
   const x = (index) => pad.left + (rows.length === 1 ? innerW/2 : index * innerW / (rows.length - 1));
   const y = (value) => pad.top + (maxValue - value) * innerH / range;
 
@@ -206,7 +239,7 @@ const drawChart = (rows, summary, previousSummary) => {
   }
 
   const gradient = ctx.createLinearGradient(0,pad.top,0,height-pad.bottom);
-  gradient.addColorStop(0,"rgba(56,158,255,.28)");
+  gradient.addColorStop(0,"rgba(56,158,255,.14)");
   gradient.addColorStop(1,"rgba(56,158,255,0)");
   ctx.beginPath();
   values.forEach((value,index) => index === 0 ? ctx.moveTo(x(index),y(value)) : ctx.lineTo(x(index),y(value)));
@@ -216,12 +249,35 @@ const drawChart = (rows, summary, previousSummary) => {
   ctx.fillStyle = gradient;
   ctx.fill();
 
+  // Daily change candles: green means the selected metric grew vs yesterday,
+  // red means it fell. They deliberately represent close-to-close movement,
+  // not exchange OHLC candles because CRM has one aggregate value per day.
+  if (values.length > 1) {
+    const candleWidth = Math.max(3, Math.min(9, innerW / Math.max(values.length, 1) * 0.36));
+    for (let index=1; index<values.length; index++) {
+      const previousValue = values[index-1];
+      const currentValue = values[index];
+      const rising = currentValue >= previousValue;
+      const candleColor = rising ? "rgba(55,203,134,.88)" : "rgba(255,92,92,.88)";
+      const px = x(index);
+      const pyPrev = y(previousValue);
+      const pyCurrent = y(currentValue);
+      ctx.strokeStyle = candleColor;
+      ctx.fillStyle = candleColor;
+      ctx.lineWidth = 1;
+      ctx.beginPath();ctx.moveTo(px,pyPrev);ctx.lineTo(px,pyCurrent);ctx.stroke();
+      const top = Math.min(pyPrev, pyCurrent);
+      const bodyHeight = Math.max(Math.abs(pyPrev-pyCurrent), 2);
+      ctx.fillRect(px-candleWidth/2, top, candleWidth, bodyHeight);
+    }
+  }
+
   ctx.beginPath();
   values.forEach((value,index) => index === 0 ? ctx.moveTo(x(index),y(value)) : ctx.lineTo(x(index),y(value)));
   ctx.strokeStyle = "#42a5ff";
-  ctx.lineWidth = 2;
-  ctx.shadowColor = "rgba(66,165,255,.35)";
-  ctx.shadowBlur = 8;
+  ctx.lineWidth = 1.35;
+  ctx.shadowColor = "rgba(66,165,255,.25)";
+  ctx.shadowBlur = 5;
   ctx.stroke();
   ctx.shadowBlur = 0;
 
@@ -244,7 +300,13 @@ const drawChart = (rows, summary, previousSummary) => {
     ctx.fillText(label,x(index),height-pad.bottom+9);
   }
 
-  chartPoints = rows.map((row,index)=>({x:x(index),y:y(values[index]),row,value:values[index]}));
+  chartPoints = rows.map((row,index)=>({
+    x:x(index),
+    y:y(values[index]),
+    row,
+    value:values[index],
+    previousValue:index > 0 ? values[index-1] : null,
+  }));
 };
 
 const renderCapitalProducts = (inventory) => {
@@ -266,6 +328,9 @@ const render = (payload) => {
   const previousRows = previousPeriod(allRows, selectedDays, currentRows.length);
   const summary = summarize(currentRows);
   const previous = summarize(previousRows);
+  const driverComparison = comparisonPeriods(allRows, currentRows);
+  const driverCurrent = summarize(driverComparison.current);
+  const driverPrevious = summarize(driverComparison.previous);
   const inventory = payload.inventory || {};
 
   document.querySelector("#summary-days").textContent = number(summary.days);
@@ -282,10 +347,17 @@ const render = (payload) => {
   setChange("#revenue-change", summary.revenue, previous.revenue);
   setChange("#profit-change", summary.profit, previous.profit);
   setChange("#orders-change", summary.orders, previous.orders);
-  renderDrivers(summary, previous);
+  renderDrivers(driverCurrent, driverPrevious, driverComparison.mode);
 
   document.querySelector("#capital-stock").textContent = money(inventory.on_hand_cost);
   document.querySelector("#capital-incoming").textContent = money(inventory.incoming_cost);
+  const incomingMeta = document.querySelector("#capital-incoming-meta");
+  if (incomingMeta) {
+    const meta = [`${number(inventory.incoming_units)} ед. в пути`];
+    if (Number(inventory.incoming_estimated_units || 0) > 0) meta.push(`${number(inventory.incoming_estimated_units)} ед. оценены по текущей цене поставщика`);
+    if (Number(inventory.incoming_unpriced_units || 0) > 0) meta.push(`${number(inventory.incoming_unpriced_units)} ед. пока без цены`);
+    incomingMeta.textContent = meta.join(" · ");
+  }
   const ratio = Number(inventory.on_hand_cost || 0) > 0 ? summary.revenue / Number(inventory.on_hand_cost) : NaN;
   document.querySelector("#capital-ratio").textContent = Number.isFinite(ratio) ? `${number(ratio,2)}×` : "—";
   document.querySelector("#average-order").textContent = money(summary.averageOrder);
@@ -351,9 +423,16 @@ canvas.addEventListener("mousemove", (event) => {
   let nearest = chartPoints[0];
   for (const point of chartPoints) if (Math.abs(point.x-mouseX) < Math.abs(nearest.x-mouseX)) nearest = point;
   const config = metricConfig[selectedMetric];
-  tooltip.innerHTML = `${businessDate(nearest.row.business_date)}<strong>${config.format(nearest.value)}</strong>`;
-  tooltip.style.left = `${Math.min(Math.max(nearest.x,70),rect.width-70)}px`;
-  tooltip.style.top = `${Math.max(nearest.y,60)}px`;
+  let movement = "";
+  if (nearest.previousValue != null) {
+    const delta = nearest.value - nearest.previousValue;
+    const deltaPct = nearest.previousValue !== 0 ? delta * 100 / Math.abs(nearest.previousValue) : NaN;
+    const formattedDelta = selectedMetric === "revenue" || selectedMetric === "profit" ? signedMoney(delta) : `${delta > 0 ? "+" : ""}${number(delta)}`;
+    movement = `<small class="${changeClass(delta)}">${formattedDelta}${Number.isFinite(deltaPct) ? ` · ${signedPercent(deltaPct)}` : ""} к предыдущему дню</small>`;
+  }
+  tooltip.innerHTML = `${businessDate(nearest.row.business_date)}<strong>${config.format(nearest.value)}</strong>${movement}`;
+  tooltip.style.left = `${Math.min(Math.max(nearest.x,90),rect.width-90)}px`;
+  tooltip.style.top = `${Math.max(nearest.y,70)}px`;
   tooltip.classList.remove("hidden");
 });
 canvas.addEventListener("mouseleave",()=>tooltip.classList.add("hidden"));
