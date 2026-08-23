@@ -13,9 +13,11 @@ from .commerce.domain import CommerceOrder
 from .commerce.repository import SqlAlchemyCommerceRepository
 from .commerce.service import CommerceService
 from .db import get_db
-from .inventory_models import InventoryBatch
+from .inventory_models import InventoryBatch, InventoryBatchType
 from .models import MarketplaceAccount, Product
+from .monitoring import SupplierOfferState
 from .revenue_models import DailyRevenueSnapshot
+from .suppliers import ProductBinding, SupplierProduct
 from .workspace_context import current_workspace_id
 
 router = APIRouter(
@@ -86,6 +88,59 @@ def _workspace_account_ids(db: Session, workspace_id: int) -> tuple[int, ...]:
     )
 
 
+def _supplier_estimates(
+    db: Session,
+    *,
+    workspace_id: int,
+    product_ids: set[int],
+) -> dict[int, Decimal]:
+    """Return one best-effort current supplier price per product.
+
+    Incoming purchase batches can be created before a final FIFO unit cost is
+    confirmed. In that case analytics may estimate capital in transit from the
+    currently bound supplier. The estimate is presentation-only and never
+    mutates FIFO or purchase accounting.
+    """
+
+    if not product_ids:
+        return {}
+    rows = db.execute(
+        select(ProductBinding, SupplierProduct, SupplierOfferState)
+        .join(
+            SupplierProduct,
+            SupplierProduct.id == ProductBinding.supplier_product_id,
+        )
+        .outerjoin(
+            SupplierOfferState,
+            SupplierOfferState.supplier_product_id == SupplierProduct.id,
+        )
+        .where(
+            ProductBinding.workspace_id == workspace_id,
+            ProductBinding.product_id.in_(product_ids),
+            ProductBinding.status.in_(("active", "confirmed")),
+        )
+        .order_by(
+            ProductBinding.product_id,
+            ProductBinding.is_primary.desc(),
+            ProductBinding.priority,
+            ProductBinding.id,
+        )
+    ).all()
+    result: dict[int, Decimal] = {}
+    for binding, supplier_product, state in rows:
+        product_id = int(binding.product_id)
+        if product_id in result:
+            continue
+        value = None
+        if state is not None and state.price is not None:
+            value = Decimal(state.price)
+        elif supplier_product.current_price is not None:
+            value = Decimal(supplier_product.current_price)
+        if value is not None and value > 0:
+            result[product_id] = value
+    return result
+
+
 def _inventory_analytics(db: Session, workspace_id: int) -> dict[str, object]:
     on_hand_units, on_hand_cost, sku_count = db.execute(
         select(
@@ -97,24 +152,50 @@ def _inventory_analytics(db: Session, workspace_id: int) -> dict[str, object]:
             func.count(func.distinct(InventoryBatch.product_id)),
         ).where(
             InventoryBatch.workspace_id == workspace_id,
+            InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
             InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
         )
     ).one()
 
-    incoming_units, incoming_cost = db.execute(
-        select(
-            func.coalesce(func.sum(InventoryBatch.quantity_remaining), 0),
-            func.coalesce(
-                func.sum(InventoryBatch.quantity_remaining * InventoryBatch.unit_cost),
-                0,
-            ),
-        ).where(
-            InventoryBatch.workspace_id == workspace_id,
-            InventoryBatch.is_received.is_(False),
-            InventoryBatch.quantity_remaining > 0,
-        )
-    ).one()
+    incoming_batches = list(
+        db.scalars(
+            select(InventoryBatch)
+            .where(
+                InventoryBatch.workspace_id == workspace_id,
+                InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
+                InventoryBatch.is_received.is_(False),
+                InventoryBatch.quantity_received > 0,
+            )
+            .order_by(InventoryBatch.received_at, InventoryBatch.id)
+        ).all()
+    )
+    supplier_estimates = _supplier_estimates(
+        db,
+        workspace_id=workspace_id,
+        product_ids={int(batch.product_id) for batch in incoming_batches},
+    )
+    incoming_units = 0
+    incoming_cost = Decimal("0")
+    incoming_known_units = 0
+    incoming_estimated_units = 0
+    incoming_unpriced_units = 0
+    for batch in incoming_batches:
+        quantity = max(int(batch.quantity_received or 0), 0)
+        if quantity <= 0:
+            continue
+        incoming_units += quantity
+        batch_cost = Decimal(batch.unit_cost or 0)
+        if batch_cost > 0:
+            unit_cost = batch_cost
+            incoming_known_units += quantity
+        else:
+            unit_cost = supplier_estimates.get(int(batch.product_id), Decimal("0"))
+            if unit_cost > 0:
+                incoming_estimated_units += quantity
+            else:
+                incoming_unpriced_units += quantity
+        incoming_cost += unit_cost * quantity
 
     capital_rows = db.execute(
         select(
@@ -131,6 +212,7 @@ def _inventory_analytics(db: Session, workspace_id: int) -> dict[str, object]:
         .where(
             InventoryBatch.workspace_id == workspace_id,
             Product.workspace_id == workspace_id,
+            InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
             InventoryBatch.is_received.is_(True),
             InventoryBatch.quantity_remaining > 0,
         )
@@ -147,8 +229,12 @@ def _inventory_analytics(db: Session, workspace_id: int) -> dict[str, object]:
         "on_hand_units": int(on_hand_units or 0),
         "on_hand_cost": Decimal(on_hand_cost or 0).quantize(Decimal("0.01")),
         "sku_count": int(sku_count or 0),
-        "incoming_units": int(incoming_units or 0),
-        "incoming_cost": Decimal(incoming_cost or 0).quantize(Decimal("0.01")),
+        "incoming_units": incoming_units,
+        "incoming_cost": incoming_cost.quantize(Decimal("0.01")),
+        "incoming_known_units": incoming_known_units,
+        "incoming_estimated_units": incoming_estimated_units,
+        "incoming_unpriced_units": incoming_unpriced_units,
+        "incoming_cost_is_estimate": incoming_estimated_units > 0,
         "top_capital": [
             {
                 "product_id": int(row.id),
