@@ -61,6 +61,7 @@ const statusView = (row) => {
     idle:"Ожидает", queued:"В очереди", scanning:"Сканирование", queued_apply:"Цена готова",
     preparing_apply:"Сверка остатка", applying:"Запись PENDING", verifying:"Проверка цены",
     applied:"Применено", watching:"Цена актуальна", delivery_advantage:"Быстрая доставка",
+    preorder_position:"Место предзаказа", preorder_position_best_effort:"Место best-effort",
     floor_limited:"На пороге",
     cooldown:"Интервал цены",
     price_anomaly:"Аномалия цены", market_context_mismatch:"Контекст не совпал",
@@ -68,7 +69,8 @@ const statusView = (row) => {
     apply_timeout:"Не подтверждено", apply_unconfirmed:"Защитная пауза", verification_retry:"Перепроверка", error:"Ошибка",
     paused:"Отключён", stale:"Решение устарело", apply_failed:"Ошибка записи",
   };
-  const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : ["applied","watching","cooldown","delivery_advantage"].includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
+  const successStatuses = ["applied","watching","cooldown","delivery_advantage","preorder_position","preorder_position_best_effort"];
+  const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : successStatuses.includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
   return {status, label:labels[status] || status, kind};
 };
 
@@ -117,6 +119,7 @@ const card = (row) => {
   const source = row.current_source || {};
   const scanDue = !state.next_scan_at || new Date(state.next_scan_at).getTime() <= Date.now();
   const canRun = row.policy.enabled && !state.automatic_writes_paused && !workingStatuses.has(view.status) && scanDue;
+  const positionMode = (source.kind || state.source_kind) === "supplier";
   return `<article class="fast-card ${view.kind}" data-product-id="${row.product_id}">
     <div class="fast-card-head">
       <div class="fast-card-title"><span class="fast-status ${view.kind}">${escapeHtml(view.label)}</span>${productPhoto(row)}<div><h3>${escapeHtml(row.name)}</h3><p>Kaspi ${escapeHtml(row.kaspi_product_id)} · SKU ${escapeHtml(row.merchant_sku || "—")}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</p></div></div>
@@ -129,13 +132,14 @@ const card = (row) => {
       <div><span>Наша цена</span><strong>${money(state.own_price_kzt)}</strong><small>${state.own_position ? `позиция №${state.own_position} из ${state.seller_count || "—"}` : "позиция —"}</small></div>
       <div><span>Лучший конкурент</span><strong>${money(state.competitor_price_kzt)}</strong><small>${escapeHtml(state.competitor_name || "—")}</small></div>
       <div><span>Целевая цена</span><strong>${money(state.target_price_kzt)}</strong><small>шаг ${money(row.policy.undercut_step_kzt)}</small></div>
+      <div><span>Место в предзаказе</span><strong>№${Number(row.policy.preorder_target_position || 4)}</strong><small>${positionMode ? "стратегия активна" : "включится при FIFO=0 + supplier"}</small></div>
       <div><span>Цена карточки</span><strong>${money(state.page_visible_price_kzt)}</strong><small>${state.market_context_ok ? "контекст подтверждён" : "ожидает подтверждения"}</small></div>
       <div><span>Последний scan</span><strong>${dateTime(state.last_scanned_at)}</strong><small>следующий ${dateTime(state.next_scan_at)}</small></div>
       <div><span>Последний apply</span><strong>${dateTime(state.last_applied_at)}</strong><small>${state.last_operation_id ? `operation ${escapeHtml(state.last_operation_id)}` : "операций ещё нет"}</small></div>
       <div><span>Интервал</span><strong>${Number(row.policy.scan_interval_seconds) / 60} мин.</strong><small>проверка и максимум один write · аномалия ${Number(row.policy.max_undercut_gap_percent)}%</small></div>
-      <div><span>Преимущество доставки</span><strong>до ${money(row.policy.delivery_price_premium_kzt)}</strong><small>не демпинговать, если быстрее от ${Number(row.policy.delivery_advantage_days)} дн.</small></div>
+      <div><span>Преимущество доставки</span><strong>до ${money(row.policy.delivery_price_premium_kzt)}</strong><small>для физического FIFO</small></div>
       <div><span>Agent / версия решения</span><strong>${escapeHtml(state.last_agent_id || "—")}</strong><small>state v${Number(state.state_version || 0)}</small></div>
-      <div><span>Канал</span><strong>Realtime API</strong><small>XML не изменяется</small></div>
+      <div><span>Канал</span><strong>Realtime API</strong><small>XML — страховочное зеркало</small></div>
     </div>
     <div class="fast-card-reason"><strong>${escapeHtml(view.label)}.</strong> ${escapeHtml(state.pause_reason || state.status_reason || "Первая проверка ещё не выполнялась.")}${state.last_error_message ? ` · ${escapeHtml(state.last_error_message)}` : ""}</div>
     <details class="fast-details" data-product-id="${row.product_id}" data-state-version="${Number(state.state_version || 0)}"><summary>Офферы и проверка buyer-context · ${Number(state.offers_count || 0)}</summary><div class="offers-container"><p class="fast-card-reason">Раскройте блок — CRM загрузит диагностику только этого товара.</p></div></details>
@@ -256,6 +260,7 @@ const policyPayload = (prefix="") => ({
   scan_interval_seconds:Number(document.querySelector(`#${prefix}scan-interval`).value),
   delivery_price_premium_kzt:Number(document.querySelector(`#${prefix}delivery-premium`).value),
   delivery_advantage_days:Number(document.querySelector(`#${prefix}delivery-days`).value),
+  preorder_target_position:Number(document.querySelector(`#${prefix}preorder-position`).value),
   city_id:document.querySelector(`#${prefix}city-id`).value.trim(),
   zone_id:document.querySelector(`#${prefix}zone-id`).value.trim(),
 });
@@ -266,13 +271,14 @@ const openEdit = (row) => {
   const policy = row.policy;
   document.querySelector("#edit-product-id").value = row.product_id;
   document.querySelector("#edit-title").textContent = row.name;
-  document.querySelector("#edit-economics").textContent = `Себестоимость ${money(row.current_source?.unit_cost_kzt)} · текущий floor ${money(row.current_safe_floor_kzt)} · наша цена ${money(row.state?.own_price_kzt)}. После сохранения старое решение отменяется и товар сканируется заново.`;
+  document.querySelector("#edit-economics").textContent = `Себестоимость ${money(row.current_source?.unit_cost_kzt)} · текущий floor ${money(row.current_safe_floor_kzt)} · наша цена ${money(row.state?.own_price_kzt)}. При supplier preorder Fast будет целиться в место №${Number(policy.preorder_target_position || 4)}. После сохранения товар сканируется заново.`;
   document.querySelector("#edit-minimum-profit").value = policy.minimum_profit_kzt;
   document.querySelector("#edit-undercut-step").value = policy.undercut_step_kzt;
   document.querySelector("#edit-scan-interval").value = policy.scan_interval_seconds;
   document.querySelector("#edit-max-gap").value = policy.max_undercut_gap_percent;
   document.querySelector("#edit-delivery-premium").value = policy.delivery_price_premium_kzt;
   document.querySelector("#edit-delivery-days").value = policy.delivery_advantage_days;
+  document.querySelector("#edit-preorder-position").value = policy.preorder_target_position || 4;
   document.querySelector("#edit-city-id").value = policy.city_id;
   document.querySelector("#edit-zone-id").value = policy.zone_id;
   document.querySelector("#edit-allow-raise").checked = policy.allow_price_raise;
@@ -301,9 +307,9 @@ editForm.addEventListener("submit", async (event) => {
   try {
     await savePolicy(productId, policyPayload("edit-"));
     editDialog.close();
-    message.textContent = "Настройки сохранены. Floor и цена будут рассчитаны заново по свежему рынку.";
+    message.textContent = "Настройки сохранены. Fast пересчитает цену и место по свежему рынку.";
     await loadPage();
-  } catch (error) { message.textContent = error.message || "Не удалось изменить порог"; }
+  } catch (error) { message.textContent = error.message || "Не удалось изменить настройки"; }
   finally { setBusy(button, false, ""); }
 });
 
