@@ -63,7 +63,7 @@ def test_changed_supplier_state_wakes_zero_fifo_fast_product(db_session) -> None
     job = db_session.get(FastDumpingJob, state.active_job_id)
     assert job is not None
     assert job.policy_id == policy.id
-    assert job.status == "queued"
+    assert job.status == "queued_scan"
     assert job.reason == "supplier_offer_changed"
 
 
