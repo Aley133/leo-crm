@@ -10,13 +10,9 @@ from sqlalchemy.orm import Session
 
 from .browser_agent_models import BrowserAgentJob, BrowserAgentJobStatus
 from .db import SessionLocal
-from .marketplace_import import (
-    RAW_PAYLOAD_HISTORY_PER_ORDER,
-    prune_order_raw_payload_history,
-)
+from .marketplace_import import RAW_PAYLOAD_HISTORY_PER_ORDER, prune_order_raw_payload_history
 from .models import MarketplaceRawPayload
 from .monitoring import MonitorAttempt
-
 
 DEFAULT_CLEANUP_INTERVAL_SECONDS = 86_400
 DEFAULT_STARTUP_DELAY_SECONDS = 600
@@ -25,10 +21,6 @@ DEFAULT_MONITOR_ATTEMPT_RETENTION_DAYS = 14
 DEFAULT_MIN_HISTORY_PER_TARGET = 20
 DEFAULT_BATCH_SIZE = 5_000
 DEFAULT_MAX_ROWS_PER_TABLE = 50_000
-
-# One transaction-level PostgreSQL advisory lock keeps multiple web replicas from
-# pruning the same technical history at the same time. It is intentionally not
-# used as a business lock and is released automatically at commit/rollback.
 RETENTION_ADVISORY_LOCK_KEY = 1_279_545_679
 
 LAST_RUN: dict[str, object] = {
@@ -60,13 +52,16 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
 
 
 def cleanup_enabled() -> bool:
-    raw = os.getenv("DATA_RETENTION_ENABLED", "true").strip().casefold()
-    return raw not in {"0", "false", "no", "off"}
+    return os.getenv("DATA_RETENTION_ENABLED", "true").strip().casefold() not in {
+        "0",
+        "false",
+        "no",
+        "off",
+    }
 
 
 def _acquire_cleanup_lock(db: Session) -> bool:
-    bind = db.get_bind()
-    if bind.dialect.name != "postgresql":
+    if db.get_bind().dialect.name != "postgresql":
         return True
     return bool(
         db.scalar(
@@ -81,12 +76,7 @@ def prune_global_order_raw_payloads(
     *,
     keep: int = RAW_PAYLOAD_HISTORY_PER_ORDER,
 ) -> int:
-    """Repair any historical raw-order backlog while preserving bounded audit data.
-
-    Normal imports already prune the current order immediately. This global sweep
-    exists as a safety net for legacy rows and alternative import paths. It never
-    touches canonical orders, order lines, events, FIFO or revenue data.
-    """
+    """Keep bounded raw audit snapshots without touching canonical orders."""
 
     keep = max(5, int(keep))
     oversized_orders = db.execute(
@@ -101,7 +91,6 @@ def prune_global_order_raw_payloads(
         )
         .having(func.count(MarketplaceRawPayload.id) > keep)
     ).all()
-
     removed = 0
     for marketplace_account_id, external_order_id in oversized_orders:
         removed += prune_order_raw_payload_history(
@@ -139,10 +128,7 @@ def _prune_browser_agent_jobs_batch(
         )
         .where(
             BrowserAgentJob.status.in_(
-                (
-                    BrowserAgentJobStatus.SUCCEEDED.value,
-                    BrowserAgentJobStatus.FAILED.value,
-                )
+                (BrowserAgentJobStatus.SUCCEEDED.value, BrowserAgentJobStatus.FAILED.value)
             ),
             BrowserAgentJob.finished_at.is_not(None),
         )
@@ -161,9 +147,7 @@ def _prune_browser_agent_jobs_batch(
     )
     if not candidate_ids:
         return 0
-    result = db.execute(
-        delete(BrowserAgentJob).where(BrowserAgentJob.id.in_(candidate_ids))
-    )
+    result = db.execute(delete(BrowserAgentJob).where(BrowserAgentJob.id.in_(candidate_ids)))
     return int(result.rowcount or 0)
 
 
@@ -176,7 +160,7 @@ def prune_browser_agent_history(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_rows: int = DEFAULT_MAX_ROWS_PER_TABLE,
 ) -> int:
-    """Delete only old completed browser jobs; active queue entries are untouchable."""
+    """Prune old completed jobs while preserving active queue rows and diagnostics."""
 
     cutoff = (now or datetime.now(UTC)) - timedelta(days=max(1, int(retention_days)))
     removed = 0
@@ -207,10 +191,7 @@ def _prune_monitor_attempts_batch(
             func.row_number()
             .over(
                 partition_by=MonitorAttempt.monitor_target_id,
-                order_by=(
-                    MonitorAttempt.finished_at.desc(),
-                    MonitorAttempt.id.desc(),
-                ),
+                order_by=(MonitorAttempt.finished_at.desc(), MonitorAttempt.id.desc()),
             )
             .label("rn"),
         )
@@ -230,9 +211,7 @@ def _prune_monitor_attempts_batch(
     )
     if not candidate_ids:
         return 0
-    result = db.execute(
-        delete(MonitorAttempt).where(MonitorAttempt.id.in_(candidate_ids))
-    )
+    result = db.execute(delete(MonitorAttempt).where(MonitorAttempt.id.in_(candidate_ids)))
     return int(result.rowcount or 0)
 
 
@@ -245,13 +224,7 @@ def prune_monitor_attempt_history(
     batch_size: int = DEFAULT_BATCH_SIZE,
     max_rows: int = DEFAULT_MAX_ROWS_PER_TABLE,
 ) -> int:
-    """Bound technical scan attempts while preserving recent diagnostics per target.
-
-    SupplierOfferState is the current business truth and SupplierOfferObservation
-    keeps actual changed supplier facts. Old attempts are execution logs only.
-    Observations reference attempts with ON DELETE SET NULL, so deleting an old
-    attempt does not delete the supplier observation itself.
-    """
+    """Bound execution logs; current supplier state and observations are untouched."""
 
     cutoff = (now or datetime.now(UTC)) - timedelta(days=max(1, int(retention_days)))
     removed = 0
@@ -269,7 +242,7 @@ def prune_monitor_attempt_history(
 
 
 def run_retention_cleanup(*, now: datetime | None = None) -> RetentionCleanupResult:
-    """Run one bounded cleanup transaction without touching business records."""
+    """Run one bounded cleanup transaction across all workspaces."""
 
     if not cleanup_enabled():
         return RetentionCleanupResult(skipped=True)
@@ -300,6 +273,9 @@ def run_retention_cleanup(*, now: datetime | None = None) -> RetentionCleanupRes
     )
 
     with SessionLocal() as db:
+        # Retention is infrastructure maintenance, not a workspace request. Without
+        # this flag the ORM safety hook would silently scope deletes to workspace 1.
+        db.info["include_all_workspaces"] = True
         if not _acquire_cleanup_lock(db):
             db.rollback()
             return RetentionCleanupResult(skipped=True)
@@ -333,7 +309,7 @@ async def _wait_or_stop(stop_event: asyncio.Event, seconds: int) -> bool:
 
 
 async def retention_cleanup_loop(stop_event: asyncio.Event) -> None:
-    """Run low-frequency retention in the web process without blocking requests."""
+    """Run retention daily in a worker thread so API requests are never blocked."""
 
     if not cleanup_enabled():
         LAST_RUN.update(status="disabled", error=None)
@@ -357,32 +333,23 @@ async def retention_cleanup_loop(stop_event: asyncio.Event) -> None:
     while not stop_event.is_set():
         started_at = datetime.now(UTC)
         LAST_RUN.update(
-            status="running",
-            started_at=started_at.isoformat(),
-            finished_at=None,
-            error=None,
+            status="running", started_at=started_at.isoformat(), finished_at=None, error=None
         )
         try:
             result = await asyncio.to_thread(run_retention_cleanup, now=started_at)
-            finished_at = datetime.now(UTC)
             LAST_RUN.update(
                 status="skipped" if result.skipped else "ok",
-                finished_at=finished_at.isoformat(),
-                **{
-                    key: value
-                    for key, value in asdict(result).items()
-                    if key != "skipped"
-                },
+                finished_at=datetime.now(UTC).isoformat(),
+                **{key: value for key, value in asdict(result).items() if key != "skipped"},
                 error=None,
             )
         except asyncio.CancelledError:
             raise
-        except Exception as exc:  # pragma: no cover - runtime protection
+        except Exception as exc:  # pragma: no cover
             LAST_RUN.update(
                 status="error",
                 finished_at=datetime.now(UTC).isoformat(),
                 error=f"{type(exc).__name__}: {exc}"[:1000],
             )
-
         if await _wait_or_stop(stop_event, interval):
             return
