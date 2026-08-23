@@ -89,6 +89,12 @@ class FastDumpingPolicy(WorkspaceOwned, Base):
         default=3,
         server_default="3",
     )
+    preorder_target_position: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=4,
+        server_default="4",
+    )
     city_id: Mapped[str] = mapped_column(
         String(32),
         nullable=False,
