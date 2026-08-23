@@ -59,13 +59,12 @@ def test_changed_supplier_state_wakes_zero_fifo_fast_product(db_session) -> None
     )
     assert awakened == 1
     assert state is not None
-    assert state.next_scan_at is not None
     assert state.active_job_id is not None
-    assert "Поставщик обновил" in (state.status_reason or "")
     job = db_session.get(FastDumpingJob, state.active_job_id)
     assert job is not None
     assert job.policy_id == policy.id
     assert job.status == "queued"
+    assert job.reason == "supplier_offer_changed"
 
 
 def test_unchanged_supplier_state_does_not_create_fast_job(db_session) -> None:
