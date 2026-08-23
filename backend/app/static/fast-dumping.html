@@ -25,7 +25,7 @@
         <div>
           <p class="eyebrow">REALTIME PRICING</p>
           <h1>Быстрый демпинг</h1>
-          <p class="subtitle">Моментальная цена через Merchant Cabinet с проверкой нашей строки продавца. Обычный демпинг и XML работают отдельно.</p>
+          <p class="subtitle">Realtime цена, остаток и предзаказ через Merchant Cabinet. Физический FIFO и supplier preorder управляются одним Fast-контуром.</p>
         </div>
         <button id="refresh" class="button" type="button">Обновить</button>
       </header>
@@ -41,7 +41,7 @@
           <div>
             <span class="fast-kicker">FAST DUMPING AGENT</span>
             <h2 id="fast-agent-title">Проверяем локальный агент…</h2>
-            <p id="fast-agent-meta">Realtime-агент использует отдельную Merchant-сессию выбранного аккаунта и не меняет XML.</p>
+            <p id="fast-agent-meta">Realtime-агент использует отдельную Merchant-сессию выбранного аккаунта.</p>
           </div>
           <div class="fast-agent-actions">
             <span id="fast-agent-status" class="fast-pill">Проверка</span>
@@ -50,8 +50,8 @@
         </section>
 
         <section class="fast-safety-note">
-          <strong>Без конфликта с обычным демпингом</strong>
-          <p>Эта вкладка не публикует XML. В работу допускаются только товары с фактическим FIFO-остатком; перед записью CRM повторно сверяет остаток и безопасный floor.</p>
+          <strong>Один realtime-контур</strong>
+          <p>При FIFO &gt; 0 Fast торгует физическим остатком. При FIFO = 0 и доступном поставщике автоматически включается предзаказ; без поставщика товар снимается с продажи. XML только зеркалит подтверждённое realtime-состояние.</p>
         </section>
 
         <section class="metrics fast-metrics" aria-label="Сводка быстрого демпинга">
@@ -72,7 +72,7 @@
 
         <section class="fast-section connect-section">
           <div class="fast-section-head">
-            <div><span class="fast-kicker">ПОДКЛЮЧЕНИЕ</span><h2>Добавить товар</h2><p>Быстрый демпинг получает собственные настройки и не включает обычный XML-демпинг.</p></div>
+            <div><span class="fast-kicker">ПОДКЛЮЧЕНИЕ</span><h2>Добавить товар</h2><p>Физический товар использует обычную Fast-стратегию, а при переходе на supplier preorder включается выбранное место по цене.</p></div>
           </div>
           <form id="policy-form" class="fast-policy-form">
             <label class="wide"><span>Товар</span>
@@ -86,8 +86,9 @@
             <label><span>Минимальная прибыль, ₸</span><input id="minimum-profit" type="number" min="0" step="1" value="1000" required><small>Из неё CRM рассчитывает hard floor</small></label>
             <label><span>Шаг ниже конкурента, ₸</span><input id="undercut-step" type="number" min="1" max="10000" step="1" value="1" required></label>
             <label><span>Интервал проверки и записи</span><select id="scan-interval" required><option value="300">5 минут</option><option value="600" selected>10 минут (рекомендуется)</option><option value="900">15 минут</option><option value="1800">30 минут</option><option value="2100">35 минут</option><option value="3600">1 час</option></select><small>Цена меняется не чаще выбранного интервала</small></label>
-            <label><span>Доплата за быструю доставку, ₸</span><input id="delivery-premium" type="number" min="0" max="100000" step="1" value="500" required><small>Более дешёвый продавец может быть пропущен в пределах этой разницы</small></label>
-            <label><span>Преимущество доставки, дней</span><input id="delivery-days" type="number" min="1" max="30" step="1" value="3" required><small>Наша доставка должна быть быстрее минимум на столько дней</small></label>
+            <label><span>Место в предзаказе</span><input id="preorder-position" type="number" min="1" max="50" step="1" value="4" required><small>Только при FIFO=0 и supplier preorder. По умолчанию №4</small></label>
+            <label><span>Доплата за быструю доставку, ₸</span><input id="delivery-premium" type="number" min="0" max="100000" step="1" value="500" required><small>Работает для физического FIFO; supplier preorder использует стратегию «Место»</small></label>
+            <label><span>Преимущество доставки, дней</span><input id="delivery-days" type="number" min="1" max="30" step="1" value="3" required><small>Для физического FIFO</small></label>
             <label><span>Защита аномалии, %</span><input id="max-gap" type="number" min="0.01" max="100" step="0.01" value="35" required></label>
             <label><span>Город Kaspi</span><input id="city-id" maxlength="32" value="196220100" required></label>
             <label><span>Зона Kaspi</span><input id="zone-id" maxlength="64" value="Magnum_ZONE1" required></label>
@@ -111,15 +112,16 @@
 
   <dialog id="edit-dialog" class="fast-dialog">
     <form id="edit-form" class="fast-dialog-card">
-      <div class="fast-dialog-head"><div><span class="fast-kicker">БЕЗОПАСНЫЙ ПОРОГ</span><h2 id="edit-title">Изменить настройки</h2></div><button id="edit-close" type="button" aria-label="Закрыть">×</button></div>
+      <div class="fast-dialog-head"><div><span class="fast-kicker">FAST НАСТРОЙКИ</span><h2 id="edit-title">Изменить настройки</h2></div><button id="edit-close" type="button" aria-label="Закрыть">×</button></div>
       <p id="edit-economics" class="fast-dialog-note"></p>
       <input id="edit-product-id" type="hidden">
       <div class="fast-dialog-grid">
         <label><span>Минимальная прибыль, ₸</span><input id="edit-minimum-profit" type="number" min="0" step="1" required></label>
         <label><span>Шаг ниже конкурента, ₸</span><input id="edit-undercut-step" type="number" min="1" max="10000" step="1" required></label>
         <label><span>Интервал проверки и записи</span><select id="edit-scan-interval" required><option value="300">5 минут</option><option value="600">10 минут (рекомендуется)</option><option value="900">15 минут</option><option value="1800">30 минут</option><option value="2100">35 минут</option><option value="3600">1 час</option></select><small>Один запрос рынка и максимум одна запись за интервал</small></label>
-        <label><span>Доплата за быструю доставку, ₸</span><input id="edit-delivery-premium" type="number" min="0" max="100000" step="1" required><small>По умолчанию 500 ₸</small></label>
-        <label><span>Преимущество доставки, дней</span><input id="edit-delivery-days" type="number" min="1" max="30" step="1" required><small>По умолчанию 3 дня</small></label>
+        <label><span>Место в предзаказе</span><input id="edit-preorder-position" type="number" min="1" max="50" step="1" required><small>Действует только при supplier preorder; default №4</small></label>
+        <label><span>Доплата за быструю доставку, ₸</span><input id="edit-delivery-premium" type="number" min="0" max="100000" step="1" required><small>Для физического FIFO</small></label>
+        <label><span>Преимущество доставки, дней</span><input id="edit-delivery-days" type="number" min="1" max="30" step="1" required><small>Для физического FIFO</small></label>
         <label><span>Аномалия, %</span><input id="edit-max-gap" type="number" min="0.01" max="100" step="0.01" required></label>
         <label><span>Город Kaspi</span><input id="edit-city-id" maxlength="32" required></label>
         <label><span>Зона Kaspi</span><input id="edit-zone-id" maxlength="64" required></label>
@@ -132,6 +134,6 @@
 
   <script src="/static/workspace-context.js?v=20260731-1"></script>
   <script src="/static/product-image-resolver.js?v=20260819-2" defer></script>
-  <script src="/static/fast-dumping.js?v=20260819-2" defer></script>
+  <script src="/static/fast-dumping.js?v=20260823-1" defer></script>
 </body>
 </html>
