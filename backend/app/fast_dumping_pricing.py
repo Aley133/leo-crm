@@ -4,10 +4,18 @@ from dataclasses import dataclass, replace
 from decimal import Decimal, InvalidOperation
 from typing import Any
 
+from .commerce.profit_calculator import kaspi_logistics_per_unit
+
 
 MONEY = Decimal("0.01")
 PERCENT = Decimal("0.01")
 DEFAULT_VISIBLE_SELLERS = 5
+LOGISTICS_PRICE_BREAKS = (
+    Decimal("1000"),
+    Decimal("3000"),
+    Decimal("5000"),
+    Decimal("10000"),
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,12 +34,7 @@ class FastPriceDecision:
 
 @dataclass(frozen=True, slots=True)
 class DeliveryBusinessPlan:
-    """Commercial ceiling created by the faster-delivery advantage.
-
-    `effective_competitor_price_kzt` is a synthetic anchor consumed by the
-    ordinary repricing formula. The resulting target is still `anchor - step`,
-    so floor, anomaly and no-raise protections remain centralized in one place.
-    """
+    """Commercial ceiling created by the faster-delivery advantage."""
 
     effective_competitor_price_kzt: Decimal
     target_ceiling_kzt: Decimal
@@ -41,6 +44,15 @@ class DeliveryBusinessPlan:
     ignored_count: int
     ignored_names: tuple[str, ...]
     reason: str
+
+
+@dataclass(frozen=True, slots=True)
+class LogisticsJump:
+    original_target_kzt: Decimal
+    target_price_kzt: Decimal
+    threshold_kzt: Decimal
+    upper_bound_kzt: Decimal
+    logistics_kzt: Decimal
 
 
 def _money(value: Decimal | int | str) -> Decimal:
@@ -77,6 +89,38 @@ def _offer_name(offer: dict[str, Any]) -> str:
     return str(offer.get("merchant_name") or offer.get("merchant_id") or "Продавец").strip()
 
 
+def optimize_target_for_logistics_jump(
+    *,
+    target_price_kzt: Decimal,
+    safe_floor_kzt: Decimal,
+) -> LogisticsJump | None:
+    """Skip a price window made unattractive by a fixed Kaspi logistics jump.
+
+    The owner treats the new fixed logistics tariff as an amount that must first
+    be earned back after crossing a tariff boundary. Example: at 5,000 KZT the
+    tariff becomes 927 KZT, so a market target inside 5,000..5,927 is replaced
+    by 4,999 when that price still satisfies the configured minimum-profit
+    floor. The same rule is derived from the authoritative tariff table for all
+    boundaries instead of hard-coding one product-specific threshold.
+    """
+
+    target = _money(target_price_kzt)
+    floor = _money(safe_floor_kzt)
+    for threshold in reversed(LOGISTICS_PRICE_BREAKS):
+        landing = _money(threshold - Decimal("1"))
+        logistics = _money(kaspi_logistics_per_unit(threshold))
+        upper_bound = _money(threshold + logistics)
+        if threshold <= target <= upper_bound and floor <= landing:
+            return LogisticsJump(
+                original_target_kzt=target,
+                target_price_kzt=landing,
+                threshold_kzt=_money(threshold),
+                upper_bound_kzt=upper_bound,
+                logistics_kzt=logistics,
+            )
+    return None
+
+
 def build_delivery_business_plan(
     *,
     own_price_kzt: Decimal | None,
@@ -88,14 +132,7 @@ def build_delivery_business_plan(
     page_visible_price_kzt: Decimal | None = None,
     top_visible_sellers: int = DEFAULT_VISIBLE_SELLERS,
 ) -> DeliveryBusinessPlan | None:
-    """Turn ignored slow offers into a bounded commercial price opportunity.
-
-    Slow nearby-priced sellers are still visible to the buyer, so they define
-    how much premium a faster seller may charge. At the same time the target is
-    capped strictly below the fifth external offer, which guarantees that our
-    row stays inside the first five price-sorted sellers even when many sellers
-    share the same price.
-    """
+    """Turn ignored slow offers into a bounded commercial price opportunity."""
 
     if own_price_kzt is None or not market_offers:
         return None
@@ -108,9 +145,7 @@ def build_delivery_business_plan(
     advantage_days = max(1, int(delivery_advantage_days))
     visible_limit = max(1, int(top_visible_sellers))
     step = _money(undercut_step_kzt)
-    page_floor = (
-        None if page_visible_price_kzt is None else _money(page_visible_price_kzt)
-    )
+    page_floor = None if page_visible_price_kzt is None else _money(page_visible_price_kzt)
 
     ignored: list[tuple[Decimal, str, int]] = []
     external_prices: list[Decimal] = []
@@ -120,8 +155,6 @@ def build_delivery_business_plan(
         price = _optional_money(raw.get("price_kzt"))
         if price is None:
             continue
-        # Offers below the public headline were already marked by the scanner
-        # as a different buyer/zone context. Do not let them distort TOP-5.
         if page_floor is not None and price < page_floor:
             continue
         external_prices.append(price)
@@ -149,11 +182,7 @@ def build_delivery_business_plan(
         if candidate > 0:
             top5_ceiling = candidate
 
-    selected_ceiling = (
-        None
-        if competitor_price_kzt is None
-        else _money(competitor_price_kzt) - step
-    )
+    selected_ceiling = None if competitor_price_kzt is None else _money(competitor_price_kzt) - step
     ceilings = [premium_ceiling]
     if top5_ceiling is not None:
         ceilings.append(top5_ceiling)
@@ -162,9 +191,6 @@ def build_delivery_business_plan(
     target_ceiling = min(ceilings)
     effective_competitor = target_ceiling + step
 
-    # Keep the summary short enough for the CRM card while naming the shops the
-    # user actually cares about. Prices are sorted, so the first names are the
-    # strongest slow competitors.
     ignored.sort(key=lambda item: (item[0], item[1]))
     names: list[str] = []
     details: list[str] = []
@@ -182,19 +208,12 @@ def build_delivery_business_plan(
 
     parts = [
         "Исключены по доставке: " + ", ".join(details) + ".",
-        (
-            "Премия за быструю доставку допускает цену до "
-            f"{format(premium_ceiling, 'f')} ₸."
-        ),
+        f"Премия за быструю доставку допускает цену до {format(premium_ceiling, 'f')} ₸.",
     ]
     if top5_ceiling is not None:
-        parts.append(
-            f"Ограничение TOP-{visible_limit}: не выше {format(top5_ceiling, 'f')} ₸."
-        )
+        parts.append(f"Ограничение TOP-{visible_limit}: не выше {format(top5_ceiling, 'f')} ₸.")
     if selected_ceiling is not None and selected_ceiling == target_ceiling:
-        parts.append(
-            "Следующий допустимый конкурент задаёт более низкий ценовой ориентир."
-        )
+        parts.append("Следующий допустимый конкурент задаёт более низкий ценовой ориентир.")
     parts.append(f"Коммерческий потолок: {format(target_ceiling, 'f')} ₸.")
 
     return DeliveryBusinessPlan(
@@ -229,9 +248,7 @@ def _decide_fast_price_core(
         raise ValueError("max_undercut_gap_percent must be in (0, 100]")
 
     own = None if own_price_kzt is None else _money(own_price_kzt)
-    competitor = (
-        None if competitor_price_kzt is None else _money(competitor_price_kzt)
-    )
+    competitor = None if competitor_price_kzt is None else _money(competitor_price_kzt)
     if competitor is None:
         return FastPriceDecision(
             safe_floor_kzt=floor,
@@ -245,12 +262,10 @@ def _decide_fast_price_core(
             max_undercut_gap_percent=max_gap,
         )
 
-    gap_percent = None
+    competitor_gap = None
     if own is not None and own > 0 and competitor < own:
-        gap_percent = ((own - competitor) / own * Decimal("100")).quantize(
-            PERCENT
-        )
-        if gap_percent > max_gap:
+        competitor_gap = ((own - competitor) / own * Decimal("100")).quantize(PERCENT)
+        if competitor_gap > max_gap:
             return FastPriceDecision(
                 safe_floor_kzt=floor,
                 competitor_price_kzt=competitor,
@@ -259,11 +274,11 @@ def _decide_fast_price_core(
                 undercut_step_kzt=step,
                 status="price_anomaly",
                 reason=(
-                    f"Конкурент ниже нашей цены на {gap_percent}%, что больше "
+                    f"Конкурент ниже нашей цены на {competitor_gap}%, что больше "
                     f"защитного порога {max_gap}%. Автозапись заблокирована."
                 ),
                 write_allowed=False,
-                gap_percent=gap_percent,
+                gap_percent=competitor_gap,
                 max_undercut_gap_percent=max_gap,
             )
 
@@ -282,16 +297,54 @@ def _decide_fast_price_core(
             else "Цель равна цене лучшего подтверждённого конкурента минус шаг."
         )
 
+        logistics_jump = optimize_target_for_logistics_jump(
+            target_price_kzt=target,
+            safe_floor_kzt=floor,
+        )
+        if logistics_jump is not None:
+            target = logistics_jump.target_price_kzt
+            status = "logistics_jump"
+            reason = (
+                f"Логистический скачок Kaspi: расчётная цель "
+                f"{format(logistics_jump.original_target_kzt, 'f')} ₸ попала в "
+                f"невыгодный диапазон {format(logistics_jump.threshold_kzt, 'f')}–"
+                f"{format(logistics_jump.upper_bound_kzt, 'f')} ₸ с логистикой "
+                f"{format(logistics_jump.logistics_kzt, 'f')} ₸. Цель перенесена "
+                f"на {format(logistics_jump.target_price_kzt, 'f')} ₸; "
+                "минимальная прибыль сохранена."
+            )
+
+    target = _money(target)
+    target_gap = competitor_gap
+    if own is not None and own > 0 and target < own:
+        target_gap = ((own - target) / own * Decimal("100")).quantize(PERCENT)
+        if target_gap > max_gap:
+            return FastPriceDecision(
+                safe_floor_kzt=floor,
+                competitor_price_kzt=competitor,
+                own_price_kzt=own,
+                target_price_kzt=own,
+                undercut_step_kzt=step,
+                status="price_anomaly",
+                reason=(
+                    f"Итоговая цель потребовала бы снизить цену на {target_gap}%, "
+                    f"что больше защитного порога {max_gap}%. Автозапись заблокирована."
+                ),
+                write_allowed=False,
+                gap_percent=target_gap,
+                max_undercut_gap_percent=max_gap,
+            )
+
     return FastPriceDecision(
         safe_floor_kzt=floor,
         competitor_price_kzt=competitor,
         own_price_kzt=own,
-        target_price_kzt=_money(target),
+        target_price_kzt=target,
         undercut_step_kzt=step,
         status=status,
         reason=reason,
         write_allowed=True,
-        gap_percent=gap_percent,
+        gap_percent=target_gap,
         max_undercut_gap_percent=max_gap,
     )
 
@@ -310,7 +363,7 @@ def decide_fast_price(
     page_visible_price_kzt: Decimal | None = None,
     top_visible_sellers: int = DEFAULT_VISIBLE_SELLERS,
 ) -> FastPriceDecision:
-    """Use the proven lab rule plus delivery-premium and TOP-5 business guards."""
+    """Use the proven lab rule plus delivery-premium, TOP-5 and tariff guards."""
 
     step = _money(undercut_step_kzt)
     plan = build_delivery_business_plan(
@@ -323,11 +376,7 @@ def decide_fast_price(
         page_visible_price_kzt=page_visible_price_kzt,
         top_visible_sellers=top_visible_sellers,
     )
-    effective_competitor = (
-        competitor_price_kzt
-        if plan is None
-        else plan.effective_competitor_price_kzt
-    )
+    effective_competitor = competitor_price_kzt if plan is None else plan.effective_competitor_price_kzt
     decision = _decide_fast_price_core(
         own_price_kzt=own_price_kzt,
         competitor_price_kzt=effective_competitor,
