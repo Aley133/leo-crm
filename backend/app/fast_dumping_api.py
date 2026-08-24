@@ -311,6 +311,65 @@ def upsert_fast_dumping_policy(
     }
 
 
+@router.delete("/products/{product_id}")
+def remove_fast_dumping_product(
+    product_id: int,
+    db: Session = Depends(get_db),
+) -> dict:
+    """Stop managing one SKU without changing the product or its Kaspi offer."""
+
+    workspace_id = current_workspace_id()
+    policy = db.scalar(
+        select(FastDumpingPolicy)
+        .where(
+            FastDumpingPolicy.workspace_id == workspace_id,
+            FastDumpingPolicy.product_id == product_id,
+        )
+        .with_for_update()
+    )
+    if policy is None:
+        raise HTTPException(status_code=404, detail="Товар не подключён к Fast Dumping")
+
+    state = db.scalar(
+        select(FastDumpingState)
+        .where(
+            FastDumpingState.workspace_id == workspace_id,
+            FastDumpingState.product_id == product_id,
+        )
+        .with_for_update()
+    )
+    active = (
+        db.get(FastDumpingJob, state.active_job_id)
+        if state is not None and state.active_job_id
+        else None
+    )
+    if active is not None and active.status in {"leased_apply", "leased_verify"}:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Kaspi уже обрабатывает realtime-операцию по этому SKU. "
+                "Дождитесь её подтверждения и повторите удаление."
+            ),
+        )
+    if state is not None:
+        cancel_active_job(
+            db,
+            state=state,
+            reason="Товар удалён пользователем из Fast Dumping.",
+        )
+
+    # State and FastDumpingJob rows reference the policy with ON DELETE CASCADE.
+    # Product, inventory/FIFO, supplier bindings, orders and the current Kaspi
+    # offer are deliberately untouched: removal only relinquishes Fast ownership.
+    db.delete(policy)
+    db.commit()
+    return {
+        "product_id": product_id,
+        "removed": True,
+        "kaspi_offer_changed": False,
+    }
+
+
 @router.get("/products/{product_id}/offers")
 def read_fast_dumping_offers(
     product_id: int,
