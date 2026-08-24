@@ -297,9 +297,16 @@ def _decide_fast_price_core(
             else "Цель равна цене лучшего подтверждённого конкурента минус шаг."
         )
 
-        logistics_jump = optimize_target_for_logistics_jump(
-            target_price_kzt=target,
-            safe_floor_kzt=floor,
+        # The tariff jump is a shortcut only while moving the price downward.
+        # When the market moves up, Fast must follow the ordinary competitor
+        # target instead of falling back below the previous tariff boundary.
+        logistics_jump = (
+            optimize_target_for_logistics_jump(
+                target_price_kzt=target,
+                safe_floor_kzt=floor,
+            )
+            if own is not None and target < own
+            else None
         )
         if logistics_jump is not None:
             target = logistics_jump.target_price_kzt
