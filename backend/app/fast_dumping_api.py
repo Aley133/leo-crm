@@ -358,9 +358,17 @@ def remove_fast_dumping_product(
             reason="Товар удалён пользователем из Fast Dumping.",
         )
 
-    # State and FastDumpingJob rows reference the policy with ON DELETE CASCADE.
-    # Product, inventory/FIFO, supplier bindings, orders and the current Kaspi
-    # offer are deliberately untouched: removal only relinquishes Fast ownership.
+    # Explicitly remove Fast-owned rows instead of relying only on database
+    # ON DELETE CASCADE. SQLite test databases may not enforce FK cascades, and
+    # a removed SKU must disappear from Fast immediately in every environment.
+    db.query(FastDumpingJob).filter(
+        FastDumpingJob.workspace_id == workspace_id,
+        FastDumpingJob.product_id == product_id,
+    ).delete(synchronize_session=False)
+    db.query(FastDumpingState).filter(
+        FastDumpingState.workspace_id == workspace_id,
+        FastDumpingState.product_id == product_id,
+    ).delete(synchronize_session=False)
     db.delete(policy)
     db.commit()
     return {
