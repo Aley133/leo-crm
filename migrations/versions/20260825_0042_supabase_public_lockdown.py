@@ -32,6 +32,17 @@ def upgrade() -> None:
     if not _postgres_only():
         return
 
+    # PUBLIC can inherit function EXECUTE even when a grant is revoked directly
+    # from anon/authenticated, so revoke the common-role privileges too.
+    op.execute(
+        """
+        REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM PUBLIC;
+        REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM PUBLIC;
+        REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM PUBLIC;
+        REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+        """
+    )
+
     # Remove every direct Data API capability when Supabase roles exist.
     # Dynamic role checks keep local/non-Supabase PostgreSQL deployments valid.
     op.execute(
@@ -42,12 +53,14 @@ def upgrade() -> None:
             REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM anon;
             REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM anon;
             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM anon;
+            REVOKE CREATE ON SCHEMA public FROM anon;
           END IF;
 
           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
             REVOKE ALL PRIVILEGES ON ALL TABLES IN SCHEMA public FROM authenticated;
             REVOKE ALL PRIVILEGES ON ALL SEQUENCES IN SCHEMA public FROM authenticated;
             REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA public FROM authenticated;
+            REVOKE CREATE ON SCHEMA public FROM authenticated;
           END IF;
         END
         $$;
@@ -79,13 +92,26 @@ def upgrade() -> None:
         """
     )
 
-    # Future objects must not silently regain anon/authenticated privileges.
-    # ALTER DEFAULT PRIVILEGES applies to objects created by the migration role,
-    # which is the same role Render/Alembic uses for this application schema.
+    # Future objects must not silently regain Data API access. PostgreSQL grants
+    # EXECUTE on new functions to PUBLIC by default, so that default is revoked
+    # explicitly in addition to anon/authenticated.
     op.execute(
         """
         DO $$
         BEGIN
+          EXECUTE format(
+            'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE ALL ON TABLES FROM PUBLIC',
+            current_user
+          );
+          EXECUTE format(
+            'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE ALL ON SEQUENCES FROM PUBLIC',
+            current_user
+          );
+          EXECUTE format(
+            'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC',
+            current_user
+          );
+
           IF EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'anon') THEN
             EXECUTE format(
               'ALTER DEFAULT PRIVILEGES FOR ROLE %I IN SCHEMA public REVOKE ALL ON TABLES FROM anon',
