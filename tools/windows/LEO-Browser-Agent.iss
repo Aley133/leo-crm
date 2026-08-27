@@ -1,5 +1,5 @@
 #define MyAppName "LEO Browser Agent"
-#define MyAppVersion "0.3.1"
+#define MyAppVersion "0.3.2"
 #define MyAppPublisher "LEO CRM"
 #define MyAppExeName "LEO-Browser-Agent.exe"
 

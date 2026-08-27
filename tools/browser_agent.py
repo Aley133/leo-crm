@@ -16,6 +16,7 @@ from backend.app.supplier_adapters.base import AdapterRequest
 from tools.ozon_http import OzonSessionHttpAdapter
 
 SUPPLIER_JOB_TYPE = "supplier_product_observation"
+RUNTIME_KIND = "ozon_http"
 DEFAULT_JOB_TIMEOUT_SECONDS = 45.0
 HEARTBEAT_SECONDS = 15.0
 IDLE_POLL_MAX_SECONDS = 15.0
@@ -118,6 +119,7 @@ async def _complete_job(*, api_url: str, token: str, job: dict, adapters: dict[s
 def _agent_identity(agent_id: str) -> dict[str, Any]:
     return {
         "agent_id": agent_id,
+        "runtime_kind": RUNTIME_KIND,
         "hostname": socket.gethostname(),
         "platform": platform.platform(),
         "version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip(),

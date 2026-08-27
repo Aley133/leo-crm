@@ -67,8 +67,9 @@ jobs:
             --name LEO-Browser-Agent `
             --paths . `
             --hidden-import tools.browser_agent `
-            --collect-submodules backend `
-            --collect-submodules tools `
+            --collect-submodules tools.ozon_http `
+            --hidden-import backend.app.supplier_adapters.base `
+            --hidden-import backend.app.supplier_adapters.errors `
             tools/browser_agent_desktop.py
           pyinstaller --noconfirm --clean --onefile --console `
             --name LEO-Kaspi-Competitor-Agent `

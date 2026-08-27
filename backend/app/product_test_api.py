@@ -181,6 +181,11 @@ def _money(value: object) -> Decimal | None:
     return result if result > 0 else None
 
 
+def _external_https_url(value: object, *, max_length: int = 4000) -> str | None:
+    raw = str(value or "").strip()
+    return raw[:max_length] if raw.startswith("https://") else None
+
+
 def _item_payload(item: ProductTestItem) -> dict:
     return {
         "id": item.id,
@@ -220,6 +225,7 @@ def _job_payload(job: ProductTestJob) -> dict:
         "agent_id": job.agent_id,
         "error_code": job.error_code,
         "error_message": job.error_message,
+        "result": job.result_json if isinstance(job.result_json, dict) else {},
         "created_at": job.created_at,
         "updated_at": job.updated_at,
         "completed_at": job.completed_at,
@@ -538,12 +544,39 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
             "supplier_url": supplier_url,
             "supplier_price_kzt": None if supplier_price is None else format(supplier_price, "f"),
             "supplier_delivery_days": row.get("supplier_delivery_days"),
+            "supplier_delivery_text": str(row.get("supplier_delivery_text") or "").strip()[:255] or None,
+            "supplier_delivery_date": str(row.get("supplier_delivery_date") or "").strip()[:32] or None,
             "supplier_offer_sku": row.get("supplier_offer_sku"),
             "supplier_seller_name": row.get("supplier_seller_name"),
+            "supplier_seller_rating": row.get("supplier_seller_rating"),
+            "supplier_seller_reviews": row.get("supplier_seller_reviews"),
+            "supplier_product_title": str(row.get("supplier_product_title") or "").strip()[:500] or None,
+            "supplier_image_url": _external_https_url(row.get("supplier_image_url")),
+            "supplier_image_urls": [
+                url
+                for value in list(row.get("supplier_image_urls") or [])[:6]
+                if (url := _external_https_url(value))
+            ],
+            "supplier_offer_count": row.get("supplier_offer_count"),
+            "supplier_rating": row.get("supplier_rating"),
+            "supplier_reviews": row.get("supplier_reviews"),
             "match_status": match_status,
             "match_score": row.get("match_score"),
-            "validated": bool(supplier_url and supplier_price is not None and match_status == "CONFIRMED"),
-            "validation_source": "strict_match_and_other_offers",
+            "match_reasons": list(row.get("match_reasons") or [])[:12],
+            "image_match": row.get("image_match") if isinstance(row.get("image_match"), dict) else {},
+            "queries_tested": row.get("queries_tested"),
+            "strict_candidates_checked": row.get("strict_candidates_checked"),
+            "priced_strict_candidates": row.get("priced_strict_candidates"),
+            "total_supplier_offers_checked": row.get("total_supplier_offers_checked"),
+            "selection_reason": row.get("selection_reason"),
+            "visual_review_required": True,
+            "validated": bool(
+                supplier_url
+                and supplier_price is not None
+                and match_status == "CONFIRMED"
+                and _external_https_url(row.get("supplier_image_url"))
+            ),
+            "validation_source": "strict_multimodal_lowest_offer",
         }
         offers = row.get("offers") if isinstance(row.get("offers"), dict) else {}
         offers = {**offers, "supplier": supplier}
@@ -577,7 +610,15 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
             for key, value in values.items():
                 setattr(item, key, value)
         persisted.append(item)
-    _finish_job(job, {"persisted_count": len(persisted), "scanned": result.get("scanned")})
+    _finish_job(job, {
+        "persisted_count": len(persisted),
+        "scanned": result.get("scanned"),
+        "eligible_new": result.get("eligible_new"),
+        "matched_products_checked": result.get("matched_products_checked"),
+        "confirmed_pairs": result.get("confirmed_pairs"),
+        "manual_review_pairs": result.get("manual_review_pairs"),
+        "lookup_error_count": len(list(result.get("lookup_errors") or [])),
+    })
     db.commit()
     return {"job": _job_payload(job), "items": [_item_payload(item) for item in persisted]}
 
@@ -593,7 +634,9 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
         raise ValueError("Тестовый товар больше не существует")
     price = _money(result.get("supplier_price_kzt"))
     url = str(result.get("supplier_url") or item.supplier_url or "").strip()[:4000]
-    if price is None or not url or not result.get("validated"):
+    price_confirmed = bool(result.get("price_confirmed", result.get("validated")))
+    supplier_image = _external_https_url(result.get("supplier_image_url"))
+    if price is None or not url or not price_confirmed:
         raise ValueError("Ozon не подтвердил цену поставщика")
     item.supplier_url = url
     details = dict(item.offers_json or {})
@@ -601,15 +644,37 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
         "supplier_url": url,
         "supplier_price_kzt": format(price, "f"),
         "supplier_delivery_days": result.get("supplier_delivery_days"),
+        "supplier_delivery_text": str(result.get("supplier_delivery_text") or "").strip()[:255] or None,
+        "supplier_delivery_date": str(result.get("supplier_delivery_date") or "").strip()[:32] or None,
         "supplier_offer_sku": result.get("supplier_offer_sku"),
         "supplier_seller_name": result.get("supplier_seller_name"),
+        "supplier_seller_rating": result.get("supplier_seller_rating"),
+        "supplier_seller_reviews": result.get("supplier_seller_reviews"),
         "supplier_offer_count": result.get("supplier_offer_count"),
-        "validated": True,
+        "supplier_product_title": str(result.get("supplier_product_title") or "").strip()[:500] or None,
+        "supplier_image_url": supplier_image,
+        "supplier_image_urls": [
+            url
+            for value in list(result.get("supplier_image_urls") or [])[:6]
+            if (url := _external_https_url(value))
+        ],
+        "supplier_rating": result.get("supplier_rating"),
+        "supplier_reviews": result.get("supplier_reviews"),
+        "match_status": result.get("match_status") or "MANUAL_REVIEW",
+        "match_score": result.get("match_score"),
+        "match_reasons": list(result.get("match_reasons") or [])[:12],
+        "image_match": result.get("image_match") if isinstance(result.get("image_match"), dict) else {},
+        "visual_review_required": True,
+        "validated": bool(result.get("validated") and supplier_image),
         "validation_source": "manual_url_other_offers",
     }
     item.offers_json = details
-    item.status = "ready_to_add"
-    item.last_error = None
+    item.status = "ready_to_add" if details["supplier"]["validated"] else "needs_supplier_link"
+    item.last_error = (
+        None
+        if details["supplier"]["validated"]
+        else "Цена Ozon подтверждена, но фото карточки не получено. Проверьте или замените ссылку."
+    )
     _finish_job(job, {"item_id": item.id, "supplier_price_kzt": format(price, "f")})
     db.commit()
     return {"job": _job_payload(job), "item": _item_payload(item)}
@@ -883,7 +948,9 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
             "target_new": payload.target_new or settings.target_new,
             "max_kaspi_scan": settings.max_kaspi_scan,
             "max_ozon_queries": settings.max_ozon_queries,
-            "image_verify": settings.image_verify,
+            # Visual verification is part of the operator approval contract and
+            # cannot be disabled for new discovery jobs.
+            "image_verify": True,
             "existing_kaspi_ids": existing_ids,
         },
     )
@@ -932,6 +999,15 @@ def validate_product_supplier(item_id: int, payload: SupplierUrlRequest, db: Ses
     item.supplier_url = payload.supplier_url.strip()
     item.status = "validating_supplier"
     item.last_error = None
+    details = item.offers_json if isinstance(item.offers_json, dict) else {}
+    kaspi_offer = details.get("kaspi") if isinstance(details.get("kaspi"), dict) else {}
+    kaspi_images = [
+        url
+        for value in list(kaspi_offer.get("image_urls") or [])[:6]
+        if (url := _external_https_url(value))
+    ]
+    if item.image_url and item.image_url not in kaspi_images:
+        kaspi_images.insert(0, item.image_url)
     job = _queue_job(
         db,
         workspace_id=workspace_id,
@@ -940,7 +1016,15 @@ def validate_product_supplier(item_id: int, payload: SupplierUrlRequest, db: Ses
         item_id=item.id,
         city_id=item.city_id,
         zone_id=item.zone_id,
-        options={"supplier_url": item.supplier_url},
+        options={
+            "supplier_url": item.supplier_url,
+            "product": {
+                "title": item.name,
+                "brand": item.brand,
+                "image_url": item.image_url,
+                "image_urls": kaspi_images,
+            },
+        },
     )
     db.commit()
     return {"job": _job_payload(job), "item": _item_payload(item)}
