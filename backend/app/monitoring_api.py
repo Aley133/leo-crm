@@ -18,7 +18,7 @@ from .monitoring import (
     SupplierOfferState,
 )
 from .scheduler_engine import AdapterRegistry, ScheduledTaskResult, process_claimed_target
-from .supplier_adapters.ozon_browser_access import OzonBrowserAccessAdapter
+from tools.ozon_http import OzonSessionHttpAdapter
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
@@ -59,7 +59,7 @@ router = APIRouter(
 
 
 def _runtime_registry() -> AdapterRegistry:
-    return AdapterRegistry({"ozon": OzonBrowserAccessAdapter()})
+    return AdapterRegistry({"ozon": OzonSessionHttpAdapter()})
 
 
 async def _close_runtime_registry(registry: AdapterRegistry) -> None:

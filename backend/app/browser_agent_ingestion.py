@@ -71,7 +71,11 @@ def normalized_offer_from_agent(job: BrowserAgentJob, payload: dict[str, Any]) -
     if not isinstance(raw_metadata, dict):
         raise BrowserAgentResultError("raw_metadata must be an object")
     raw_metadata = dict(raw_metadata)
-    raw_metadata["execution_surface"] = "local_browser_agent"
+    execution_surface = str(
+        raw_metadata.get("execution_surface")
+        or ("local_http_agent" if schema_version.startswith("ozon-http") else "local_browser_agent")
+    )
+    raw_metadata["execution_surface"] = execution_surface
     raw_metadata["browser_agent_job_id"] = job.id
 
     return NormalizedOffer(
@@ -137,12 +141,18 @@ def persist_browser_agent_success(
     if started_at.tzinfo is None and finished_at.tzinfo is not None:
         started_at = started_at.replace(tzinfo=finished_at.tzinfo)
 
+    adapter_code = offer.adapter_schema_version
+    access_strategy = (
+        AccessStrategy.BROWSER.value
+        if offer.raw_metadata.get("execution_surface") == "local_browser_agent"
+        else AccessStrategy.DIRECT_HTTP.value
+    )
     attempt = MonitorAttempt(
         monitor_target_id=target.id,
         lease_token=f"browser-agent:{job.id}",
         outcome=AttemptOutcome.SUCCESS.value,
-        adapter_code="ozon-browser-agent-v2",
-        access_strategy=AccessStrategy.BROWSER.value,
+        adapter_code=adapter_code,
+        access_strategy=access_strategy,
         started_at=started_at,
         finished_at=finished_at,
         duration_ms=max(0, int((finished_at - started_at).total_seconds() * 1000)),
@@ -237,7 +247,7 @@ def persist_browser_agent_success(
     apply_source_success(
         session,
         supplier_id=supplier_id,
-        access_strategy=AccessStrategy.BROWSER.value,
+        access_strategy=access_strategy,
         occurred_at=finished_at,
     )
     session.flush()

@@ -8,8 +8,6 @@ let refreshTimer = null;
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
-const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU") : "—";
-
 const request = async (url, options = {}) => {
   const token = localStorage.getItem(storageKey) || "";
   const response = await fetch(url, {cache:"no-store", ...options, headers:{Authorization:`Bearer ${token}`, ...(options.body ? {"Content-Type":"application/json"} : {}), ...(options.headers || {})}});
@@ -18,79 +16,100 @@ const request = async (url, options = {}) => {
   if (!response.ok) throw new Error(payload.detail || `API вернул HTTP ${response.status}`);
   return payload;
 };
-
 const notify = (text, kind = "") => { message.textContent = text; message.className = `message ${kind}`.trim(); };
-const setBusy = (button, busy, busyLabel) => { if (!button.dataset.label) button.dataset.label = button.textContent; button.disabled = busy; button.textContent = busy ? busyLabel : button.dataset.label; };
+const setBusy = (button, busy, label) => { if (!button.dataset.label) button.dataset.label = button.textContent; button.disabled = busy; button.textContent = busy ? label : button.dataset.label; };
 
-const image = (item) => item.image_url
-  ? `<img class="lab-photo" src="${escapeHtml(item.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
-  : '<div class="lab-photo placeholder">Фото появится<br>после проверки</div>';
+const statusText = (item) => ({
+  ready_to_add: "Поставщик подтверждён",
+  needs_supplier_link: "Нужна ссылка Ozon",
+  needs_supplier_validation: "Ссылка изменена — проверьте",
+  validating_supplier: "Проверяем ссылку",
+  adding_to_kaspi: "Добавляем на Kaspi",
+  enrolled_fast_dumping: "В Быстром демпинге",
+  error: item.last_error || "Ошибка",
+}[item.status] || item.status || "Кандидат");
 
-const itemCard = (item) => `<article class="lab-card" data-id="${item.id}">
-  ${image(item)}
-  <div class="lab-product"><h3>${escapeHtml(item.name)}</h3><p>${escapeHtml(item.brand || "Без бренда")} · Kaspi ${escapeHtml(item.kaspi_product_id)}<br>SKU ${escapeHtml(item.merchant_sku)}</p><a href="${escapeHtml(item.kaspi_url)}" target="_blank" rel="noopener">Открыть карточку Kaspi</a><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="Ссылка поставщика (необязательно)"></div>
-  <div class="lab-value"><span>Цена карточки</span><strong>${money(item.observed_price_kzt)}</strong><small>последнее чтение</small></div>
-  <label class="lab-value"><span>Цена для XML, ₸</span><input class="price" type="number" min="1" step="1" value="${item.test_price_kzt == null ? "" : Number(item.test_price_kzt)}"></label>
-  <label class="lab-value"><span>Предзаказ, дней</span><input class="preorder" type="number" min="0" max="365" value="${Number(item.preorder_days || 0)}"></label>
-  <label class="lab-value"><span>Остаток, шт.</span><input class="stock" type="number" min="0" max="1000000" value="${Number(item.stock_count || 0)}"></label>
-  <div class="lab-actions"><button class="button save" type="button">Сохранить</button><button class="button secondary toggle" type="button">${item.active ? "Убрать из XML" : "Вернуть в XML"}</button></div>
-</article>`;
+const itemCard = (item) => {
+  const supplier = item.offers?.supplier || {};
+  const pricing = item.offers?.initial_pricing || {};
+  const locked = ["validating_supplier", "adding_to_kaspi", "enrolled_fast_dumping"].includes(item.status);
+  const canAdd = item.status === "ready_to_add" && supplier.validated;
+  return `<article class="lab-card" data-id="${item.id}">
+    ${item.image_url ? `<img class="lab-photo" src="${escapeHtml(item.image_url)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<div class="lab-photo placeholder">Нет фото</div>'}
+    <div class="lab-product"><h3>${escapeHtml(item.name)}</h3><p>${escapeHtml(item.brand || "Без бренда")} · Kaspi ${escapeHtml(item.kaspi_product_id)}</p><a href="${escapeHtml(item.kaspi_url)}" target="_blank" rel="noopener">Kaspi</a><span> · </span>${item.supplier_url ? `<a href="${escapeHtml(item.supplier_url)}" target="_blank" rel="noopener">Ozon</a>` : "Ozon не выбран"}<p><strong>${escapeHtml(statusText(item))}</strong></p></div>
+    <div class="lab-value"><span>Конкурент Kaspi</span><strong>${money(item.observed_price_kzt)}</strong><small>${pricing.status ? escapeHtml(pricing.status) : "для стартовой цены"}</small></div>
+    <div class="lab-value"><span>Поставщик Ozon</span><strong>${money(supplier.supplier_price_kzt)}</strong><small>${escapeHtml(supplier.supplier_seller_name || "не подтверждён")}</small></div>
+    <label class="lab-value"><span>Своя ссылка Ozon</span><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="https://www.ozon.kz/product/…" ${locked ? "disabled" : ""}></label>
+    <div class="lab-actions">
+      <button class="button validate" type="button" ${locked ? "disabled" : ""}>Проверить ссылку</button>
+      <button class="button add" type="button" ${canAdd ? "" : "disabled"}>Добавить на Kaspi</button>
+      ${item.product_id ? `<a class="button secondary" href="/crm/products/${item.product_id}">Открыть товар</a><a class="button secondary" href="/crm/fast-dumping">Демпинг</a>` : ""}
+    </div>
+  </article>`;
+};
 
 const renderJobs = (jobs) => {
-  const active = jobs.filter((job) => ["queued","leased","failed"].includes(job.status)).slice(0, 5);
-  const pending = jobs.filter((job) => ["queued","leased"].includes(job.status));
-  document.querySelector("#jobs").innerHTML = active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${job.status === "failed" ? "Ошибка локального чтения" : job.status === "leased" ? "Локальный Agent читает карточку" : "Ожидает локальный Agent"}</strong> · ${escapeHtml(job.reference)}${job.error_message ? ` · ${escapeHtml(job.error_message)}` : ""}</div>`).join("");
+  const active = jobs.filter((job) => ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
+  const pending = active.filter((job) => ["queued", "leased"].includes(job.status));
+  const labels = {discover:"Поиск новых товаров", validate_supplier:"Проверка Ozon", create_offer:"Добавление на Kaspi", inspect:"Чтение карточки"};
+  document.querySelector("#jobs").innerHTML = active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Agent выполняет" : job.status === "queued" ? "ожидает Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
   document.querySelector("#job-count").textContent = pending.length;
-  if (pending.length && !refreshTimer) {
-    refreshTimer = window.setTimeout(() => { refreshTimer = null; load(); }, 3000);
-  }
+  if (pending.length && !refreshTimer) refreshTimer = window.setTimeout(() => { refreshTimer = null; load(); }, 3000);
+};
+
+const fillSettings = (settings) => {
+  const form = document.querySelector("#settings-form");
+  Object.entries(settings || {}).forEach(([key, value]) => {
+    const field = form.elements.namedItem(key); if (!field) return;
+    if (field.type === "checkbox") field.checked = Boolean(value); else field.value = value ?? "";
+  });
+  if (settings?.target_new) document.querySelector("#target-new").value = settings.target_new;
 };
 
 const render = (payload) => {
   const items = payload.items || [];
   document.querySelector("#items").innerHTML = items.map(itemCard).join("");
   document.querySelector("#empty").classList.toggle("hidden", items.length > 0);
-  document.querySelector("#total-count").textContent = items.length;
-  document.querySelector("#xml-count").textContent = items.filter((item) => item.active && item.test_price_kzt != null).length;
-  document.querySelector("#feed-state").textContent = payload.feed ? "Готов" : "Нет";
-  document.querySelector("#feed-meta").textContent = payload.feed?.source_filename || "загрузите XML в Товарах";
-  document.querySelector("#download-xml").classList.toggle("disabled", !payload.feed);
+  document.querySelector("#total-count").textContent = items.filter((item) => item.status !== "enrolled_fast_dumping").length;
+  document.querySelector("#ready-count").textContent = items.filter((item) => item.status === "ready_to_add").length;
+  document.querySelector("#enrolled-count").textContent = items.filter((item) => item.status === "enrolled_fast_dumping").length;
+  fillSettings(payload.settings || {});
   renderJobs(payload.jobs || []);
 };
 
 async function load() {
   if (!localStorage.getItem(storageKey)) { authPanel.classList.remove("hidden"); page.classList.add("hidden"); return; }
-  try {
-    const state = await request("/api/product-test");
-    authPanel.classList.add("hidden"); page.classList.remove("hidden"); render(state); notify("");
-  } catch (error) { notify(error.message, "error"); if (!localStorage.getItem(storageKey)) { authPanel.classList.remove("hidden"); page.classList.add("hidden"); } }
+  try { const state = await request("/api/product-test"); authPanel.classList.add("hidden"); page.classList.remove("hidden"); render(state); notify(""); }
+  catch (error) { notify(error.message, "error"); }
 }
 
 document.querySelector("#token-form").addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, document.querySelector("#token").value.trim()); load(); });
 document.querySelector("#refresh").addEventListener("click", load);
-document.querySelector("#inspect-form").addEventListener("submit", async (event) => {
-  event.preventDefault(); const button = document.querySelector("#inspect-button"); setBusy(button, true, "Передаю локальному Agent…");
-  try {
-    await request("/api/product-test/inspect", {method:"POST", body:JSON.stringify({reference:document.querySelector("#reference").value.trim(), city_id:document.querySelector("#city-id").value.trim(), zone_id:document.querySelector("#zone-id").value.trim()})});
-    document.querySelector("#reference").value = ""; notify("Задание передано локальному Agent. Карточка появится автоматически.", "success"); await load();
-  } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
+document.querySelector("#discover-form").addEventListener("submit", async (event) => {
+  event.preventDefault(); const button = document.querySelector("#discover-button"); setBusy(button, true, "Передаю Agent…");
+  try { await request("/api/product-test/discover", {method:"POST", body:JSON.stringify({query:document.querySelector("#query").value.trim(), target_new:Number(document.querySelector("#target-new").value)})}); notify("Быстрый поиск запущен. Кандидаты появятся автоматически.", "success"); await load(); }
+  catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
+});
+document.querySelector("#settings-form").addEventListener("submit", async (event) => {
+  event.preventDefault(); const form = event.currentTarget; const button = form.querySelector("button"); setBusy(button, true, "Сохраняю…");
+  const body = {}; new FormData(form).forEach((value, key) => { body[key] = ["city_id", "zone_id"].includes(key) ? String(value) : Number(value); });
+  body.image_verify = form.elements.image_verify.checked; body.allow_price_raise = form.elements.allow_price_raise.checked;
+  try { await request("/api/product-test/settings", {method:"PATCH", body:JSON.stringify(body)}); notify("Значения по умолчанию сохранены.", "success"); await load(); }
+  catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 document.querySelector("#items").addEventListener("click", async (event) => {
-  const card = event.target.closest(".lab-card"); if (!card) return;
-  const current = event.target.closest("button"); if (!current) return;
-  setBusy(current, true, "Сохраняю…");
+  const card = event.target.closest(".lab-card"); const button = event.target.closest("button"); if (!card || !button) return;
+  setBusy(button, true, button.classList.contains("add") ? "Добавляю…" : "Проверяю…");
   try {
-    const priceValue = card.querySelector(".price").value.trim();
-    const body = current.classList.contains("toggle") ? {active:current.textContent.includes("Вернуть")} : {test_price_kzt:priceValue ? Number(priceValue) : null, preorder_days:Number(card.querySelector(".preorder").value), stock_count:Number(card.querySelector(".stock").value), supplier_url:card.querySelector(".supplier").value.trim() || null};
-    await request(`/api/product-test/items/${card.dataset.id}`, {method:"PATCH", body:JSON.stringify(body)}); notify("Настройки тестового XML сохранены.", "success"); await load();
-  } catch (error) { notify(error.message, "error"); } finally { setBusy(current, false, ""); }
-});
-document.querySelector("#download-xml").addEventListener("click", (event) => {
-  const token = localStorage.getItem(storageKey) || "";
-  if (!token) { event.preventDefault(); notify("Сначала подключитесь к CRM.", "error"); return; }
-  event.preventDefault(); fetch("/api/product-test/xml", {headers:{Authorization:`Bearer ${token}`}}).then(async (response) => {
-    if (!response.ok) throw new Error((await response.json()).detail || `HTTP ${response.status}`);
-    const blob = await response.blob(); const href = URL.createObjectURL(blob); const link = document.createElement("a"); link.href = href; link.download = "leo-product-test.xml"; link.click(); URL.revokeObjectURL(href);
-  }).catch((error) => notify(error.message, "error"));
+    if (button.classList.contains("validate")) {
+      const supplierUrl = card.querySelector(".supplier").value.trim();
+      await request(`/api/product-test/items/${card.dataset.id}/validate-supplier`, {method:"POST", body:JSON.stringify({supplier_url:supplierUrl})});
+      notify("Ссылка передана локальному HTTP Agent.", "success");
+    } else if (button.classList.contains("add")) {
+      await request(`/api/product-test/items/${card.dataset.id}/add`, {method:"POST"});
+      notify("Создание оффера запущено. В демпинг он попадёт только после подтверждения Kaspi.", "success");
+    }
+    await load();
+  } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 load();

@@ -4,13 +4,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_windows_browser_agent_launcher_starts_cdp_and_worker() -> None:
+def test_windows_browser_agent_launcher_starts_http_worker() -> None:
     batch = (ROOT / "START_BROWSER_AGENT.bat").read_text(encoding="utf-8")
     script = (ROOT / "tools" / "start_browser_agent_windows.ps1").read_text(encoding="utf-8")
 
     assert "start_browser_agent_windows.ps1" in batch
-    assert "--remote-debugging-port=9222" in script
-    assert "CHROME_CDP_ENDPOINT" in script
+    assert "--remote-debugging-port" not in script
+    assert "CHROME_CDP_ENDPOINT" not in script
+    assert "HTTP Monitoring Agent" in script
     assert "CRM_API_URL" in script
     assert "CRM_SERVICE_TOKEN" in script
     assert "BROWSER_AGENT_ID" in script

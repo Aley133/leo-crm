@@ -21,6 +21,12 @@ def _failure_outcome(error_code: str | None) -> AttemptOutcome:
         return AttemptOutcome.CAPTCHA
     if "blocked" in normalized:
         return AttemptOutcome.BLOCKED
+    if "ratelimit" in normalized or "rate_limit" in normalized:
+        return AttemptOutcome.RATE_LIMITED
+    if "auth" in normalized:
+        return AttemptOutcome.AUTH_REQUIRED
+    if "notfound" in normalized or "not_found" in normalized:
+        return AttemptOutcome.NOT_FOUND
     if "timeout" in normalized:
         return AttemptOutcome.TIMEOUT
     if "network" in normalized or "pool" in normalized or "connection" in normalized:
@@ -76,8 +82,8 @@ def persist_browser_agent_failure(
         monitor_target_id=target.id,
         lease_token=f"browser-agent:{job.id}",
         outcome=outcome.value,
-        adapter_code="ozon-browser-agent-v1",
-        access_strategy=AccessStrategy.BROWSER.value,
+        adapter_code="ozon-http-session-v1",
+        access_strategy=AccessStrategy.DIRECT_HTTP.value,
         started_at=started_at,
         finished_at=finished_at,
         duration_ms=max(0, int((finished_at - started_at).total_seconds() * 1000)),
@@ -99,7 +105,7 @@ def persist_browser_agent_failure(
         apply_source_failure(
             session,
             supplier_id=supplier_id,
-            access_strategy=AccessStrategy.BROWSER.value,
+            access_strategy=AccessStrategy.DIRECT_HTTP.value,
             outcome=outcome,
             error_code=attempt.error_code,
             occurred_at=finished_at,

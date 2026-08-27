@@ -12,17 +12,17 @@ def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     assert (ROOT / "tools" / "__init__.py").is_file()
     assert "SERVICE_API_TOKEN" in entrypoint
     assert "CRM_API_URL" in entrypoint
-    assert "CHROME_CDP_ENDPOINT" in entrypoint
+    assert "OzonSessionResolver" in entrypoint
     assert "run_browser_agent" in entrypoint
     assert "CryptProtectData" in entrypoint
     assert "CryptUnprotectData" in entrypoint
-    assert 'APP_VERSION = "0.2.1"' in entrypoint
+    assert 'APP_VERSION = "0.3.0"' in entrypoint
     assert "MUTEX_NAME" in entrypoint
-    assert "_browser_watchdog" in entrypoint
+    assert "_browser_watchdog" not in entrypoint
     assert "CreateMutexW" in entrypoint
     assert "OutputBaseFilename=LEO-Browser-Agent-Setup" in installer
     assert "OutputDir=..\\..\\dist" in installer
-    assert '#define MyAppVersion "0.2.1"' in installer
+    assert '#define MyAppVersion "0.3.0"' in installer
     assert "taskkill /F /IM" in installer
     assert "CloseApplications=yes" in installer
     assert "RestartApplications=no" in installer
@@ -33,6 +33,7 @@ def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     assert "--hidden-import tools.browser_agent" in workflow
     assert "python -c \"import tools.browser_agent; import tools.browser_agent_desktop\"" in workflow
     assert 'backend/app/supplier_adapters/**' in workflow
+    assert 'tools/ozon_http/**' in workflow
     assert "Verify release version alignment" in workflow
     assert "Inno Setup" in workflow
     assert "browser-agent-latest" in workflow
@@ -45,7 +46,7 @@ def test_monitoring_page_downloads_windows_installer_directly() -> None:
     assert 'id="download-browser-agent"' in html
     assert "releases/download/browser-agent-latest/LEO-Browser-Agent-Setup.exe" in html
     assert "LEO-Browser-Agent-Setup.cmd" not in html
-    assert "Скачать Browser Agent" in html
+    assert "Скачать HTTP Agent" in html
 
 
 def test_release_does_not_embed_service_token() -> None:

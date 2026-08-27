@@ -76,8 +76,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.24.9"
-DEPLOYMENT_MARKER = "automatic-data-retention"
+APP_VERSION = "0.25.0"
+DEPLOYMENT_MARKER = "http-monitoring-product-discovery"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

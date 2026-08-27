@@ -1,57 +1,17 @@
-# LEO CRM Browser Agent — Windows
+# Windows HTTP Monitoring Agent
 
-The local Browser Agent is the execution surface for supplier pages that block Render IPs. It connects only to a dedicated Chrome profile on `127.0.0.1:9222`; the Chrome debugging port is never exposed to the internet.
+The local agent keeps the existing CRM monitoring queue and lease protocol but executes Ozon checks through the lab-proved HTTP session. It does not launch Chrome or Playwright. Wildberries targets remain stored and are temporarily excluded from dispatch.
 
-## First verification
+## Setup
 
-1. Install Google Chrome and Python 3.12+.
-2. Clone/pull the repository and install dependencies:
+1. Install the current `LEO-Browser-Agent-Setup.exe` release.
+2. Enter `SERVICE_API_TOKEN` on first launch.
+3. If no compatible lab session is found, copy an Ozon search request from DevTools Network as **Copy as cURL (bash)** and paste it into the prompt once.
 
-   ```powershell
-   py -m pip install -r requirements.txt
-   ```
+The Ozon profile is stored under the current Windows user and encrypted with DPAPI. Cookies and request headers are never uploaded to CRM; only normalized price, availability, seller and delivery facts are returned.
 
-3. Copy:
+The agent uses three bounded HTTP workers by default. Existing CRM monitor targets, observations, price calculations and Fast Dumping triggers are unchanged.
 
-   `tools/windows/browser_agent.env.example.ps1`
+## Session renewal
 
-   to:
-
-   `tools/windows/browser_agent.env.ps1`
-
-4. Put the same service token used in Swagger into `CRM_SERVICE_TOKEN`.
-5. In Swagger, queue one known Ozon target:
-
-   `POST /api/monitor-targets/{target_id}/queue-browser-agent`
-
-6. Double-click:
-
-   `tools/windows/verify_browser_agent_once.bat`
-
-The launcher will:
-
-- start a dedicated persistent Chrome profile;
-- bind CDP only to `127.0.0.1:9222`;
-- verify the CRM health endpoint;
-- claim exactly one job;
-- open the supplier page through the live Chrome profile;
-- return price/currency/availability to CRM;
-- exit.
-
-A successful terminal result prints a payload containing at least `price`, `currency`, `observed_at`, and `adapter_schema_version`.
-
-## Continuous mode
-
-After the one-job verification succeeds, double-click:
-
-`tools/windows/start_browser_agent_continuous.bat`
-
-The continuous agent runs one dispatcher plus `BROWSER_AGENT_CONCURRENCY` parallel workers. Each `MonitorTarget` retains its own `next_check_at`; this is not a full-catalog sequential scan.
-
-## Security rules
-
-- Never forward port 9222 on the router.
-- Never bind Chrome debugging to `0.0.0.0`.
-- Never commit `browser_agent.env.ps1`.
-- The dedicated profile is stored under `.browser-agent/chrome-profile` and is excluded from Git.
-- Do not use the main personal Chrome profile for the agent.
+When Ozon expires the session, relaunch the agent and import a fresh `/search/` cURL. The old session is replaced locally. Do not share the session file or cURL text.

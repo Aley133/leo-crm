@@ -5,7 +5,7 @@ import asyncio
 from backend.app import monitoring_api
 from backend.app.scheduler_engine import AdapterRegistry
 from backend.app.supplier_adapters.base import AccessStrategy
-from backend.app.supplier_adapters.ozon_browser import OzonBrowserAdapter
+from tools.ozon_http import OzonSessionHttpAdapter
 
 
 class ClosableAdapter:
@@ -19,12 +19,12 @@ class ClosableAdapter:
         self.closed = True
 
 
-def test_runtime_registry_uses_real_ozon_browser_adapter() -> None:
+def test_runtime_registry_uses_fast_ozon_http_session_adapter() -> None:
     registry = monitoring_api._runtime_registry()
     adapter = registry.get("ozon")
 
-    assert isinstance(adapter, OzonBrowserAdapter)
-    assert adapter.access_strategy == AccessStrategy.BROWSER
+    assert isinstance(adapter, OzonSessionHttpAdapter)
+    assert adapter.access_strategy == AccessStrategy.DIRECT_HTTP
 
     asyncio.run(monitoring_api._close_runtime_registry(registry))
 

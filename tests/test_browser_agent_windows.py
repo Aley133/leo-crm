@@ -6,13 +6,12 @@ from tools.browser_agent import _parse_args
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_windows_launcher_keeps_cdp_local_and_uses_dedicated_profile() -> None:
+def test_windows_launcher_uses_http_runtime_without_cdp() -> None:
     script = (ROOT / "tools" / "windows" / "start_browser_agent.ps1").read_text(encoding="utf-8")
-    assert "--remote-debugging-address=127.0.0.1" in script
-    assert "--remote-debugging-port=9222" in script
+    assert "--remote-debugging" not in script
+    assert "CHROME_CDP_ENDPOINT" not in script
+    assert "Chrome/Playwright are not used" in script
     assert 'Join-Path $env:LOCALAPPDATA "LEO-CRM\\browser-agent"' in script
-    assert '$ChromeProfile = Join-Path $RuntimeRoot "chrome-profile"' in script
-    assert "0.0.0.0" not in script
 
 
 def test_windows_agent_secret_file_and_profile_are_ignored() -> None:

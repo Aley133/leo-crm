@@ -283,6 +283,15 @@ def list_browser_agents(db: Session = Depends(get_unscoped_db)):
 
 @router.post("/dispatch-due")
 def dispatch_due_jobs(payload: BrowserAgentDispatch, db: Session = Depends(get_unscoped_db)):
+    if payload.supplier_code.strip().casefold() != "ozon":
+        return {
+            "queued_count": 0,
+            "job_ids": [],
+            "throttled": False,
+            "disabled": True,
+            "reason": "Wildberries HTTP monitoring is temporarily disabled",
+            "retry_after_seconds": 300,
+        }
     acquired, retry_after = _acquire_dispatch_slot(payload.supplier_code)
     if not acquired:
         return {

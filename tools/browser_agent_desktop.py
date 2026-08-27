@@ -3,29 +3,22 @@ from __future__ import annotations
 import asyncio
 import base64
 import ctypes
-import json
 import os
-import subprocess
 import sys
-import threading
 import time
 from ctypes import wintypes
 from pathlib import Path
 from tkinter import Tk, messagebox, simpledialog
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
 from urllib.request import Request, urlopen
 
 import tools.browser_agent as browser_agent_module
-from backend.app.supplier_adapters.wildberries_delivery_aware import WildberriesDeliveryAwareAdapter
+from tools.ozon_http import OzonSessionResolver
 
 run_browser_agent = browser_agent_module.main
-browser_agent_module.WildberriesBrowserAccessAdapter = WildberriesDeliveryAwareAdapter
 
 API_URL = "https://leo-crm-api.onrender.com"
-CDP_ENDPOINT = "http://127.0.0.1:9222"
-PROFILE_START_URL = "https://www.ozon.kz/"
-APP_VERSION = "0.2.1"
+APP_VERSION = "0.3.0"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
 TOKEN_FILE = APP_DIR / "agent-token.dat"
 LOG_FILE = APP_DIR / "agent.log"
@@ -46,7 +39,7 @@ def _protect(data: bytes) -> bytes:
     source, source_buffer = _blob(data)
     target = DATA_BLOB()
     if not ctypes.windll.crypt32.CryptProtectData(
-        ctypes.byref(source), "LEO Browser Agent", None, None, None, 0, ctypes.byref(target)
+        ctypes.byref(source), "LEO HTTP Agent", None, None, None, 0, ctypes.byref(target)
     ):
         raise ctypes.WinError()
     try:
@@ -94,7 +87,7 @@ def _ask_token() -> str:
     root = Tk()
     root.withdraw()
     token = simpledialog.askstring(
-        "LEO Browser Agent",
+        "LEO HTTP Agent",
         "Вставьте SERVICE_API_TOKEN из LEO CRM. Он будет зашифрован средствами Windows и сохранён только для этого пользователя:",
         show="*",
         parent=root,
@@ -126,108 +119,24 @@ def _verify_crm(token: str) -> None:
         raise RuntimeError(f"CRM недоступна: {exc}") from exc
 
 
-def _find_browser() -> Path:
-    candidates = [
-        Path(os.environ.get("PROGRAMFILES", "")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("LOCALAPPDATA", "")) / "Google/Chrome/Application/chrome.exe",
-        Path(os.environ.get("PROGRAMFILES", "")) / "Microsoft/Edge/Application/msedge.exe",
-        Path(os.environ.get("PROGRAMFILES(X86)", "")) / "Microsoft/Edge/Application/msedge.exe",
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    raise RuntimeError("Google Chrome или Microsoft Edge не найден")
-
-
-def _cdp_ready() -> bool:
+def _ensure_ozon_session() -> None:
+    resolver = OzonSessionResolver()
     try:
-        with urlopen(f"{CDP_ENDPOINT}/json/version", timeout=2) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-        return isinstance(payload, dict) and bool(payload.get("webSocketDebuggerUrl"))
-    except (json.JSONDecodeError, URLError, TimeoutError, OSError):
-        return False
-
-
-def _cdp_has_page() -> bool:
-    try:
-        with urlopen(f"{CDP_ENDPOINT}/json/list", timeout=2) as response:
-            targets = json.loads(response.read().decode("utf-8"))
-        return any(
-            isinstance(target, dict) and str(target.get("type") or "").casefold() == "page"
-            for target in targets
-        )
-    except (json.JSONDecodeError, TypeError, URLError, TimeoutError, OSError):
-        return False
-
-
-def _open_profile_page() -> None:
-    encoded_url = quote(PROFILE_START_URL, safe="")
-    request = Request(f"{CDP_ENDPOINT}/json/new?{encoded_url}", method="PUT")
-    with urlopen(request, timeout=5) as response:
-        response.read()
-
-
-def _wait_for_profile_page(*, timeout_seconds: float) -> bool:
-    deadline = time.monotonic() + timeout_seconds
-    next_page_request_at = 0.0
-    while time.monotonic() < deadline:
-        if _cdp_has_page():
-            return True
-        now = time.monotonic()
-        if _cdp_ready() and now >= next_page_request_at:
-            try:
-                _open_profile_page()
-            except (HTTPError, URLError, TimeoutError, OSError):
-                pass
-            next_page_request_at = now + 2.0
-        time.sleep(0.25)
-    return _cdp_has_page()
-
-
-def _start_browser() -> None:
-    if _cdp_ready():
-        if _wait_for_profile_page(timeout_seconds=10):
-            return
-        raise RuntimeError(
-            "Chrome отвечает на порту 9222, но профильное окно не создаётся. "
-            "Закройте все процессы Chrome и запустите LEO Browser Agent снова."
-        )
-    browser = _find_browser()
-    profile = APP_DIR / "chrome-profile"
-    profile.mkdir(parents=True, exist_ok=True)
-    subprocess.Popen(
-        [
-            str(browser),
-            "--remote-debugging-address=127.0.0.1",
-            "--remote-debugging-port=9222",
-            f"--user-data-dir={profile}",
-            "--no-first-run",
-            "--no-default-browser-check",
-            PROFILE_START_URL,
-        ],
-        creationflags=getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0),
-    )
-    if _wait_for_profile_page(timeout_seconds=30):
+        resolver.resolve(validate=True)
         return
-    raise RuntimeError("Браузер запущен, но профиль Chrome на порту 9222 не готов")
-
-
-def _browser_watchdog() -> None:
-    while True:
-        try:
-            if not _cdp_ready():
-                print("Browser watchdog: CDP unavailable, restarting browser")
-                _start_browser()
-                print("Browser watchdog: CDP restored")
-            elif not _cdp_has_page():
-                print("Browser watchdog: profile page unavailable, recreating it")
-                if not _wait_for_profile_page(timeout_seconds=10):
-                    raise RuntimeError("Chrome CDP is available but has no profile page")
-                print("Browser watchdog: profile page restored")
-        except Exception as exc:
-            print(f"Browser watchdog error: {exc!r}")
-        time.sleep(10)
+    except Exception:
+        pass
+    root = Tk()
+    root.withdraw()
+    curl_text = simpledialog.askstring(
+        "LEO HTTP Agent",
+        "Ozon HTTP-сессия не найдена. Вставьте Copy as cURL (bash) любого Network-запроса выдачи /search/ Ozon. Cookies останутся зашифрованы на этом компьютере:",
+        parent=root,
+    )
+    root.destroy()
+    if not curl_text or not curl_text.strip():
+        raise RuntimeError("Ozon HTTP session не настроена")
+    resolver.import_curl(curl_text.strip(), validate=True)
 
 
 def _acquire_single_instance() -> None:
@@ -237,14 +146,14 @@ def _acquire_single_instance() -> None:
         raise ctypes.WinError()
     if ctypes.windll.kernel32.GetLastError() == 183:
         ctypes.windll.kernel32.CloseHandle(handle)
-        raise RuntimeError("LEO Browser Agent уже запущен")
+        raise RuntimeError("LEO HTTP Agent уже запущен")
     _MUTEX_HANDLE = handle
 
 
 def _show_error(text: str) -> None:
     root = Tk()
     root.withdraw()
-    messagebox.showerror("LEO Browser Agent", f"{text}\n\nЛог: {LOG_FILE}", parent=root)
+    messagebox.showerror("LEO HTTP Agent", f"{text}\n\nЛог: {LOG_FILE}", parent=root)
     root.destroy()
 
 
@@ -253,7 +162,7 @@ def _redirect_output() -> None:
     stream = LOG_FILE.open("a", encoding="utf-8", buffering=1)
     sys.stdout = stream
     sys.stderr = stream
-    print(f"\n=== LEO Browser Agent {APP_VERSION} start {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
+    print(f"\n=== LEO HTTP Agent {APP_VERSION} start {time.strftime('%Y-%m-%d %H:%M:%S')} ===")
 
 
 def main() -> int:
@@ -262,14 +171,12 @@ def main() -> int:
         _acquire_single_instance()
         token = _ask_token()
         _verify_crm(token)
-        _start_browser()
-        threading.Thread(target=_browser_watchdog, name="browser-watchdog", daemon=True).start()
+        _ensure_ozon_session()
         os.environ["CRM_API_URL"] = API_URL
         os.environ["CRM_SERVICE_TOKEN"] = token
         os.environ["BROWSER_AGENT_ID"] = f"leo-windows-{os.environ.get('COMPUTERNAME', 'pc')}"
-        os.environ["CHROME_CDP_ENDPOINT"] = CDP_ENDPOINT
         os.environ["BROWSER_AGENT_POLL_SECONDS"] = "3"
-        os.environ["BROWSER_AGENT_CONCURRENCY"] = "1"
+        os.environ["BROWSER_AGENT_CONCURRENCY"] = "3"
         os.environ["BROWSER_AGENT_DISPATCH_LIMIT"] = "100"
         os.environ["BROWSER_AGENT_VERSION"] = APP_VERSION
         return asyncio.run(run_browser_agent())

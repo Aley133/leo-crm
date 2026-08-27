@@ -96,7 +96,7 @@ def test_agent_serializes_crm_requests_behind_shared_circuit() -> None:
     assert "await _wait_for_crm_gate()" in source
     assert "_acquire_single_instance(selected_workspace)" in source
     assert "ERROR_ALREADY_EXISTS" in source
-    assert 'VERSION = "1.0.11"' in source
+    assert 'VERSION = "1.2.0"' in source
     assert "/api/product-test-agent/claim" in source
     assert "IDLE_POLL_MAX_SECONDS = 60" in source
     assert "VERIFY_POLL_SECONDS" not in source

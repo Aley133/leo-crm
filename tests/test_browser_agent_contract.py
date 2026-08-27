@@ -5,6 +5,8 @@ from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
+import pytest
+
 from backend.app.browser_agent_models import BrowserAgent, BrowserAgentJobStatus
 from backend.app.main import app
 from backend.app.supplier_adapters.base import NormalizedOffer
@@ -64,11 +66,11 @@ def test_local_agent_serializes_normalized_offer() -> None:
     assert result["raw_metadata"]["source"] == "browser_json_ld"
 
 
-def test_local_agent_routes_marketplace_urls_to_distinct_adapters() -> None:
+def test_local_agent_routes_only_ozon_while_wb_is_disabled() -> None:
     assert _adapter_code_for_url("https://ozon.kz/product/example-17/") == "ozon"
     assert _adapter_code_for_url("https://www.ozon.ru/product/example-17/") == "ozon"
-    assert _adapter_code_for_url("https://www.wildberries.ru/catalog/123/detail.aspx") == "wb"
-    assert _adapter_code_for_url("https://wb.ru/catalog/123") == "wb"
+    with pytest.raises(ValueError, match="temporarily disabled"):
+        _adapter_code_for_url("https://www.wildberries.ru/catalog/123/detail.aspx")
 
 
 def test_browser_agent_status_contract_is_explicit() -> None:
@@ -108,8 +110,9 @@ def test_agent_claim_sends_machine_identity() -> None:
     assert '"hostname": socket.gethostname()' in source
     assert '"platform": platform.platform()' in source
     assert '"version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip()' in source
-    assert '"wb": WildberriesBrowserAccessAdapter(pool)' in source
-    assert 'for supplier_code in ("ozon", "wb")' in source
+    assert '"ozon": OzonSessionHttpAdapter()' in source
+    assert 'for supplier_code in ("ozon",):' in source
+    assert "PlaywrightBrowserPool" not in source
 
 
 def test_supplier_agent_uses_bounded_idle_polling_and_heartbeat() -> None:
