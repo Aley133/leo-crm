@@ -33,8 +33,9 @@
       <div id="message" class="message" role="status" aria-live="polite"></div>
 
       <section id="lab-page" class="hidden">
-        <section class="lab-agent ready">
-          <div><span class="lab-kicker">БЫСТРЫЙ HTTP</span><h2>Kaspi → Ozon → CRM → Быстрый демпинг</h2><p>Поиск и проверка выполняются локальным Fast Agent без Playwright. В CRM попадают только нормализованные данные; сессии и cookies остаются на вашем компьютере.</p></div>
+        <section id="product-test-agent" class="lab-agent missing">
+          <div><span class="lab-kicker">ОТДЕЛЬНЫЙ PRODUCT TEST AGENT</span><h2 id="product-test-agent-title">Агент ещё не подключался</h2><p id="product-test-agent-meta">Запустите отдельный агент — он не ждёт освобождения мониторинга или Быстрого демпинга.</p></div>
+          <div class="lab-agent-actions"><span id="product-test-agent-status" class="agent-pill offline">Не в сети</span><a class="button" href="https://github.com/Aley133/leo-crm/releases/download/product-test-agent-latest/LEO-Product-Test-Agent.exe">Скачать Product Test Agent</a></div>
         </section>
 
         <section class="lab-section">
@@ -87,6 +88,6 @@
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/product-test.js?v=20260826-1" defer></script>
+  <script src="/static/product-test.js?v=20260827-1" defer></script>
 </body>
 </html>

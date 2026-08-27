@@ -131,12 +131,13 @@ def _extract_cards(payload: Any) -> tuple[list[dict[str, Any]], dict[str, Any]]:
 class KaspiProductSearch:
     """Pure HTTP JSON storefront discovery. No write endpoints exist here."""
 
-    def __init__(self, city_id: str, timeout: float = 15.0, page_delay_ms: int = 70) -> None:
+    def __init__(self, city_id: str, timeout: float = 15.0, page_delay_ms: int = 180) -> None:
         self.city_id = str(city_id or "750000000")
         self.page_delay_ms = max(0, int(page_delay_ms))
         self.client = httpx.Client(
             timeout=timeout,
             follow_redirects=True,
+            trust_env=False,
             headers={
                 "Accept": "application/json, text/*",
                 "User-Agent": UA,
@@ -206,6 +207,31 @@ class KaspiProductSearch:
         response = self.client.get(FILTERS_URL, params=params, headers=headers)
         return response, FILTERS_URL, params
 
+    def _page_with_rate_limit_retry(
+        self,
+        text: str,
+        page: int,
+        request_id: str,
+    ) -> tuple[httpx.Response, str, dict[str, Any], int]:
+        response: httpx.Response | None = None
+        url = RESULTS_URL
+        params: dict[str, Any] = {}
+        for attempt in range(3):
+            if page == 0:
+                response, url, params = self._bootstrap_page_zero(text, request_id)
+            else:
+                response, url, params = self._get_page(text, page, request_id)
+            if response.status_code != 429 or attempt == 2:
+                return response, url, params, attempt
+            raw_retry = response.headers.get("Retry-After")
+            try:
+                delay = float(raw_retry) if raw_retry else 1.25 * (2 ** attempt)
+            except (TypeError, ValueError):
+                delay = 1.25 * (2 ** attempt)
+            time.sleep(min(8.0, max(0.8, delay)))
+        assert response is not None
+        return response, url, params, 2
+
     def _scan_once(self, text: str, *, page: int, sort: str, limit: int, mode: str) -> dict[str, Any]:
         products: list[dict[str, Any]] = []
         seen: set[str] = set()
@@ -224,10 +250,11 @@ class KaspiProductSearch:
 
         while len(products) < limit and pages_attempted < max_pages:
             started = time.perf_counter()
-            if current == 0:
-                response, url, params = self._bootstrap_page_zero(text, request_id)
-            else:
-                response, url, params = self._get_page(text, current, request_id)
+            response, url, params, rate_limit_retries = self._page_with_rate_limit_retry(
+                text,
+                current,
+                request_id,
+            )
             elapsed = round((time.perf_counter() - started) * 1000, 1)
             request_row = {
                 "page": current,
@@ -238,6 +265,7 @@ class KaspiProductSearch:
                 "params": params,
                 "status_code": response.status_code,
                 "elapsed_ms": elapsed,
+                "rate_limit_retries": rate_limit_retries,
             }
             requests.append(request_row)
             pages_attempted += 1

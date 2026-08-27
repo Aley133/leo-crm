@@ -15,14 +15,19 @@ from backend.app.product_registry_api import resolve_product_image
 from backend.app import kaspi_product_photo
 from backend.app.product_test_api import (
     ProductDiscoveryRequest,
+    ProductTestAgentHeartbeat,
     ProductTestInspectRequest,
+    ProductTestUpdate,
+    ProductTestAgentIdentity,
     ProductTestAgentResult,
     add_product_to_kaspi,
     build_product_test_xml,
     claim_product_test_job,
     complete_product_test_job,
     discover_product_candidates,
+    heartbeat_product_test_agent,
     inspect_product,
+    update_product_test_item,
 )
 from backend.app.product_test_models import ProductTestItem, ProductTestJob
 from backend.app.fast_dumping_models import FastDumpingJob, FastDumpingPolicy
@@ -33,6 +38,7 @@ from backend.app import product_test_api
 from backend.app.workspace_models import KaspiAccountCredential, Workspace
 from backend.app.workspace_context import workspace_context
 from tools import kaspi_fast_dumping_scanner
+from tools.product_discovery import kaspi_search
 from tools.kaspi_fast_dumping_scanner import (
     _meta_content,
     _open_product_page,
@@ -167,6 +173,36 @@ def test_public_photo_card_does_not_require_promo_conditions(monkeypatch) -> Non
     assert promo == {}
     assert _product_id_from_url(product_url) == "110563850"
     assert _meta_content(page.text, "property", "og:image") == "https://resources.cdn-kaspi.kz/img/p/photo.jpg"
+
+
+def test_kaspi_discovery_retries_one_rate_limited_page(monkeypatch) -> None:
+    calls = 0
+    sleeps: list[float] = []
+    search = kaspi_search.KaspiProductSearch("196220100", page_delay_ms=0)
+
+    def fake_get(url, **_kwargs):
+        nonlocal calls
+        calls += 1
+        request = httpx.Request("GET", url)
+        if calls == 1:
+            return httpx.Response(429, headers={"Retry-After": "0"}, request=request)
+        return httpx.Response(200, json={"data": []}, request=request)
+
+    monkeypatch.setattr(search.client, "get", fake_get)
+    monkeypatch.setattr(kaspi_search.time, "sleep", sleeps.append)
+    try:
+        response, _url, _params, retries = search._page_with_rate_limit_retry(
+            "Solgar",
+            1,
+            "request-id",
+        )
+    finally:
+        search.close()
+
+    assert response.status_code == 200
+    assert retries == 1
+    assert calls == 2
+    assert sleeps == [0.8]
 
 
 def test_backend_photo_reader_prefers_mobile_json_endpoint(monkeypatch) -> None:
@@ -306,13 +342,39 @@ def test_product_test_agent_claim_leases_workspace_job(db_session) -> None:
         ProductTestInspectRequest(reference="102591400_177620711"),
         db_session,
     )
+    legacy_claim = claim_product_test_job(
+        FastAgentIdentity(agent_id="fast-w1", workspace_id=1, merchant_uid="merchant-1"),
+        db_session,
+    )
+    assert legacy_claim["job"] is None
+    assert legacy_claim["agent_required"] == "product_test"
     result = claim_product_test_job(
-        FastAgentIdentity(agent_id="agent-w1", workspace_id=1, merchant_uid="merchant-1"),
+        ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
         db_session,
     )
     assert queued["job"]["status"] == "queued"
     assert result["job"]["reference"] == "102591400_177620711"
     assert len(result["job"]["lease_token"]) == 32
+
+
+def test_product_test_agent_has_independent_presence(db_session) -> None:
+    _seed_agent_account(db_session)
+    product_test_api._PRODUCT_TEST_HEARTBEATS.clear()
+    record = heartbeat_product_test_agent(
+        ProductTestAgentHeartbeat(
+            agent_id="product-test-pc",
+            agent_kind="product_test",
+            workspace_id=1,
+            merchant_uid="merchant-1",
+            hostname="LAB-PC",
+            version="1.0.0",
+        ),
+        db_session,
+    )
+    status = product_test_api._product_test_agent_status(1)
+    assert record["agent_kind"] == "product_test"
+    assert status["online"] is True
+    assert status["agents"][0]["version"] == "1.0.0"
 
 
 def test_two_fast_agents_cannot_cross_workspace_product_test_jobs(db_session) -> None:
@@ -331,16 +393,18 @@ def test_two_fast_agents_cannot_cross_workspace_product_test_jobs(db_session) ->
         )
 
     third_claim = claim_product_test_job(
-        FastAgentIdentity(
+        ProductTestAgentIdentity(
             agent_id="agent-w3",
+            agent_kind="product_test",
             workspace_id=3,
             merchant_uid="merchant-3",
         ),
         db_session,
     )
     first_claim = claim_product_test_job(
-        FastAgentIdentity(
+        ProductTestAgentIdentity(
             agent_id="agent-w1",
+            agent_kind="product_test",
             workspace_id=1,
             merchant_uid="merchant-1",
         ),
@@ -372,23 +436,27 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     ui = (ROOT / "backend/app/ui.py").read_text(encoding="utf-8")
     html = (ROOT / "backend/app/static/product-test.html").read_text(encoding="utf-8")
     script = (ROOT / "backend/app/static/product-test.js").read_text(encoding="utf-8")
-    agent = (ROOT / "tools/kaspi_fast_dumping_agent.py").read_text(encoding="utf-8")
+    agent = (ROOT / "tools/product_test_agent.py").read_text(encoding="utf-8")
+    fast_agent = (ROOT / "tools/kaspi_fast_dumping_agent.py").read_text(encoding="utf-8")
     assert "app.include_router(product_test_router)" in main
     assert '@router.get("/crm/product-test"' in ui
     assert 'id="discover-form"' in html
     assert 'id="settings-form"' in html
-    assert "БЫСТРЫЙ HTTP" in html
+    assert "ОТДЕЛЬНЫЙ PRODUCT TEST AGENT" in html
+    assert "LEO-Product-Test-Agent.exe" in html
     assert "/api/product-test/discover" in script
     assert "/validate-supplier" in script
     assert "/add`" in script
     assert 'name="max_undercut_gap_percent"' in html
     assert 'name="delivery_price_premium_kzt"' in html
     assert 'name="delivery_advantage_days"' in html
-    assert "/api/fast-dumping-agent/agents/status" not in script
+    assert "renderAgent(payload.agent" in script
+    assert "Проверить / заменить ссылку" in script
     assert "/api/product-test-agent/claim" in agent
     assert "inspect_kaspi_product" in agent
     assert "discover_products" in agent
     assert "create_linked_offer" in agent
+    assert "/api/product-test-agent/claim" not in fast_agent
     api = (ROOT / "backend/app/product_test_api.py").read_text(encoding="utf-8")
     assert 'status="queued"' in api
     assert "ProductTestJob.workspace_id == payload.workspace_id" in api
@@ -403,7 +471,7 @@ def test_product_test_inspection_completes_from_local_agent(db_session) -> None:
         db_session,
     )
     claim = claim_product_test_job(
-        FastAgentIdentity(agent_id="agent-w1", workspace_id=1, merchant_uid="merchant-1"),
+        ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
         db_session,
     )
     result = complete_product_test_job(
@@ -466,7 +534,7 @@ def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_sessio
     db_session.commit()
     queued = discover_product_candidates(ProductDiscoveryRequest(query="Solgar", target_new=2), db_session)
     claim = claim_product_test_job(
-        FastAgentIdentity(agent_id="agent-w1", workspace_id=1, merchant_uid="merchant-1"),
+        ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
         db_session,
     )
     assert claim["job"]["job_type"] == "discover"
@@ -546,7 +614,7 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
     db_session.commit()
     queued = add_product_to_kaspi(item.id, db_session)
     claim = claim_product_test_job(
-        FastAgentIdentity(agent_id="agent-w1", workspace_id=1, merchant_uid="merchant-1"),
+        ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
         db_session,
     )
     assert claim["job"]["job_type"] == "create_offer"
@@ -575,6 +643,43 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
     assert db_session.scalar(select(MonitorTarget)) is not None
     assert db_session.scalar(select(BrowserAgentJob)) is not None
     assert db_session.scalar(select(SupplierOfferState)) is not None
+
+
+def test_changed_supplier_url_must_be_revalidated_before_add(db_session) -> None:
+    _seed_agent_account(db_session)
+    original_url = "https://www.ozon.kz/product/original-444444444/"
+    replacement_url = "https://www.ozon.kz/product/replacement-555555555/"
+    item = ProductTestItem(
+        workspace_id=1,
+        input_reference="Solgar",
+        kaspi_product_id="333333333",
+        merchant_sku="333333333",
+        name="Solgar Magnesium",
+        kaspi_url="https://kaspi.kz/shop/p/solgar-333333333/",
+        supplier_url=original_url,
+        observed_price_kzt=Decimal("9000"),
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        offers_json={"supplier": {
+            "supplier_url": original_url,
+            "supplier_price_kzt": "4000",
+            "validated": True,
+        }},
+        status="ready_to_add",
+        active=True,
+    )
+    db_session.add(item)
+    db_session.commit()
+
+    updated = update_product_test_item(
+        item.id,
+        ProductTestUpdate(supplier_url=replacement_url),
+        db_session,
+    )
+    assert updated["status"] == "needs_supplier_validation"
+    with pytest.raises(product_test_api.HTTPException) as caught:
+        add_product_to_kaspi(item.id, db_session)
+    assert caught.value.status_code == 409
 
 
 def test_missing_product_photo_is_prioritized_for_local_agent_and_cached(db_session) -> None:
