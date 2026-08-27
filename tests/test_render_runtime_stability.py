@@ -141,7 +141,7 @@ def test_idle_supplier_agent_claim_is_read_only(db_session, monkeypatch) -> None
 
     monkeypatch.setattr(db_session, "commit", commit)
     response = browser_agent_api.claim_browser_agent_job(
-        browser_agent_api.BrowserAgentClaim(agent_id="idle-agent"),
+        browser_agent_api.BrowserAgentClaim(agent_id="idle-agent", runtime_kind="ozon_http"),
         db_session,
     )
 

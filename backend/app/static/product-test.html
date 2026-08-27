@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Тест товара</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
-  <link rel="stylesheet" href="/static/product-test.css?v=20260819-1">
+  <link rel="stylesheet" href="/static/product-test.css?v=20260827-3">
   <link rel="stylesheet" href="/static/product-images.css?v=20260819-2">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
@@ -22,7 +22,7 @@
     </aside>
     <main>
       <header class="topbar">
-        <div><p class="eyebrow">HTTP PRODUCT DISCOVERY</p><h1>Тест товаров</h1><p class="subtitle">Находим новые карточки Kaspi, подтверждаем поставщика Ozon и после реального создания автоматически включаем существующий Быстрый демпинг.</p></div>
+        <div><p class="eyebrow">HTTP PRODUCT DISCOVERY</p><h1>Тест товаров</h1><p class="subtitle">Находим отсутствующие товары, проверяем точное совпадение Kaspi ↔ Ozon по названию, характеристикам и фото, затем показываем пару для вашей визуальной проверки.</p></div>
         <button id="refresh" class="button" type="button">Обновить</button>
       </header>
 
@@ -39,7 +39,7 @@
         </section>
 
         <section class="lab-section">
-          <div class="lab-head"><div><span class="lab-kicker">АВТОПОИСК</span><h2>Найти товары, которых у нас нет</h2><p>Введите бренд, название или поисковую фразу. Agent исключит товары из вашего каталога и попробует строго сопоставить Ozon.</p></div></div>
+          <div class="lab-head"><div><span class="lab-kicker">АВТОПОИСК</span><h2>Найти товары, которых у нас нет</h2><p>Agent исключит ваш каталог и Merchant Cabinet, выполнит несколько Ozon-запросов, сверит бренд, название, дозировку, количество и фотографии, затем выберет минимальную подтверждённую цену среди точных совпадений.</p></div></div>
           <form id="discover-form" class="inspect-form">
             <label class="wide"><span>Что искать</span><input id="query" maxlength="500" placeholder="Например: Solgar, магний глицинат" required></label>
             <label><span>Новых товаров</span><input id="target-new" type="number" min="1" max="100" value="10" required></label>
@@ -49,7 +49,7 @@
 
         <section class="metrics lab-metrics">
           <article class="metric"><span>Найдено</span><strong id="total-count">0</strong><small>кандидатов</small></article>
-          <article class="metric"><span>Готово к добавлению</span><strong id="ready-count">0</strong><small>поставщик подтверждён</small></article>
+          <article class="metric"><span>На проверку</span><strong id="ready-count">0</strong><small>Kaspi ↔ Ozon готовы</small></article>
           <article class="metric"><span>В работе</span><strong id="job-count">0</strong><small>локальных заданий</small></article>
           <article class="metric"><span>В демпинге</span><strong id="enrolled-count">0</strong><small>товаров</small></article>
         </section>
@@ -71,7 +71,7 @@
               <label><span>Позиция предзаказа</span><input name="preorder_target_position" type="number" min="1" max="50"></label>
               <label><span>Город Kaspi</span><input name="city_id" maxlength="32"></label>
               <label><span>Зона Kaspi</span><input name="zone_id" maxlength="64"></label>
-              <label><span><input name="image_verify" type="checkbox"> Проверять фото</span></label>
+              <label><span><input name="image_verify" type="checkbox" checked disabled> Фото проверяется обязательно</span></label>
               <label><span><input name="allow_price_raise" type="checkbox"> Разрешать повышение</span></label>
               <button class="button" type="submit">Сохранить значения по умолчанию</button>
             </form>
@@ -79,7 +79,7 @@
         </section>
 
         <section class="lab-section">
-          <div class="lab-head controls"><div><span class="lab-kicker">КАНДИДАТЫ</span><h2>Новые товары</h2><p>Автосопоставление можно исправить своей ссылкой Ozon. После подтверждённого добавления карточка появится в «Товарах» и в существующем Быстром демпинге.</p></div></div>
+          <div class="lab-head controls"><div><span class="lab-kicker">ВИЗУАЛЬНОЕ СОПОСТАВЛЕНИЕ</span><h2>Kaspi ↔ Ozon</h2><p>Сначала сравните две фотографии. Если товар совпал — нажмите «Выгрузить на Kaspi». Если нет — вставьте правильную Ozon-ссылку и повторно проверьте. После подтверждения создаётся обычный товар и существующая привязка Мониторинга; параллельных путей нет.</p></div></div>
           <div id="jobs" class="jobs"></div>
           <div id="items" class="lab-list"></div>
           <div id="empty" class="empty hidden">Пока нет кандидатов. Запустите быстрый поиск выше.</div>
@@ -88,6 +88,6 @@
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/product-test.js?v=20260827-1" defer></script>
+  <script src="/static/product-test.js?v=20260827-3" defer></script>
 </body>
 </html>

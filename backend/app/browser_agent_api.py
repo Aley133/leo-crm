@@ -35,6 +35,7 @@ class BrowserAgentJobCreate(BaseModel):
 
 class BrowserAgentClaim(BaseModel):
     agent_id: str = Field(min_length=1, max_length=128)
+    runtime_kind: str | None = Field(default=None, max_length=32)
     lease_seconds: int = Field(default=120, ge=30, le=600)
     hostname: str | None = Field(default=None, max_length=255)
     platform: str | None = Field(default=None, max_length=128)
@@ -48,6 +49,7 @@ class BrowserAgentDispatch(BaseModel):
 
 class BrowserAgentHeartbeat(BaseModel):
     agent_id: str = Field(min_length=1, max_length=128)
+    runtime_kind: str | None = Field(default=None, max_length=32)
     status: str = Field(default="idle", min_length=1, max_length=32)
     version: str | None = Field(default=None, max_length=32)
     hostname: str | None = Field(default=None, max_length=255)
@@ -80,8 +82,20 @@ def _dispatch_min_interval_seconds() -> float:
 
 DISPATCH_MIN_INTERVAL_SECONDS = _dispatch_min_interval_seconds()
 BROWSER_AGENT_IDLE_RETRY_SECONDS = 15
+REQUIRED_BROWSER_AGENT_RUNTIME = "ozon_http"
 _DISPATCH_LAST_AT: dict[str, float] = {}
 _DISPATCH_LOCK = Lock()
+
+
+def _require_http_runtime(runtime_kind: str | None) -> None:
+    if str(runtime_kind or "").strip().casefold() != REQUIRED_BROWSER_AGENT_RUNTIME:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Установлен устаревший Browser Agent с Chrome/CDP. "
+                "Скачайте актуальный LEO HTTP Agent 0.3.2 или новее."
+            ),
+        )
 
 
 def _acquire_dispatch_slot(
@@ -238,6 +252,7 @@ def _upsert_agent(
 
 @router.post("/heartbeat")
 def heartbeat_browser_agent(payload: BrowserAgentHeartbeat, db: Session = Depends(get_unscoped_db)):
+    _require_http_runtime(payload.runtime_kind)
     agent = _upsert_agent(
         db,
         agent_id=payload.agent_id,
@@ -337,6 +352,7 @@ def create_browser_agent_job(payload: BrowserAgentJobCreate, db: Session = Depen
 
 @router.post("/claim")
 def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(get_unscoped_db)):
+    _require_http_runtime(payload.runtime_kind)
     now = utc_now()
     job = db.scalar(
         select(BrowserAgentJob)

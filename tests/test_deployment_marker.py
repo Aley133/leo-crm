@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.25.1"
-EXPECTED_DEPLOYMENT_MARKER = "dedicated-product-test-agent"
+EXPECTED_APP_VERSION = "0.25.3"
+EXPECTED_DEPLOYMENT_MARKER = "product-test-lab-results"
 
 
 def test_application_metadata_contract() -> None:

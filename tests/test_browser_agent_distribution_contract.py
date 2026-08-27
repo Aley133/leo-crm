@@ -16,13 +16,13 @@ def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     assert "run_browser_agent" in entrypoint
     assert "CryptProtectData" in entrypoint
     assert "CryptUnprotectData" in entrypoint
-    assert 'APP_VERSION = "0.3.1"' in entrypoint
+    assert 'APP_VERSION = "0.3.2"' in entrypoint
     assert "MUTEX_NAME" in entrypoint
     assert "_browser_watchdog" not in entrypoint
     assert "CreateMutexW" in entrypoint
     assert "OutputBaseFilename=LEO-Browser-Agent-Setup" in installer
     assert "OutputDir=..\\..\\dist" in installer
-    assert '#define MyAppVersion "0.3.1"' in installer
+    assert '#define MyAppVersion "0.3.2"' in installer
     assert "taskkill /F /IM" in installer
     assert "CloseApplications=yes" in installer
     assert "RestartApplications=no" in installer
@@ -31,6 +31,10 @@ def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     assert "pyinstaller" in workflow.lower()
     assert "--paths ." in workflow
     assert "--hidden-import tools.browser_agent" in workflow
+    browser_build = workflow.split("pyinstaller --noconfirm", 1)[1].split("pyinstaller --noconfirm", 1)[0]
+    assert "--collect-submodules backend" not in browser_build
+    assert "--collect-submodules tools.ozon_http" in browser_build
+    assert "--hidden-import backend.app.supplier_adapters.base" in browser_build
     assert "python -c \"import tools.browser_agent; import tools.browser_agent_desktop\"" in workflow
     assert 'backend/app/supplier_adapters/**' in workflow
     assert 'tools/ozon_http/**' in workflow

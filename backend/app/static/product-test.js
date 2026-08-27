@@ -21,39 +21,61 @@ const notify = (text, kind = "") => { message.textContent = text; message.classN
 const setBusy = (button, busy, label) => { if (!button.dataset.label) button.dataset.label = button.textContent; button.disabled = busy; button.textContent = busy ? label : button.dataset.label; };
 
 const statusText = (item) => ({
-  ready_to_add: "Поставщик подтверждён",
-  needs_supplier_link: "Нужна ссылка Ozon",
+  ready_to_add: "Готово к вашей визуальной проверке",
+  needs_supplier_link: item.last_error || "Точное совпадение Ozon не найдено — вставьте ссылку",
   needs_supplier_validation: "Ссылка изменена — проверьте",
   validating_supplier: "Проверяем ссылку",
-  adding_to_kaspi: "Добавляем на Kaspi",
-  enrolled_fast_dumping: "В Быстром демпинге",
+  adding_to_kaspi: "Выгружаем на Kaspi и ждём реальный SKU",
+  enrolled_fast_dumping: "Создан в Товарах, подключён к Мониторингу и Быстрому демпингу",
   error: item.last_error || "Ошибка",
 }[item.status] || item.status || "Кандидат");
 
-const itemCard = (item) => {
+const ratingLine = (rating, reviews) => {
+  const score = Number(rating);
+  const count = Number(reviews);
+  if (!Number.isFinite(score) && !Number.isFinite(count)) return '<span class="muted">Рейтинг —</span>';
+  return `<span class="rating">★ ${Number.isFinite(score) ? score.toFixed(1) : "—"}${Number.isFinite(count) ? ` · ${count.toLocaleString("ru-RU")} отзывов` : ""}</span>`;
+};
+
+const marketProduct = ({market, title, brand, sku, image, url, rating, reviews}) => `<div class="market-product ${market.toLowerCase()}">
+  ${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(`${market}: ${title}`)}" loading="lazy" referrerpolicy="no-referrer">` : `<div class="market-image-placeholder">Нет фото ${escapeHtml(market)}</div>`}
+  <div class="market-copy"><strong>${escapeHtml(title || `Карточка ${market}`)}</strong><small>${escapeHtml([brand, sku].filter(Boolean).join(" · ") || "—")}</small>${ratingLine(rating, reviews)}${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(market)} ↗</a>` : '<span class="muted">Ссылка не найдена</span>'}</div>
+</div>`;
+
+const itemRow = (item, index) => {
   const supplier = item.offers?.supplier || {};
-  const pricing = item.offers?.initial_pricing || {};
+  const kaspi = item.offers?.kaspi || {};
+  const autoOzon = item.offers?.ozon?.best || {};
+  const ozonImage = supplier.supplier_image_url || autoOzon.image_url || "";
+  const ozonTitle = supplier.supplier_product_title || autoOzon.title || "Точное совпадение Ozon не найдено";
+  const visual = supplier.image_match || {};
+  const score = supplier.match_score == null ? null : Math.round(Number(supplier.match_score) * 100);
+  const visualText = visual.status === "CONFIRM" ? "Фото совпало" : visual.status === "SUPPORT" ? "Фото похоже" : "Проверить фото";
+  const sellerOffers = Number(supplier.total_supplier_offers_checked || supplier.supplier_offer_count || 0);
   const locked = ["validating_supplier", "adding_to_kaspi", "enrolled_fast_dumping"].includes(item.status);
   const canAdd = item.status === "ready_to_add" && supplier.validated;
-  return `<article class="lab-card" data-id="${item.id}" data-supplier-url="${escapeHtml(item.supplier_url || "")}" data-can-add="${canAdd ? "1" : "0"}">
-    ${item.image_url ? `<img class="lab-photo" src="${escapeHtml(item.image_url)}" alt="" loading="lazy" referrerpolicy="no-referrer">` : '<div class="lab-photo placeholder">Нет фото</div>'}
-    <div class="lab-product"><h3>${escapeHtml(item.name)}</h3><p>${escapeHtml(item.brand || "Без бренда")} · Kaspi ${escapeHtml(item.kaspi_product_id)}</p><a href="${escapeHtml(item.kaspi_url)}" target="_blank" rel="noopener">Kaspi</a><span> · </span>${item.supplier_url ? `<a href="${escapeHtml(item.supplier_url)}" target="_blank" rel="noopener">Ozon</a>` : "Ozon не выбран"}<p><strong>${escapeHtml(statusText(item))}</strong></p></div>
-    <div class="lab-value"><span>Конкурент Kaspi</span><strong>${money(item.observed_price_kzt)}</strong><small>${pricing.status ? escapeHtml(pricing.status) : "для стартовой цены"}</small></div>
-    <div class="lab-value"><span>Поставщик Ozon</span><strong>${money(supplier.supplier_price_kzt)}</strong><small>${escapeHtml(supplier.supplier_seller_name || "не подтверждён")}</small></div>
-    <label class="lab-value"><span>Своя ссылка Ozon</span><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="https://www.ozon.kz/product/…" ${locked ? "disabled" : ""}></label>
-    <div class="lab-actions">
-      <button class="button validate" type="button" ${locked ? "disabled" : ""}>Проверить / заменить ссылку</button>
-      <button class="button add" type="button" ${canAdd ? "" : "disabled"}>Добавить на Kaspi</button>
-      ${item.product_id ? `<a class="button secondary" href="/crm/products/${item.product_id}">Открыть товар</a><a class="button secondary" href="/crm/fast-dumping">Демпинг</a>` : ""}
-    </div>
+  const deliveryText = supplier.supplier_delivery_text || (supplier.supplier_delivery_date ? `до ${supplier.supplier_delivery_date}` : supplier.supplier_delivery_days != null ? `${supplier.supplier_delivery_days} дн.` : "—");
+  const matchClass = supplier.match_status === "CONFIRMED" ? "found" : supplier.match_status === "REVIEW" || supplier.match_status === "MANUAL_REVIEW" ? "review" : "missing";
+  return `<article class="lab-result-row ${matchClass}" data-id="${item.id}" data-supplier-url="${escapeHtml(item.supplier_url || "")}" data-can-add="${canAdd ? "1" : "0"}">
+    <div class="row-number">${index + 1}</div>
+    <div data-label="KASPI">${marketProduct({market:"Kaspi", title:item.name, brand:item.brand, sku:item.kaspi_product_id, image:item.image_url, url:item.kaspi_url, rating:kaspi.rating, reviews:kaspi.reviews})}</div>
+    <div class="table-value" data-label="KASPI ЦЕНА"><strong>${money(item.observed_price_kzt)}</strong><small>конкурент</small></div>
+    <div data-label="OZON">${marketProduct({market:"Ozon", title:ozonTitle, brand:autoOzon.brand, sku:supplier.supplier_offer_sku || autoOzon.sku, image:ozonImage, url:item.supplier_url, rating:supplier.supplier_rating ?? autoOzon.rating, reviews:supplier.supplier_reviews ?? autoOzon.reviews})}</div>
+    <div class="table-value supplier-cost" data-label="SUPPLIER COST"><strong>${money(supplier.supplier_price_kzt)}</strong><small>${escapeHtml(supplier.supplier_seller_name || "не подтверждён")}</small><em>${sellerOffers ? `${sellerOffers} предложений` : ""}</em></div>
+    <div class="table-value" data-label="ДОСТАВКА"><strong>${escapeHtml(deliveryText)}</strong>${supplier.supplier_delivery_days != null ? `<small>${supplier.supplier_delivery_days} дн.</small>` : ""}</div>
+    <div class="match-cell" data-label="MATCH"><strong>${score == null ? "—" : `${score}%`}</strong><span>${escapeHtml(visualText)}</span><small>${escapeHtml(supplier.match_status || "NO_RESULT")}</small></div>
+    <div class="result-actions" data-label="СТАТУС / ДЕЙСТВИЯ"><span class="result-status ${matchClass}">${escapeHtml(statusText(item))}</span><label><span>Правильная ссылка Ozon</span><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="https://www.ozon.kz/product/…" ${locked ? "disabled" : ""}></label><button class="button validate" type="button" ${locked ? "disabled" : ""}>Проверить / заменить</button><button class="button add" type="button" ${canAdd ? "" : "disabled"}>Выгрузить на Kaspi</button>${item.product_id ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div>` : ""}</div>
   </article>`;
 };
 
 const renderJobs = (jobs) => {
-  const active = jobs.filter((job) => ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
+  const relevant = jobs.filter((job) => job.job_type !== "inspect");
+  const active = relevant.filter((job) => ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
   const pending = active.filter((job) => ["queued", "leased"].includes(job.status));
+  const lastSearch = relevant.find((job) => job.job_type === "discover" && job.status === "succeeded" && job.result);
   const labels = {discover:"Поиск новых товаров", validate_supplier:"Проверка Ozon", create_offer:"Добавление на Kaspi", inspect:"Чтение карточки"};
-  document.querySelector("#jobs").innerHTML = active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
+  const summary = lastSearch ? `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>` : "";
+  document.querySelector("#jobs").innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
   document.querySelector("#job-count").textContent = pending.length;
   if (pending.length && !refreshTimer) refreshTimer = window.setTimeout(() => { refreshTimer = null; load(); }, 3000);
 };
@@ -82,14 +104,16 @@ const fillSettings = (settings) => {
   const form = document.querySelector("#settings-form");
   Object.entries(settings || {}).forEach(([key, value]) => {
     const field = form.elements.namedItem(key); if (!field) return;
-    if (field.type === "checkbox") field.checked = Boolean(value); else field.value = value ?? "";
+    if (key === "image_verify") field.checked = true;
+    else if (field.type === "checkbox") field.checked = Boolean(value);
+    else field.value = value ?? "";
   });
   if (settings?.target_new) document.querySelector("#target-new").value = settings.target_new;
 };
 
 const render = (payload) => {
   const items = payload.items || [];
-  document.querySelector("#items").innerHTML = items.map(itemCard).join("");
+  document.querySelector("#items").innerHTML = items.length ? `<div class="lab-results-table"><div class="lab-table-head"><span>#</span><span>KASPI</span><span>KASPI ЦЕНА</span><span>OZON</span><span>SUPPLIER COST</span><span>ДОСТАВКА</span><span>MATCH</span><span>СТАТУС / ДЕЙСТВИЯ</span></div>${items.map(itemRow).join("")}</div>` : "";
   document.querySelector("#empty").classList.toggle("hidden", items.length > 0);
   document.querySelector("#total-count").textContent = items.filter((item) => item.status !== "enrolled_fast_dumping").length;
   document.querySelector("#ready-count").textContent = items.filter((item) => item.status === "ready_to_add").length;
@@ -120,8 +144,8 @@ document.querySelector("#settings-form").addEventListener("submit", async (event
   catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 document.querySelector("#items").addEventListener("click", async (event) => {
-  const card = event.target.closest(".lab-card"); const button = event.target.closest("button"); if (!card || !button) return;
-  setBusy(button, true, button.classList.contains("add") ? "Добавляю…" : "Проверяю…");
+  const card = event.target.closest(".lab-result-row"); const button = event.target.closest("button"); if (!card || !button) return;
+  setBusy(button, true, button.classList.contains("add") ? "Выгружаю…" : "Проверяю…");
   try {
     if (button.classList.contains("validate")) {
       const supplierUrl = card.querySelector(".supplier").value.trim();
@@ -131,14 +155,14 @@ document.querySelector("#items").addEventListener("click", async (event) => {
       const currentUrl = card.querySelector(".supplier").value.trim();
       if (currentUrl !== (card.dataset.supplierUrl || "")) throw new Error("Ссылка Ozon изменена. Сначала нажмите «Проверить / заменить ссылку».");
       await request(`/api/product-test/items/${card.dataset.id}/add`, {method:"POST"});
-      notify("Создание оффера запущено. В демпинг он попадёт только после подтверждения Kaspi.", "success");
+      notify("Выгрузка запущена. После подтверждения Kaspi обычная карточка появится в «Товарах» и подключится к существующему Мониторингу и Быстрому демпингу.", "success");
     }
     await load();
   } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 document.querySelector("#items").addEventListener("input", (event) => {
   if (!event.target.classList.contains("supplier")) return;
-  const card = event.target.closest(".lab-card"); if (!card) return;
+  const card = event.target.closest(".lab-result-row"); if (!card) return;
   const dirty = event.target.value.trim() !== (card.dataset.supplierUrl || "");
   card.classList.toggle("link-dirty", dirty);
   const add = card.querySelector(".add"); if (add) add.disabled = dirty || card.dataset.canAdd !== "1";

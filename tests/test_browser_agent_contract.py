@@ -110,9 +110,28 @@ def test_agent_claim_sends_machine_identity() -> None:
     assert '"hostname": socket.gethostname()' in source
     assert '"platform": platform.platform()' in source
     assert '"version": (os.getenv("BROWSER_AGENT_VERSION") or "dev").strip()' in source
+    assert '"runtime_kind": RUNTIME_KIND' in source
+    assert 'RUNTIME_KIND = "ozon_http"' in source
     assert '"ozon": OzonSessionHttpAdapter()' in source
     assert 'for supplier_code in ("ozon",):' in source
     assert "PlaywrightBrowserPool" not in source
+
+
+def test_server_rejects_agents_without_explicit_http_runtime() -> None:
+    from backend.app.browser_agent_api import _require_http_runtime
+
+    with pytest.raises(Exception) as exc_info:
+        _require_http_runtime(None)
+    assert getattr(exc_info.value, "status_code", None) == 409
+    assert "Chrome/CDP" in str(getattr(exc_info.value, "detail", ""))
+    _require_http_runtime("ozon_http")
+
+
+def test_shared_adapter_package_does_not_eagerly_import_browser_engine() -> None:
+    source = (ROOT / "backend/app/supplier_adapters/__init__.py").read_text(encoding="utf-8")
+    prefix = source.split("def __getattr__", 1)[0]
+    assert "from .ozon_browser import" not in prefix
+    assert 'if name == "OzonBrowserAdapter"' in source
 
 
 def test_supplier_agent_uses_bounded_idle_polling_and_heartbeat() -> None:

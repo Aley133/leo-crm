@@ -28,6 +28,7 @@ from backend.app.product_test_api import (
     heartbeat_product_test_agent,
     inspect_product,
     update_product_test_item,
+    validate_product_supplier,
 )
 from backend.app.product_test_models import ProductTestItem, ProductTestJob
 from backend.app.fast_dumping_models import FastDumpingJob, FastDumpingPolicy
@@ -38,7 +39,7 @@ from backend.app import product_test_api
 from backend.app.workspace_models import KaspiAccountCredential, Workspace
 from backend.app.workspace_context import workspace_context
 from tools import kaspi_fast_dumping_scanner
-from tools.product_discovery import kaspi_search
+from tools.product_discovery import kaspi_search, runtime as product_discovery_runtime
 from tools.kaspi_fast_dumping_scanner import (
     _meta_content,
     _open_product_page,
@@ -452,6 +453,14 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert 'name="delivery_advantage_days"' in html
     assert "renderAgent(payload.agent" in script
     assert "Проверить / заменить ссылку" in script
+    assert "Выгрузить на Kaspi" in script
+    assert "lab-results-table" in script
+    assert "supplier_rating" in script
+    assert "supplier_delivery_text" in script
+    assert 'job.job_type !== "inspect"' in script
+    assert "supplier_image_url" in script
+    assert 'href="/crm/monitoring"' in script
+    assert "ВИЗУАЛЬНОЕ СОПОСТАВЛЕНИЕ" in html
     assert "/api/product-test-agent/claim" in agent
     assert "inspect_kaspi_product" in agent
     assert "discover_products" in agent
@@ -528,6 +537,148 @@ def test_initial_offer_price_has_only_two_market_outcomes() -> None:
     assert floor_limited.status == "safe_floor_above_market"
 
 
+def test_ozon_match_checks_all_strategies_and_chooses_lowest_strict_price() -> None:
+    product = {
+        "title": "Solgar Magnesium Citrate 400 mg 120 capsules",
+        "brand": "Solgar",
+        "image_url": "https://resources.cdn-kaspi.kz/img/m/p/solgar.jpg",
+    }
+    exact_high = {
+        "sku": "ozon-high",
+        "title": product["title"],
+        "brand": "Solgar",
+        "ozon_url": "https://www.ozon.kz/product/solgar-high-111111111/",
+    }
+    exact_low = {
+        "sku": "ozon-low",
+        "title": product["title"],
+        "brand": "Solgar",
+        "ozon_url": "https://www.ozon.kz/product/solgar-low-222222222/",
+    }
+
+    class FakeClient:
+        def __init__(self) -> None:
+            self.queries: list[str] = []
+
+        def search(self, query: str, page: int = 1) -> dict:
+            del page
+            self.queries.append(query)
+            rows = [exact_high] if len(self.queries) == 1 else [exact_low] if len(self.queries) == 2 else []
+            return {"attempt": {"status_code": 200, "blocked": False}, "items": rows}
+
+        def product_price_hints(self, url: str) -> dict:
+            price = 3900 if "high" in url else 3500
+            return {
+                "ok": True,
+                "cheaper_price_kzt": price,
+                "cheaper_offer": {
+                    "product_url": url,
+                    "offer_sku": f"seller-{price}",
+                    "seller_name": f"Seller {price}",
+                    "delivery_days": 2,
+                },
+                "other_offer_count": 4,
+            }
+
+    client = FakeClient()
+    result = product_discovery_runtime._best_ozon_match(
+        client,
+        product,
+        max_queries=3,
+        verifier=None,
+    )
+    assert len(client.queries) == 3
+    assert result["best"]["sku"] == "ozon-low"
+    assert result["best"]["supplier_price_kzt"] == 3500
+    assert result["best"]["selection_reason"] == "lowest_price_across_strict_matches_and_sellers"
+    assert result["best"]["priced_strict_candidates"] == 2
+    assert result["best"]["total_supplier_offers_checked"] == 8
+
+
+def test_discovery_keeps_scanning_until_complete_visual_pairs(monkeypatch) -> None:
+    products = [
+        {
+            "master_sku": str(1000 + index),
+            "title": f"Solgar Product {index}",
+            "brand": "Solgar",
+            "image_url": f"https://resources.cdn-kaspi.kz/img/m/p/{index}.jpg",
+            "image_urls": [f"https://resources.cdn-kaspi.kz/img/m/p/{index}.jpg"],
+            "kaspi_url": f"https://kaspi.kz/shop/p/solgar-{1000 + index}/",
+            "price_kzt": 9000 + index,
+            "rating": 4.8,
+            "reviews": 120,
+        }
+        for index in range(20)
+    ]
+
+    class FakeSearch:
+        def __init__(self, city_id):
+            self.city_id = city_id
+
+        def search(self, *args, **kwargs):
+            return {"products": products, "stats": {"elapsed_ms": 12}}
+
+        def close(self):
+            return None
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def close(self):
+            return None
+
+    checked: list[str] = []
+
+    def fake_match(client, product, *, max_queries, verifier):
+        del client, max_queries, verifier
+        checked.append(product["master_sku"])
+        index = int(product["master_sku"]) - 1000
+        if index < 12:
+            return {"best": None, "top_candidates": [], "queries": [{"blocked": False}]}
+        return {
+            "best": {
+                "sku": f"ozon-{index}",
+                "title": product["title"],
+                "ozon_url": f"https://www.ozon.kz/product/solgar-{900000000 + index}/",
+                "supplier_url": f"https://www.ozon.kz/product/solgar-{900000000 + index}/",
+                "supplier_price_kzt": 4000 + index,
+                "image_url": f"https://ir.ozone.ru/s3/multimedia/{index}.jpg",
+                "match_status": "CONFIRMED",
+                "match_score": 0.95,
+                "rating": 4.9,
+                "reviews": 500,
+            },
+            "top_candidates": [],
+            "queries": [{"blocked": False}],
+        }
+
+    monkeypatch.setattr(product_discovery_runtime, "KaspiProductSearch", FakeSearch)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+    monkeypatch.setattr(product_discovery_runtime, "_best_ozon_match", fake_match)
+
+    result = product_discovery_runtime.discover_products(
+        query="Solgar",
+        city_id="196220100",
+        target_new=2,
+        max_kaspi_scan=20,
+        max_ozon_queries=3,
+        image_verify=False,
+    )
+
+    assert len(checked) == 14
+    assert result["confirmed_pairs"] == 2
+    assert result["matched_products_checked"] == 14
+    assert [row["kaspi_product_id"] for row in result["rows"]] == ["1012", "1013"]
+    assert result["rows"][0]["supplier_rating"] == 4.9
+    assert result["rows"][0]["supplier_reviews"] == 500
+
+
 def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_session) -> None:
     _seed_agent_account(db_session)
     db_session.add(Product(workspace_id=1, kaspi_product_id="111", merchant_sku="111_own", name="Already ours"))
@@ -566,10 +717,23 @@ def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_sessio
                     "supplier_url": "https://www.ozon.kz/product/solgar-222222222/",
                     "supplier_price_kzt": "4000",
                     "supplier_delivery_days": 3,
+                    "supplier_delivery_text": "Доставим 30 августа",
+                    "supplier_delivery_date": "2026-08-30",
                     "supplier_offer_sku": "ozon-222",
                     "supplier_seller_name": "Supplier",
+                    "supplier_seller_rating": 4.9,
+                    "supplier_seller_reviews": 132,
+                    "supplier_product_title": "Solgar Magnesium Ozon",
+                    "supplier_image_url": "https://ir.ozone.ru/s3/multimedia/solgar.jpg",
+                    "supplier_image_urls": ["https://ir.ozone.ru/s3/multimedia/solgar.jpg"],
+                    "supplier_rating": 4.8,
+                    "supplier_reviews": 524,
+                    "supplier_offer_count": 5,
                     "match_status": "CONFIRMED",
                     "match_score": 0.96,
+                    "queries_tested": 3,
+                    "priced_strict_candidates": 2,
+                    "total_supplier_offers_checked": 9,
                     "offers": {},
                 }],
             },
@@ -579,6 +743,75 @@ def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_sessio
     assert queued["queued"] is True
     assert completed["items"][0]["status"] == "ready_to_add"
     assert completed["items"][0]["offers"]["supplier"]["validated"] is True
+    assert completed["items"][0]["offers"]["supplier"]["supplier_image_url"].endswith("solgar.jpg")
+    assert completed["items"][0]["offers"]["supplier"]["supplier_rating"] == 4.8
+    assert completed["items"][0]["offers"]["supplier"]["supplier_reviews"] == 524
+    assert completed["items"][0]["offers"]["supplier"]["supplier_delivery_text"] == "Доставим 30 августа"
+    assert completed["items"][0]["offers"]["supplier"]["priced_strict_candidates"] == 2
+    assert completed["items"][0]["offers"]["supplier"]["total_supplier_offers_checked"] == 9
+
+
+def test_manual_ozon_url_reuses_validation_job_and_refreshes_visual_pair(db_session) -> None:
+    _seed_agent_account(db_session)
+    item = ProductTestItem(
+        workspace_id=1,
+        input_reference="Solgar",
+        kaspi_product_id="333333333",
+        merchant_sku="333333333",
+        name="Solgar Magnesium",
+        brand="Solgar",
+        image_url="https://resources.cdn-kaspi.kz/img/m/p/333.jpg",
+        kaspi_url="https://kaspi.kz/shop/p/solgar-333333333/",
+        observed_price_kzt=Decimal("9000"),
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        offers_json={"kaspi": {"image_urls": ["https://resources.cdn-kaspi.kz/img/m/p/333.jpg"]}},
+        status="needs_supplier_link",
+        active=True,
+    )
+    db_session.add(item)
+    db_session.commit()
+    url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
+    queued = validate_product_supplier(
+        item.id,
+        product_test_api.SupplierUrlRequest(supplier_url=url),
+        db_session,
+    )
+    claim = claim_product_test_job(
+        ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
+        db_session,
+    )
+    assert queued["job"]["job_type"] == "validate_supplier"
+    assert claim["job"]["options"]["product"]["title"] == item.name
+    assert claim["job"]["options"]["product"]["image_urls"] == [item.image_url]
+    completed = complete_product_test_job(
+        claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "supplier_url": url,
+                "supplier_price_kzt": 4100,
+                "supplier_offer_sku": "seller-555",
+                "supplier_seller_name": "Manual seller",
+                "supplier_product_title": "Solgar Magnesium Ozon",
+                "supplier_image_url": "https://ir.ozone.ru/s3/multimedia/manual.jpg",
+                "supplier_image_urls": ["https://ir.ozone.ru/s3/multimedia/manual.jpg"],
+                "match_status": "REVIEW",
+                "match_score": 0.74,
+                "image_match": {"status": "SUPPORT", "score": 0.84},
+                "validated": True,
+            },
+        ),
+        db_session,
+    )
+    supplier = completed["item"]["offers"]["supplier"]
+    assert completed["item"]["status"] == "ready_to_add"
+    assert supplier["supplier_image_url"].endswith("manual.jpg")
+    assert supplier["validation_source"] == "manual_url_other_offers"
+    assert supplier["image_match"]["status"] == "SUPPORT"
 
 
 def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_session) -> None:
