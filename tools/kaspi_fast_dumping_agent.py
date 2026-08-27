@@ -28,9 +28,11 @@ from tools.kaspi_fast_dumping_scanner import (
     scan_kaspi_competitors,
 )
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
+from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
+from tools.product_discovery.runtime import discover_products, validate_supplier_url
 
 
-VERSION = "1.0.11"
+VERSION = "1.2.0"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -910,15 +912,66 @@ async def _process_product_test(
     job: dict,
     agent_id: str,
     workspace_id: int,
+    merchant_session: KaspiMerchantSession,
+    store_id: str,
 ) -> None:
     job_id = int(job["id"])
     try:
-        async with asyncio.timeout(SCAN_TIMEOUT_SECONDS):
-            inspection = await inspect_kaspi_product(
-                reference=str(job.get("reference") or ""),
-                city_id=str(job.get("city_id") or "196220100"),
-                zone_id=str(job.get("zone_id") or "Magnum_ZONE1"),
-            )
+        job_type = str(job.get("job_type") or "inspect")
+        options = job.get("options") if isinstance(job.get("options"), dict) else {}
+        timeout_seconds = (
+            1800
+            if job_type in {"create_offer", "discover"}
+            else SCAN_TIMEOUT_SECONDS
+        )
+        async with asyncio.timeout(timeout_seconds):
+            if job_type == "discover":
+                merchant_catalog = MerchantOfferApi(
+                    merchant_session,
+                    store_id=store_id,
+                    city_id=str(job.get("city_id") or "196220100"),
+                )
+                inspection = await asyncio.to_thread(
+                    discover_products,
+                    query=str(job.get("reference") or ""),
+                    city_id=str(job.get("city_id") or "196220100"),
+                    target_new=int(options.get("target_new") or 10),
+                    max_kaspi_scan=int(options.get("max_kaspi_scan") or 200),
+                    max_ozon_queries=int(options.get("max_ozon_queries") or 3),
+                    image_verify=bool(options.get("image_verify", True)),
+                    existing_kaspi_ids={str(value) for value in options.get("existing_kaspi_ids") or []},
+                    merchant_catalog=merchant_catalog,
+                )
+            elif job_type == "validate_supplier":
+                inspection = await asyncio.to_thread(validate_supplier_url, str(options.get("supplier_url") or ""))
+            elif job_type == "create_offer":
+                creator = MerchantOfferApi(
+                    merchant_session,
+                    store_id=store_id,
+                    city_id=str(job.get("city_id") or "196220100"),
+                )
+                inspection = await asyncio.to_thread(
+                    creator.create_linked_offer,
+                    master_sku=str(options["master_sku"]),
+                    model=str(options["model"]),
+                    price=int(options["initial_price_kzt"]),
+                    stock=int(options["stock_count"]),
+                    preorder=int(options["preorder_days"]),
+                    live=True,
+                    attempts=60,
+                    poll_seconds=2.0,
+                )
+                if inspection.get("result") not in {"CREATED_AND_VISIBLE", "ALREADY_EXISTS"}:
+                    raise RuntimeError(str(inspection.get("result") or "Kaspi offer was not confirmed"))
+                after = inspection.get("after") or inspection.get("before") or {}
+                if not after.get("found") or not after.get("price_kzt"):
+                    raise RuntimeError("Kaspi принял создание, но оффер с ценой ещё не появился")
+            else:
+                inspection = await inspect_kaspi_product(
+                    reference=str(job.get("reference") or ""),
+                    city_id=str(job.get("city_id") or "196220100"),
+                    zone_id=str(job.get("zone_id") or "Magnum_ZONE1"),
+                )
         payload = {
             "agent_id": agent_id,
             "workspace_id": workspace_id,
@@ -1157,6 +1210,8 @@ async def main(
                                     job=product_test_job,
                                     agent_id=worker_id,
                                     workspace_id=selected_workspace,
+                                    merchant_session=merchant_session,
+                                    store_id=store_id,
                                 )
                                 product_test_claim_not_before = time.monotonic()
                                 continue

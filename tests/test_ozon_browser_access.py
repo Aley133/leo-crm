@@ -43,7 +43,7 @@ def test_ozon_challenge_shell_is_blocked_not_parse_error() -> None:
 def test_runtime_registry_uses_scoped_semantic_delivery_adapter() -> None:
     registry = _runtime_registry()
     adapter = registry.get("ozon")
-    assert adapter.code == "ozon-browser-v13"
+    assert adapter.code == "ozon-http-session-v1"
 
 
 def test_ozon_semantic_delivery_is_authoritative_and_observable() -> None:

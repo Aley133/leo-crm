@@ -13,12 +13,10 @@ from urllib.parse import urlparse
 from urllib.request import Request, urlopen
 
 from backend.app.supplier_adapters.base import AdapterRequest
-from backend.app.supplier_adapters.ozon_browser_access import OzonBrowserAccessAdapter
-from backend.app.supplier_adapters.playwright_pool import PlaywrightBrowserPool
-from backend.app.supplier_adapters.wildberries_browser_access import WildberriesBrowserAccessAdapter
+from tools.ozon_http import OzonSessionHttpAdapter
 
 SUPPLIER_JOB_TYPE = "supplier_product_observation"
-DEFAULT_JOB_TIMEOUT_SECONDS = 120.0
+DEFAULT_JOB_TIMEOUT_SECONDS = 45.0
 HEARTBEAT_SECONDS = 15.0
 IDLE_POLL_MAX_SECONDS = 15.0
 
@@ -52,7 +50,7 @@ def _adapter_code_for_url(url: str) -> str:
     if host in {"ozon.ru", "ozon.kz"} or host.endswith(".ozon.ru") or host.endswith(".ozon.kz"):
         return "ozon"
     if host in {"wildberries.ru", "wb.ru"} or host.endswith(".wildberries.ru"):
-        return "wb"
+        raise ValueError("Wildberries monitoring is temporarily disabled")
     raise ValueError(f"Unsupported supplier URL host: {host or '-'}")
 
 
@@ -87,7 +85,7 @@ async def _run_job(job: dict, adapters: dict[str, Any]) -> dict:
 
 
 async def _complete_job(*, api_url: str, token: str, job: dict, adapters: dict[str, Any]) -> str:
-    print(f"Claimed browser job #{job['id']}: {job.get('url') or '-'}")
+    print(f"Claimed HTTP monitoring job #{job['id']}: {job.get('url') or '-'}")
     timeout_seconds = max(10.0, float(os.getenv("BROWSER_AGENT_JOB_TIMEOUT_SECONDS") or DEFAULT_JOB_TIMEOUT_SECONDS))
     try:
         result = await asyncio.wait_for(_run_job(job, adapters), timeout=timeout_seconds)
@@ -96,8 +94,8 @@ async def _complete_job(*, api_url: str, token: str, job: dict, adapters: dict[s
         completion = {
             "lease_token": job["lease_token"],
             "status": "failed",
-            "error_code": "BrowserAgentJobTimeout",
-            "error_message": f"Browser job exceeded {timeout_seconds:g} seconds",
+            "error_code": "HttpAgentJobTimeout",
+            "error_message": f"HTTP monitoring job exceeded {timeout_seconds:g} seconds",
         }
     except Exception as exc:
         completion = {
@@ -113,7 +111,7 @@ async def _complete_job(*, api_url: str, token: str, job: dict, adapters: dict[s
         token,
         completion,
     )
-    print(f"Completed browser job #{job['id']}: {completion['status']}")
+    print(f"Completed HTTP monitoring job #{job['id']}: {completion['status']}")
     return str(response.get("status") or completion["status"])
 
 
@@ -168,7 +166,9 @@ async def _dispatch_source_once(*, api_url: str, token: str, dispatch_limit: int
 async def _dispatch_once(*, api_url: str, token: str, dispatch_limit: int) -> tuple[int, float]:
     queued = 0
     retry_after = 0.0
-    for supplier_code in ("ozon", "wb"):
+    # WB data and targets stay intact, but new WB jobs are intentionally not
+    # dispatched until its HTTP engine is ready.
+    for supplier_code in ("ozon",):
         result = await _dispatch_source_once(
             api_url=api_url,
             token=token,
@@ -239,14 +239,14 @@ async def _run_once(*, api_url: str, token: str, agent_id: str, adapters: dict[s
     )
     job = claim.get("job")
     if not job:
-        print("No queued supplier browser jobs.")
+        print("No queued supplier HTTP jobs.")
         return 2
     status = await _complete_job(api_url=api_url, token=token, job=job, adapters=adapters)
     return 0 if status == "succeeded" else 1
 
 
 def _parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="LEO CRM local supplier browser agent")
+    parser = argparse.ArgumentParser(description="LEO CRM local supplier HTTP agent")
     parser.add_argument("--once", action="store_true", help="dispatch and process exactly one supplier job, then exit")
     return parser.parse_args()
 
@@ -254,37 +254,26 @@ def _parse_args() -> argparse.Namespace:
 async def main(*, once: bool = False) -> int:
     api_url = _required_env("CRM_API_URL").rstrip("/")
     token = _required_env("CRM_SERVICE_TOKEN")
-    agent_id = (os.getenv("BROWSER_AGENT_ID") or "leo-local-chrome").strip()
-    cdp_endpoint = (os.getenv("CHROME_CDP_ENDPOINT") or "http://127.0.0.1:9222").strip()
+    agent_id = (os.getenv("BROWSER_AGENT_ID") or "leo-local-http").strip()
     poll_seconds = max(1.0, float(os.getenv("BROWSER_AGENT_POLL_SECONDS") or "3"))
     concurrency = max(1, min(12, int(os.getenv("BROWSER_AGENT_CONCURRENCY") or "3")))
     dispatch_limit = max(1, min(1000, int(os.getenv("BROWSER_AGENT_DISPATCH_LIMIT") or "100")))
 
-    pool = PlaywrightBrowserPool(
-        concurrency=1 if once else concurrency,
-        cdp_endpoint=cdp_endpoint,
-        reuse_default_context=True,
-    )
     adapters: dict[str, Any] = {
-        "ozon": OzonBrowserAccessAdapter(pool),
-        "wb": WildberriesBrowserAccessAdapter(pool),
+        "ozon": OzonSessionHttpAdapter(),
     }
-    print(f"Browser agent {agent_id} connected to CRM {api_url}")
-    print(f"Chrome CDP endpoint: {cdp_endpoint}")
-    print(f"Parallel browser workers: {1 if once else concurrency}")
-    print("Enabled adapters: ozon, wb")
+    print(f"HTTP agent {agent_id} connected to CRM {api_url}")
+    print(f"Parallel HTTP workers: {1 if once else concurrency}")
+    print("Enabled adapters: ozon (HTTP session); wb is temporarily disabled")
 
     if once:
-        try:
-            return await _run_once(
-                api_url=api_url,
-                token=token,
-                agent_id=agent_id,
-                adapters=adapters,
-                dispatch_limit=1,
-            )
-        finally:
-            await pool.close()
+        return await _run_once(
+            api_url=api_url,
+            token=token,
+            agent_id=agent_id,
+            adapters=adapters,
+            dispatch_limit=1,
+        )
 
     tasks = [
         asyncio.create_task(
@@ -325,7 +314,6 @@ async def main(*, once: bool = False) -> int:
         for task in tasks:
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
-        await pool.close()
     return 0
 
 

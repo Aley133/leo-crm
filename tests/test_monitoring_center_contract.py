@@ -136,7 +136,7 @@ def test_monitoring_center_formats_runtime_data_for_operators() -> None:
     assert "const recentAttemptStats" in script
     assert "cachedSources" in script
     assert "Runtime работает нормально" in script
-    assert "Ожидает Browser Agent" in script
+    assert "Ожидает HTTP Agent" in script
     assert "Ошибка сети" in script
     assert '<details class="error-details">' in script
     assert "const renderLeased" in script

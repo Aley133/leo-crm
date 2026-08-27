@@ -14,14 +14,21 @@ from backend.app.product_images import normalize_product_image_url
 from backend.app.product_registry_api import resolve_product_image
 from backend.app import kaspi_product_photo
 from backend.app.product_test_api import (
+    ProductDiscoveryRequest,
     ProductTestInspectRequest,
     ProductTestAgentResult,
+    add_product_to_kaspi,
     build_product_test_xml,
     claim_product_test_job,
     complete_product_test_job,
+    discover_product_candidates,
     inspect_product,
 )
 from backend.app.product_test_models import ProductTestItem, ProductTestJob
+from backend.app.fast_dumping_models import FastDumpingJob, FastDumpingPolicy
+from backend.app.browser_agent_models import BrowserAgentJob
+from backend.app.monitoring import MonitorTarget, SupplierOfferState
+from backend.app.product_test_pricing import choose_initial_offer_price
 from backend.app import product_test_api
 from backend.app.workspace_models import KaspiAccountCredential, Workspace
 from backend.app.workspace_context import workspace_context
@@ -368,13 +375,20 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     agent = (ROOT / "tools/kaspi_fast_dumping_agent.py").read_text(encoding="utf-8")
     assert "app.include_router(product_test_router)" in main
     assert '@router.get("/crm/product-test"' in ui
-    assert 'id="inspect-form"' in html
-    assert 'id="download-xml"' in html
-    assert "ЛОКАЛЬНЫЙ IP" in html
-    assert "/api/product-test/inspect" in script
+    assert 'id="discover-form"' in html
+    assert 'id="settings-form"' in html
+    assert "БЫСТРЫЙ HTTP" in html
+    assert "/api/product-test/discover" in script
+    assert "/validate-supplier" in script
+    assert "/add`" in script
+    assert 'name="max_undercut_gap_percent"' in html
+    assert 'name="delivery_price_premium_kzt"' in html
+    assert 'name="delivery_advantage_days"' in html
     assert "/api/fast-dumping-agent/agents/status" not in script
     assert "/api/product-test-agent/claim" in agent
     assert "inspect_kaspi_product" in agent
+    assert "discover_products" in agent
+    assert "create_linked_offer" in agent
     api = (ROOT / "backend/app/product_test_api.py").read_text(encoding="utf-8")
     assert 'status="queued"' in api
     assert "ProductTestJob.workspace_id == payload.workspace_id" in api
@@ -423,6 +437,144 @@ def test_product_test_inspection_completes_from_local_agent(db_session) -> None:
         "kaspi_product_id": "102591400",
         "merchant_sku": "102591400_177620711",
     }
+
+
+def test_initial_offer_price_has_only_two_market_outcomes() -> None:
+    can_undercut = choose_initial_offer_price(
+        supplier_cost_kzt=Decimal("3000"),
+        minimum_profit_kzt=Decimal("1000"),
+        competitor_price_kzt=Decimal("9000"),
+        undercut_step_kzt=1,
+    )
+    assert can_undercut.price_kzt == Decimal("8999")
+    assert can_undercut.status == "below_kaspi_competitor"
+
+    floor_limited = choose_initial_offer_price(
+        supplier_cost_kzt=Decimal("8000"),
+        minimum_profit_kzt=Decimal("1000"),
+        competitor_price_kzt=Decimal("9000"),
+        undercut_step_kzt=1,
+    )
+    assert floor_limited.price_kzt == floor_limited.safe_floor_kzt
+    assert floor_limited.price_kzt > Decimal("8999")
+    assert floor_limited.status == "safe_floor_above_market"
+
+
+def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_session) -> None:
+    _seed_agent_account(db_session)
+    db_session.add(Product(workspace_id=1, kaspi_product_id="111", merchant_sku="111_own", name="Already ours"))
+    db_session.commit()
+    queued = discover_product_candidates(ProductDiscoveryRequest(query="Solgar", target_new=2), db_session)
+    claim = claim_product_test_job(
+        FastAgentIdentity(agent_id="agent-w1", workspace_id=1, merchant_uid="merchant-1"),
+        db_session,
+    )
+    assert claim["job"]["job_type"] == "discover"
+    assert "111" in claim["job"]["options"]["existing_kaspi_ids"]
+    leased_job = db_session.get(ProductTestJob, claim["job"]["id"])
+    assert leased_job is not None
+    lease_now = product_test_api._now()
+    if leased_job.lease_until.tzinfo is None:
+        lease_now = lease_now.replace(tzinfo=None)
+    assert (leased_job.lease_until - lease_now).total_seconds() > 1700
+
+    completed = complete_product_test_job(
+        claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "scanned": 20,
+                "rows": [{
+                    "kaspi_product_id": "222",
+                    "merchant_sku": "222",
+                    "product_name": "Solgar Magnesium",
+                    "brand": "Solgar",
+                    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/222.jpg",
+                    "product_url": "https://kaspi.kz/shop/p/solgar-222/",
+                    "page_visible_price_kzt": "9000",
+                    "supplier_url": "https://www.ozon.kz/product/solgar-222222222/",
+                    "supplier_price_kzt": "4000",
+                    "supplier_delivery_days": 3,
+                    "supplier_offer_sku": "ozon-222",
+                    "supplier_seller_name": "Supplier",
+                    "match_status": "CONFIRMED",
+                    "match_score": 0.96,
+                    "offers": {},
+                }],
+            },
+        ),
+        db_session,
+    )
+    assert queued["queued"] is True
+    assert completed["items"][0]["status"] == "ready_to_add"
+    assert completed["items"][0]["offers"]["supplier"]["validated"] is True
+
+
+def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_session) -> None:
+    _seed_agent_account(db_session)
+    item = ProductTestItem(
+        workspace_id=1,
+        input_reference="Solgar",
+        kaspi_product_id="333333333",
+        merchant_sku="333333333",
+        name="Solgar Magnesium",
+        brand="Solgar",
+        image_url="https://resources.cdn-kaspi.kz/img/m/p/333.jpg",
+        kaspi_url="https://kaspi.kz/shop/p/solgar-333333333/",
+        supplier_url="https://www.ozon.kz/product/solgar-444444444/",
+        observed_price_kzt=Decimal("9000"),
+        test_price_kzt=None,
+        preorder_days=0,
+        stock_count=5,
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        offers_json={"supplier": {
+            "supplier_url": "https://www.ozon.kz/product/solgar-444444444/",
+            "supplier_price_kzt": "4000",
+            "supplier_delivery_days": 3,
+            "supplier_offer_sku": "ozon-444",
+            "supplier_seller_name": "Supplier",
+            "validated": True,
+        }},
+        status="ready_to_add",
+        active=True,
+    )
+    db_session.add(item)
+    db_session.commit()
+    queued = add_product_to_kaspi(item.id, db_session)
+    claim = claim_product_test_job(
+        FastAgentIdentity(agent_id="agent-w1", workspace_id=1, merchant_uid="merchant-1"),
+        db_session,
+    )
+    assert claim["job"]["job_type"] == "create_offer"
+    assert claim["job"]["options"]["initial_price_kzt"] == 8999
+    completed = complete_product_test_job(
+        claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "result": "CREATED_AND_VISIBLE",
+                "merchant_sku": "333333333_987654321",
+                "after": {"found": True, "sku": "333333333_987654321", "price_kzt": 8999},
+            },
+        ),
+        db_session,
+    )
+    product = db_session.scalar(select(Product).where(Product.kaspi_product_id == "333333333"))
+    assert queued["item"]["status"] == "adding_to_kaspi"
+    assert completed["item"]["status"] == "enrolled_fast_dumping"
+    assert product is not None and product.merchant_sku == "333333333_987654321"
+    assert db_session.scalar(select(FastDumpingPolicy).where(FastDumpingPolicy.product_id == product.id)) is not None
+    assert db_session.scalar(select(FastDumpingJob).where(FastDumpingJob.product_id == product.id)) is not None
+    assert db_session.scalar(select(MonitorTarget)) is not None
+    assert db_session.scalar(select(BrowserAgentJob)) is not None
+    assert db_session.scalar(select(SupplierOfferState)) is not None
 
 
 def test_missing_product_photo_is_prioritized_for_local_agent_and_cached(db_session) -> None:

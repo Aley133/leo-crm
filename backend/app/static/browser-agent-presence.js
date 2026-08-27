@@ -22,22 +22,22 @@
     const claiming = browserAgents.find((agent) => agent.status === "claiming");
 
     if (!browserOnline) {
-      if (heading) heading.textContent = "Ozon/WB Browser Agent не подключён";
+      if (heading) heading.textContent = "Ozon HTTP Agent не подключён";
       if (detail) detail.textContent = queued
-        ? `В очереди ${queued} задание. Запустите Ozon/WB Browser Agent.`
-        : "CRM не получает heartbeat от Ozon/WB Browser Agent.";
+        ? `В очереди ${queued} задание. Запустите Ozon HTTP Agent.`
+        : "CRM не получает heartbeat от Ozon HTTP Agent.";
       if (!leased) {
-        if (runtimeTitle) runtimeTitle.textContent = queued ? "Очередь ждёт Browser Agent" : "Локальные агенты не подключены";
+        if (runtimeTitle) runtimeTitle.textContent = queued ? "Очередь ждёт HTTP Agent" : "Локальные агенты не подключены";
         if (runtimeDetail) runtimeDetail.textContent = queued
           ? "Агент не подключён к CRM или не прошёл проверку токена."
-          : "CRM не получает heartbeat от Ozon/WB Browser Agent.";
-        if (runtimeAction) runtimeAction.textContent = "Запустите Browser Agent";
+          : "CRM не получает heartbeat от Ozon HTTP Agent.";
+        if (runtimeAction) runtimeAction.textContent = "Запустите HTTP Agent";
       }
       return;
     }
 
     const browserAgent = running || claiming || browserAgents[0];
-    if (heading) heading.textContent = "Ozon/WB Browser Agent подключён";
+    if (heading) heading.textContent = "Ozon HTTP Agent подключён";
     if (detail) detail.textContent = `${browserAgent.agent_id} — онлайн.`;
   };
 

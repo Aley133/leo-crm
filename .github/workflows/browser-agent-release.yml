@@ -8,6 +8,8 @@ on:
       - "tools/__init__.py"
       - "tools/browser_agent.py"
       - "tools/browser_agent_desktop.py"
+      - "tools/ozon_http/**"
+      - "tools/product_discovery/**"
       - "tools/kaspi_competitor_agent.py"
       - "tools/kaspi_seller_browser.py"
       - "tools/windows/LEO-Browser-Agent.iss"

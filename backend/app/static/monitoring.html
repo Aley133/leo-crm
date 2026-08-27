@@ -28,10 +28,10 @@
     </aside>
     <main>
       <header class="topbar">
-        <div><p class="eyebrow">Browser Runtime</p><h1>Центр мониторинга</h1><p class="subtitle">Очередь, проверки, ошибки и состояние источников</p></div>
+        <div><p class="eyebrow">HTTP Runtime</p><h1>Центр мониторинга</h1><p class="subtitle">Очередь, проверки, ошибки и состояние источников</p></div>
         <div class="topbar-actions">
           <div id="crm-connection" class="connection-state checking" aria-live="polite"><span></span><strong>Проверка подключения…</strong></div>
-          <a id="download-browser-agent" class="button" href="https://github.com/Aley133/leo-crm/releases/download/browser-agent-latest/LEO-Browser-Agent-Setup.exe" download>Скачать Browser Agent</a>
+          <a id="download-browser-agent" class="button" href="https://github.com/Aley133/leo-crm/releases/download/browser-agent-latest/LEO-Browser-Agent-Setup.exe" download>Скачать HTTP Agent</a>
           <button id="disconnect" class="button secondary hidden" type="button">Отключиться</button>
           <button id="refresh" class="button secondary" type="button">Обновить</button>
         </div>
@@ -51,7 +51,7 @@
         <div class="metrics monitoring-metrics">
           <article class="metric"><span>Целей</span><strong id="targets-total">—</strong><small>всего</small></article>
           <article class="metric"><span>Активны</span><strong id="targets-active">—</strong><small>работают</small></article>
-          <article class="metric"><span>В очереди</span><strong id="jobs-queued">—</strong><small>Browser Agent</small></article>
+          <article class="metric"><span>В очереди</span><strong id="jobs-queued">—</strong><small>HTTP Agent</small></article>
           <article class="metric"><span>В работе</span><strong id="jobs-leased">—</strong><small>активных lease</small></article>
           <article class="metric"><span>Успешно за 24 ч</span><strong id="attempts-success-24h">—</strong><small>проверок</small></article>
           <article class="metric"><span>Ошибок за 24 ч</span><strong id="attempts-failed-24h">—</strong><small>проверок</small></article>
@@ -62,7 +62,7 @@
         <section class="panel wide">
           <div class="panel-title"><h2>Сейчас выполняется</h2><span id="leased-label">Проверяем активные задания…</span></div>
           <div id="leased-empty" class="agent-idle-card">
-            <div><span class="agent-state-dot"></span><strong>Проверяем Browser Agent…</strong><p id="agent-idle-detail">Ожидаем heartbeat от агента Ozon/WB.</p></div>
+            <div><span class="agent-state-dot"></span><strong>Проверяем HTTP Agent…</strong><p id="agent-idle-detail">Ожидаем heartbeat от агента Ozon HTTP.</p></div>
             <dl><div><dt>Очередь</dt><dd id="agent-queue-count">—</dd></div><div><dt>Последняя работа</dt><dd id="agent-last-work">—</dd></div><div><dt>Среднее время</dt><dd id="agent-average-time">—</dd></div></dl>
           </div>
           <div class="table-wrap"><table id="leased-table"><thead><tr><th>Job</th><th>Товар</th><th>Источник</th><th>Agent</th><th>Lease до</th><th>Ход работы</th></tr></thead><tbody id="leased-body"></tbody></table></div>

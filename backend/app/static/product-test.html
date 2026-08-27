@@ -22,7 +22,7 @@
     </aside>
     <main>
       <header class="topbar">
-        <div><p class="eyebrow">PRODUCT LAB</p><h1>Тест товара</h1><p class="subtitle">Проверяйте новую карточку Kaspi до закупки и добавляйте её в отдельный накопительный XML.</p></div>
+        <div><p class="eyebrow">HTTP PRODUCT DISCOVERY</p><h1>Тест товаров</h1><p class="subtitle">Находим новые карточки Kaspi, подтверждаем поставщика Ozon и после реального создания автоматически включаем существующий Быстрый демпинг.</p></div>
         <button id="refresh" class="button" type="button">Обновить</button>
       </header>
 
@@ -34,36 +34,59 @@
 
       <section id="lab-page" class="hidden">
         <section class="lab-agent ready">
-          <div><span class="lab-kicker">ЛОКАЛЬНЫЙ IP</span><h2>Через Fast Dumping Agent</h2><p>Ручная проверка идёт через ваш компьютер и не упирается в лимиты IP Render. В CRM сохраняются только нормализованные данные и безопасная HTTPS-ссылка на фото.</p></div>
+          <div><span class="lab-kicker">БЫСТРЫЙ HTTP</span><h2>Kaspi → Ozon → CRM → Быстрый демпинг</h2><p>Поиск и проверка выполняются локальным Fast Agent без Playwright. В CRM попадают только нормализованные данные; сессии и cookies остаются на вашем компьютере.</p></div>
         </section>
 
         <section class="lab-section">
-          <div class="lab-head"><div><span class="lab-kicker">НОВАЯ КАРТОЧКА</span><h2>Найти товар</h2><p>Поддерживаются Kaspi SKU, составной SKU и полная ссылка на карточку.</p></div></div>
-          <form id="inspect-form" class="inspect-form">
-            <label class="wide"><span>SKU или ссылка Kaspi</span><input id="reference" maxlength="2000" placeholder="102591400_177620711 или https://kaspi.kz/shop/p/…" required></label>
-            <label><span>Город Kaspi</span><input id="city-id" maxlength="32" value="196220100" required></label>
-            <label><span>Зона Kaspi</span><input id="zone-id" maxlength="64" value="Magnum_ZONE1" required></label>
-            <button id="inspect-button" class="button" type="submit">Считать карточку</button>
+          <div class="lab-head"><div><span class="lab-kicker">АВТОПОИСК</span><h2>Найти товары, которых у нас нет</h2><p>Введите бренд, название или поисковую фразу. Agent исключит товары из вашего каталога и попробует строго сопоставить Ozon.</p></div></div>
+          <form id="discover-form" class="inspect-form">
+            <label class="wide"><span>Что искать</span><input id="query" maxlength="500" placeholder="Например: Solgar, магний глицинат" required></label>
+            <label><span>Новых товаров</span><input id="target-new" type="number" min="1" max="100" value="10" required></label>
+            <button id="discover-button" class="button" type="submit">Найти товары</button>
           </form>
         </section>
 
         <section class="metrics lab-metrics">
-          <article class="metric"><span>В лаборатории</span><strong id="total-count">0</strong><small>карточек</small></article>
-          <article class="metric"><span>В тестовом XML</span><strong id="xml-count">0</strong><small>активных цен</small></article>
-          <article class="metric"><span>Сейчас читается</span><strong id="job-count">0</strong><small>локальных заданий</small></article>
-          <article class="metric"><span>Основной XML</span><strong id="feed-state">—</strong><small id="feed-meta">не загружен</small></article>
+          <article class="metric"><span>Найдено</span><strong id="total-count">0</strong><small>кандидатов</small></article>
+          <article class="metric"><span>Готово к добавлению</span><strong id="ready-count">0</strong><small>поставщик подтверждён</small></article>
+          <article class="metric"><span>В работе</span><strong id="job-count">0</strong><small>локальных заданий</small></article>
+          <article class="metric"><span>В демпинге</span><strong id="enrolled-count">0</strong><small>товаров</small></article>
         </section>
 
         <section class="lab-section">
-          <div class="lab-head controls"><div><span class="lab-kicker">НАКОПИТЕЛЬНЫЙ XML</span><h2>Тестовые товары</h2><p>Скачивание создаёт копию основного XML и не меняет действующий каталог.</p></div><a id="download-xml" class="button" href="/api/product-test/xml">Скачать тестовый XML</a></div>
+          <details>
+            <summary><strong>Параметры автодобавления и Быстрого демпинга</strong></summary>
+            <form id="settings-form" class="inspect-form">
+              <label><span>Макс. скан Kaspi</span><input name="max_kaspi_scan" type="number" min="1" max="1000"></label>
+              <label><span>Запросов Ozon</span><input name="max_ozon_queries" type="number" min="1" max="8"></label>
+              <label><span>Остаток, шт.</span><input name="stock_count" type="number" min="1"></label>
+              <label><span>Буфер предзаказа, дней</span><input name="preorder_buffer_days" type="number" min="0" max="30"></label>
+              <label><span>Мин. прибыль, ₸</span><input name="minimum_profit_kzt" type="number" min="0"></label>
+              <label><span>Шаг ниже конкурента, ₸</span><input name="undercut_step_kzt" type="number" min="1"></label>
+              <label><span>Порог аномального разрыва, %</span><input name="max_undercut_gap_percent" type="number" min="0.01" max="100" step="0.01"></label>
+              <label><span>Интервал, сек.</span><select name="scan_interval_seconds"><option>300</option><option>600</option><option>900</option><option>1800</option><option>2100</option><option>3600</option></select></label>
+              <label><span>Премия за быструю доставку, ₸</span><input name="delivery_price_premium_kzt" type="number" min="0" max="100000"></label>
+              <label><span>Преимущество доставки, дней</span><input name="delivery_advantage_days" type="number" min="1" max="30"></label>
+              <label><span>Позиция предзаказа</span><input name="preorder_target_position" type="number" min="1" max="50"></label>
+              <label><span>Город Kaspi</span><input name="city_id" maxlength="32"></label>
+              <label><span>Зона Kaspi</span><input name="zone_id" maxlength="64"></label>
+              <label><span><input name="image_verify" type="checkbox"> Проверять фото</span></label>
+              <label><span><input name="allow_price_raise" type="checkbox"> Разрешать повышение</span></label>
+              <button class="button" type="submit">Сохранить значения по умолчанию</button>
+            </form>
+          </details>
+        </section>
+
+        <section class="lab-section">
+          <div class="lab-head controls"><div><span class="lab-kicker">КАНДИДАТЫ</span><h2>Новые товары</h2><p>Автосопоставление можно исправить своей ссылкой Ozon. После подтверждённого добавления карточка появится в «Товарах» и в существующем Быстром демпинге.</p></div></div>
           <div id="jobs" class="jobs"></div>
           <div id="items" class="lab-list"></div>
-          <div id="empty" class="empty hidden">Пока нет тестовых карточек. Добавьте SKU или ссылку выше.</div>
+          <div id="empty" class="empty hidden">Пока нет кандидатов. Запустите быстрый поиск выше.</div>
         </section>
       </section>
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/product-test.js?v=20260820-1" defer></script>
+  <script src="/static/product-test.js?v=20260826-1" defer></script>
 </body>
 </html>
