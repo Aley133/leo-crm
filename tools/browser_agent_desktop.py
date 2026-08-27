@@ -18,7 +18,7 @@ from tools.ozon_http import OzonSessionResolver
 run_browser_agent = browser_agent_module.main
 
 API_URL = "https://leo-crm-api.onrender.com"
-APP_VERSION = "0.3.0"
+APP_VERSION = "0.3.1"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
 TOKEN_FILE = APP_DIR / "agent-token.dat"
 LOG_FILE = APP_DIR / "agent.log"

@@ -1,23 +1,23 @@
-name: Kaspi Fast Dumping Agent Release
+name: Product Test Agent Release
 
 on:
   push:
     branches:
       - main
     paths:
-      - "tools/kaspi_fast_dumping_agent.py"
-      - "tools/kaspi_fast_dumping_agent_v2.py"
-      - "tools/kaspi_fast_offer_runtime.py"
+      - "tools/product_test_agent.py"
       - "tools/kaspi_fast_dumping_scanner.py"
       - "tools/kaspi_fast_dumping_session.py"
-      - ".github/workflows/kaspi-fast-dumping-agent-release.yml"
+      - "tools/product_discovery/**"
+      - "tools/ozon_http/**"
+      - ".github/workflows/product-test-agent-release.yml"
   workflow_dispatch:
 
 permissions:
   contents: write
 
 concurrency:
-  group: kaspi-fast-dumping-agent-release
+  group: product-test-agent-release
   cancel-in-progress: true
 
 jobs:
@@ -42,19 +42,19 @@ jobs:
       - name: Verify isolated imports
         shell: pwsh
         run: |
-          python -c "import tools.kaspi_fast_dumping_agent; import tools.kaspi_fast_dumping_agent_v2; import tools.kaspi_fast_offer_runtime; import tools.kaspi_fast_dumping_scanner; import tools.kaspi_fast_dumping_session"
+          python -c "import tools.product_test_agent; import tools.product_discovery.runtime; import tools.ozon_http"
           @'
           import ast
           from pathlib import Path
 
           forbidden_roots = {"backend", "sqlalchemy", "playwright"}
-          for path in (
-              Path("tools/kaspi_fast_dumping_agent.py"),
-              Path("tools/kaspi_fast_dumping_agent_v2.py"),
-              Path("tools/kaspi_fast_offer_runtime.py"),
-              Path("tools/kaspi_fast_dumping_scanner.py"),
-              Path("tools/kaspi_fast_dumping_session.py"),
-          ):
+          paths = [Path("tools/product_test_agent.py")]
+          paths.extend(Path("tools/product_discovery").glob("*.py"))
+          paths.extend(
+              path for path in Path("tools/ozon_http").glob("*.py")
+              if path.name != "adapter.py"
+          )
+          for path in paths:
               tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
               imported = set()
               for node in ast.walk(tree):
@@ -74,26 +74,29 @@ jobs:
         shell: pwsh
         run: |
           pyinstaller --noconfirm --clean --onefile --console `
-            --name LEO-Kaspi-Fast-Dumping-Agent `
+            --name LEO-Product-Test-Agent `
             --paths . `
-            --hidden-import tools.kaspi_fast_dumping_agent `
-            --hidden-import tools.kaspi_fast_dumping_agent_v2 `
-            --hidden-import tools.kaspi_fast_offer_runtime `
+            --hidden-import tools.product_test_agent `
             --hidden-import tools.kaspi_fast_dumping_scanner `
             --hidden-import tools.kaspi_fast_dumping_session `
+            --collect-submodules tools.product_discovery `
+            --hidden-import tools.ozon_http.resolver `
+            --hidden-import tools.ozon_http.session_store `
+            --hidden-import tools.ozon_http.session_profile `
+            --hidden-import tools.ozon_http.session_client `
             --collect-submodules curl_cffi `
             --collect-submodules PIL `
             --collect-submodules httpx `
             --collect-all tzdata `
-            tools/kaspi_fast_dumping_agent_v2.py
+            tools/product_test_agent.py
 
       - name: Verify executable
         shell: pwsh
         run: |
-          if (-not (Test-Path "dist/LEO-Kaspi-Fast-Dumping-Agent.exe")) {
-            throw "LEO-Kaspi-Fast-Dumping-Agent.exe was not created"
+          if (-not (Test-Path "dist/LEO-Product-Test-Agent.exe")) {
+            throw "LEO-Product-Test-Agent.exe was not created"
           }
-          $size = (Get-Item "dist/LEO-Kaspi-Fast-Dumping-Agent.exe").Length
+          $size = (Get-Item "dist/LEO-Product-Test-Agent.exe").Length
           if ($size -lt 1000000) {
             throw "Packaged executable is unexpectedly small: $size bytes"
           }
@@ -101,8 +104,8 @@ jobs:
       - name: Upload workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: LEO-Kaspi-Fast-Dumping-Agent-Windows
-          path: dist/LEO-Kaspi-Fast-Dumping-Agent.exe
+          name: LEO-Product-Test-Agent-Windows
+          path: dist/LEO-Product-Test-Agent.exe
           if-no-files-found: error
           retention-days: 30
 
@@ -113,19 +116,19 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git tag -f kaspi-fast-dumping-agent-latest $env:GITHUB_SHA
-          git push origin refs/tags/kaspi-fast-dumping-agent-latest --force
-          gh release view kaspi-fast-dumping-agent-latest *> $null
-          $notes = "LEO Agent 1.2.1: Быстрый демпинг и фоновые фото изолированы от новой отдельной очереди Product Test Agent."
+          git tag -f product-test-agent-latest $env:GITHUB_SHA
+          git push origin refs/tags/product-test-agent-latest --force
+          gh release view product-test-agent-latest *> $null
+          $notes = "LEO Product Test Agent 1.0.0: отдельная очередь Kaspi → Ozon → CRM → существующий Fast Dumping, строгий автоматический match и ручная замена Ozon-ссылки с повторной проверкой."
           if ($LASTEXITCODE -ne 0) {
-            gh release create kaspi-fast-dumping-agent-latest `
+            gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `
-              --title "LEO Kaspi Fast Dumping Agent" `
+              --title "LEO Product Test Agent" `
               --notes $notes
           } else {
-            gh release edit kaspi-fast-dumping-agent-latest `
+            gh release edit product-test-agent-latest `
               --target "$env:GITHUB_SHA" `
-              --title "LEO Kaspi Fast Dumping Agent" `
+              --title "LEO Product Test Agent" `
               --notes $notes
           }
-          gh release upload kaspi-fast-dumping-agent-latest "dist/LEO-Kaspi-Fast-Dumping-Agent.exe" --clobber
+          gh release upload product-test-agent-latest "dist/LEO-Product-Test-Agent.exe" --clobber

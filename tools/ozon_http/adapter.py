@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from datetime import UTC, datetime
 from decimal import Decimal
 from typing import Any
@@ -29,11 +30,16 @@ class OzonSessionHttpAdapter:
 
     def __init__(self, resolver: OzonSessionResolver | None = None) -> None:
         self.resolver = resolver or OzonSessionResolver()
+        # The storefront session is fast, but bursts from three CRM workers
+        # were producing gateway/network noise. Two in-flight reads still scan
+        # the whole catalog quickly without hammering one imported session.
+        self._request_gate = asyncio.Semaphore(2)
 
     async def fetch(self, request: AdapterRequest) -> NormalizedOffer:
         self._validate_url(request.url)
         try:
-            result = await asyncio.to_thread(self._fetch_sync, request.url, request.external_id)
+            async with self._request_gate:
+                result = await asyncio.to_thread(self._fetch_sync, request.url, request.external_id)
         except OzonSessionUnavailableError as exc:
             raise AdapterAuthRequiredError(str(exc)) from exc
         except TimeoutError as exc:
@@ -65,6 +71,34 @@ class OzonSessionHttpAdapter:
         offer: dict[str, Any] = result.get("cheaper_offer") or {}
         price = result.get("cheaper_price_kzt")
         if not isinstance(price, int) or price <= 0:
+            authoritative_empty = (
+                "other_offer_count" in result
+                and "other_offers" in result
+                and int(result.get("other_offer_count") or 0) == 0
+                and result.get("other_offers") == []
+            )
+            if authoritative_empty:
+                return NormalizedOffer(
+                    supplier_product_id=request.supplier_product_id,
+                    price=None,
+                    old_price=None,
+                    available=False,
+                    stock=0,
+                    delivery_days=None,
+                    seller=None,
+                    adapter_schema_version=self.code,
+                    observed_at=datetime.now(UTC),
+                    currency="KZT",
+                    raw_metadata={
+                        "execution_surface": "local_http_agent",
+                        "source": "otherOffersFromSellers.webSellerList",
+                        "business_state": "no_active_seller_offers",
+                        "offer_count": 0,
+                        "product_id": result.get("product_id"),
+                        "read_only": True,
+                        "browser_used": False,
+                    },
+                )
             raise AdapterParseError("Ozon returned no confirmed KZT seller price", http_status=200)
 
         return NormalizedOffer(
@@ -94,7 +128,26 @@ class OzonSessionHttpAdapter:
         profile = self.resolver.resolve()
         client = OzonSessionHttpClient(profile)
         try:
-            return client.product_price_hints(url)
+            result: dict[str, Any] = {}
+            for attempt in range(3):
+                try:
+                    result = client.product_price_hints(url)
+                except Exception as exc:
+                    name = type(exc).__name__.casefold()
+                    transient = any(
+                        marker in name
+                        for marker in ("timeout", "connect", "network", "curl", "request")
+                    )
+                    if not transient or attempt == 2:
+                        raise
+                    time.sleep(0.5 * (2 ** attempt))
+                    continue
+                status = int((result.get("attempt") or {}).get("status_code") or 0)
+                if status not in {408, 425, 500, 502, 503, 504, 520, 521, 522, 523, 524, 530}:
+                    return result
+                if attempt < 2:
+                    time.sleep(0.5 * (2 ** attempt))
+            return result
         finally:
             client.close()
 

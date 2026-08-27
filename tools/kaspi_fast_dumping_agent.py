@@ -24,15 +24,10 @@ from urllib.request import Request, urlopen
 
 from tools.kaspi_fast_dumping_scanner import (
     KaspiCompetitorSnapshot,
-    inspect_kaspi_product,
     scan_kaspi_competitors,
 )
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
-from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
-from tools.product_discovery.runtime import discover_products, validate_supplier_url
-
-
-VERSION = "1.2.0"
+VERSION = "1.2.1"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -44,7 +39,6 @@ PHOTO_REQUEST_SPACING_SECONDS = 1.5
 PHOTO_IDLE_SECONDS = 60
 PHOTO_FAILURE_RETRY_SECONDS = 6 * 60 * 60
 PHOTO_TRANSIENT_RETRY_SECONDS = 30 * 60
-PRODUCT_TEST_IDLE_SECONDS = 5
 KASPI_PHOTO_ENDPOINT = "https://kaspi.kz/shop/rest/misc/product/mobile"
 TRANSIENT_HTTP_STATUSES = {
     408,
@@ -905,103 +899,6 @@ async def _process_photo(
     )
 
 
-async def _process_product_test(
-    *,
-    api_url: str,
-    token: str,
-    job: dict,
-    agent_id: str,
-    workspace_id: int,
-    merchant_session: KaspiMerchantSession,
-    store_id: str,
-) -> None:
-    job_id = int(job["id"])
-    try:
-        job_type = str(job.get("job_type") or "inspect")
-        options = job.get("options") if isinstance(job.get("options"), dict) else {}
-        timeout_seconds = (
-            1800
-            if job_type in {"create_offer", "discover"}
-            else SCAN_TIMEOUT_SECONDS
-        )
-        async with asyncio.timeout(timeout_seconds):
-            if job_type == "discover":
-                merchant_catalog = MerchantOfferApi(
-                    merchant_session,
-                    store_id=store_id,
-                    city_id=str(job.get("city_id") or "196220100"),
-                )
-                inspection = await asyncio.to_thread(
-                    discover_products,
-                    query=str(job.get("reference") or ""),
-                    city_id=str(job.get("city_id") or "196220100"),
-                    target_new=int(options.get("target_new") or 10),
-                    max_kaspi_scan=int(options.get("max_kaspi_scan") or 200),
-                    max_ozon_queries=int(options.get("max_ozon_queries") or 3),
-                    image_verify=bool(options.get("image_verify", True)),
-                    existing_kaspi_ids={str(value) for value in options.get("existing_kaspi_ids") or []},
-                    merchant_catalog=merchant_catalog,
-                )
-            elif job_type == "validate_supplier":
-                inspection = await asyncio.to_thread(validate_supplier_url, str(options.get("supplier_url") or ""))
-            elif job_type == "create_offer":
-                creator = MerchantOfferApi(
-                    merchant_session,
-                    store_id=store_id,
-                    city_id=str(job.get("city_id") or "196220100"),
-                )
-                inspection = await asyncio.to_thread(
-                    creator.create_linked_offer,
-                    master_sku=str(options["master_sku"]),
-                    model=str(options["model"]),
-                    price=int(options["initial_price_kzt"]),
-                    stock=int(options["stock_count"]),
-                    preorder=int(options["preorder_days"]),
-                    live=True,
-                    attempts=60,
-                    poll_seconds=2.0,
-                )
-                if inspection.get("result") not in {"CREATED_AND_VISIBLE", "ALREADY_EXISTS"}:
-                    raise RuntimeError(str(inspection.get("result") or "Kaspi offer was not confirmed"))
-                after = inspection.get("after") or inspection.get("before") or {}
-                if not after.get("found") or not after.get("price_kzt"):
-                    raise RuntimeError("Kaspi принял создание, но оффер с ценой ещё не появился")
-            else:
-                inspection = await inspect_kaspi_product(
-                    reference=str(job.get("reference") or ""),
-                    city_id=str(job.get("city_id") or "196220100"),
-                    zone_id=str(job.get("zone_id") or "Magnum_ZONE1"),
-                )
-        payload = {
-            "agent_id": agent_id,
-            "workspace_id": workspace_id,
-            "lease_token": job["lease_token"],
-            "status": "succeeded",
-            "result": inspection,
-        }
-    except Exception as exc:
-        payload = {
-            "agent_id": agent_id,
-            "workspace_id": workspace_id,
-            "lease_token": job["lease_token"],
-            "status": "failed",
-            "result": {},
-            "error_code": type(exc).__name__,
-            "error_message": str(exc)[:4000],
-        }
-    result = await _post_json_with_retry(
-        f"{api_url}/api/product-test-agent/jobs/{job_id}/complete",
-        token,
-        payload,
-        operation=f"Сохранение тестовой карточки #{job_id}",
-    )
-    _log(
-        f"Тестовая карточка #{job_id}: "
-        f"{(result.get('job') or result).get('status')}",
-        workspace_id=workspace_id,
-    )
-
-
 async def main(
     *,
     once: bool = False,
@@ -1119,7 +1016,7 @@ async def main(
         workspace_id=selected_workspace,
     )
     _log(
-        "Очереди: цены → ручной тест товара → фото; повторные фото ограничены CRM.",
+        "Очереди: быстрый демпинг → фото. Тест товаров обслуживает отдельный Product Test Agent.",
         workspace_id=selected_workspace,
     )
     if os.name == "nt" and not once:
@@ -1145,7 +1042,6 @@ async def main(
         idle_seconds = 2.0
         worker_id = f"{agent_id}-w{number}"
         price_claim_not_before = 0.0
-        product_test_claim_not_before = 0.0
         photo_claim_not_before = 0.0
         price_idle_confirmed_until = 0.0
         while True:
@@ -1195,33 +1091,6 @@ async def main(
                             concurrency,
                             merchant_uid,
                         )
-                        if now >= product_test_claim_not_before:
-                            product_test_claim = await _post_json_with_retry(
-                                f"{api_url}/api/product-test-agent/claim",
-                                token,
-                                identity,
-                                operation="Получение ручного теста товара",
-                            )
-                            product_test_job = product_test_claim.get("job")
-                            if product_test_job:
-                                await _process_product_test(
-                                    api_url=api_url,
-                                    token=token,
-                                    job=product_test_job,
-                                    agent_id=worker_id,
-                                    workspace_id=selected_workspace,
-                                    merchant_session=merchant_session,
-                                    store_id=store_id,
-                                )
-                                product_test_claim_not_before = time.monotonic()
-                                continue
-                            product_test_claim_not_before = now + max(
-                                2.0,
-                                float(
-                                    product_test_claim.get("retry_after_seconds")
-                                    or PRODUCT_TEST_IDLE_SECONDS
-                                ),
-                            )
                         if now >= photo_claim_not_before:
                             photo_claim = await _post_json_with_retry(
                                 f"{api_url}/api/fast-dumping-agent/photo-claim",
@@ -1251,9 +1120,7 @@ async def main(
                             )
                     due = [price_claim_not_before]
                     if number == 1 and price_idle_confirmed_until > now:
-                        due.extend(
-                            (product_test_claim_not_before, photo_claim_not_before)
-                        )
+                        due.append(photo_claim_not_before)
                     delay = max(0.5, min(due) - time.monotonic())
                     await asyncio.sleep(min(IDLE_POLL_MAX_SECONDS, delay))
                     continue

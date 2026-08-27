@@ -67,6 +67,24 @@ def test_session_adapter_does_not_turn_missing_price_into_out_of_stock(monkeypat
         asyncio.run(OzonSessionHttpAdapter(FakeResolver()).fetch(_request()))
 
 
+def test_session_adapter_accepts_authoritative_empty_seller_list_as_unavailable(monkeypatch) -> None:
+    FakeClient.result = {
+        "ok": True,
+        "attempt": {"status_code": 200, "blocked": False},
+        "product_id": "123456789",
+        "other_offer_count": 0,
+        "other_offers": [],
+        "cheaper_price_kzt": None,
+        "cheaper_offer": None,
+    }
+    monkeypatch.setattr(adapter_module, "OzonSessionHttpClient", FakeClient)
+    offer = asyncio.run(OzonSessionHttpAdapter(FakeResolver()).fetch(_request()))
+    assert offer.price is None
+    assert offer.available is False
+    assert offer.stock == 0
+    assert offer.raw_metadata["business_state"] == "no_active_seller_offers"
+
+
 def test_session_adapter_classifies_blocked_response(monkeypatch) -> None:
     FakeClient.result = {"ok": False, "attempt": {"status_code": 403, "blocked": True}}
     monkeypatch.setattr(adapter_module, "OzonSessionHttpClient", FakeClient)

@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
+from threading import Lock
 from xml.etree import ElementTree
 from uuid import uuid4
 
@@ -32,6 +33,8 @@ DEFAULT_ZONE_ID = "Magnum_ZONE1"
 MAX_XML_BYTES = 25 * 1024 * 1024
 PRODUCT_TEST_LEASE_SECONDS = 180
 PRODUCT_TEST_HISTORY_LIMIT = 40
+PRODUCT_TEST_AGENT_KIND = "product_test"
+PRODUCT_TEST_AGENT_ONLINE_SECONDS = 50
 
 
 class ProductTestInspectRequest(BaseModel):
@@ -88,6 +91,17 @@ class ProductTestAgentResult(BaseModel):
     error_message: str | None = Field(default=None, max_length=4000)
 
 
+class ProductTestAgentIdentity(FastAgentIdentity):
+    # Optional only for a graceful cut-over: Fast Agent 1.2.0 still calls the
+    # old endpoint. It receives an empty queue instead of repeatedly logging a
+    # validation error, while only the dedicated agent can receive work.
+    agent_kind: str | None = Field(default=None, max_length=64)
+
+
+class ProductTestAgentHeartbeat(ProductTestAgentIdentity):
+    status: str = Field(default="online", max_length=32)
+
+
 router = APIRouter(
     prefix="/api/product-test",
     tags=["product-test"],
@@ -99,9 +113,62 @@ agent_router = APIRouter(
     dependencies=[Depends(require_service_token)],
 )
 
+_PRODUCT_TEST_HEARTBEATS: dict[tuple[int, str], dict] = {}
+_PRODUCT_TEST_HEARTBEATS_LOCK = Lock()
+_MAX_PRODUCT_TEST_HEARTBEATS = 32
+
 
 def _now() -> datetime:
     return datetime.now(UTC)
+
+
+def _touch_product_test_agent(
+    payload: ProductTestAgentIdentity,
+    *,
+    status: str = "online",
+) -> dict:
+    record = {
+        "agent_id": payload.agent_id,
+        "agent_kind": payload.agent_kind,
+        "workspace_id": payload.workspace_id,
+        "hostname": payload.hostname,
+        "platform": payload.platform,
+        "version": payload.version,
+        "concurrency": payload.concurrency,
+        "merchant_uid": payload.merchant_uid,
+        "status": status,
+        "last_seen_at": _now(),
+    }
+    with _PRODUCT_TEST_HEARTBEATS_LOCK:
+        _PRODUCT_TEST_HEARTBEATS[(payload.workspace_id, payload.agent_id)] = record
+        if len(_PRODUCT_TEST_HEARTBEATS) > _MAX_PRODUCT_TEST_HEARTBEATS:
+            oldest = sorted(
+                _PRODUCT_TEST_HEARTBEATS,
+                key=lambda key: _PRODUCT_TEST_HEARTBEATS[key]["last_seen_at"],
+            )[: len(_PRODUCT_TEST_HEARTBEATS) - _MAX_PRODUCT_TEST_HEARTBEATS]
+            for key in oldest:
+                _PRODUCT_TEST_HEARTBEATS.pop(key, None)
+    return record
+
+
+def _product_test_agent_status(workspace_id: int) -> dict:
+    checked_at = _now()
+    with _PRODUCT_TEST_HEARTBEATS_LOCK:
+        agents = [
+            dict(record)
+            for (record_workspace, _agent_id), record in _PRODUCT_TEST_HEARTBEATS.items()
+            if record_workspace == workspace_id
+        ]
+    agents.sort(key=lambda item: item["last_seen_at"], reverse=True)
+    cutoff = checked_at - timedelta(seconds=PRODUCT_TEST_AGENT_ONLINE_SECONDS)
+    for item in agents:
+        item["online"] = item["last_seen_at"] >= cutoff
+    return {
+        "workspace_id": workspace_id,
+        "online": any(item["online"] for item in agents),
+        "agents": agents,
+        "checked_at": checked_at,
+    }
 
 
 def _money(value: object) -> Decimal | None:
@@ -150,6 +217,7 @@ def _job_payload(job: ProductTestJob) -> dict:
         "job_type": job.job_type,
         "item_id": job.item_id,
         "status": job.status,
+        "agent_id": job.agent_id,
         "error_code": job.error_code,
         "error_message": job.error_message,
         "created_at": job.created_at,
@@ -358,6 +426,7 @@ def read_product_test_state(db: Session = Depends(get_db)) -> dict:
         "feed": None if feed is None else {"id": feed.id, "source_filename": feed.source_filename, "merchant_id": feed.merchant_id},
         "defaults": {"city_id": settings.city_id, "zone_id": settings.zone_id},
         "settings": _settings_payload(settings),
+        "agent": _product_test_agent_status(workspace_id),
     }
 
 
@@ -887,7 +956,14 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
         raise HTTPException(status_code=404, detail="Тестовый товар не найден")
     supplier = (item.offers_json or {}).get("supplier") or {}
     supplier_cost = _money(supplier.get("supplier_price_kzt"))
-    if not item.supplier_url or not supplier.get("validated") or supplier_cost is None:
+    validated_url = str(supplier.get("supplier_url") or "").strip()
+    if (
+        item.status != "ready_to_add"
+        or not item.supplier_url
+        or item.supplier_url.strip() != validated_url
+        or not supplier.get("validated")
+        or supplier_cost is None
+    ):
         raise HTTPException(status_code=409, detail="Сначала подтвердите ссылку и цену поставщика Ozon")
     settings = _settings(db, workspace_id)
     pricing = choose_initial_offer_price(
@@ -950,10 +1026,17 @@ def download_product_test_xml(db: Session = Depends(get_db)) -> Response:
 
 @agent_router.post("/claim")
 def claim_product_test_job(
-    payload: FastAgentIdentity,
+    payload: ProductTestAgentIdentity,
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
-    """Lease one manual Product Test read to the matching workspace Agent."""
+    """Lease one Product Test job only to the dedicated local agent."""
+
+    if getattr(payload, "agent_kind", None) != PRODUCT_TEST_AGENT_KIND:
+        return {
+            "job": None,
+            "retry_after_seconds": 300,
+            "agent_required": PRODUCT_TEST_AGENT_KIND,
+        }
 
     try:
         _validate_workspace_merchant(
@@ -963,6 +1046,7 @@ def claim_product_test_job(
         )
         now = _now()
         with workspace_context(payload.workspace_id):
+            _touch_product_test_agent(payload)
             db.execute(
                 update(ProductTestJob)
                 .where(
@@ -1015,6 +1099,29 @@ def claim_product_test_job(
     except ValueError as exc:
         db.rollback()
         raise HTTPException(status_code=409, detail=str(exc)) from exc
+
+
+@agent_router.post("/heartbeat")
+def heartbeat_product_test_agent(
+    payload: ProductTestAgentHeartbeat,
+    db: Session = Depends(get_unscoped_db),
+) -> dict:
+    if payload.agent_kind != PRODUCT_TEST_AGENT_KIND:
+        raise HTTPException(status_code=409, detail="Требуется отдельный Product Test Agent")
+    try:
+        _validate_workspace_merchant(
+            db,
+            workspace_id=payload.workspace_id,
+            merchant_uid=payload.merchant_uid,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    return _touch_product_test_agent(payload, status=payload.status)
+
+
+@agent_router.get("/agents/status")
+def read_product_test_agent_status() -> dict:
+    return _product_test_agent_status(current_workspace_id())
 
 
 @agent_router.post("/jobs/{job_id}/complete")
