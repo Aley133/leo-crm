@@ -74,7 +74,7 @@ class SupplierUrlRequest(BaseModel):
 
 class ProductTestUpdate(BaseModel):
     test_price_kzt: Decimal | None = Field(default=None, gt=0)
-    preorder_days: int | None = Field(default=None, ge=0, le=365)
+    preorder_days: int | None = Field(default=None, ge=1, le=365)
     stock_count: int | None = Field(default=None, ge=0, le=1_000_000)
     city_id: str | None = Field(default=None, min_length=1, max_length=32)
     zone_id: str | None = Field(default=None, min_length=1, max_length=64)
@@ -441,7 +441,7 @@ def build_product_test_xml(source_xml: str, items: list[ProductTestItem]) -> byt
         availability = ensure_offer_availability(offer)
         availability.set("available", "yes")
         availability.set("storeId", store_id)
-        availability.set("preOrder", str(max(0, item.preorder_days)))
+        availability.set("preOrder", str(max(1, item.preorder_days)))
         availability.set("stockCount", str(max(0, item.stock_count)))
         _set_city_price(offer, item.city_id or DEFAULT_CITY_ID, item.test_price_kzt)
     repaired = repair_kaspi_catalog_tree(root)
@@ -660,7 +660,7 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
                 city_id=job.city_id,
                 zone_id=job.zone_id,
                 stock_count=5,
-                preorder_days=0,
+                preorder_days=1,
                 **values,
             )
             db.add(item)
@@ -759,6 +759,12 @@ def _enroll_created_product(db: Session, *, job: ProductTestJob, result: dict) -
     actual_price = _money(state.get("price_kzt"))
     if not state.get("found") or not merchant_sku or actual_price is None:
         raise ValueError("Kaspi ещё не подтвердил созданный оффер и его цену")
+    actual_preorder_days = int(state.get("preorder_days") or 0)
+    expected_preorder_days = max(1, int(item.preorder_days or 0))
+    if actual_preorder_days != expected_preorder_days:
+        raise ValueError(
+            f"Kaspi ещё не подтвердил предзаказ {expected_preorder_days} дн. созданного оффера"
+        )
 
     product = db.scalar(
         select(Product).where(
@@ -1147,7 +1153,7 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
         undercut_step_kzt=settings.undercut_step_kzt,
     )
     delivery_days = int(supplier.get("supplier_delivery_days") or 0)
-    preorder_days = max(0, delivery_days + settings.preorder_buffer_days)
+    preorder_days = max(1, delivery_days + settings.preorder_buffer_days)
     item.test_price_kzt = pricing.price_kzt
     item.stock_count = settings.stock_count
     item.preorder_days = preorder_days

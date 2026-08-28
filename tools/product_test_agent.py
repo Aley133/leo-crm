@@ -26,7 +26,7 @@ from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
 from tools.product_discovery.runtime import discover_products, validate_supplier_url
 
 
-VERSION = "1.0.4"
+VERSION = "1.0.5"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -36,6 +36,8 @@ CRM_RETRY_ATTEMPTS = 4
 CRM_BACKOFF_MAX_SECONDS = 60.0
 SCAN_TIMEOUT_SECONDS = 180
 LONG_JOB_TIMEOUT_SECONDS = 1800
+KASPI_CONFIRMATION_ATTEMPTS = 180
+KASPI_CONFIRMATION_POLL_SECONDS = 5.0
 TRANSIENT_HTTP_STATUSES = {
     408,
     425,
@@ -504,14 +506,20 @@ async def _execute_job(
             stock=int(options["stock_count"]),
             preorder=int(options["preorder_days"]),
             live=True,
-            attempts=60,
-            poll_seconds=2.0,
+            attempts=KASPI_CONFIRMATION_ATTEMPTS,
+            poll_seconds=KASPI_CONFIRMATION_POLL_SECONDS,
         )
         if result.get("result") not in {"CREATED_AND_VISIBLE", "ALREADY_EXISTS"}:
             raise RuntimeError(str(result.get("result") or "Kaspi offer was not confirmed"))
         after = result.get("after") or result.get("before") or {}
         if not after.get("found") or not after.get("price_kzt"):
             raise RuntimeError("Kaspi принял создание, но оффер с ценой ещё не появился")
+        if (
+            int(after.get("price_kzt") or 0) != int(options["initial_price_kzt"])
+            or int(after.get("stock_count") or 0) != int(options["stock_count"])
+            or int(after.get("preorder_days") or 0) != max(1, int(options["preorder_days"]))
+        ):
+            raise RuntimeError("Kaspi ещё не подтвердил цену, остаток и предзаказ созданного оффера")
         return result
     return await inspect_kaspi_product(
         reference=str(job.get("reference") or ""),

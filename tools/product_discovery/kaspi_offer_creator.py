@@ -503,13 +503,115 @@ class MerchantOfferApi:
         poll_seconds: float = 2.0,
     ) -> dict[str, Any]:
         master_sku = str(master_sku).strip()
+        price = int(price)
+        stock = int(stock)
+        # Product Test offers are inventory-on-order by definition.  Keep the
+        # invariant at the last write boundary as well as in the CRM API so an
+        # older caller can never publish a zero-day offer.
+        preorder = max(1, int(preorder))
+        attempt_limit = max(1, int(attempts))
+        poll_interval = max(0.5, float(poll_seconds))
+        history: list[dict[str, Any]] = []
+
+        def is_confirmed(state: OfferState) -> bool:
+            return bool(
+                state.found
+                and state.price_kzt == price
+                and state.stock_count == stock
+                and state.preorder_days == preorder
+            )
+
+        def poll_offer(
+            reference: str,
+            *,
+            phase: str,
+            deadline: float,
+            require_confirmation: bool,
+        ) -> OfferState | None:
+            last_state: OfferState | None = None
+            for attempt in range(1, attempt_limit + 1):
+                try:
+                    state = self.read_offer(reference)
+                    last_state = state
+                    history.append({"phase": phase, "attempt": attempt, "state": state.dict()})
+                    if state.found and (not require_confirmation or is_confirmed(state)):
+                        return state
+                except (httpx.HTTPError, OSError) as exc:
+                    history.append({
+                        "phase": phase,
+                        "attempt": attempt,
+                        "error": f"{type(exc).__name__}: {exc}"[:1000],
+                    })
+                remaining = deadline - time.monotonic()
+                if attempt >= attempt_limit or remaining <= 0:
+                    break
+                time.sleep(min(poll_interval, remaining))
+            return last_state
+
         before = self.read_offer(master_sku)
         if before.found:
+            if not live or is_confirmed(before):
+                return {
+                    "result": "ALREADY_EXISTS",
+                    "before": before.dict(),
+                    "after": before.dict(),
+                    "merchant_sku": before.sku,
+                    "master_sku": master_sku,
+                    "preorder_requested": preorder,
+                    "preorder_verified": before.preorder_days == preorder,
+                    "price_verified": before.price_kzt == price,
+                    "stock_verified": before.stock_count == stock,
+                    "message": "Оффер уже привязан и соответствует параметрам Product Test.",
+                }
+
+            self.config.assert_live_allowed(True)
+            existing_write = self.process_offer(
+                sku=before.sku,
+                model=model,
+                price=price,
+                stock=stock,
+                preorder=preorder,
+                live=True,
+            )
+            steps = [{"name": "repair_existing_offer", **existing_write}]
+            if not existing_write.get("accepted"):
+                return {
+                    "result": "EXISTING_PROCESS_FAILED",
+                    "before": before.dict(),
+                    "merchant_sku": before.sku,
+                    "master_sku": master_sku,
+                    "steps": steps,
+                }
+            deadline = time.monotonic() + attempt_limit * poll_interval
+            repaired = poll_offer(
+                before.sku,
+                phase="repair-existing",
+                deadline=deadline,
+                require_confirmation=True,
+            )
+            if repaired is None or not is_confirmed(repaired):
+                return {
+                    "result": "EXISTING_PROCESS_ACCEPTED_NOT_CONFIRMED",
+                    "before": before.dict(),
+                    "after": None if repaired is None else repaired.dict(),
+                    "merchant_sku": before.sku,
+                    "master_sku": master_sku,
+                    "steps": steps,
+                    "history": history,
+                }
             return {
                 "result": "ALREADY_EXISTS",
                 "before": before.dict(),
+                "after": repaired.dict(),
                 "merchant_sku": before.sku,
-                "message": "Оффер уже привязан. Для изменений используй обычный realtime process.",
+                "master_sku": master_sku,
+                "steps": steps,
+                "history": history,
+                "preorder_requested": preorder,
+                "preorder_verified": repaired.preorder_days == preorder,
+                "price_verified": repaired.price_kzt == price,
+                "stock_verified": repaired.stock_count == stock,
+                "message": "Существующий оффер приведён к параметрам Product Test и подтверждён.",
             }
         if not live:
             return {
@@ -593,18 +695,15 @@ class MerchantOfferApi:
         protocol = self._protocol_offer(merchant_sku)
         steps.append({"name": "protocol_verify", **protocol})
 
-        history: list[dict[str, Any]] = []
-        visible: OfferState | None = None
-        for attempt in range(1, max(1, attempts) + 1):
-            state = self.read_offer(merchant_sku)
-            history.append({"attempt": attempt, "state": state.dict()})
-            if state.found:
-                visible = state
-                break
-            if attempt < attempts:
-                time.sleep(max(0.5, poll_seconds))
+        deadline = time.monotonic() + attempt_limit * poll_interval
+        visible = poll_offer(
+            merchant_sku,
+            phase="wait-visible",
+            deadline=deadline,
+            require_confirmation=False,
+        )
 
-        if visible is None:
+        if visible is None or not visible.found:
             return {
                 "result": "LINKED_PROCESS_ACCEPTED_NOT_VISIBLE",
                 "before": before.dict(),
@@ -614,9 +713,9 @@ class MerchantOfferApi:
                 "note": "link-to-master и process приняты, но BFF ещё не увидел merchant SKU.",
             }
 
-        preorder_write = None
-        if int(preorder) != int(visible.preorder_days or 0):
-            preorder_write = self.process_offer(
+        final = visible
+        if not is_confirmed(visible):
+            final_write = self.process_offer(
                 sku=merchant_sku,
                 model=model,
                 price=price,
@@ -624,23 +723,40 @@ class MerchantOfferApi:
                 preorder=preorder,
                 live=True,
             )
-            steps.append({"name": "set_preorder", **preorder_write})
-            if preorder_write.get("accepted"):
-                for attempt in range(1, 8):
-                    state = self.read_offer(merchant_sku)
-                    history.append({"attempt": f"preorder-{attempt}", "state": state.dict()})
-                    if (
-                        state.found
-                        and state.price_kzt == int(price)
-                        and state.stock_count == int(stock)
-                        and state.preorder_days == int(preorder)
-                    ):
-                        visible = state
-                        break
-                    if attempt < 7:
-                        time.sleep(2)
+            steps.append({"name": "confirm_offer_values", **final_write})
+            if not final_write.get("accepted"):
+                return {
+                    "result": "CREATED_PROCESS_FAILED",
+                    "before": before.dict(),
+                    "after": visible.dict(),
+                    "merchant_sku": merchant_sku,
+                    "master_sku": master_sku,
+                    "steps": steps,
+                    "history": history,
+                }
+            confirmed = poll_offer(
+                merchant_sku,
+                phase="confirm-values",
+                deadline=deadline,
+                require_confirmation=True,
+            )
+            if confirmed is not None:
+                final = confirmed
 
-        final = self.read_offer(merchant_sku)
+        if not is_confirmed(final):
+            return {
+                "result": "CREATED_NOT_CONFIRMED",
+                "before": before.dict(),
+                "after": final.dict(),
+                "merchant_sku": merchant_sku,
+                "master_sku": master_sku,
+                "steps": steps,
+                "history": history,
+                "preorder_requested": preorder,
+                "preorder_verified": final.preorder_days == preorder,
+                "price_verified": final.price_kzt == price,
+                "stock_verified": final.stock_count == stock,
+            }
         return {
             "result": "CREATED_AND_VISIBLE",
             "before": before.dict(),
@@ -649,6 +765,8 @@ class MerchantOfferApi:
             "steps": steps,
             "history": history,
             "after": final.dict(),
-            "preorder_requested": int(preorder),
-            "preorder_verified": final.preorder_days == int(preorder),
+            "preorder_requested": preorder,
+            "preorder_verified": final.preorder_days == preorder,
+            "price_verified": final.price_kzt == price,
+            "stock_verified": final.stock_count == stock,
         }
