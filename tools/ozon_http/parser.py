@@ -633,3 +633,89 @@ def parse_search(
             if len(rows) >= max_results:
                 return {"items": rows, "widget_keys": widget_keys, "parser": "widgetStates"}
     return {"items": rows, "widget_keys": widget_keys, "parser": "widgetStates"}
+
+
+def parse_product_page(
+    payload: dict[str, Any],
+    base: str = "https://www.ozon.kz",
+    expected_currency: str | None = "KZT",
+) -> dict[str, Any]:
+    """Read the displayed price from an exact Ozon product-page payload.
+
+    Product pages split their heading, gallery, delivery and price across
+    separate widget states, so they cannot be parsed as search-card lists.  We
+    deliberately inspect only price-named widgets and still require an
+    explicit expected currency.  This keeps instalment amounts and unrelated
+    recommendations from becoming a supplier cost.
+    """
+
+    root = _jsonish(payload)
+    widget_states = root.get("widgetStates") if isinstance(root, dict) else None
+    if not isinstance(widget_states, dict):
+        return {
+            "price_kzt": None,
+            "price_value": None,
+            "price_text": None,
+            "currency_code": None,
+            "price_source": None,
+            "widget_key": None,
+        }
+
+    candidates: list[dict[str, Any]] = []
+    page_states: list[tuple[str, Any]] = []
+    for order, (key, value) in enumerate(widget_states.items()):
+        decoded = _jsonish(value)
+        if not isinstance(decoded, (dict, list)):
+            continue
+        page_states.append((str(key), decoded))
+        key_lower = str(key).lower()
+        # Exact page price lives in webPrice. Recommendation and carousel
+        # widgets also contain "price" but belong to other products.
+        if not key_lower.startswith("webprice"):
+            continue
+        scope = decoded if isinstance(decoded, dict) else {"items": decoded}
+        price = _price(scope, expected_currency=expected_currency)
+        amount = price.get("value")
+        currency = price.get("currency_code")
+        price_context = f"{price.get('source') or ''} {price.get('text') or ''}".lower()
+        if not isinstance(amount, int) or amount <= 0 or currency != str(expected_currency or "").upper():
+            continue
+        if any(marker in price_context for marker in SECONDARY_MARKERS + INSTALLMENT_MARKERS):
+            continue
+        candidates.append({
+            **price,
+            "widget_key": str(key),
+            "rank": 200.0 + float(price.get("score") or 0) - (order * 0.001),
+        })
+
+    if not candidates:
+        return {
+            "price_kzt": None,
+            "price_value": None,
+            "price_text": None,
+            "currency_code": None,
+            "price_source": None,
+            "widget_key": None,
+        }
+
+    candidates.sort(key=lambda row: row["rank"], reverse=True)
+    best = candidates[0]
+    combined = {key: value for key, value in page_states}
+    delivery = _delivery(combined)
+    rating, reviews = _rating_reviews(combined)
+    return {
+        "price_kzt": best["value"],
+        "price_value": best["value"],
+        "price_text": best.get("text"),
+        "currency_code": best.get("currency_code"),
+        "currency_symbol": best.get("currency_symbol"),
+        "price_source": f"{best['widget_key']}.{best.get('source') or 'price'}",
+        "price_candidate_count": len(candidates),
+        "widget_key": best["widget_key"],
+        "delivery_text": delivery.get("text"),
+        "delivery_date": delivery.get("date"),
+        "delivery_days": delivery.get("days"),
+        "rating": rating,
+        "reviews": reviews,
+        "base": base,
+    }

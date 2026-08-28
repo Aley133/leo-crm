@@ -119,7 +119,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.0.3: сохраняет минимальную цену продавцов Ozon и безопасно использует подтверждённую KZT-цену точной карточки, когда список продавцов временно недоступен."
+          $notes = "LEO Product Test Agent 1.0.4: читает KZT-цену напрямую из точной страницы Ozon, когда цена отсутствует в поиске и списке продавцов; CRM отдельно контролирует ожидание публикации Kaspi."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

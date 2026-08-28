@@ -1,4 +1,5 @@
 import asyncio
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from xml.etree import ElementTree
@@ -27,6 +28,7 @@ from backend.app.product_test_api import (
     discover_product_candidates,
     heartbeat_product_test_agent,
     inspect_product,
+    read_product_test_state,
     update_product_test_item,
     validate_product_supplier,
 )
@@ -40,6 +42,7 @@ from backend.app.workspace_models import KaspiAccountCredential, Workspace
 from backend.app.workspace_context import workspace_context
 from tools import kaspi_fast_dumping_scanner
 from tools.product_discovery import kaspi_search, runtime as product_discovery_runtime
+from tools.ozon_http.parser import parse_product_page
 from tools.kaspi_fast_dumping_scanner import (
     _meta_content,
     _open_product_page,
@@ -459,7 +462,10 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert "supplier_delivery_text" in script
     assert "цена карточки Ozon" in script
     assert "supplier_price_source" in script
-    assert 'job.job_type !== "inspect"' in script
+    assert '["discover", "validate_supplier"].includes(job.job_type)' in script
+    assert 'id="kaspi-submissions-section"' in html
+    assert "renderSubmissions(submissions)" in script
+    assert "Повторить выгрузку" in script
     assert "supplier_image_url" in script
     assert 'href="/crm/monitoring"' in script
     assert "ВИЗУАЛЬНОЕ СОПОСТАВЛЕНИЕ" in html
@@ -651,6 +657,66 @@ def test_ozon_card_price_fallback_never_uses_rub_amount() -> None:
 
     assert product_discovery_runtime._attach_search_card_supplier_offer(candidate) is False
     assert "supplier_price_kzt" not in candidate
+
+
+def test_exact_product_page_parser_prefers_final_kzt_price_over_instalment() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1507555262-default-1": (
+                '{"finalPrice":"2 250 ₸","originalPrice":"11 430 ₸",'
+                '"installment":{"text":"188 ₸ × 12 месяцев"}}'
+            ),
+            "webRecommendations-price": '{"finalPrice":"999 ₽"}',
+        }
+    }
+
+    parsed = parse_product_page(payload, expected_currency="KZT")
+
+    assert parsed["price_kzt"] == 2250
+    assert parsed["currency_code"] == "KZT"
+    assert parsed["widget_key"].startswith("webPrice-")
+    assert "finalPrice" in parsed["price_source"]
+
+
+def test_ozon_match_uses_exact_product_page_when_modal_and_search_price_are_empty() -> None:
+    candidate = {
+        "sku": "1507555262",
+        "title": "GLS Pharmaceuticals Пивные дрожжи 120 капсул",
+        "brand": "GLS Pharmaceuticals",
+        "ozon_url": "https://www.ozon.kz/product/pivnye-drozhzhi-1507555262/",
+        "image_url": "https://ir.ozone.ru/s3/multimedia/yeast.jpg",
+    }
+
+    class FakeClient:
+        def search(self, query: str, page: int = 1) -> dict:
+            del query, page
+            return {"attempt": {"status_code": 200, "blocked": False}, "items": [candidate]}
+
+        def product_price_hints(self, url: str) -> dict:
+            del url
+            return {"ok": True, "cheaper_price_kzt": None, "cheaper_offer": None, "other_offer_count": 0}
+
+        def product_page_price(self, url: str, product_id: str) -> dict:
+            assert url == candidate["ozon_url"]
+            assert product_id == candidate["sku"]
+            return {
+                "ok": True,
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice-1507555262.finalPrice",
+                "delivery_days": 1,
+            }
+
+    result = product_discovery_runtime._best_ozon_match(
+        FakeClient(),
+        {"title": candidate["title"], "brand": candidate["brand"]},
+        max_queries=1,
+        verifier=None,
+    )
+
+    assert result["best"]["supplier_price_kzt"] == 2250
+    assert result["best"]["supplier_price_source"].startswith("product_page.webPrice-")
+    assert result["best"]["supplier_delivery_days"] == 1
 
 
 def test_manual_ozon_url_uses_exact_card_kzt_price_when_seller_modal_has_none(monkeypatch) -> None:
@@ -862,6 +928,48 @@ def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_sessio
     assert completed["items"][0]["offers"]["supplier"]["total_supplier_offers_checked"] == 9
 
 
+def test_new_discovery_replaces_candidates_but_keeps_kaspi_submissions(db_session) -> None:
+    _seed_agent_account(db_session)
+    old_candidate = ProductTestItem(
+        workspace_id=1,
+        input_reference="old",
+        kaspi_product_id="710000001",
+        merchant_sku="710000001",
+        name="Old candidate",
+        kaspi_url="https://kaspi.kz/shop/p/old-710000001/",
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        offers_json={},
+        status="needs_supplier_link",
+        active=True,
+    )
+    waiting = ProductTestItem(
+        workspace_id=1,
+        input_reference="old",
+        kaspi_product_id="710000002",
+        merchant_sku="710000002",
+        name="Already submitted",
+        kaspi_url="https://kaspi.kz/shop/p/waiting-710000002/",
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        offers_json={"kaspi_submission": {"status": "waiting", "attempt": 1}},
+        status="adding_to_kaspi",
+        active=True,
+    )
+    db_session.add_all([old_candidate, waiting])
+    db_session.commit()
+
+    discover_product_candidates(ProductDiscoveryRequest(query="new batch", target_new=10), db_session)
+    state = read_product_test_state(db_session)
+
+    db_session.refresh(old_candidate)
+    db_session.refresh(waiting)
+    assert old_candidate.active is False
+    assert waiting.active is True
+    assert state["items"] == []
+    assert [row["id"] for row in state["submissions"]] == [waiting.id]
+
+
 def test_manual_ozon_url_reuses_validation_job_and_refreshes_visual_pair(db_session) -> None:
     _seed_agent_account(db_session)
     item = ProductTestItem(
@@ -927,7 +1035,7 @@ def test_manual_ozon_url_reuses_validation_job_and_refreshes_visual_pair(db_sess
     assert supplier["image_match"]["status"] == "SUPPORT"
 
 
-def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_session) -> None:
+def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_session, monkeypatch) -> None:
     _seed_agent_account(db_session)
     item = ProductTestItem(
         workspace_id=1,
@@ -965,6 +1073,11 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
     )
     assert claim["job"]["job_type"] == "create_offer"
     assert claim["job"]["options"]["initial_price_kzt"] == 8999
+    assert queued["item"]["status"] == "adding_to_kaspi"
+    assert queued["item"]["offers"]["kaspi_submission"]["status"] == "waiting"
+    waiting_state = read_product_test_state(db_session)
+    assert waiting_state["items"] == []
+    assert waiting_state["submissions"][0]["id"] == item.id
     completed = complete_product_test_job(
         claim["job"]["id"],
         ProductTestAgentResult(
@@ -981,14 +1094,65 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
         db_session,
     )
     product = db_session.scalar(select(Product).where(Product.kaspi_product_id == "333333333"))
-    assert queued["item"]["status"] == "adding_to_kaspi"
     assert completed["item"]["status"] == "enrolled_fast_dumping"
+    assert completed["item"]["offers"]["kaspi_submission"]["status"] == "succeeded"
     assert product is not None and product.merchant_sku == "333333333_987654321"
     assert db_session.scalar(select(FastDumpingPolicy).where(FastDumpingPolicy.product_id == product.id)) is not None
     assert db_session.scalar(select(FastDumpingJob).where(FastDumpingJob.product_id == product.id)) is not None
     assert db_session.scalar(select(MonitorTarget)) is not None
     assert db_session.scalar(select(BrowserAgentJob)) is not None
     assert db_session.scalar(select(SupplierOfferState)) is not None
+    visible_state = read_product_test_state(db_session)
+    assert visible_state["submissions"][0]["id"] == item.id
+    hide_after = datetime.fromisoformat(completed["item"]["offers"]["kaspi_submission"]["hide_after"])
+    monkeypatch.setattr(product_test_api, "_now", lambda: hide_after + timedelta(seconds=1))
+    assert read_product_test_state(db_session)["submissions"] == []
+
+
+def test_failed_kaspi_submission_stays_visible_and_can_be_retried(db_session) -> None:
+    _seed_agent_account(db_session)
+    supplier_url = "https://www.ozon.kz/product/solgar-444444444/"
+    item = ProductTestItem(
+        workspace_id=1,
+        input_reference="Solgar",
+        kaspi_product_id="720000001",
+        merchant_sku="720000001",
+        name="Solgar retry",
+        kaspi_url="https://kaspi.kz/shop/p/solgar-720000001/",
+        supplier_url=supplier_url,
+        observed_price_kzt=Decimal("9000"),
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        offers_json={"supplier": {"supplier_url": supplier_url, "supplier_price_kzt": "4000", "validated": True}},
+        status="ready_to_add",
+        active=True,
+    )
+    db_session.add(item)
+    db_session.commit()
+    add_product_to_kaspi(item.id, db_session)
+    claim = claim_product_test_job(
+        ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
+        db_session,
+    )
+    failed = complete_product_test_job(
+        claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=claim["job"]["lease_token"],
+            status="failed",
+            error_code="kaspi_offer_not_visible",
+            error_message="Kaspi не обнаружил товар",
+        ),
+        db_session,
+    )
+
+    assert failed["status"] == "failed"
+    state = read_product_test_state(db_session)
+    assert state["submissions"][0]["offers"]["kaspi_submission"]["status"] == "failed"
+    retried = add_product_to_kaspi(item.id, db_session)
+    assert retried["item"]["offers"]["kaspi_submission"]["status"] == "waiting"
+    assert retried["item"]["offers"]["kaspi_submission"]["attempt"] == 2
 
 
 def test_changed_supplier_url_must_be_revalidated_before_add(db_session) -> None:

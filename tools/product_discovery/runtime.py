@@ -64,6 +64,43 @@ def _attach_search_card_supplier_offer(candidate: dict[str, Any]) -> bool:
     return True
 
 
+def _attach_product_page_supplier_offer(
+    client: OzonSessionHttpClient,
+    candidate: dict[str, Any],
+) -> bool:
+    """Last fallback: read `webPrice` from the already matched exact card."""
+
+    reader = getattr(client, "product_page_price", None)
+    if not callable(reader) or not candidate.get("ozon_url"):
+        return False
+    try:
+        detail = reader(str(candidate["ozon_url"]), candidate.get("sku"))
+    except Exception as exc:
+        candidate["product_page_price_error"] = f"{type(exc).__name__}: {exc}"[:500]
+        return False
+    price = detail.get("price_kzt")
+    if not detail.get("ok") or not isinstance(price, int) or isinstance(price, bool) or price <= 0:
+        return False
+    candidate.update({
+        "supplier_price_kzt": price,
+        "supplier_url": candidate.get("ozon_url"),
+        "supplier_offer_sku": candidate.get("sku") or detail.get("product_id"),
+        "supplier_seller_name": candidate.get("seller_name") or "Ozon",
+        "supplier_delivery_days": (
+            detail.get("delivery_days")
+            if detail.get("delivery_days") is not None
+            else candidate.get("delivery_days")
+        ),
+        "supplier_delivery_text": detail.get("delivery_text") or candidate.get("delivery_text"),
+        "supplier_delivery_date": detail.get("delivery_date") or candidate.get("delivery_date"),
+        "supplier_seller_rating": candidate.get("seller_rating"),
+        "supplier_seller_reviews": candidate.get("seller_reviews"),
+        "supplier_price_source": f"product_page.{detail.get('price_source') or 'webPrice'}",
+    })
+    candidate.setdefault("supplier_offer_count", 0)
+    return True
+
+
 def _attach_lowest_supplier_offer(
     client: OzonSessionHttpClient,
     candidate: dict[str, Any],
@@ -74,12 +111,18 @@ def _attach_lowest_supplier_offer(
         detail = client.product_price_hints(str(candidate["ozon_url"]))
     except Exception as exc:
         candidate["supplier_lookup_error"] = f"{type(exc).__name__}: {exc}"[:500]
-        return _attach_search_card_supplier_offer(candidate)
+        return (
+            _attach_search_card_supplier_offer(candidate)
+            or _attach_product_page_supplier_offer(client, candidate)
+        )
     offer = detail.get("cheaper_offer") or {}
     price = detail.get("cheaper_price_kzt")
     candidate["supplier_offer_count"] = detail.get("other_offer_count") or 0
     if not detail.get("ok") or not isinstance(price, int) or isinstance(price, bool) or price <= 0:
-        return _attach_search_card_supplier_offer(candidate)
+        return (
+            _attach_search_card_supplier_offer(candidate)
+            or _attach_product_page_supplier_offer(client, candidate)
+        )
     candidate.update({
         "supplier_price_kzt": price,
         "supplier_url": offer.get("product_url") or candidate.get("ozon_url"),
@@ -354,6 +397,8 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
     candidate: dict[str, Any] | None = None
     search_attempts: list[dict[str, Any]] = []
     detail: dict[str, Any] = {}
+    page_detail: dict[str, Any] = {}
+    product_id: str | None = None
     price_hint_error: str | None = None
     try:
         try:
@@ -374,6 +419,16 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
             candidate = ranked[0] if ranked else candidate
             visual = verifier.verify(_image_urls(product), _image_urls(candidate), max_pairs=6)
             candidate["image_match"] = visual
+        modal_price = detail.get("cheaper_price_kzt")
+        card_price, _card_field = _search_card_kzt_price(candidate or {})
+        if (
+            (not isinstance(modal_price, int) or isinstance(modal_price, bool) or modal_price <= 0)
+            and card_price is None
+        ):
+            try:
+                page_detail = client.product_page_price(url, product_id)
+            except Exception as exc:
+                page_detail = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:500]}
     finally:
         client.close()
         if verifier is not None:
@@ -386,6 +441,11 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
         price_source = f"search_card.{card_field}" if card_field else ""
         offer = {}
     if not isinstance(price, int) or isinstance(price, bool) or price <= 0:
+        page_price = page_detail.get("price_kzt")
+        if page_detail.get("ok") and isinstance(page_price, int) and not isinstance(page_price, bool) and page_price > 0:
+            price = page_price
+            price_source = f"product_page.{page_detail.get('price_source') or 'webPrice'}"
+    if not isinstance(price, int) or isinstance(price, bool) or price <= 0:
         raise RuntimeError("По ссылке Ozon не найдена подтверждённая цена в KZT")
     return {
         "supplier_url": offer.get("product_url") or (candidate or {}).get("ozon_url") or url,
@@ -394,10 +454,10 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
         "supplier_delivery_days": (
             offer.get("delivery_days")
             if offer.get("delivery_days") is not None
-            else (candidate or {}).get("delivery_days")
+            else (candidate or {}).get("delivery_days") if (candidate or {}).get("delivery_days") is not None else page_detail.get("delivery_days")
         ),
-        "supplier_delivery_text": offer.get("delivery_text") or (candidate or {}).get("delivery_text"),
-        "supplier_delivery_date": offer.get("delivery_date") or (candidate or {}).get("delivery_date"),
+        "supplier_delivery_text": offer.get("delivery_text") or (candidate or {}).get("delivery_text") or page_detail.get("delivery_text"),
+        "supplier_delivery_date": offer.get("delivery_date") or (candidate or {}).get("delivery_date") or page_detail.get("delivery_date"),
         "supplier_offer_sku": offer.get("offer_sku") or (candidate or {}).get("sku") or detail.get("product_id"),
         "supplier_seller_name": offer.get("seller_name") or (candidate or {}).get("seller_name"),
         "supplier_seller_rating": offer.get("seller_rating"),

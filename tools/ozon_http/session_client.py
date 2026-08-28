@@ -5,7 +5,7 @@ import time
 from typing import Any
 
 from .config import Config, ROOT
-from .parser import parse_search, cheaper_price_hint, parse_other_seller_offers
+from .parser import parse_search, cheaper_price_hint, parse_other_seller_offers, parse_product_page
 from .session_profile import CurlProfile
 
 
@@ -162,6 +162,46 @@ class OzonSessionHttpClient:
             "other_offer_count": result.get("offer_count") or 0,
             "other_offers": result.get("offers") or [],
             "product_id": result.get("product_id"),
+            "read_only": True,
+        }
+
+    def product_page_price(self, product_url: str, product_id: str | int | None = None) -> dict[str, Any]:
+        """Read the exact card's displayed KZT price through the saved HTTP session."""
+
+        pid = self._product_id(product_url, product_id)
+        raw = self._do(
+            self.profile.rewritten_page_url(product_url),
+            headers=self.profile.request_headers_for_page(product_url),
+        )
+        payload = raw.pop("payload", None)
+        raw.pop("parsed", None)
+        card = (
+            parse_product_page(
+                payload,
+                base=self.profile.origin,
+                expected_currency=self.config.expected_currency,
+            )
+            if isinstance(payload, dict)
+            else {}
+        )
+        price = card.get("price_kzt")
+        return {
+            "ok": bool(
+                raw.get("status_code") == 200
+                and not raw.get("blocked")
+                and isinstance(price, int)
+                and not isinstance(price, bool)
+                and price > 0
+            ),
+            "attempt": raw,
+            "product_id": pid,
+            "card": card,
+            "price_kzt": price if isinstance(price, int) and not isinstance(price, bool) and price > 0 else None,
+            "price_text": card.get("price_text"),
+            "price_source": card.get("price_source"),
+            "delivery_text": card.get("delivery_text"),
+            "delivery_date": card.get("delivery_date"),
+            "delivery_days": card.get("delivery_days"),
             "read_only": True,
         }
 
