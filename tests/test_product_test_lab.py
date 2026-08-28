@@ -117,7 +117,7 @@ def test_product_test_xml_is_a_copy_with_schema_safe_offer() -> None:
         kaspi_url="https://kaspi.kz/shop/p/product-102591400/",
         observed_price_kzt=Decimal("8538"),
         test_price_kzt=Decimal("8990"),
-        preorder_days=3,
+        preorder_days=0,
         stock_count=7,
         city_id="196220100",
         zone_id="Magnum_ZONE1",
@@ -132,7 +132,7 @@ def test_product_test_xml_is_a_copy_with_schema_safe_offer() -> None:
     added = next(node for node in offers if node.attrib["sku"] == "102591400_177620711")
     assert _children(added).index("availabilities") < _children(added).index("cityprices")
     availability = next(node for node in added.iter() if str(node.tag).rsplit("}", 1)[-1] == "availability")
-    assert availability.attrib == {"available": "yes", "storeId": "PP1", "preOrder": "3", "stockCount": "7"}
+    assert availability.attrib == {"available": "yes", "storeId": "PP1", "preOrder": "1", "stockCount": "7"}
     cityprice = next(node for node in added.iter() if str(node.tag).rsplit("}", 1)[-1] == "cityprice")
     assert cityprice.attrib["cityId"] == "196220100"
     assert cityprice.text == "8990"
@@ -1073,6 +1073,7 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
     )
     assert claim["job"]["job_type"] == "create_offer"
     assert claim["job"]["options"]["initial_price_kzt"] == 8999
+    assert claim["job"]["options"]["preorder_days"] == 4
     assert queued["item"]["status"] == "adding_to_kaspi"
     assert queued["item"]["offers"]["kaspi_submission"]["status"] == "waiting"
     waiting_state = read_product_test_state(db_session)
@@ -1088,7 +1089,13 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
             result={
                 "result": "CREATED_AND_VISIBLE",
                 "merchant_sku": "333333333_987654321",
-                "after": {"found": True, "sku": "333333333_987654321", "price_kzt": 8999},
+                "after": {
+                    "found": True,
+                    "sku": "333333333_987654321",
+                    "price_kzt": 8999,
+                    "stock_count": 5,
+                    "preorder_days": 4,
+                },
             },
         ),
         db_session,
@@ -1107,6 +1114,62 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
     hide_after = datetime.fromisoformat(completed["item"]["offers"]["kaspi_submission"]["hide_after"])
     monkeypatch.setattr(product_test_api, "_now", lambda: hide_after + timedelta(seconds=1))
     assert read_product_test_state(db_session)["submissions"] == []
+
+
+def test_zero_day_kaspi_offer_is_not_enrolled_as_a_product(db_session) -> None:
+    item = ProductTestItem(
+        workspace_id=1,
+        input_reference="GLS Omega-3",
+        kaspi_product_id="138791468",
+        merchant_sku="138791468",
+        name="GLS Omega-3",
+        kaspi_url="https://kaspi.kz/shop/p/gls-omega-3-138791468/",
+        supplier_url="https://www.ozon.kz/product/omega-1521854115/",
+        test_price_kzt=Decimal("9599"),
+        preorder_days=1,
+        stock_count=5,
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        offers_json={"supplier": {
+            "supplier_url": "https://www.ozon.kz/product/omega-1521854115/",
+            "supplier_price_kzt": "8000",
+            "validated": True,
+        }},
+        status="adding_to_kaspi",
+        active=True,
+    )
+    job = ProductTestJob(
+        workspace_id=1,
+        job_type="create_offer",
+        item_id=None,
+        input_reference="item:pending",
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        status="leased",
+    )
+    db_session.add_all([item, job])
+    db_session.flush()
+    job.item_id = item.id
+    db_session.commit()
+
+    with pytest.raises(ValueError, match="предзаказ 1 дн"):
+        product_test_api._enroll_created_product(
+            db_session,
+            job=job,
+            result={
+                "result": "ALREADY_EXISTS",
+                "merchant_sku": "138791468_857843219",
+                "after": {
+                    "found": True,
+                    "sku": "138791468_857843219",
+                    "price_kzt": 9599,
+                    "stock_count": 5,
+                    "preorder_days": 0,
+                },
+            },
+        )
+
+    assert db_session.scalar(select(Product).where(Product.kaspi_product_id == "138791468")) is None
 
 
 def test_failed_kaspi_submission_stays_visible_and_can_be_retried(db_session) -> None:
@@ -1134,6 +1197,7 @@ def test_failed_kaspi_submission_stays_visible_and_can_be_retried(db_session) ->
         ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
         db_session,
     )
+    assert claim["job"]["options"]["preorder_days"] == 1
     failed = complete_product_test_job(
         claim["job"]["id"],
         ProductTestAgentResult(
