@@ -106,11 +106,11 @@
 .submission-badge.failed { background: #48242c; color: #ff9cac; }
 
 .lab-list { margin-top: 18px; overflow-x: auto; }
-.lab-results-table { min-width: 1460px; overflow: hidden; border: 1px solid #29415e; border-radius: 14px; background: #091728; }
+.lab-results-table { min-width: 1590px; overflow: hidden; border: 1px solid #29415e; border-radius: 14px; background: #091728; }
 .lab-table-head,
 .lab-result-row {
   display: grid;
-  grid-template-columns: 42px minmax(250px, 1.25fr) 116px minmax(250px, 1.25fr) 145px 125px 105px minmax(250px, 1.1fr);
+  grid-template-columns: 42px minmax(250px, 1.25fr) 116px minmax(250px, 1.25fr) 145px 125px 125px 105px minmax(250px, 1.1fr);
 }
 
 .lab-table-head {

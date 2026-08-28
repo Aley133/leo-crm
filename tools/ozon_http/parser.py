@@ -701,6 +701,18 @@ def parse_product_page(
     candidates.sort(key=lambda row: row["rank"], reverse=True)
     best = candidates[0]
     combined = {key: value for key, value in page_states}
+    heading_states = {
+        key: value
+        for key, value in page_states
+        if key.casefold().startswith("webproductheading")
+    }
+    gallery_states = {
+        key: value
+        for key, value in page_states
+        if key.casefold().startswith("webgallery")
+    }
+    title = _title(heading_states) if heading_states else ""
+    images = _images(gallery_states) if gallery_states else []
     delivery = _delivery(combined)
     rating, reviews = _rating_reviews(combined)
     return {
@@ -715,6 +727,9 @@ def parse_product_page(
         "delivery_text": delivery.get("text"),
         "delivery_date": delivery.get("date"),
         "delivery_days": delivery.get("days"),
+        "title": title if title and title != "Без названия" else None,
+        "image_url": images[0] if images else None,
+        "image_urls": images,
         "rating": rating,
         "reviews": reviews,
         "base": base,
