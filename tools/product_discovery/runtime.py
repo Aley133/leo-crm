@@ -391,90 +391,51 @@ def discover_products(
 
 
 def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) -> dict[str, Any]:
+    """Validate an operator-selected Ozon card without changing its identity.
+
+    A pasted URL is an explicit operator decision.  Its displayed product-page
+    price and delivery are authoritative; search results and the other-sellers
+    modal must never replace it with another card or offer.
+    """
+
     profile = OzonSessionResolver().resolve()
     client = OzonSessionHttpClient(profile)
-    verifier = ImageVerifier() if product else None
-    candidate: dict[str, Any] | None = None
-    search_attempts: list[dict[str, Any]] = []
-    detail: dict[str, Any] = {}
-    page_detail: dict[str, Any] = {}
-    product_id: str | None = None
-    price_hint_error: str | None = None
+    product_id = _product_id_from_ozon_url(url)
     try:
-        try:
-            detail = client.product_price_hints(url)
-        except Exception as exc:
-            price_hint_error = f"{type(exc).__name__}: {exc}"[:500]
-        product_id = str(detail.get("product_id") or _product_id_from_ozon_url(url) or "") or None
-        try:
-            candidate, search_attempts = _manual_url_candidate(
-                client,
-                url,
-                product_id=product_id,
-            )
-        except Exception as exc:
-            search_attempts = [{"error": f"{type(exc).__name__}: {exc}"[:500]}]
-        if candidate is not None and product:
-            ranked = rank_product(product, [candidate])
-            candidate = ranked[0] if ranked else candidate
-            visual = verifier.verify(_image_urls(product), _image_urls(candidate), max_pairs=6)
-            candidate["image_match"] = visual
-        modal_price = detail.get("cheaper_price_kzt")
-        card_price, _card_field = _search_card_kzt_price(candidate or {})
-        if (
-            (not isinstance(modal_price, int) or isinstance(modal_price, bool) or modal_price <= 0)
-            and card_price is None
-        ):
-            try:
-                page_detail = client.product_page_price(url, product_id)
-            except Exception as exc:
-                page_detail = {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:500]}
+        page_detail = client.product_page_price(url, product_id)
     finally:
         client.close()
-        if verifier is not None:
-            verifier.close()
-    offer = detail.get("cheaper_offer") or {}
-    price = detail.get("cheaper_price_kzt")
-    price_source = "otherOffersFromSellers.lowest_confirmed"
-    if not detail.get("ok") or not isinstance(price, int) or isinstance(price, bool) or price <= 0:
-        price, card_field = _search_card_kzt_price(candidate or {})
-        price_source = f"search_card.{card_field}" if card_field else ""
-        offer = {}
-    if not isinstance(price, int) or isinstance(price, bool) or price <= 0:
-        page_price = page_detail.get("price_kzt")
-        if page_detail.get("ok") and isinstance(page_price, int) and not isinstance(page_price, bool) and page_price > 0:
-            price = page_price
-            price_source = f"product_page.{page_detail.get('price_source') or 'webPrice'}"
+
+    price = page_detail.get("price_kzt")
     if not isinstance(price, int) or isinstance(price, bool) or price <= 0:
         raise RuntimeError("По ссылке Ozon не найдена подтверждённая цена в KZT")
+    card = page_detail.get("card") if isinstance(page_detail.get("card"), dict) else {}
+    exact_product_id = str(page_detail.get("product_id") or product_id or "").strip() or None
     return {
-        "supplier_url": offer.get("product_url") or (candidate or {}).get("ozon_url") or url,
+        "supplier_url": url,
         "supplier_price_kzt": price,
-        "supplier_price_source": price_source,
-        "supplier_delivery_days": (
-            offer.get("delivery_days")
-            if offer.get("delivery_days") is not None
-            else (candidate or {}).get("delivery_days") if (candidate or {}).get("delivery_days") is not None else page_detail.get("delivery_days")
-        ),
-        "supplier_delivery_text": offer.get("delivery_text") or (candidate or {}).get("delivery_text") or page_detail.get("delivery_text"),
-        "supplier_delivery_date": offer.get("delivery_date") or (candidate or {}).get("delivery_date") or page_detail.get("delivery_date"),
-        "supplier_offer_sku": offer.get("offer_sku") or (candidate or {}).get("sku") or detail.get("product_id"),
-        "supplier_seller_name": offer.get("seller_name") or (candidate or {}).get("seller_name"),
-        "supplier_seller_rating": offer.get("seller_rating"),
-        "supplier_seller_reviews": offer.get("seller_reviews"),
-        "supplier_offer_count": detail.get("other_offer_count") or 0,
-        "supplier_product_title": (candidate or {}).get("title"),
-        "supplier_image_url": (candidate or {}).get("image_url"),
-        "supplier_image_urls": _image_urls(candidate or {}),
-        "supplier_rating": (candidate or {}).get("rating"),
-        "supplier_reviews": (candidate or {}).get("reviews"),
-        "match_status": (candidate or {}).get("match_status") or "MANUAL_REVIEW",
-        "match_score": (candidate or {}).get("match_score"),
-        "match_reasons": (candidate or {}).get("match_reasons") or [],
-        "image_match": (candidate or {}).get("image_match") or {},
-        "search_attempts": search_attempts,
-        "price_hint_error": price_hint_error,
-        "visual_review_required": True,
+        "supplier_price_source": f"manual_product_page.{page_detail.get('price_source') or 'webPrice'}",
+        "supplier_delivery_days": page_detail.get("delivery_days"),
+        "supplier_delivery_text": page_detail.get("delivery_text"),
+        "supplier_delivery_date": page_detail.get("delivery_date"),
+        "supplier_offer_sku": exact_product_id,
+        "supplier_seller_name": "Ozon",
+        "supplier_seller_rating": None,
+        "supplier_seller_reviews": None,
+        "supplier_offer_count": 1,
+        "supplier_product_title": card.get("title"),
+        "supplier_image_url": card.get("image_url"),
+        "supplier_image_urls": list(card.get("image_urls") or [])[:6],
+        "supplier_rating": card.get("rating"),
+        "supplier_reviews": card.get("reviews"),
+        "match_status": "OPERATOR_CONFIRMED",
+        "match_score": 1.0,
+        "match_reasons": ["operator_selected_exact_url"],
+        "image_match": {"status": "OPERATOR_CONFIRMED"},
+        "search_attempts": [],
+        "price_hint_error": None,
+        "manual_override": True,
+        "visual_review_required": False,
         "price_confirmed": True,
-        "validated": bool(candidate and (candidate.get("image_url") or _image_urls(candidate))),
+        "validated": True,
     }

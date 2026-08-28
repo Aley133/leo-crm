@@ -371,10 +371,10 @@ class MerchantOfferApi:
                         model=model,
                         price=price,
                         stock=stock,
-                        preorder=None,
+                        preorder=max(1, int(preorder)),
                         include_brand=True,
                     ),
-                    "note": "Повторяет ручной Merchant Cabinet: первый process без preOrder.",
+                    "note": f"Первый process сразу создаёт тестовый товар с preOrder={max(1, int(preorder))}.",
                 },
                 {
                     "name": "protocol_verify",
@@ -448,13 +448,21 @@ class MerchantOfferApi:
             "body": response.text[:1000],
         }
 
-    def _initial_manual_process(self, *, merchant_sku: str, model: str, price: int, stock: int) -> dict[str, Any]:
+    def _initial_manual_process(
+        self,
+        *,
+        merchant_sku: str,
+        model: str,
+        price: int,
+        stock: int,
+        preorder: int,
+    ) -> dict[str, Any]:
         payload = self.process_payload(
             sku=merchant_sku,
             model=model,
             price=price,
             stock=stock,
-            preorder=None,
+            preorder=max(1, int(preorder)),
             include_brand=True,
         )
         started = time.perf_counter()
@@ -682,6 +690,7 @@ class MerchantOfferApi:
             model=model,
             price=price,
             stock=stock,
+            preorder=preorder,
         )
         steps.append({"name": "initial_process", **initial})
         if not initial["ok"]:

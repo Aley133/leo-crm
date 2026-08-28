@@ -36,6 +36,11 @@ PRODUCT_TEST_HISTORY_LIMIT = 40
 PRODUCT_TEST_AGENT_KIND = "product_test"
 PRODUCT_TEST_AGENT_ONLINE_SECONDS = 50
 PRODUCT_TEST_SUCCESS_VISIBLE_SECONDS = 15 * 60
+PRODUCT_TEST_CATEGORY_ERROR_VISIBLE_SECONDS = 3 * 60
+PRODUCT_TEST_CATEGORY_REJECTION_CODES = frozenset({
+    "VALIDATE_CHOOSE_REJECTED",
+    "VALIDATE_PRICE_STOCK_REJECTED",
+})
 
 
 class ProductTestInspectRequest(BaseModel):
@@ -235,8 +240,6 @@ def _submission_is_visible(item: ProductTestItem, *, now: datetime) -> bool:
     submission = _kaspi_submission(item)
     if not submission:
         return False
-    if submission.get("status") != "succeeded":
-        return True
     raw_hide_after = str(submission.get("hide_after") or "").strip()
     if not raw_hide_after:
         return True
@@ -247,6 +250,13 @@ def _submission_is_visible(item: ProductTestItem, *, now: datetime) -> bool:
     if hide_after.tzinfo is None:
         hide_after = hide_after.replace(tzinfo=UTC)
     return hide_after > now
+
+
+def _category_rejection_hide_after(*, error_code: object, error_message: object) -> str | None:
+    text = f"{error_code or ''} {error_message or ''}".upper()
+    if not any(code in text for code in PRODUCT_TEST_CATEGORY_REJECTION_CODES):
+        return None
+    return (_now() + timedelta(seconds=PRODUCT_TEST_CATEGORY_ERROR_VISIBLE_SECONDS)).isoformat()
 
 
 def _job_payload(job: ProductTestJob) -> dict:
@@ -273,6 +283,47 @@ def _settings(db: Session, workspace_id: int) -> ProductTestSettings:
         db.add(row)
         db.flush()
     return row
+
+
+def _refresh_upload_plan(item: ProductTestItem, settings: ProductTestSettings) -> dict | None:
+    """Keep the operator preview and the eventual create job on one calculation."""
+
+    details = dict(item.offers_json or {})
+    supplier = details.get("supplier") if isinstance(details.get("supplier"), dict) else {}
+    supplier_cost = _money(supplier.get("supplier_price_kzt"))
+    if not supplier.get("validated") or supplier_cost is None:
+        item.test_price_kzt = None
+        item.preorder_days = max(1, int(item.preorder_days or 0))
+        details.pop("initial_pricing", None)
+        item.offers_json = details
+        return None
+    pricing = choose_initial_offer_price(
+        supplier_cost_kzt=supplier_cost,
+        minimum_profit_kzt=Decimal(settings.minimum_profit_kzt),
+        competitor_price_kzt=_money(item.observed_price_kzt),
+        undercut_step_kzt=settings.undercut_step_kzt,
+    )
+    try:
+        delivery_days = max(0, int(supplier.get("supplier_delivery_days") or 0))
+    except (TypeError, ValueError):
+        delivery_days = 0
+    item.test_price_kzt = pricing.price_kzt
+    item.stock_count = settings.stock_count
+    item.preorder_days = max(1, delivery_days + settings.preorder_buffer_days)
+    details["initial_pricing"] = {
+        "price_kzt": format(pricing.price_kzt, "f"),
+        "safe_floor_kzt": format(pricing.safe_floor_kzt, "f"),
+        "competitor_price_kzt": (
+            None
+            if pricing.competitor_price_kzt is None
+            else format(pricing.competitor_price_kzt, "f")
+        ),
+        "status": pricing.status,
+        "preorder_days": item.preorder_days,
+        "supplier_delivery_days": delivery_days,
+    }
+    item.offers_json = details
+    return details["initial_pricing"]
 
 
 def _settings_payload(row: ProductTestSettings) -> dict:
@@ -562,6 +613,7 @@ def _finish_job(job: ProductTestJob, result: dict) -> None:
 
 def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dict:
     persisted: list[ProductTestItem] = []
+    settings = _settings(db, job.workspace_id)
     for row in list(result.get("rows") or [])[:100]:
         if not isinstance(row, dict):
             continue
@@ -667,6 +719,7 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
         else:
             for key, value in values.items():
                 setattr(item, key, value)
+        _refresh_upload_plan(item, settings)
         persisted.append(item)
     _finish_job(job, {
         "persisted_count": len(persisted),
@@ -698,6 +751,7 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
         raise ValueError("Ozon не подтвердил цену поставщика")
     item.supplier_url = url
     details = dict(item.offers_json or {})
+    manual_override = bool(result.get("manual_override"))
     details["supplier"] = {
         "supplier_url": url,
         "supplier_price_kzt": format(price, "f"),
@@ -723,14 +777,13 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
         "match_score": result.get("match_score"),
         "match_reasons": list(result.get("match_reasons") or [])[:12],
         "image_match": result.get("image_match") if isinstance(result.get("image_match"), dict) else {},
-        "visual_review_required": True,
-        "validated": bool(result.get("validated") and supplier_image),
+        "manual_override": manual_override,
+        "visual_review_required": bool(result.get("visual_review_required", not manual_override)),
+        "validated": bool(result.get("validated")),
         "validation_source": (
-            "manual_url_card_price_fallback"
-            if str(result.get("supplier_price_source") or "").startswith("search_card.")
+            "manual_exact_product_page"
+            if manual_override
             else "manual_url_product_page_price"
-            if str(result.get("supplier_price_source") or "").startswith("product_page.")
-            else "manual_url_other_offers"
         ),
     }
     item.offers_json = details
@@ -740,6 +793,7 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
         if details["supplier"]["validated"]
         else "Цена Ozon подтверждена, но фото карточки не получено. Проверьте или замените ссылку."
     )
+    _refresh_upload_plan(item, _settings(db, job.workspace_id))
     _finish_job(job, {"item_id": item.id, "supplier_price_kzt": format(price, "f")})
     db.commit()
     return {"job": _job_payload(job), "item": _item_payload(item)}
@@ -986,6 +1040,7 @@ def _enroll_created_product(db: Session, *, job: ProductTestJob, result: dict) -
         fast_dumping_policy_id=policy.id,
         error=None,
         error_code=None,
+        terminal_rejection=False,
     )
     _finish_job(job, {"product_id": product.id, "policy_id": policy.id, "merchant_sku": merchant_sku})
     db.commit()
@@ -1056,12 +1111,21 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
 
 @router.patch("/settings")
 def update_product_test_settings(payload: ProductTestSettingsUpdate, db: Session = Depends(get_db)) -> dict:
-    settings = _settings(db, current_workspace_id())
+    workspace_id = current_workspace_id()
+    settings = _settings(db, workspace_id)
     for key, value in payload.model_dump(exclude_unset=True).items():
         if value is not None:
             setattr(settings, key, value.strip() if isinstance(value, str) else value)
     if settings.target_new > settings.max_kaspi_scan:
         raise HTTPException(status_code=422, detail="Лимит сканирования должен быть не меньше числа новых товаров")
+    for item in db.scalars(
+        select(ProductTestItem).where(
+            ProductTestItem.workspace_id == workspace_id,
+            ProductTestItem.active.is_(True),
+        ).with_for_update()
+    ):
+        if not _kaspi_submission(item):
+            _refresh_upload_plan(item, settings)
     db.commit()
     db.refresh(settings)
     return _settings_payload(settings)
@@ -1146,27 +1210,12 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
     ):
         raise HTTPException(status_code=409, detail="Сначала подтвердите ссылку и цену поставщика Ozon")
     settings = _settings(db, workspace_id)
-    pricing = choose_initial_offer_price(
-        supplier_cost_kzt=supplier_cost,
-        minimum_profit_kzt=Decimal(settings.minimum_profit_kzt),
-        competitor_price_kzt=_money(item.observed_price_kzt),
-        undercut_step_kzt=settings.undercut_step_kzt,
-    )
-    delivery_days = int(supplier.get("supplier_delivery_days") or 0)
-    preorder_days = max(1, delivery_days + settings.preorder_buffer_days)
-    item.test_price_kzt = pricing.price_kzt
-    item.stock_count = settings.stock_count
-    item.preorder_days = preorder_days
+    pricing = _refresh_upload_plan(item, settings)
+    if pricing is None or item.test_price_kzt is None:
+        raise HTTPException(status_code=409, detail="Не удалось рассчитать стартовые параметры Kaspi")
+    preorder_days = max(1, int(item.preorder_days or 0))
     item.status = "adding_to_kaspi"
     item.last_error = None
-    details = dict(item.offers_json or {})
-    details["initial_pricing"] = {
-        "price_kzt": format(pricing.price_kzt, "f"),
-        "safe_floor_kzt": format(pricing.safe_floor_kzt, "f"),
-        "competitor_price_kzt": None if pricing.competitor_price_kzt is None else format(pricing.competitor_price_kzt, "f"),
-        "status": pricing.status,
-    }
-    item.offers_json = details
     job = _queue_job(
         db,
         workspace_id=workspace_id,
@@ -1178,7 +1227,7 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
         options={
             "master_sku": item.kaspi_product_id,
             "model": item.name,
-            "initial_price_kzt": int(pricing.price_kzt),
+            "initial_price_kzt": int(item.test_price_kzt),
             "stock_count": settings.stock_count,
             "preorder_days": preorder_days,
         },
@@ -1193,9 +1242,10 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
         hide_after=None,
         job_id=job.id,
         attempt=int(previous_submission.get("attempt") or 0) + 1,
-        initial_price_kzt=format(pricing.price_kzt, "f"),
+        initial_price_kzt=format(item.test_price_kzt, "f"),
         error=None,
         error_code=None,
+        terminal_rejection=False,
     )
     db.commit()
     return {"job": _job_payload(job), "item": _item_payload(item)}
@@ -1350,10 +1400,16 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
                     item.status = "error"
                     item.last_error = (payload.error_message or payload.error_code or "Локальный Agent завершил задание с ошибкой")[:4000]
                     if job.job_type == "create_offer":
+                        hide_after = _category_rejection_hide_after(
+                            error_code=payload.error_code,
+                            error_message=payload.error_message,
+                        )
                         _set_kaspi_submission(
                             item,
                             status="failed",
                             completed_at=_now().isoformat(),
+                            hide_after=hide_after,
+                            terminal_rejection=bool(hide_after),
                             error=item.last_error,
                             error_code=payload.error_code,
                         )
@@ -1379,10 +1435,16 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
                     item.status = "error"
                     item.last_error = job.error_message
                     if job.job_type == "create_offer":
+                        hide_after = _category_rejection_hide_after(
+                            error_code=job.error_code,
+                            error_message=job.error_message,
+                        )
                         _set_kaspi_submission(
                             item,
                             status="failed",
                             completed_at=_now().isoformat(),
+                            hide_after=hide_after,
+                            terminal_rejection=bool(hide_after),
                             error=item.last_error,
                             error_code=job.error_code,
                         )

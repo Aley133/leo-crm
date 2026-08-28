@@ -1,5 +1,5 @@
 import asyncio
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from xml.etree import ElementTree
@@ -462,6 +462,9 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert "supplier_delivery_text" in script
     assert "цена карточки Ozon" in script
     assert "supplier_price_source" in script
+    assert "СТАРТ KASPI" in script
+    assert "preOrder ${Math.max(1" in script
+    assert "точно по вашей ссылке" in script
     assert '["discover", "validate_supplier"].includes(job.job_type)' in script
     assert 'id="kaspi-submissions-section"' in html
     assert "renderSubmissions(submissions)" in script
@@ -666,6 +669,8 @@ def test_exact_product_page_parser_prefers_final_kzt_price_over_instalment() -> 
                 '{"finalPrice":"2 250 ₸","originalPrice":"11 430 ₸",'
                 '"installment":{"text":"188 ₸ × 12 месяцев"}}'
             ),
+            "webProductHeading-1507555262-default-1": '{"title":"GLS Пивные дрожжи 120 капсул"}',
+            "webGallery-1507555262-default-1": '{"coverImage":"https://ir.ozone.ru/s3/multimedia/yeast.jpg"}',
             "webRecommendations-price": '{"finalPrice":"999 ₽"}',
         }
     }
@@ -676,6 +681,8 @@ def test_exact_product_page_parser_prefers_final_kzt_price_over_instalment() -> 
     assert parsed["currency_code"] == "KZT"
     assert parsed["widget_key"].startswith("webPrice-")
     assert "finalPrice" in parsed["price_source"]
+    assert parsed["title"] == "GLS Пивные дрожжи 120 капсул"
+    assert parsed["image_url"].endswith("yeast.jpg")
 
 
 def test_ozon_match_uses_exact_product_page_when_modal_and_search_price_are_empty() -> None:
@@ -719,7 +726,7 @@ def test_ozon_match_uses_exact_product_page_when_modal_and_search_price_are_empt
     assert result["best"]["supplier_delivery_days"] == 1
 
 
-def test_manual_ozon_url_uses_exact_card_kzt_price_when_seller_modal_has_none(monkeypatch) -> None:
+def test_manual_ozon_url_uses_only_exact_product_page_price_and_delivery(monkeypatch) -> None:
     url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
 
     class FakeResolver:
@@ -731,28 +738,28 @@ def test_manual_ozon_url_uses_exact_card_kzt_price_when_seller_modal_has_none(mo
             self.profile = profile
 
         def product_price_hints(self, product_url: str) -> dict:
-            assert product_url == url
-            return {
-                "ok": True,
-                "product_id": "555555555",
-                "cheaper_price_kzt": None,
-                "cheaper_offer": None,
-                "other_offer_count": 0,
-            }
+            raise AssertionError(f"manual URL must not inspect other sellers: {product_url}")
 
         def search(self, query: str, page: int = 1) -> dict:
-            del page
-            assert query == "555555555"
+            raise AssertionError(f"manual URL must not start a search: {query} {page}")
+
+        def product_page_price(self, product_url: str, product_id: str) -> dict:
+            assert product_url == url
+            assert product_id == "555555555"
             return {
-                "attempt": {"status_code": 200, "blocked": False},
-                "items": [{
-                    "sku": "555555555",
+                "ok": True,
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice-555555555.finalPrice",
+                "delivery_text": "Доставим завтра",
+                "delivery_days": 1,
+                "card": {
                     "title": "Solgar Magnesium",
-                    "ozon_url": url,
-                    "effective_price_kzt": 4100,
-                    "delivery_days": 5,
                     "image_url": "https://ir.ozone.ru/s3/multimedia/manual.jpg",
-                }],
+                    "image_urls": ["https://ir.ozone.ru/s3/multimedia/manual.jpg"],
+                    "rating": 4.9,
+                    "reviews": 120,
+                },
             }
 
         def close(self):
@@ -763,9 +770,13 @@ def test_manual_ozon_url_uses_exact_card_kzt_price_when_seller_modal_has_none(mo
 
     result = product_discovery_runtime.validate_supplier_url(url)
 
-    assert result["supplier_price_kzt"] == 4100
-    assert result["supplier_price_source"] == "search_card.effective_price_kzt"
-    assert result["supplier_delivery_days"] == 5
+    assert result["supplier_url"] == url
+    assert result["supplier_price_kzt"] == 2250
+    assert result["supplier_price_source"] == "manual_product_page.webPrice-555555555.finalPrice"
+    assert result["supplier_delivery_days"] == 1
+    assert result["supplier_delivery_text"] == "Доставим завтра"
+    assert result["match_status"] == "OPERATOR_CONFIRMED"
+    assert result["manual_override"] is True
     assert result["validated"] is True
 
 
@@ -1013,15 +1024,17 @@ def test_manual_ozon_url_reuses_validation_job_and_refreshes_visual_pair(db_sess
             result={
                 "supplier_url": url,
                 "supplier_price_kzt": 4100,
-                "supplier_price_source": "search_card.effective_price_kzt",
+                "supplier_price_source": "manual_product_page.webPrice-555555555.finalPrice",
                 "supplier_offer_sku": "seller-555",
                 "supplier_seller_name": "Manual seller",
                 "supplier_product_title": "Solgar Magnesium Ozon",
                 "supplier_image_url": "https://ir.ozone.ru/s3/multimedia/manual.jpg",
                 "supplier_image_urls": ["https://ir.ozone.ru/s3/multimedia/manual.jpg"],
-                "match_status": "REVIEW",
-                "match_score": 0.74,
-                "image_match": {"status": "SUPPORT", "score": 0.84},
+                "match_status": "OPERATOR_CONFIRMED",
+                "match_score": 1.0,
+                "image_match": {"status": "OPERATOR_CONFIRMED"},
+                "manual_override": True,
+                "visual_review_required": False,
                 "validated": True,
             },
         ),
@@ -1029,10 +1042,12 @@ def test_manual_ozon_url_reuses_validation_job_and_refreshes_visual_pair(db_sess
     )
     supplier = completed["item"]["offers"]["supplier"]
     assert completed["item"]["status"] == "ready_to_add"
+    assert completed["item"]["test_price_kzt"] == Decimal("8999")
+    assert completed["item"]["preorder_days"] == 1
     assert supplier["supplier_image_url"].endswith("manual.jpg")
-    assert supplier["validation_source"] == "manual_url_card_price_fallback"
-    assert supplier["supplier_price_source"] == "search_card.effective_price_kzt"
-    assert supplier["image_match"]["status"] == "SUPPORT"
+    assert supplier["validation_source"] == "manual_exact_product_page"
+    assert supplier["supplier_price_source"].startswith("manual_product_page.")
+    assert supplier["image_match"]["status"] == "OPERATOR_CONFIRMED"
 
 
 def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_session, monkeypatch) -> None:
@@ -1214,9 +1229,57 @@ def test_failed_kaspi_submission_stays_visible_and_can_be_retried(db_session) ->
     assert failed["status"] == "failed"
     state = read_product_test_state(db_session)
     assert state["submissions"][0]["offers"]["kaspi_submission"]["status"] == "failed"
+    assert state["submissions"][0]["offers"]["kaspi_submission"]["hide_after"] is None
     retried = add_product_to_kaspi(item.id, db_session)
     assert retried["item"]["offers"]["kaspi_submission"]["status"] == "waiting"
     assert retried["item"]["offers"]["kaspi_submission"]["attempt"] == 2
+
+
+def test_category_rejection_disappears_from_kaspi_submissions_after_three_minutes(db_session, monkeypatch) -> None:
+    _seed_agent_account(db_session)
+    supplier_url = "https://www.ozon.kz/product/category-blocked-444444444/"
+    item = ProductTestItem(
+        workspace_id=1,
+        input_reference="Blocked category",
+        kaspi_product_id="720000002",
+        merchant_sku="720000002",
+        name="Blocked category product",
+        kaspi_url="https://kaspi.kz/shop/p/blocked-720000002/",
+        supplier_url=supplier_url,
+        observed_price_kzt=Decimal("9000"),
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        offers_json={"supplier": {"supplier_url": supplier_url, "supplier_price_kzt": "4000", "validated": True}},
+        status="ready_to_add",
+        active=True,
+    )
+    db_session.add(item)
+    db_session.commit()
+    add_product_to_kaspi(item.id, db_session)
+    claim = claim_product_test_job(
+        ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
+        db_session,
+    )
+    failed_at = datetime.now(UTC).replace(microsecond=0)
+    monkeypatch.setattr(product_test_api, "_now", lambda: failed_at)
+    complete_product_test_job(
+        claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=claim["job"]["lease_token"],
+            status="failed",
+            error_code="RuntimeError",
+            error_message="VALIDATE_CHOOSE_REJECTED",
+        ),
+        db_session,
+    )
+
+    submission = read_product_test_state(db_session)["submissions"][0]["offers"]["kaspi_submission"]
+    assert submission["terminal_rejection"] is True
+    assert datetime.fromisoformat(submission["hide_after"]) == failed_at + timedelta(minutes=3)
+    monkeypatch.setattr(product_test_api, "_now", lambda: failed_at + timedelta(minutes=3, seconds=1))
+    assert read_product_test_state(db_session)["submissions"] == []
 
 
 def test_changed_supplier_url_must_be_revalidated_before_add(db_session) -> None:

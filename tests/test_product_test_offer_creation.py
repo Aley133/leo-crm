@@ -1,9 +1,49 @@
 import asyncio
+from types import SimpleNamespace
 
 import pytest
 
 from tools import product_test_agent
 from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi, OfferState
+
+
+def test_initial_creation_process_includes_minimum_preorder(monkeypatch) -> None:
+    api = object.__new__(MerchantOfferApi)
+    api.store_id = "11843018_041600"
+    api.city_id = "196220100"
+    api.merchant_uid = "merchant-1"
+    requests: list[dict] = []
+    response = SimpleNamespace(
+        is_success=True,
+        status_code=200,
+        text='{"id":"operation-1"}',
+        json=lambda: {"id": "operation-1"},
+    )
+    monkeypatch.setattr(
+        api,
+        "_request_json",
+        lambda method, url, *, json_body: requests.append({"method": method, "url": url, "json": json_body}) or response,
+    )
+
+    result = api._initial_manual_process(
+        merchant_sku="138791468_857843219",
+        model="GLS Omega-3",
+        price=9599,
+        stock=5,
+        preorder=0,
+    )
+
+    assert result["ok"] is True
+    assert requests[0]["json"]["availabilities"][0]["preOrder"] == 1
+    preview = api.create_flow_preview(
+        master_sku="138791468",
+        model="GLS Omega-3",
+        price=9599,
+        stock=5,
+        preorder=0,
+    )
+    initial = next(step for step in preview["steps"] if step["name"] == "initial_process")
+    assert initial["json"]["availabilities"][0]["preOrder"] == 1
 
 
 def test_existing_zero_day_offer_is_repaired_without_creating_a_duplicate(monkeypatch) -> None:
