@@ -19,6 +19,10 @@ const request = async (url, options = {}) => {
 };
 const notify = (text, kind = "") => { message.textContent = text; message.className = `message ${kind}`.trim(); };
 const setBusy = (button, busy, label) => { if (!button.dataset.label) button.dataset.label = button.textContent; button.disabled = busy; button.textContent = busy ? label : button.dataset.label; };
+const scheduleRefresh = (delay = 3000) => {
+  if (refreshTimer) return;
+  refreshTimer = window.setTimeout(() => { refreshTimer = null; load(); }, Math.max(500, delay));
+};
 
 const statusText = (item) => ({
   ready_to_add: "Готово к вашей визуальной проверке",
@@ -52,8 +56,9 @@ const itemRow = (item, index) => {
   const score = supplier.match_score == null ? null : Math.round(Number(supplier.match_score) * 100);
   const visualText = visual.status === "CONFIRM" ? "Фото совпало" : visual.status === "SUPPORT" ? "Фото похоже" : "Проверить фото";
   const sellerOffers = Number(supplier.total_supplier_offers_checked || supplier.supplier_offer_count || 0);
-  const cardPrice = String(supplier.supplier_price_source || "").startsWith("search_card.");
-  const priceSource = cardPrice ? "цена карточки Ozon" : sellerOffers ? `${sellerOffers} предложений` : "";
+  const source = String(supplier.supplier_price_source || "");
+  const cardPrice = source.startsWith("search_card.") || source.startsWith("product_page.");
+  const priceSource = source.startsWith("product_page.") ? "цена страницы Ozon" : cardPrice ? "цена карточки Ozon" : sellerOffers ? `${sellerOffers} предложений` : "";
   const supplierLabel = supplier.supplier_seller_name || (cardPrice ? "Ozon" : "не подтверждён");
   const locked = ["validating_supplier", "adding_to_kaspi", "enrolled_fast_dumping"].includes(item.status);
   const canAdd = item.status === "ready_to_add" && supplier.validated;
@@ -71,16 +76,49 @@ const itemRow = (item, index) => {
   </article>`;
 };
 
+const submissionRow = (item) => {
+  const submission = item.offers?.kaspi_submission || {};
+  const status = submission.status || "waiting";
+  const waiting = status === "waiting";
+  const succeeded = status === "succeeded";
+  const title = waiting ? "Ждём появления товара на Kaspi" : succeeded ? "Успешно выгружен и обнаружен на Kaspi" : "Kaspi не подтвердил выгрузку";
+  const meta = succeeded
+    ? `SKU ${submission.merchant_sku || item.merchant_sku || "—"} · цена ${money(submission.actual_price_kzt || item.test_price_kzt)}`
+    : waiting
+      ? `попытка ${Number(submission.attempt || 1)} · поставлен ${dateTime(submission.queued_at)}`
+      : (submission.error || item.last_error || "Неизвестная ошибка");
+  return `<article class="submission-row ${escapeHtml(status)}" data-id="${item.id}">
+    ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="${escapeHtml(item.name)}" loading="lazy" referrerpolicy="no-referrer">` : '<div class="submission-image-placeholder">Нет фото</div>'}
+    <div class="submission-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml([item.brand, item.kaspi_product_id].filter(Boolean).join(" · "))}</small><span>${escapeHtml(title)}</span><em>${escapeHtml(meta)}</em></div>
+    <div class="submission-actions"><span class="submission-badge ${escapeHtml(status)}">${waiting ? "ОЖИДАНИЕ" : succeeded ? "УСПЕШНО" : "ОШИБКА"}</span>${succeeded ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div><small>исчезнет после ${dateTime(submission.hide_after)}</small>` : status === "failed" ? '<button class="button retry" type="button">Повторить выгрузку</button>' : '<small>Product Test Agent проверяет Merchant Cabinet</small>'}</div>
+  </article>`;
+};
+
+const renderSubmissions = (submissions) => {
+  const section = document.querySelector("#kaspi-submissions-section");
+  const list = document.querySelector("#kaspi-submissions");
+  section.classList.toggle("hidden", submissions.length === 0);
+  list.innerHTML = submissions.map(submissionRow).join("");
+  if (submissions.some((item) => (item.offers?.kaspi_submission?.status || "waiting") === "waiting")) {
+    scheduleRefresh(3000);
+  } else if (submissions.some((item) => item.offers?.kaspi_submission?.status === "succeeded")) {
+    const remaining = submissions
+      .filter((item) => item.offers?.kaspi_submission?.status === "succeeded")
+      .map((item) => new Date(item.offers.kaspi_submission.hide_after).getTime() - Date.now())
+      .filter((value) => Number.isFinite(value) && value > 0);
+    scheduleRefresh(Math.min(30000, ...(remaining.length ? remaining : [30000])) + 100);
+  }
+};
+
 const renderJobs = (jobs) => {
-  const relevant = jobs.filter((job) => job.job_type !== "inspect");
+  const relevant = jobs.filter((job) => ["discover", "validate_supplier"].includes(job.job_type));
   const active = relevant.filter((job) => ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
   const pending = active.filter((job) => ["queued", "leased"].includes(job.status));
   const lastSearch = relevant.find((job) => job.job_type === "discover" && job.status === "succeeded" && job.result);
-  const labels = {discover:"Поиск новых товаров", validate_supplier:"Проверка Ozon", create_offer:"Добавление на Kaspi", inspect:"Чтение карточки"};
+  const labels = {discover:"Поиск новых товаров", validate_supplier:"Проверка Ozon"};
   const summary = lastSearch ? `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>` : "";
   document.querySelector("#jobs").innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
-  document.querySelector("#job-count").textContent = pending.length;
-  if (pending.length && !refreshTimer) refreshTimer = window.setTimeout(() => { refreshTimer = null; load(); }, 3000);
+  if (pending.length) scheduleRefresh(3000);
 };
 
 const renderAgent = (payload) => {
@@ -115,14 +153,18 @@ const fillSettings = (settings) => {
 };
 
 const render = (payload) => {
+  if (refreshTimer) { window.clearTimeout(refreshTimer); refreshTimer = null; }
   const items = payload.items || [];
+  const submissions = payload.submissions || [];
   document.querySelector("#items").innerHTML = items.length ? `<div class="lab-results-table"><div class="lab-table-head"><span>#</span><span>KASPI</span><span>KASPI ЦЕНА</span><span>OZON</span><span>SUPPLIER COST</span><span>ДОСТАВКА</span><span>MATCH</span><span>СТАТУС / ДЕЙСТВИЯ</span></div>${items.map(itemRow).join("")}</div>` : "";
   document.querySelector("#empty").classList.toggle("hidden", items.length > 0);
   document.querySelector("#total-count").textContent = items.filter((item) => item.status !== "enrolled_fast_dumping").length;
   document.querySelector("#ready-count").textContent = items.filter((item) => item.status === "ready_to_add").length;
-  document.querySelector("#enrolled-count").textContent = items.filter((item) => item.status === "enrolled_fast_dumping").length;
+  document.querySelector("#job-count").textContent = (payload.jobs || []).filter((job) => ["queued", "leased"].includes(job.status)).length;
+  document.querySelector("#enrolled-count").textContent = submissions.filter((item) => item.offers?.kaspi_submission?.status === "succeeded").length;
   fillSettings(payload.settings || {});
   renderJobs(payload.jobs || []);
+  renderSubmissions(submissions);
   renderAgent(payload.agent || {});
 };
 
@@ -169,5 +211,15 @@ document.querySelector("#items").addEventListener("input", (event) => {
   const dirty = event.target.value.trim() !== (card.dataset.supplierUrl || "");
   card.classList.toggle("link-dirty", dirty);
   const add = card.querySelector(".add"); if (add) add.disabled = dirty || card.dataset.canAdd !== "1";
+});
+document.querySelector("#kaspi-submissions").addEventListener("click", async (event) => {
+  const row = event.target.closest(".submission-row"); const button = event.target.closest("button.retry");
+  if (!row || !button) return;
+  setBusy(button, true, "Повторяю…");
+  try {
+    await request(`/api/product-test/items/${row.dataset.id}/add`, {method:"POST"});
+    notify("Повторная выгрузка передана Product Test Agent.", "success");
+    await load();
+  } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 load();

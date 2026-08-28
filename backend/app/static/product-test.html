@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Тест товара</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
-  <link rel="stylesheet" href="/static/product-test.css?v=20260827-4">
+  <link rel="stylesheet" href="/static/product-test.css?v=20260828-1">
   <link rel="stylesheet" href="/static/product-images.css?v=20260819-2">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
@@ -78,6 +78,11 @@
           </details>
         </section>
 
+        <section id="kaspi-submissions-section" class="lab-section hidden">
+          <div class="lab-head controls"><div><span class="lab-kicker">КОНТРОЛЬ ПУБЛИКАЦИИ KASPI</span><h2>Переданные на Kaspi</h2><p>Здесь отдельно видны товары, которые ждут появления в Merchant Cabinet, а также результат выгрузки. Успешная строка остаётся ещё 15 минут и затем исчезает автоматически.</p></div></div>
+          <div id="kaspi-submissions" class="submission-list"></div>
+        </section>
+
         <section class="lab-section">
           <div class="lab-head controls"><div><span class="lab-kicker">ВИЗУАЛЬНОЕ СОПОСТАВЛЕНИЕ</span><h2>Kaspi ↔ Ozon</h2><p>Сначала сравните две фотографии. Если товар совпал — нажмите «Выгрузить на Kaspi». Если нет — вставьте правильную Ozon-ссылку и повторно проверьте. После подтверждения создаётся обычный товар и существующая привязка Мониторинга; параллельных путей нет.</p></div></div>
           <div id="jobs" class="jobs"></div>
@@ -88,6 +93,6 @@
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/product-test.js?v=20260827-4" defer></script>
+  <script src="/static/product-test.js?v=20260828-1" defer></script>
 </body>
 </html>

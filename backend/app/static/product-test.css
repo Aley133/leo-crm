@@ -75,6 +75,36 @@
 .empty { margin-top: 18px; padding: 28px; text-align: center; color: #8fa9c5; border: 1px dashed #35516f; border-radius: 14px; }
 .hidden { display: none !important; }
 
+.submission-list { display: grid; gap: 10px; margin-top: 18px; }
+.submission-row {
+  display: grid;
+  grid-template-columns: 72px minmax(0, 1fr) minmax(230px, auto);
+  align-items: center;
+  gap: 14px;
+  padding: 14px;
+  border: 1px solid #725a2e;
+  border-radius: 14px;
+  background: #091728;
+}
+.submission-row.succeeded { border-color: #2f7653; }
+.submission-row.failed { border-color: #6c3442; }
+.submission-row img,
+.submission-image-placeholder { box-sizing: border-box; width: 72px; height: 76px; border-radius: 10px; object-fit: contain; background: #fff; }
+.submission-image-placeholder { display: grid; place-items: center; padding: 5px; background: #14243a; color: #7897b8; font-size: 10px; text-align: center; }
+.submission-copy { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
+.submission-copy strong { color: #fff; }
+.submission-copy small { color: #7897b8; }
+.submission-copy span { color: #ffd180; font-weight: 800; }
+.submission-row.succeeded .submission-copy span { color: #83efbd; }
+.submission-row.failed .submission-copy span,
+.submission-row.failed .submission-copy em { color: #ff9cac; }
+.submission-copy em { color: #a8bfd8; font-size: 12px; font-style: normal; overflow-wrap: anywhere; }
+.submission-actions { display: flex; align-items: flex-end; flex-direction: column; gap: 9px; }
+.submission-actions small { color: #7897b8; }
+.submission-badge { border-radius: 999px; padding: 6px 9px; background: #4b3b1f; color: #ffd180; font-size: 10px; font-weight: 900; }
+.submission-badge.succeeded { background: #123f31; color: #83efbd; }
+.submission-badge.failed { background: #48242c; color: #ff9cac; }
+
 .lab-list { margin-top: 18px; overflow-x: auto; }
 .lab-results-table { min-width: 1460px; overflow: hidden; border: 1px solid #29415e; border-radius: 14px; background: #091728; }
 .lab-table-head,
@@ -182,4 +212,8 @@
   .market-product { grid-template-columns: 86px minmax(0, 1fr); }
   .market-product img,
   .market-image-placeholder { width: 86px; height: 102px; }
+  .submission-row { grid-template-columns: 58px minmax(0, 1fr); }
+  .submission-row img,
+  .submission-image-placeholder { width: 58px; height: 64px; }
+  .submission-actions { grid-column: 1 / -1; align-items: stretch; }
 }

@@ -35,6 +35,7 @@ PRODUCT_TEST_LEASE_SECONDS = 180
 PRODUCT_TEST_HISTORY_LIMIT = 40
 PRODUCT_TEST_AGENT_KIND = "product_test"
 PRODUCT_TEST_AGENT_ONLINE_SECONDS = 50
+PRODUCT_TEST_SUCCESS_VISIBLE_SECONDS = 15 * 60
 
 
 class ProductTestInspectRequest(BaseModel):
@@ -213,6 +214,39 @@ def _item_payload(item: ProductTestItem) -> dict:
         "created_at": item.created_at,
         "updated_at": item.updated_at,
     }
+
+
+def _kaspi_submission(item: ProductTestItem) -> dict:
+    details = item.offers_json if isinstance(item.offers_json, dict) else {}
+    submission = details.get("kaspi_submission")
+    return dict(submission) if isinstance(submission, dict) else {}
+
+
+def _set_kaspi_submission(item: ProductTestItem, **values: object) -> dict:
+    details = dict(item.offers_json or {})
+    submission = _kaspi_submission(item)
+    submission.update(values)
+    details["kaspi_submission"] = submission
+    item.offers_json = details
+    return submission
+
+
+def _submission_is_visible(item: ProductTestItem, *, now: datetime) -> bool:
+    submission = _kaspi_submission(item)
+    if not submission:
+        return False
+    if submission.get("status") != "succeeded":
+        return True
+    raw_hide_after = str(submission.get("hide_after") or "").strip()
+    if not raw_hide_after:
+        return True
+    try:
+        hide_after = datetime.fromisoformat(raw_hide_after.replace("Z", "+00:00"))
+    except ValueError:
+        return True
+    if hide_after.tzinfo is None:
+        hide_after = hide_after.replace(tzinfo=UTC)
+    return hide_after > now
 
 
 def _job_payload(job: ProductTestJob) -> dict:
@@ -421,13 +455,26 @@ def build_product_test_xml(source_xml: str, items: list[ProductTestItem]) -> byt
 @router.get("")
 def read_product_test_state(db: Session = Depends(get_db)) -> dict:
     workspace_id = current_workspace_id()
-    items = list(db.scalars(select(ProductTestItem).order_by(ProductTestItem.updated_at.desc(), ProductTestItem.id.desc())).all())
-    jobs = list(db.scalars(select(ProductTestJob).order_by(ProductTestJob.id.desc()).limit(20)).all())
+    all_items = list(db.scalars(
+        select(ProductTestItem)
+        .where(ProductTestItem.workspace_id == workspace_id)
+        .order_by(ProductTestItem.updated_at.desc(), ProductTestItem.id.desc())
+    ).all())
+    now = _now()
+    items = [item for item in all_items if item.active and not _kaspi_submission(item)]
+    submissions = [item for item in all_items if _submission_is_visible(item, now=now)]
+    jobs = list(db.scalars(
+        select(ProductTestJob)
+        .where(ProductTestJob.workspace_id == workspace_id)
+        .order_by(ProductTestJob.id.desc())
+        .limit(20)
+    ).all())
     feed = db.scalar(select(KaspiXmlFeed).where(KaspiXmlFeed.active.is_(True)).order_by(KaspiXmlFeed.id.desc()).limit(1))
     settings = _settings(db, workspace_id)
     db.commit()
     return {
         "items": [_item_payload(item) for item in items],
+        "submissions": [_item_payload(item) for item in submissions],
         "jobs": [_job_payload(job) for job in jobs],
         "feed": None if feed is None else {"id": feed.id, "source_filename": feed.source_filename, "merchant_id": feed.merchant_id},
         "defaults": {"city_id": settings.city_id, "zone_id": settings.zone_id},
@@ -537,6 +584,10 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
                 ProductTestItem.kaspi_product_id == kaspi_id,
             ).with_for_update()
         )
+        # A card already handed to Kaspi belongs to the publication-control
+        # list.  A later discovery must never overwrite that transaction.
+        if item is not None and _kaspi_submission(item):
+            continue
         supplier_price = _money(row.get("supplier_price_kzt"))
         supplier_url = str(row.get("supplier_url") or "").strip()[:4000] or None
         match_status = str(row.get("match_status") or "NO_RESULT")
@@ -580,6 +631,8 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
             "validation_source": (
                 "strict_multimodal_card_price_fallback"
                 if str(row.get("supplier_price_source") or "").startswith("search_card.")
+                else "strict_multimodal_product_page_price"
+                if str(row.get("supplier_price_source") or "").startswith("product_page.")
                 else "strict_multimodal_lowest_offer"
             ),
         }
@@ -675,6 +728,8 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
         "validation_source": (
             "manual_url_card_price_fallback"
             if str(result.get("supplier_price_source") or "").startswith("search_card.")
+            else "manual_url_product_page_price"
+            if str(result.get("supplier_price_source") or "").startswith("product_page.")
             else "manual_url_other_offers"
         ),
     }
@@ -913,6 +968,19 @@ def _enroll_created_product(db: Session, *, job: ProductTestJob, result: dict) -
     item.active = False
     item.added_at = now
     item.last_error = None
+    _set_kaspi_submission(
+        item,
+        status="succeeded",
+        completed_at=now.isoformat(),
+        detected_at=now.isoformat(),
+        hide_after=(now + timedelta(seconds=PRODUCT_TEST_SUCCESS_VISIBLE_SECONDS)).isoformat(),
+        merchant_sku=merchant_sku,
+        actual_price_kzt=format(actual_price, "f"),
+        product_id=product.id,
+        fast_dumping_policy_id=policy.id,
+        error=None,
+        error_code=None,
+    )
     _finish_job(job, {"product_id": product.id, "policy_id": policy.id, "merchant_sku": merchant_sku})
     db.commit()
     return {"job": _job_payload(job), "item": _item_payload(item), "product_id": product.id, "fast_dumping_policy_id": policy.id}
@@ -964,6 +1032,16 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
             "existing_kaspi_ids": existing_ids,
         },
     )
+    # Starting a new scan replaces the visual-candidate batch immediately.
+    # Items already submitted to Kaspi are preserved in their own control list.
+    for item in db.scalars(
+        select(ProductTestItem).where(
+            ProductTestItem.workspace_id == workspace_id,
+            ProductTestItem.active.is_(True),
+        ).with_for_update()
+    ):
+        if not _kaspi_submission(item):
+            item.active = False
     _prune_product_test_history(db, workspace_id=workspace_id)
     db.commit()
     db.refresh(job)
@@ -1051,8 +1129,10 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
     supplier = (item.offers_json or {}).get("supplier") or {}
     supplier_cost = _money(supplier.get("supplier_price_kzt"))
     validated_url = str(supplier.get("supplier_url") or "").strip()
+    previous_submission = _kaspi_submission(item)
+    retrying_failed_submission = item.status == "error" and previous_submission.get("status") == "failed"
     if (
-        item.status != "ready_to_add"
+        (item.status != "ready_to_add" and not retrying_failed_submission)
         or not item.supplier_url
         or item.supplier_url.strip() != validated_url
         or not supplier.get("validated")
@@ -1096,6 +1176,20 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
             "stock_count": settings.stock_count,
             "preorder_days": preorder_days,
         },
+    )
+    queued_at = _now()
+    _set_kaspi_submission(
+        item,
+        status="waiting",
+        queued_at=queued_at.isoformat(),
+        completed_at=None,
+        detected_at=None,
+        hide_after=None,
+        job_id=job.id,
+        attempt=int(previous_submission.get("attempt") or 0) + 1,
+        initial_price_kzt=format(pricing.price_kzt, "f"),
+        error=None,
+        error_code=None,
     )
     db.commit()
     return {"job": _job_payload(job), "item": _item_payload(item)}
@@ -1249,6 +1343,14 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
                 if item is not None:
                     item.status = "error"
                     item.last_error = (payload.error_message or payload.error_code or "Локальный Agent завершил задание с ошибкой")[:4000]
+                    if job.job_type == "create_offer":
+                        _set_kaspi_submission(
+                            item,
+                            status="failed",
+                            completed_at=_now().isoformat(),
+                            error=item.last_error,
+                            error_code=payload.error_code,
+                        )
             db.commit()
             return _job_payload(job)
 
@@ -1270,5 +1372,13 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
                 if item is not None:
                     item.status = "error"
                     item.last_error = job.error_message
+                    if job.job_type == "create_offer":
+                        _set_kaspi_submission(
+                            item,
+                            status="failed",
+                            completed_at=_now().isoformat(),
+                            error=item.last_error,
+                            error_code=job.error_code,
+                        )
             db.commit()
             return _job_payload(job)
