@@ -26,7 +26,7 @@ from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
 from tools.product_discovery.runtime import discover_products, validate_supplier_url
 
 
-VERSION = "1.0.2"
+VERSION = "1.0.3"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
