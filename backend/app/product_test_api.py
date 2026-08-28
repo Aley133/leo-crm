@@ -543,6 +543,7 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
         supplier = {
             "supplier_url": supplier_url,
             "supplier_price_kzt": None if supplier_price is None else format(supplier_price, "f"),
+            "supplier_price_source": row.get("supplier_price_source"),
             "supplier_delivery_days": row.get("supplier_delivery_days"),
             "supplier_delivery_text": str(row.get("supplier_delivery_text") or "").strip()[:255] or None,
             "supplier_delivery_date": str(row.get("supplier_delivery_date") or "").strip()[:32] or None,
@@ -576,7 +577,11 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
                 and match_status == "CONFIRMED"
                 and _external_https_url(row.get("supplier_image_url"))
             ),
-            "validation_source": "strict_multimodal_lowest_offer",
+            "validation_source": (
+                "strict_multimodal_card_price_fallback"
+                if str(row.get("supplier_price_source") or "").startswith("search_card.")
+                else "strict_multimodal_lowest_offer"
+            ),
         }
         offers = row.get("offers") if isinstance(row.get("offers"), dict) else {}
         offers = {**offers, "supplier": supplier}
@@ -643,6 +648,7 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
     details["supplier"] = {
         "supplier_url": url,
         "supplier_price_kzt": format(price, "f"),
+        "supplier_price_source": result.get("supplier_price_source"),
         "supplier_delivery_days": result.get("supplier_delivery_days"),
         "supplier_delivery_text": str(result.get("supplier_delivery_text") or "").strip()[:255] or None,
         "supplier_delivery_date": str(result.get("supplier_delivery_date") or "").strip()[:32] or None,
@@ -666,7 +672,11 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
         "image_match": result.get("image_match") if isinstance(result.get("image_match"), dict) else {},
         "visual_review_required": True,
         "validated": bool(result.get("validated") and supplier_image),
-        "validation_source": "manual_url_other_offers",
+        "validation_source": (
+            "manual_url_card_price_fallback"
+            if str(result.get("supplier_price_source") or "").startswith("search_card.")
+            else "manual_url_other_offers"
+        ),
     }
     item.offers_json = details
     item.status = "ready_to_add" if details["supplier"]["validated"] else "needs_supplier_link"

@@ -52,6 +52,9 @@ const itemRow = (item, index) => {
   const score = supplier.match_score == null ? null : Math.round(Number(supplier.match_score) * 100);
   const visualText = visual.status === "CONFIRM" ? "Фото совпало" : visual.status === "SUPPORT" ? "Фото похоже" : "Проверить фото";
   const sellerOffers = Number(supplier.total_supplier_offers_checked || supplier.supplier_offer_count || 0);
+  const cardPrice = String(supplier.supplier_price_source || "").startsWith("search_card.");
+  const priceSource = cardPrice ? "цена карточки Ozon" : sellerOffers ? `${sellerOffers} предложений` : "";
+  const supplierLabel = supplier.supplier_seller_name || (cardPrice ? "Ozon" : "не подтверждён");
   const locked = ["validating_supplier", "adding_to_kaspi", "enrolled_fast_dumping"].includes(item.status);
   const canAdd = item.status === "ready_to_add" && supplier.validated;
   const deliveryText = supplier.supplier_delivery_text || (supplier.supplier_delivery_date ? `до ${supplier.supplier_delivery_date}` : supplier.supplier_delivery_days != null ? `${supplier.supplier_delivery_days} дн.` : "—");
@@ -61,7 +64,7 @@ const itemRow = (item, index) => {
     <div data-label="KASPI">${marketProduct({market:"Kaspi", title:item.name, brand:item.brand, sku:item.kaspi_product_id, image:item.image_url, url:item.kaspi_url, rating:kaspi.rating, reviews:kaspi.reviews})}</div>
     <div class="table-value" data-label="KASPI ЦЕНА"><strong>${money(item.observed_price_kzt)}</strong><small>конкурент</small></div>
     <div data-label="OZON">${marketProduct({market:"Ozon", title:ozonTitle, brand:autoOzon.brand, sku:supplier.supplier_offer_sku || autoOzon.sku, image:ozonImage, url:item.supplier_url, rating:supplier.supplier_rating ?? autoOzon.rating, reviews:supplier.supplier_reviews ?? autoOzon.reviews})}</div>
-    <div class="table-value supplier-cost" data-label="SUPPLIER COST"><strong>${money(supplier.supplier_price_kzt)}</strong><small>${escapeHtml(supplier.supplier_seller_name || "не подтверждён")}</small><em>${sellerOffers ? `${sellerOffers} предложений` : ""}</em></div>
+    <div class="table-value supplier-cost" data-label="SUPPLIER COST"><strong>${money(supplier.supplier_price_kzt)}</strong><small>${escapeHtml(supplierLabel)}</small><em>${escapeHtml(priceSource)}</em></div>
     <div class="table-value" data-label="ДОСТАВКА"><strong>${escapeHtml(deliveryText)}</strong>${supplier.supplier_delivery_days != null ? `<small>${supplier.supplier_delivery_days} дн.</small>` : ""}</div>
     <div class="match-cell" data-label="MATCH"><strong>${score == null ? "—" : `${score}%`}</strong><span>${escapeHtml(visualText)}</span><small>${escapeHtml(supplier.match_status || "NO_RESULT")}</small></div>
     <div class="result-actions" data-label="СТАТУС / ДЕЙСТВИЯ"><span class="result-status ${matchClass}">${escapeHtml(statusText(item))}</span><label><span>Правильная ссылка Ozon</span><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="https://www.ozon.kz/product/…" ${locked ? "disabled" : ""}></label><button class="button validate" type="button" ${locked ? "disabled" : ""}>Проверить / заменить</button><button class="button add" type="button" ${canAdd ? "" : "disabled"}>Выгрузить на Kaspi</button>${item.product_id ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div>` : ""}</div>

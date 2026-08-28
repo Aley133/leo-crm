@@ -457,6 +457,8 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert "lab-results-table" in script
     assert "supplier_rating" in script
     assert "supplier_delivery_text" in script
+    assert "цена карточки Ozon" in script
+    assert "supplier_price_source" in script
     assert 'job.job_type !== "inspect"' in script
     assert "supplier_image_url" in script
     assert 'href="/crm/monitoring"' in script
@@ -595,6 +597,112 @@ def test_ozon_match_checks_all_strategies_and_chooses_lowest_strict_price() -> N
     assert result["best"]["total_supplier_offers_checked"] == 8
 
 
+def test_ozon_match_uses_explicit_kzt_card_price_when_seller_modal_has_none() -> None:
+    product = {
+        "title": "Solgar Magnesium Citrate 400 mg 120 capsules",
+        "brand": "Solgar",
+    }
+    candidate = {
+        "sku": "ozon-card-price",
+        "title": product["title"],
+        "brand": "Solgar",
+        "ozon_url": "https://www.ozon.kz/product/solgar-magnesium-222222222/",
+        "price_kzt": 3800,
+        "effective_price_kzt": 3650,
+        "delivery_days": 4,
+        "delivery_text": "Доставим через 4 дня",
+        "image_url": "https://ir.ozone.ru/s3/multimedia/solgar.jpg",
+    }
+
+    class FakeClient:
+        def search(self, query: str, page: int = 1) -> dict:
+            del query, page
+            return {"attempt": {"status_code": 200, "blocked": False}, "items": [candidate]}
+
+        def product_price_hints(self, url: str) -> dict:
+            del url
+            return {
+                "ok": True,
+                "cheaper_price_kzt": None,
+                "cheaper_offer": None,
+                "other_offer_count": 0,
+            }
+
+    result = product_discovery_runtime._best_ozon_match(
+        FakeClient(),
+        product,
+        max_queries=1,
+        verifier=None,
+    )
+
+    assert result["best"]["supplier_price_kzt"] == 3650
+    assert result["best"]["supplier_price_source"] == "search_card.effective_price_kzt"
+    assert result["best"]["supplier_delivery_days"] == 4
+    assert result["best"]["priced_strict_candidates"] == 1
+
+
+def test_ozon_card_price_fallback_never_uses_rub_amount() -> None:
+    candidate = {
+        "ozon_url": "https://www.ozon.kz/product/example-222222222/",
+        "price_value": 799,
+        "price_rub": 799,
+        "currency_code": "RUB",
+    }
+
+    assert product_discovery_runtime._attach_search_card_supplier_offer(candidate) is False
+    assert "supplier_price_kzt" not in candidate
+
+
+def test_manual_ozon_url_uses_exact_card_kzt_price_when_seller_modal_has_none(monkeypatch) -> None:
+    url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def product_price_hints(self, product_url: str) -> dict:
+            assert product_url == url
+            return {
+                "ok": True,
+                "product_id": "555555555",
+                "cheaper_price_kzt": None,
+                "cheaper_offer": None,
+                "other_offer_count": 0,
+            }
+
+        def search(self, query: str, page: int = 1) -> dict:
+            del page
+            assert query == "555555555"
+            return {
+                "attempt": {"status_code": 200, "blocked": False},
+                "items": [{
+                    "sku": "555555555",
+                    "title": "Solgar Magnesium",
+                    "ozon_url": url,
+                    "effective_price_kzt": 4100,
+                    "delivery_days": 5,
+                    "image_url": "https://ir.ozone.ru/s3/multimedia/manual.jpg",
+                }],
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+
+    result = product_discovery_runtime.validate_supplier_url(url)
+
+    assert result["supplier_price_kzt"] == 4100
+    assert result["supplier_price_source"] == "search_card.effective_price_kzt"
+    assert result["supplier_delivery_days"] == 5
+    assert result["validated"] is True
+
+
 def test_discovery_keeps_scanning_until_complete_visual_pairs(monkeypatch) -> None:
     products = [
         {
@@ -716,6 +824,7 @@ def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_sessio
                     "page_visible_price_kzt": "9000",
                     "supplier_url": "https://www.ozon.kz/product/solgar-222222222/",
                     "supplier_price_kzt": "4000",
+                    "supplier_price_source": "search_card.effective_price_kzt",
                     "supplier_delivery_days": 3,
                     "supplier_delivery_text": "Доставим 30 августа",
                     "supplier_delivery_date": "2026-08-30",
@@ -747,6 +856,8 @@ def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_sessio
     assert completed["items"][0]["offers"]["supplier"]["supplier_rating"] == 4.8
     assert completed["items"][0]["offers"]["supplier"]["supplier_reviews"] == 524
     assert completed["items"][0]["offers"]["supplier"]["supplier_delivery_text"] == "Доставим 30 августа"
+    assert completed["items"][0]["offers"]["supplier"]["supplier_price_source"] == "search_card.effective_price_kzt"
+    assert completed["items"][0]["offers"]["supplier"]["validation_source"] == "strict_multimodal_card_price_fallback"
     assert completed["items"][0]["offers"]["supplier"]["priced_strict_candidates"] == 2
     assert completed["items"][0]["offers"]["supplier"]["total_supplier_offers_checked"] == 9
 
@@ -794,6 +905,7 @@ def test_manual_ozon_url_reuses_validation_job_and_refreshes_visual_pair(db_sess
             result={
                 "supplier_url": url,
                 "supplier_price_kzt": 4100,
+                "supplier_price_source": "search_card.effective_price_kzt",
                 "supplier_offer_sku": "seller-555",
                 "supplier_seller_name": "Manual seller",
                 "supplier_product_title": "Solgar Magnesium Ozon",
@@ -810,7 +922,8 @@ def test_manual_ozon_url_reuses_validation_job_and_refreshes_visual_pair(db_sess
     supplier = completed["item"]["offers"]["supplier"]
     assert completed["item"]["status"] == "ready_to_add"
     assert supplier["supplier_image_url"].endswith("manual.jpg")
-    assert supplier["validation_source"] == "manual_url_other_offers"
+    assert supplier["validation_source"] == "manual_url_card_price_fallback"
+    assert supplier["supplier_price_source"] == "search_card.effective_price_kzt"
     assert supplier["image_match"]["status"] == "SUPPORT"
 
 
