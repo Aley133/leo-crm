@@ -19,6 +19,7 @@ const floorSection = document.querySelector("#floor-section");
 const empty = document.querySelector("#empty");
 const editDialog = document.querySelector("#edit-dialog");
 const editForm = document.querySelector("#edit-form");
+const editRemove = document.querySelector("#edit-remove");
 let rows = [];
 let searchTimer = null;
 let searchController = null;
@@ -311,6 +312,25 @@ editForm.addEventListener("submit", async (event) => {
     await loadPage();
   } catch (error) { message.textContent = error.message || "Не удалось изменить настройки"; }
   finally { setBusy(button, false, ""); }
+});
+
+editRemove.addEventListener("click", async () => {
+  const productId = Number(document.querySelector("#edit-product-id").value);
+  const row = rows.find((item) => Number(item.product_id) === productId);
+  if (!productId || !row) return;
+  if (!window.confirm(`Удалить «${row.name}» из Fast Dumping? Товар, остатки и карточка Kaspi останутся без изменений.`)) return;
+  setBusy(editRemove, true, "Удаляю…");
+  try {
+    await request(`/api/fast-dumping/products/${productId}`, {method:"DELETE"});
+    editDialog.close();
+    offersCache.delete(productId);
+    message.textContent = "Товар удалён из Fast Dumping. Карточка, остатки и текущий offer Kaspi не изменялись.";
+    await loadPage();
+  } catch (error) {
+    message.textContent = error.message || "Не удалось удалить товар из Fast Dumping";
+  } finally {
+    setBusy(editRemove, false, "");
+  }
 });
 
 const actionClick = async (event) => {
