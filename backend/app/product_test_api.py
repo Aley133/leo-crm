@@ -89,12 +89,16 @@ class ProductTestNewCardCategoryRequest(BaseModel):
 
 
 class ProductTestNewCardUpdate(BaseModel):
-    sku: str | None = Field(default=None, min_length=1, max_length=64)
-    title: str | None = Field(default=None, min_length=1, max_length=1024)
-    brand: str | None = Field(default=None, min_length=1, max_length=255)
-    description: str | None = Field(default=None, min_length=1, max_length=1024)
+    # A draft must accept intermediate empty values while the operator is
+    # typing.  Final Product Import validation below still requires every
+    # mandatory value, but autosave must never reject and lose a partially
+    # edited field merely because it is temporarily blank.
+    sku: str | None = Field(default=None, max_length=64)
+    title: str | None = Field(default=None, max_length=1024)
+    brand: str | None = Field(default=None, max_length=255)
+    description: str | None = Field(default=None, max_length=1024)
     weight: Decimal | None = Field(default=None, gt=0, le=10000)
-    category: str | None = Field(default=None, min_length=1, max_length=255)
+    category: str | None = Field(default=None, max_length=255)
     category_title: str | None = Field(default=None, max_length=500)
     attributes: list[dict] | None = Field(default=None, max_length=300)
     images: list[str] | None = Field(default=None, max_length=20)
@@ -275,6 +279,57 @@ def _set_new_card_draft(item: ProductTestItem, draft: dict) -> None:
     details["mode"] = "new_card"
     details["new_card"] = draft
     item.offers_json = details
+
+
+def _attribute_key(row: object) -> str:
+    if not isinstance(row, dict):
+        return ""
+    return str(row.get("code") or "").strip().casefold()
+
+
+def _operator_attribute_updates(current: list[dict], incoming: list[dict]) -> list[dict]:
+    """Mark values changed in the CRM form as authoritative operator input."""
+
+    current_by_code = {
+        key: dict(row)
+        for row in current
+        if (key := _attribute_key(row))
+    }
+    output: list[dict] = []
+    for raw in incoming[:300]:
+        if not isinstance(raw, dict):
+            continue
+        key = _attribute_key(raw)
+        previous = current_by_code.get(key, {})
+        row = {**previous, **dict(raw)}
+        if previous.get("manual_override") or row.get("value") != previous.get("value"):
+            row["manual_override"] = True
+        else:
+            row.pop("manual_override", None)
+        output.append(row)
+    return output
+
+
+def _preserve_operator_attribute_values(current: list[dict], mapped: list[dict]) -> list[dict]:
+    """Merge a fresh Kaspi mapping without overwriting saved manual values."""
+
+    current_by_code = {
+        key: dict(row)
+        for row in current
+        if (key := _attribute_key(row))
+    }
+    output: list[dict] = []
+    for raw in mapped[:300]:
+        if not isinstance(raw, dict):
+            continue
+        row = dict(raw)
+        previous = current_by_code.get(_attribute_key(row))
+        if previous and previous.get("manual_override"):
+            row["value"] = previous.get("value")
+            row["manual_override"] = True
+            row["manual_source_name"] = "Введено вручную"
+        output.append(row)
+    return output
 
 
 def _new_card_draft_errors(draft: dict) -> list[str]:
@@ -862,9 +917,13 @@ def _persist_new_card_mapping(db: Session, *, job: ProductTestJob, result: dict)
         raise ValueError("Черновик новой карточки не найден")
     draft = _new_card_draft(item)
     draft["category"] = str(result.get("category") or job.options_json.get("category") or "").strip()[:255]
-    draft["attributes"] = [
+    mapped_attributes = [
         dict(row) for row in list(result.get("attributes") or [])[:300] if isinstance(row, dict)
     ]
+    draft["attributes"] = _preserve_operator_attribute_values(
+        list(draft.get("attributes") or []),
+        mapped_attributes,
+    )
     categories = list(draft.get("categories") or [])
     match = next((row for row in categories if str(row.get("code") or "") == draft["category"]), None)
     if match is not None:
@@ -1626,7 +1685,10 @@ def update_product_test_new_card(
                 if (url := _external_https_url(raw))
             ]
         elif key == "attributes":
-            value = [dict(row) for row in list(value or [])[:300] if isinstance(row, dict)]
+            value = _operator_attribute_updates(
+                list(draft.get("attributes") or []),
+                [dict(row) for row in list(value or [])[:300] if isinstance(row, dict)],
+            )
         elif key == "weight":
             value = None if value is None else format(value, "f")
         elif isinstance(value, str):

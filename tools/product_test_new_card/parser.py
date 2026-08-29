@@ -437,7 +437,15 @@ def enrich_supplement_characteristics(
         "Активный компонент",
         "Действующее вещество",
     )
-    add("Название препарата", _pick_fact(index, "Название препарата") or main_component)
+    # Ozon often omits a dedicated drug-name characteristic even though the
+    # exact commercial name is present in the product title.  The title is a
+    # factual fallback and is safer than leaving Kaspi's required field empty.
+    add(
+        "Название препарата",
+        _pick_fact(index, "Название препарата")
+        or main_component
+        or clean_product_title(str(title or "")),
+    )
 
     purpose = _pick_fact(
         index,

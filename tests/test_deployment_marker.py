@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.26.3"
-EXPECTED_DEPLOYMENT_MARKER = "new-card-create-and-calendar-delivery"
+EXPECTED_APP_VERSION = "0.26.4"
+EXPECTED_DEPLOYMENT_MARKER = "new-card-manual-draft-and-safe-autofill"
 
 
 def test_application_metadata_contract() -> None:

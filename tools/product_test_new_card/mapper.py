@@ -128,6 +128,7 @@ FIELD_ENUM_CONCEPTS: dict[str, tuple[tuple[tuple[str, ...], tuple[str, ...]], ..
         (("печен", "детокс", "очищ"), ("печен", "детокс", "очищ")),
         (("сустав", "кост", "опорно"), ("сустав", "кост", "опорно")),
         (("кожа", "волос", "ногт"), ("кожа", "волос", "ногт")),
+        (("красот", "уход", "внешност"), ("красот", "кожа", "волос", "ногт", "уход")),
     ),
     "vitamins*purpose": (
         (("микрофлор", "кишеч", "пищевар", "жкт"), ("микрофлор", "кишеч", "пищевар", "жкт")),
@@ -135,6 +136,7 @@ FIELD_ENUM_CONCEPTS: dict[str, tuple[tuple[tuple[str, ...], tuple[str, ...]], ..
         (("очищ", "детокс"), ("очищ", "детокс")),
         (("иммун" ,), ("иммун",)),
         (("сердц", "сосуд", "кровообращ", "кардио"), ("сердц", "сосуд", "кровообращ", "кардио")),
+        (("красот", "уход", "внешност", "волос", "ногт", "кожа"), ("красот", "уход", "волос", "ногт", "кожа")),
     ),
     "dietary supplements*release form": (
         (("капсул",), ("капсул",)),
@@ -387,6 +389,36 @@ def map_characteristics(
             chosen_index = index
             chosen_explicit = explicit
             break
+
+        # Some Ozon supplement cards have no separate "Основной компонент"
+        # row, while the product title still contains a component that Kaspi
+        # exposes in its official enum.  Use the title-derived drug name only
+        # when that enum itself confirms a legal value; never copy the whole
+        # title into a free-text component field.
+        if (
+            chosen_index is None
+            and not mapped_value
+            and allowed
+            and code.casefold() == "dietary supplements*main component"
+        ):
+            for index in source_by_name.get(normalize("Название препарата"), []):
+                row = source[index]
+                candidate_value, candidate_value_score = best_values(
+                    str(row.get("value") or ""),
+                    allowed,
+                    multi=bool(attribute.get("multi_valued")),
+                    field_code=code,
+                )
+                if not candidate_value:
+                    continue
+                mapped_value = candidate_value
+                value_score = candidate_value_score
+                source_name = row.get("name")
+                source_value = row.get("value")
+                chosen_score = 0.90
+                chosen_index = index
+                chosen_explicit = True
+                break
 
         if chosen_index is not None and not chosen_explicit:
             used_source.add(chosen_index)

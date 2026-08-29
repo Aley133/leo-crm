@@ -1,4 +1,5 @@
 from tools.product_test_new_card.mapper import build_payload, map_characteristics, similarity, validate_payload
+from tools.product_test_new_card.parser import enrich_supplement_characteristics
 
 
 def test_similarity_matches_common_ru_fields():
@@ -163,6 +164,44 @@ def test_baad_range_of_applications_maps_microflora_to_kaspi_digestive_enum():
     mapped = map_characteristics(source, attrs, values)
     assert mapped[0]["value"] == "пищеварение"
     assert mapped[0]["value_score"] >= 0.9
+
+
+def test_sparse_beauty_card_uses_title_and_confirmed_kaspi_enums() -> None:
+    source = enrich_supplement_characteristics(
+        "Hair Formula с биотином для волос и ногтей 60 капсул",
+        [{"name": "Направление витаминов", "value": "Для красоты"}],
+    )
+    attrs = [
+        {"code": "Vitamins*Drug name", "title": "Vitamins*Drug name", "required": True, "type": "string"},
+        {"code": "Vitamins*Purpose", "title": "Vitamins*Purpose", "required": True, "type": "enum"},
+        {
+            "code": "Dietary supplements*Range of applications",
+            "title": "Dietary supplements*Range of applications",
+            "required": True,
+            "type": "enum",
+        },
+        {
+            "code": "Dietary supplements*Main component",
+            "title": "Dietary supplements*Main component",
+            "required": True,
+            "type": "enum",
+        },
+    ]
+    values = {
+        "Vitamins*Purpose": [{"code": "beauty", "name": "Красота и здоровье"}],
+        "Dietary supplements*Range of applications": [
+            {"code": "hair", "name": "Кожа, волосы и ногти"}
+        ],
+        "Dietary supplements*Main component": [{"code": "biotin", "name": "Биотин"}],
+    }
+
+    mapped = map_characteristics(source, attrs, values)
+    by_code = {row["code"]: row for row in mapped}
+
+    assert by_code["Vitamins*Drug name"]["value"].startswith("Hair Formula")
+    assert by_code["Vitamins*Purpose"]["value"] == "beauty"
+    assert by_code["Dietary supplements*Range of applications"]["value"] == "hair"
+    assert by_code["Dietary supplements*Main component"]["value"] == "biotin"
 
 
 def test_baad_purpose_does_not_confuse_tone_with_cleansing():
