@@ -8,6 +8,10 @@ const pageMode = document.body.dataset.productTestPage || "product-test";
 const isAddProductPage = pageMode === "add-product";
 let refreshTimer = null;
 let currentNewCards = new Map();
+const localNewCardDrafts = new Map();
+const newCardSaveTimers = new Map();
+const newCardSaveVersions = new Map();
+const newCardSaveChains = new Map();
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
@@ -142,6 +146,26 @@ const newCardStatus = (item, mappingBusy = false) => ({
   new_card_error: item.last_error || "Kaspi отклонил карточку — исправьте черновик",
 }[item.status] || item.status || "Черновик");
 
+const newCardAttributeKey = (row, index = 0) => String(row?.code || `index:${index}`).trim().toLowerCase();
+
+const withLocalNewCardDraft = (item) => {
+  const local = localNewCardDrafts.get(String(item.id));
+  if (!local) return item;
+  const serverDraft = item.offers?.new_card || {};
+  const localAttributes = new Map((local.attributes || []).map((row, index) => [newCardAttributeKey(row, index), row]));
+  const attributes = (serverDraft.attributes || []).map((row, index) => {
+    const edited = localAttributes.get(newCardAttributeKey(row, index));
+    return edited ? {...row, value:edited.value, manual_override:edited.manual_override ?? row.manual_override} : row;
+  });
+  return {
+    ...item,
+    offers:{
+      ...(item.offers || {}),
+      new_card:{...serverDraft, ...local, attributes},
+    },
+  };
+};
+
 const newCardRow = (item, activeJobTypes = new Set()) => {
   const draft = item.offers?.new_card || {};
   const supplier = item.offers?.supplier || {};
@@ -159,9 +183,10 @@ const newCardRow = (item, activeJobTypes = new Set()) => {
     const allowed = row.allowed_values || [];
     const listId = `new-card-attr-${item.id}-${index}`;
     const options = allowed.map((value) => `<option value="${escapeHtml(value.code || value.name || "")}">${escapeHtml(value.name || value.code || "")}</option>`).join("");
-    return `<tr data-index="${index}"><td><strong>${escapeHtml(row.title || row.code)}</strong>${row.required ? '<span class="required-pill">обязательно</span>' : ""}<small>${escapeHtml(row.code || "")}${row.multi_valued ? " · несколько через ;" : ""}</small></td><td><input class="new-card-attr" ${allowed.length ? `list="${listId}"` : ""} value="${escapeHtml(row.value || "")}" ${editingLocked ? "disabled" : ""}>${allowed.length ? `<datalist id="${listId}">${options}</datalist>` : ""}</td><td><small>${escapeHtml([row.source_name, row.source_value].filter(Boolean).join(": ") || "нет источника Ozon")}</small></td></tr>`;
+    const sourceText = row.manual_override ? "Введено вручную — автоподстановка не перезапишет" : ([row.source_name, row.source_value].filter(Boolean).join(": ") || "нет источника Ozon");
+    return `<tr data-index="${index}"><td><strong>${escapeHtml(row.title || row.code)}</strong>${row.required ? '<span class="required-pill">обязательно</span>' : ""}<small>${escapeHtml(row.code || "")}${row.multi_valued ? " · несколько через ;" : ""}</small></td><td><input class="new-card-attr" ${allowed.length ? `list="${listId}"` : ""} value="${escapeHtml(row.value || "")}" ${editingLocked ? "disabled" : ""}>${allowed.length ? `<datalist id="${listId}">${options}</datalist>` : ""}</td><td><small>${escapeHtml(sourceText)}</small></td></tr>`;
   }).join("");
-  return `<article class="new-card-editor" data-id="${item.id}" data-category="${escapeHtml(draft.category || "")}">
+  return `<article class="new-card-editor" data-id="${item.id}" data-category="${escapeHtml(draft.category || "")}" data-dirty="${localNewCardDrafts.has(String(item.id)) ? "1" : "0"}">
     <div class="new-card-summary">
       ${displayImage ? `<img src="${escapeHtml(displayImage)}" alt="${escapeHtml(item.name)}" loading="lazy" referrerpolicy="no-referrer">` : '<div class="market-image-placeholder">Нет фото</div>'}
       <div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml([item.brand, draft.sku].filter(Boolean).join(" · "))}</small><a href="${escapeHtml(item.supplier_url || "")}" target="_blank" rel="noopener">Открыть Ozon ↗</a></div>
@@ -189,14 +214,21 @@ const renderNewCards = (items, jobs) => {
   const empty = document.querySelector("#new-cards-empty");
   const jobList = document.querySelector("#new-card-jobs");
   if (!list || !empty || !jobList) return;
-  currentNewCards = new Map(items.map((item) => [String(item.id), item]));
+  // A background poll may fire while the operator is typing. Capture the DOM
+  // before replacing it, then overlay those unsaved values on the fresh server
+  // payload so the form never jumps back or clears fields.
+  list.querySelectorAll('.new-card-editor[data-dirty="1"]').forEach((card) => {
+    localNewCardDrafts.set(String(card.dataset.id), collectNewCard(card));
+  });
+  const renderedItems = items.map(withLocalNewCardDraft);
+  currentNewCards = new Map(renderedItems.map((item) => [String(item.id), item]));
   const activeByItem = new Map();
   jobs.filter((job) => ["queued", "leased"].includes(job.status)).forEach((job) => {
     const key = String(job.item_id || "");
     if (!activeByItem.has(key)) activeByItem.set(key, new Set());
     activeByItem.get(key).add(job.job_type);
   });
-  list.innerHTML = items.map((item) => newCardRow(item, activeByItem.get(String(item.id)) || new Set())).join("");
+  list.innerHTML = renderedItems.map((item) => newCardRow(item, activeByItem.get(String(item.id)) || new Set())).join("");
   empty.classList.toggle("hidden", items.length > 0);
   const types = new Set(["prepare_new_card", "map_new_card_category", "create_new_card", "confirm_new_card"]);
   const relevant = jobs.filter((job) => types.has(job.job_type) && ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
@@ -219,6 +251,52 @@ const collectNewCard = (card) => {
     attributes,
     images: [...card.querySelectorAll(".new-card-image-use:checked")].map((input) => input.dataset.url),
   };
+};
+
+const persistNewCardDraft = (itemId, payload) => {
+  const previous = newCardSaveChains.get(itemId) || Promise.resolve();
+  const next = previous.catch(() => undefined).then(() => request(`/api/product-test/new-cards/${itemId}`, {method:"PATCH", body:JSON.stringify(payload)}));
+  newCardSaveChains.set(itemId, next);
+  return next;
+};
+
+const scheduleNewCardAutosave = (card) => {
+  const itemId = String(card.dataset.id);
+  const payload = collectNewCard(card);
+  localNewCardDrafts.set(itemId, payload);
+  card.dataset.dirty = "1";
+  const version = (newCardSaveVersions.get(itemId) || 0) + 1;
+  newCardSaveVersions.set(itemId, version);
+  const previousTimer = newCardSaveTimers.get(itemId);
+  if (previousTimer) window.clearTimeout(previousTimer);
+  const inlineMessage = card.querySelector(".new-card-action-message");
+  if (inlineMessage) {
+    inlineMessage.textContent = "Сохраняю ручные изменения…";
+    inlineMessage.className = "new-card-action-message pending";
+  }
+  newCardSaveTimers.set(itemId, window.setTimeout(async () => {
+    newCardSaveTimers.delete(itemId);
+    try {
+      await persistNewCardDraft(itemId, payload);
+      if (newCardSaveVersions.get(itemId) === version) {
+        localNewCardDrafts.delete(itemId);
+        const current = document.querySelector(`.new-card-editor[data-id="${itemId}"]`);
+        if (current) current.dataset.dirty = "0";
+        const currentMessage = current?.querySelector(".new-card-action-message");
+        if (currentMessage) {
+          currentMessage.textContent = "Ручные изменения сохранены автоматически.";
+          currentMessage.className = "new-card-action-message success";
+        }
+      }
+    } catch (error) {
+      const current = document.querySelector(`.new-card-editor[data-id="${itemId}"]`);
+      const currentMessage = current?.querySelector(".new-card-action-message");
+      if (currentMessage) {
+        currentMessage.textContent = `Не удалось автосохранить: ${error.message}`;
+        currentMessage.className = "new-card-action-message error";
+      }
+    }
+  }, 900));
 };
 
 const renderJobs = (jobs) => {
@@ -349,11 +427,28 @@ document.querySelector("#items")?.addEventListener("input", (event) => {
   card.classList.toggle("link-dirty", dirty);
   const add = card.querySelector(".add"); if (add) add.disabled = dirty || card.dataset.canAdd !== "1";
 });
+document.querySelector("#new-cards")?.addEventListener("input", (event) => {
+  const card = event.target.closest(".new-card-editor");
+  if (!card || event.target.disabled) return;
+  scheduleNewCardAutosave(card);
+});
+document.querySelector("#new-cards")?.addEventListener("change", (event) => {
+  if (!event.target.classList.contains("new-card-image-use")) return;
+  const card = event.target.closest(".new-card-editor");
+  if (!card || event.target.disabled) return;
+  scheduleNewCardAutosave(card);
+});
 document.querySelector("#new-cards")?.addEventListener("click", async (event) => {
   const card = event.target.closest(".new-card-editor");
   const button = event.target.closest("button");
   if (!card || !button) return;
   const payload = collectNewCard(card);
+  const itemId = String(card.dataset.id);
+  const pendingTimer = newCardSaveTimers.get(itemId);
+  if (pendingTimer) window.clearTimeout(pendingTimer);
+  newCardSaveTimers.delete(itemId);
+  localNewCardDrafts.set(itemId, payload);
+  const saveVersion = newCardSaveVersions.get(itemId) || 0;
   const originalCategory = card.dataset.category || "";
   const action = button.classList.contains("new-card-create") ? "Создаю…" : button.classList.contains("new-card-remap") ? "Загружаю…" : "Сохраняю…";
   const inlineMessage = card.querySelector(".new-card-action-message");
@@ -368,7 +463,8 @@ document.querySelector("#new-cards")?.addEventListener("click", async (event) =>
     if (button.classList.contains("new-card-create") && payload.category !== originalCategory) {
       throw new Error("Категория изменена. Сначала нажмите «Загрузить поля категории».");
     }
-    await request(`/api/product-test/new-cards/${card.dataset.id}`, {method:"PATCH", body:JSON.stringify(payload)});
+    await persistNewCardDraft(itemId, payload);
+    if (newCardSaveVersions.get(itemId) === saveVersion) localNewCardDrafts.delete(itemId);
     if (button.classList.contains("new-card-remap")) {
       await request(`/api/product-test/new-cards/${card.dataset.id}/map-category`, {method:"POST", body:JSON.stringify({category:payload.category})});
       notify("Product Test Agent загружает реальные поля и enum-значения выбранной категории Kaspi.", "success");

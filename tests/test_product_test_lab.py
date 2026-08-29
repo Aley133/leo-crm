@@ -19,6 +19,7 @@ from backend.app.product_test_api import (
     ProductDiscoveryRequest,
     ProductTestNewCardRequest,
     ProductTestNewCardCategoryRequest,
+    ProductTestNewCardUpdate,
     ProductTestAgentHeartbeat,
     ProductTestInspectRequest,
     ProductTestUpdate,
@@ -35,6 +36,7 @@ from backend.app.product_test_api import (
     map_product_test_new_card_category,
     prepare_product_test_new_card,
     read_product_test_state,
+    update_product_test_new_card,
     update_product_test_item,
     validate_product_supplier,
 )
@@ -489,6 +491,10 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert "preOrder ${Math.max(1" in script
     assert "точно по вашей ссылке" in script
     assert "new-card-action-message" in script
+    assert "localNewCardDrafts" in script
+    assert "scheduleNewCardAutosave" in script
+    assert "Ручные изменения сохранены автоматически" in script
+    assert "автоподстановка не перезапишет" in script
     assert 'activeJobTypes.has("map_new_card_category")' in script
     assert "Ожидаем поля категории…" in script
     assert '["discover", "validate_supplier"].includes(job.job_type)' in script
@@ -1502,6 +1508,24 @@ def test_new_card_route_waits_for_moderation_then_uses_existing_enrollment(db_se
     assert prepared["item"]["preorder_days"] == 3
     assert read_product_test_state(db_session)["new_cards"][0]["id"] == item_id
 
+    manually_edited = update_product_test_new_card(
+        item_id,
+        ProductTestNewCardUpdate(
+            attributes=[
+                {
+                    "code": "vitamins*country",
+                    "title": "Страна производства",
+                    "required": True,
+                    "value": "Канада",
+                }
+            ]
+        ),
+        db_session,
+    )
+    manual_attribute = manually_edited["offers"]["new_card"]["attributes"][0]
+    assert manual_attribute["value"] == "Канада"
+    assert manual_attribute["manual_override"] is True
+
     mapping = map_product_test_new_card_category(
         item_id,
         ProductTestNewCardCategoryRequest(category="Master - Vitamins"),
@@ -1534,6 +1558,9 @@ def test_new_card_route_waits_for_moderation_then_uses_existing_enrollment(db_se
         db_session,
     )
     assert remapped["item"]["status"] == "new_card_ready"
+    remapped_attribute = remapped["item"]["offers"]["new_card"]["attributes"][0]
+    assert remapped_attribute["value"] == "Канада"
+    assert remapped_attribute["manual_override"] is True
 
     create_product_test_new_card(item_id, db_session)
     create_claim = claim_product_test_job(identity, db_session)
