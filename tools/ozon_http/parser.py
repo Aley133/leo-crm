@@ -430,12 +430,43 @@ MONTHS_RU = {
     "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
 }
 DATE_RU_RE = re.compile(r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b", re.I)
-DELIVERY_WORDS = ("достав", "delivery", "получ", "привез", "завтра", "сегодня", "послезавтра", "pickup")
+DELIVERY_WORDS = ("достав", "delivery", "получ", "привез", "pickup")
+CURRENT_PRODUCT_DELIVERY_WIDGETS = (
+    "webaddtocart",
+    "webdelivery",
+    "webcurrentdelivery",
+    "webproductdelivery",
+)
+PAYMENT_TIMING_MARKERS = (
+    "installment",
+    "payment",
+    "рассроч",
+    "месяц",
+    "monthly",
+    "permonth",
+)
 
 
 def _delivery_date_from_text(text: str, today: date | None = None) -> tuple[str | None, int | None]:
     today = today or date.today()
     low = str(text or "").lower().replace("ё", "е")
+    # An explicit calendar promise is stronger than neighbouring relative
+    # payment labels (for example ``0 ₸ сегодня`` in the same Ozon widget).
+    m = DATE_RU_RE.search(low)
+    if m:
+        day = int(m.group(1))
+        month = MONTHS_RU[m.group(2)]
+        year = today.year
+        try:
+            target = date(year, month, day)
+        except ValueError:
+            return None, None
+        if target < today - timedelta(days=3):
+            try:
+                target = date(year + 1, month, day)
+            except ValueError:
+                return None, None
+        return target.isoformat(), (target - today).days
     if "послезавтра" in low:
         target = today + timedelta(days=2)
         return target.isoformat(), 2
@@ -444,25 +475,10 @@ def _delivery_date_from_text(text: str, today: date | None = None) -> tuple[str 
         return target.isoformat(), 1
     if "сегодня" in low:
         return today.isoformat(), 0
-    m = DATE_RU_RE.search(low)
-    if not m:
-        return None, None
-    day = int(m.group(1))
-    month = MONTHS_RU[m.group(2)]
-    year = today.year
-    try:
-        target = date(year, month, day)
-    except ValueError:
-        return None, None
-    if target < today - timedelta(days=3):
-        try:
-            target = date(year + 1, month, day)
-        except ValueError:
-            return None, None
-    return target.isoformat(), (target - today).days
+    return None, None
 
 
-def _delivery(item: dict[str, Any]) -> dict[str, Any]:
+def _delivery(item: dict[str, Any], *, today: date | None = None) -> dict[str, Any]:
     candidates: list[tuple[float, str, str]] = []
     for order, (path, text, meta) in enumerate(_walk_context(item)):
         raw = str(text or "").strip()
@@ -472,13 +488,28 @@ def _delivery(item: dict[str, Any]) -> dict[str, Any]:
         has_date = bool(DATE_RU_RE.search(low)) or any(x in low for x in ("сегодня", "завтра", "послезавтра"))
         if not has_date:
             continue
-        ctx = f"{path} {meta} {low}".lower()
+        path_low = path.casefold()
+        ctx = f"{path_low} {str(meta or '').casefold()} {low}"
+        explicit_delivery = any(marker in low for marker in DELIVERY_WORDS)
+        current_product_widget = any(marker in path_low for marker in CURRENT_PRODUCT_DELIVERY_WIDGETS)
+        payment_context = any(marker in ctx for marker in PAYMENT_TIMING_MARKERS)
+        price_timing = bool(PRICE_RE.search(raw)) and any(
+            marker in low for marker in ("сегодня", "завтра", "послезавтра")
+        )
+        # Ozon places instalment labels such as ``0 ₸ сегодня`` beside the
+        # product price. They are payment timing, not delivery.
+        if not explicit_delivery and (payment_context or price_timing):
+            continue
         score = 0.0
-        if any(x in ctx for x in DELIVERY_WORDS):
+        if current_product_widget:
+            score += 180.0
+        if explicit_delivery:
+            score += 120.0
+        if any(x in path_low for x in ("delivery", "date", "cart", "button", "eta")):
             score += 70.0
-        if any(x in path.lower() for x in ("delivery", "date", "cart", "button", "eta")):
-            score += 55.0
-        if "mainstate" in path.lower():
+        if DATE_RU_RE.search(low):
+            score += 30.0
+        if "mainstate" in path_low:
             score += 12.0
         # Date-like labels inside product cards are useful even when the field is unnamed.
         score += 20.0
@@ -488,7 +519,7 @@ def _delivery(item: dict[str, Any]) -> dict[str, Any]:
         return {"text": None, "date": None, "days": None, "source": None}
     candidates.sort(key=lambda x: x[0], reverse=True)
     _, text, path = candidates[0]
-    iso, days = _delivery_date_from_text(text)
+    iso, days = _delivery_date_from_text(text, today=today)
     return {"text": text, "date": iso, "days": days, "source": path}
 
 
@@ -639,6 +670,8 @@ def parse_product_page(
     payload: dict[str, Any],
     base: str = "https://www.ozon.kz",
     expected_currency: str | None = "KZT",
+    *,
+    today: date | None = None,
 ) -> dict[str, Any]:
     """Read the displayed price from an exact Ozon product-page payload.
 
@@ -713,7 +746,7 @@ def parse_product_page(
     }
     title = _title(heading_states) if heading_states else ""
     images = _images(gallery_states) if gallery_states else []
-    delivery = _delivery(combined)
+    delivery = _delivery(combined, today=today)
     rating, reviews = _rating_reviews(combined)
     return {
         "price_kzt": best["value"],

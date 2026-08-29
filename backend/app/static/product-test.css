@@ -228,6 +228,10 @@
 .required-pill { display: inline-block; border-radius: 6px; padding: 2px 5px; background: #48242c; color: #ff9cac; font-size: 8px; font-weight: 900; }
 .new-card-errors { display: grid; gap: 5px; margin: 0 16px 16px; padding: 11px; border: 1px solid #6c3442; border-radius: 10px; color: #ff9cac; font-size: 11px; }
 .new-card-errors.ok { border-color: #2f7653; color: #83efbd; }
+.new-card-action-message { min-height: 20px; margin: -4px 16px 12px; color: #9fb3c9; font-size: 11px; }
+.new-card-action-message.pending { color: #ffd37a; }
+.new-card-action-message.success { color: #7ee2ad; }
+.new-card-action-message.error { color: #ff94aa; }
 .new-card-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; padding: 0 16px 16px; }
 
 @media (max-width: 1000px) {

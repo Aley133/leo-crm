@@ -133,51 +133,54 @@ const renderSubmissions = (submissions) => {
   }
 };
 
-const newCardStatus = (item) => ({
+const newCardStatus = (item, mappingBusy = false) => ({
   new_card_draft: "Нужно проверить и заполнить обязательные поля",
   new_card_ready: "Черновик готов к Product Import",
-  new_card_mapping: "Product Test Agent загружает поля категории",
+  new_card_mapping: mappingBusy ? "Product Test Agent загружает поля категории" : "Поля категории загружены — карточку можно создавать",
   new_card_importing: "Kaspi выполняет Product Import",
   new_card_moderation: "Принято Kaspi, ожидаем masterSku",
   new_card_error: item.last_error || "Kaspi отклонил карточку — исправьте черновик",
 }[item.status] || item.status || "Черновик");
 
-const newCardRow = (item) => {
+const newCardRow = (item, activeJobTypes = new Set()) => {
   const draft = item.offers?.new_card || {};
   const supplier = item.offers?.supplier || {};
-  const locked = ["new_card_mapping", "new_card_importing", "new_card_moderation", "enrolled_fast_dumping"].includes(item.status);
+  const locked = ["new_card_importing", "new_card_moderation", "enrolled_fast_dumping"].includes(item.status);
+  const mappingBusy = activeJobTypes.has("map_new_card_category");
+  const editingLocked = locked || mappingBusy;
   const errors = draft.validation_errors || [];
   const categories = draft.categories || [];
   const attributes = draft.attributes || [];
   const displayImage = draft.images?.[0] || supplier.supplier_image_url || item.image_url || "";
   const delivery = supplier.supplier_delivery_text || (supplier.supplier_delivery_days != null ? `${supplier.supplier_delivery_days} дн.` : "—");
   const categoryList = categories.map((row) => `<option value="${escapeHtml(row.code)}">${escapeHtml(row.title)}</option>`).join("");
-  const images = (draft.images || []).map((url, index) => `<label class="new-card-image"><img src="${escapeHtml(url)}" alt="Фото Ozon ${index + 1}" loading="lazy" referrerpolicy="no-referrer"><span><input class="new-card-image-use" type="checkbox" data-url="${escapeHtml(url)}" ${index < 10 ? "checked" : ""} ${locked ? "disabled" : ""}> использовать</span></label>`).join("");
+  const images = (draft.images || []).map((url, index) => `<label class="new-card-image"><img src="${escapeHtml(url)}" alt="Фото Ozon ${index + 1}" loading="lazy" referrerpolicy="no-referrer"><span><input class="new-card-image-use" type="checkbox" data-url="${escapeHtml(url)}" ${index < 10 ? "checked" : ""} ${editingLocked ? "disabled" : ""}> использовать</span></label>`).join("");
   const attrRows = attributes.map((row, index) => {
     const allowed = row.allowed_values || [];
     const listId = `new-card-attr-${item.id}-${index}`;
     const options = allowed.map((value) => `<option value="${escapeHtml(value.code || value.name || "")}">${escapeHtml(value.name || value.code || "")}</option>`).join("");
-    return `<tr data-index="${index}"><td><strong>${escapeHtml(row.title || row.code)}</strong>${row.required ? '<span class="required-pill">обязательно</span>' : ""}<small>${escapeHtml(row.code || "")}${row.multi_valued ? " · несколько через ;" : ""}</small></td><td><input class="new-card-attr" ${allowed.length ? `list="${listId}"` : ""} value="${escapeHtml(row.value || "")}" ${locked ? "disabled" : ""}>${allowed.length ? `<datalist id="${listId}">${options}</datalist>` : ""}</td><td><small>${escapeHtml([row.source_name, row.source_value].filter(Boolean).join(": ") || "нет источника Ozon")}</small></td></tr>`;
+    return `<tr data-index="${index}"><td><strong>${escapeHtml(row.title || row.code)}</strong>${row.required ? '<span class="required-pill">обязательно</span>' : ""}<small>${escapeHtml(row.code || "")}${row.multi_valued ? " · несколько через ;" : ""}</small></td><td><input class="new-card-attr" ${allowed.length ? `list="${listId}"` : ""} value="${escapeHtml(row.value || "")}" ${editingLocked ? "disabled" : ""}>${allowed.length ? `<datalist id="${listId}">${options}</datalist>` : ""}</td><td><small>${escapeHtml([row.source_name, row.source_value].filter(Boolean).join(": ") || "нет источника Ozon")}</small></td></tr>`;
   }).join("");
   return `<article class="new-card-editor" data-id="${item.id}" data-category="${escapeHtml(draft.category || "")}">
     <div class="new-card-summary">
       ${displayImage ? `<img src="${escapeHtml(displayImage)}" alt="${escapeHtml(item.name)}" loading="lazy" referrerpolicy="no-referrer">` : '<div class="market-image-placeholder">Нет фото</div>'}
       <div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml([item.brand, draft.sku].filter(Boolean).join(" · "))}</small><a href="${escapeHtml(item.supplier_url || "")}" target="_blank" rel="noopener">Открыть Ozon ↗</a></div>
       <div class="new-card-plan"><span>Ozon: <strong>${money(supplier.supplier_price_kzt)}</strong></span><span>доставка: <strong>${escapeHtml(delivery)}</strong></span><span>Kaspi: <strong>${money(item.test_price_kzt)}</strong></span><span>preOrder: <strong>${Math.max(1, Number(item.preorder_days || 1))} дн.</strong></span></div>
-      <span class="new-card-status">${escapeHtml(newCardStatus(item))}</span>
+      <span class="new-card-status">${escapeHtml(newCardStatus(item, mappingBusy))}</span>
     </div>
     <div class="new-card-fields">
-      <label><span>SKU</span><input name="sku" maxlength="64" value="${escapeHtml(draft.sku || "")}" ${locked ? "disabled" : ""}></label>
-      <label><span>Бренд</span><input name="brand" maxlength="255" value="${escapeHtml(draft.brand || "")}" ${locked ? "disabled" : ""}></label>
-      <label class="wide"><span>Название</span><input name="title" maxlength="1024" value="${escapeHtml(draft.title || "")}" ${locked ? "disabled" : ""}></label>
-      <label><span>Вес, кг</span><input name="weight" type="number" min="0.001" max="10000" step="0.001" value="${escapeHtml(draft.weight || "")}" ${locked ? "disabled" : ""}></label>
-      <label><span>Категория Kaspi</span><input name="category" list="new-card-categories-${item.id}" maxlength="255" value="${escapeHtml(draft.category || "")}" ${locked ? "disabled" : ""}><datalist id="new-card-categories-${item.id}">${categoryList}</datalist><small>${escapeHtml(draft.category_title || draft.category_hint || "")}</small></label>
-      <label class="wide"><span>Описание Kaspi (100–1024 символа)</span><textarea name="description" maxlength="1024" ${locked ? "disabled" : ""}>${escapeHtml(draft.description || "")}</textarea></label>
+      <label><span>SKU</span><input name="sku" maxlength="64" value="${escapeHtml(draft.sku || "")}" ${editingLocked ? "disabled" : ""}></label>
+      <label><span>Бренд</span><input name="brand" maxlength="255" value="${escapeHtml(draft.brand || "")}" ${editingLocked ? "disabled" : ""}></label>
+      <label class="wide"><span>Название</span><input name="title" maxlength="1024" value="${escapeHtml(draft.title || "")}" ${editingLocked ? "disabled" : ""}></label>
+      <label><span>Вес, кг</span><input name="weight" type="number" min="0.001" max="10000" step="0.001" value="${escapeHtml(draft.weight || "")}" ${editingLocked ? "disabled" : ""}></label>
+      <label><span>Категория Kaspi</span><input name="category" list="new-card-categories-${item.id}" maxlength="255" value="${escapeHtml(draft.category || "")}" ${editingLocked ? "disabled" : ""}><datalist id="new-card-categories-${item.id}">${categoryList}</datalist><small>${escapeHtml(draft.category_title || draft.category_hint || "")}</small></label>
+      <label class="wide"><span>Описание Kaspi (100–1024 символа)</span><textarea name="description" maxlength="1024" ${editingLocked ? "disabled" : ""}>${escapeHtml(draft.description || "")}</textarea></label>
     </div>
     <details class="new-card-images" open><summary><strong>Фото Ozon (${(draft.images || []).length})</strong></summary><div>${images || '<span class="muted">Фото не найдены</span>'}</div></details>
     <details class="new-card-attributes" open><summary><strong>Поля Kaspi (${attributes.length})</strong></summary><div class="new-card-attributes-scroll"><table><thead><tr><th>Поле</th><th>Значение</th><th>Источник Ozon</th></tr></thead><tbody>${attrRows}</tbody></table></div></details>
     <div class="new-card-errors ${errors.length ? "" : "ok"}">${errors.length ? errors.map((value) => `<span>${escapeHtml(value)}</span>`).join("") : "Все обязательные поля заполнены"}</div>
-    <div class="new-card-actions"><button class="button new-card-save" type="button" ${locked ? "disabled" : ""}>Сохранить черновик</button><button class="button new-card-remap" type="button" ${locked ? "disabled" : ""}>Загрузить поля категории</button><button class="button new-card-create" type="button" ${locked || errors.length ? "disabled" : ""}>Создать новую карточку Kaspi</button></div>
+    <div class="new-card-action-message ${mappingBusy ? "pending" : ""}">${mappingBusy ? "Поля категории загружаются. После завершения кнопка создания включится автоматически." : ""}</div>
+    <div class="new-card-actions"><button class="button new-card-save" type="button" ${editingLocked ? "disabled" : ""}>Сохранить черновик</button><button class="button new-card-remap" type="button" ${editingLocked ? "disabled" : ""}>Загрузить поля категории</button><button class="button new-card-create" type="button" ${editingLocked || errors.length ? "disabled" : ""}>${mappingBusy ? "Ожидаем поля категории…" : "Создать новую карточку Kaspi"}</button></div>
   </article>`;
 };
 
@@ -187,7 +190,13 @@ const renderNewCards = (items, jobs) => {
   const jobList = document.querySelector("#new-card-jobs");
   if (!list || !empty || !jobList) return;
   currentNewCards = new Map(items.map((item) => [String(item.id), item]));
-  list.innerHTML = items.map(newCardRow).join("");
+  const activeByItem = new Map();
+  jobs.filter((job) => ["queued", "leased"].includes(job.status)).forEach((job) => {
+    const key = String(job.item_id || "");
+    if (!activeByItem.has(key)) activeByItem.set(key, new Set());
+    activeByItem.get(key).add(job.job_type);
+  });
+  list.innerHTML = items.map((item) => newCardRow(item, activeByItem.get(String(item.id)) || new Set())).join("");
   empty.classList.toggle("hidden", items.length > 0);
   const types = new Set(["prepare_new_card", "map_new_card_category", "create_new_card", "confirm_new_card"]);
   const relevant = jobs.filter((job) => types.has(job.job_type) && ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
@@ -347,6 +356,13 @@ document.querySelector("#new-cards")?.addEventListener("click", async (event) =>
   const payload = collectNewCard(card);
   const originalCategory = card.dataset.category || "";
   const action = button.classList.contains("new-card-create") ? "Создаю…" : button.classList.contains("new-card-remap") ? "Загружаю…" : "Сохраняю…";
+  const inlineMessage = card.querySelector(".new-card-action-message");
+  const notifyInline = (text, kind = "") => {
+    if (!inlineMessage) return;
+    inlineMessage.textContent = text;
+    inlineMessage.className = `new-card-action-message ${kind}`.trim();
+  };
+  notifyInline("");
   setBusy(button, true, action);
   try {
     if (button.classList.contains("new-card-create") && payload.category !== originalCategory) {
@@ -359,11 +375,12 @@ document.querySelector("#new-cards")?.addEventListener("click", async (event) =>
     } else if (button.classList.contains("new-card-create")) {
       await request(`/api/product-test/new-cards/${card.dataset.id}/create`, {method:"POST"});
       notify("Новая карточка передана Product Import. После detailed result агент сам дождётся masterSku, создаст оффер и подключит существующие Мониторинг и Fast Dumping.", "success");
+      notifyInline("Создание запущено. Карточка перенесена в список ожидания Kaspi.", "success");
     } else {
       notify("Черновик новой карточки сохранён.", "success");
     }
     await load();
-  } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
+  } catch (error) { notify(error.message, "error"); notifyInline(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 document.querySelector("#kaspi-submissions")?.addEventListener("click", async (event) => {
   const row = event.target.closest(".submission-row"); const button = event.target.closest("button.retry");
