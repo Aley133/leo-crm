@@ -20,6 +20,9 @@ _PREVIOUS_COMPLETE_APPLY = None
 _PREVIOUS_COMPLETE_VERIFICATION = None
 
 
+_QUEUED_REPRICE_STATUSES = {"queued_apply"}
+
+
 def _fast_policy(db: Session, product_id: int) -> FastDumpingPolicy | None:
     return db.scalar(
         select(FastDumpingPolicy).where(
@@ -41,7 +44,30 @@ def _sync_product_inventory_to_feed(
 
     stock = physical_stock_count(db, product_id=product_id)
     state = svc.ensure_state(db, policy=policy, workspace_id=policy.workspace_id)
+    state.inventory_on_hand = stock
     state.next_scan_at = svc.utcnow()
+
+    # An inventory event is authoritative for the fulfillment mode. A queued
+    # apply may still contain the supplier-preorder decision produced before a
+    # physical batch was received (or the inverse after FIFO exhaustion). It is
+    # safe to replace such an unleased apply with a fresh scan. Leased writes
+    # and queued verification are deliberately left single-flight: their
+    # completion path will schedule the already-due rescan without risking a
+    # second mutation while Kaspi is processing the first one.
+    active = (
+        db.get(FastDumpingJob, state.active_job_id)
+        if state.active_job_id
+        else None
+    )
+    if active is not None and active.status in _QUEUED_REPRICE_STATUSES:
+        svc.cancel_active_job(
+            db,
+            state=state,
+            reason=(
+                f"FIFO-остаток изменился до {stock}; старое offer-state решение "
+                "заменено обязательным новым scan."
+            ),
+        )
     if state.active_job_id is None and not state.automatic_writes_paused:
         svc.queue_scan(
             db,

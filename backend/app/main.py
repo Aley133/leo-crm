@@ -76,8 +76,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.4"
-DEPLOYMENT_MARKER = "new-card-manual-draft-and-safe-autofill"
+APP_VERSION = "0.26.5"
+DEPLOYMENT_MARKER = "fast-fifo-transition-and-removal"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

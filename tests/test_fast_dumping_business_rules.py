@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from decimal import Decimal
+from pathlib import Path
 
 import pytest
 from fastapi import HTTPException
@@ -10,6 +12,8 @@ from backend.app.fast_dumping_api import remove_fast_dumping_product
 from backend.app.fast_dumping_models import FastDumpingJob, FastDumpingPolicy, FastDumpingState
 from backend.app.fast_dumping_pricing import decide_fast_price
 from backend.app.fast_dumping_service import ensure_state, queue_scan
+from backend.app.fast_dumping_xml_guard import _sync_product_inventory_to_feed
+from backend.app.inventory_models import InventoryBatch, InventoryBatchType
 from backend.app.models import Product
 from backend.app.workspace_context import workspace_context
 
@@ -146,3 +150,109 @@ def test_remove_fast_product_refuses_while_realtime_write_is_leased(db_session) 
     assert exc.value.status_code == 409
     assert db_session.get(FastDumpingPolicy, policy.id) is not None
     assert db_session.get(Product, product.id) is not None
+
+
+def test_inventory_arrival_replaces_queued_preorder_apply_with_fresh_scan(
+    db_session,
+) -> None:
+    product, policy, state = _seed_fast_policy(db_session)
+    old_job = FastDumpingJob(
+        workspace_id=1,
+        policy_id=policy.id,
+        product_id=product.id,
+        status="queued_apply",
+        decision_json={
+            "fulfillment_mode": "preorder",
+            "stock_count": 5,
+            "preorder_days": 9,
+        },
+    )
+    db_session.add(old_job)
+    db_session.flush()
+    state.active_job_id = old_job.id
+    state.inventory_on_hand = 0
+    state.desired_stock_count = 5
+    db_session.add(
+        InventoryBatch(
+            product_id=product.id,
+            received_at=datetime.now(UTC),
+            batch_type=InventoryBatchType.PURCHASE.value,
+            is_received=True,
+            quantity_received=3,
+            quantity_remaining=3,
+            unit_cost=Decimal("5805"),
+        )
+    )
+    db_session.flush()
+
+    result = _sync_product_inventory_to_feed(
+        db_session,
+        product_id=product.id,
+        reason="inventory_batch_created",
+    )
+    db_session.flush()
+
+    db_session.refresh(old_job)
+    db_session.refresh(state)
+    replacement = db_session.get(FastDumpingJob, state.active_job_id)
+    assert result == {
+        "stock_count": 3,
+        "xml_state": "fast_realtime_owned",
+        "supplier_job_id": None,
+    }
+    assert old_job.status == "cancelled"
+    assert replacement is not None
+    assert replacement.id != old_job.id
+    assert replacement.status == "queued_scan"
+    assert replacement.reason == "inventory_event:inventory_batch_created"
+    assert state.inventory_on_hand == 3
+
+
+def test_inventory_exhaustion_replaces_queued_fifo_apply_with_fresh_scan(
+    db_session,
+) -> None:
+    product, policy, state = _seed_fast_policy(db_session)
+    old_job = FastDumpingJob(
+        workspace_id=1,
+        policy_id=policy.id,
+        product_id=product.id,
+        status="queued_apply",
+        decision_json={
+            "fulfillment_mode": "inventory",
+            "stock_count": 1,
+            "preorder_days": 0,
+        },
+    )
+    db_session.add(old_job)
+    db_session.flush()
+    state.active_job_id = old_job.id
+    state.inventory_on_hand = 1
+    state.desired_stock_count = 1
+
+    result = _sync_product_inventory_to_feed(
+        db_session,
+        product_id=product.id,
+        reason="order_inventory_allocated",
+    )
+    db_session.flush()
+
+    db_session.refresh(old_job)
+    db_session.refresh(state)
+    replacement = db_session.get(FastDumpingJob, state.active_job_id)
+    assert result["stock_count"] == 0
+    assert old_job.status == "cancelled"
+    assert replacement is not None
+    assert replacement.id != old_job.id
+    assert replacement.status == "queued_scan"
+    assert state.inventory_on_hand == 0
+
+
+def test_fast_dumping_ui_connects_remove_button_to_delete_endpoint() -> None:
+    javascript = (
+        Path(__file__).resolve().parents[1]
+        / "backend/app/static/fast-dumping.js"
+    ).read_text(encoding="utf-8")
+
+    assert 'document.querySelector("#edit-remove")' in javascript
+    assert '`/api/fast-dumping/products/${productId}`' in javascript
+    assert 'method:"DELETE"' in javascript
