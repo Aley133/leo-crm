@@ -187,6 +187,49 @@
 .enrolled-links { display: flex; gap: 9px; flex-wrap: wrap; }
 .enrolled-links a { color: #79aefb; font-size: 10px; }
 
+.new-card-list { display: grid; gap: 18px; margin-top: 18px; }
+.new-card-editor { overflow: hidden; border: 1px solid #35516f; border-radius: 16px; background: #091728; }
+.new-card-summary { display: grid; grid-template-columns: 92px minmax(220px, 1.4fr) minmax(210px, .8fr) minmax(190px, .7fr); gap: 15px; align-items: center; padding: 16px; border-bottom: 1px solid #29415e; }
+.new-card-summary > img,
+.new-card-summary > .market-image-placeholder { width: 92px; height: 104px; object-fit: contain; border-radius: 11px; background: #fff; }
+.new-card-summary > div { display: flex; min-width: 0; flex-direction: column; gap: 6px; }
+.new-card-summary strong { color: #fff; }
+.new-card-summary small { color: #7897b8; }
+.new-card-summary a { color: #79aefb; font-size: 11px; }
+.new-card-plan { display: grid !important; grid-template-columns: 1fr 1fr; gap: 8px !important; }
+.new-card-plan span { display: flex; flex-direction: column; gap: 3px; color: #7897b8; font-size: 10px; }
+.new-card-plan strong { color: #83efbd; font-size: 13px; }
+.new-card-status { color: #ffd180; font-size: 12px; font-weight: 800; line-height: 1.45; }
+.new-card-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; padding: 16px; }
+.new-card-fields label { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: #9db4cf; font-size: 11px; }
+.new-card-fields label.wide { grid-column: 1 / -1; }
+.new-card-fields input,
+.new-card-fields textarea,
+.new-card-attributes input { box-sizing: border-box; width: 100%; border: 1px solid #35516f; border-radius: 9px; background: #071423; color: #fff; padding: 9px 10px; }
+.new-card-fields textarea { min-height: 130px; resize: vertical; }
+.new-card-fields small { color: #7897b8; }
+.new-card-images,
+.new-card-attributes { margin: 0 16px 16px; border: 1px solid #29415e; border-radius: 12px; padding: 12px; }
+.new-card-images summary,
+.new-card-attributes summary { cursor: pointer; color: #d8e9fb; }
+.new-card-images > div { display: grid; grid-template-columns: repeat(auto-fill, minmax(112px, 1fr)); gap: 10px; margin-top: 12px; }
+.new-card-image { display: flex; min-width: 0; flex-direction: column; gap: 6px; color: #9db4cf; font-size: 10px; }
+.new-card-image img { width: 100%; aspect-ratio: 1; object-fit: contain; border-radius: 9px; background: #fff; }
+.new-card-image input { width: auto; }
+.new-card-attributes-scroll { overflow-x: auto; margin-top: 12px; }
+.new-card-attributes table { width: 100%; min-width: 820px; border-collapse: collapse; }
+.new-card-attributes th,
+.new-card-attributes td { padding: 9px; border-bottom: 1px solid #1e3651; text-align: left; vertical-align: top; }
+.new-card-attributes th { color: #9fc4ef; font-size: 10px; letter-spacing: .06em; }
+.new-card-attributes td:first-child { width: 32%; }
+.new-card-attributes td:nth-child(2) { width: 34%; }
+.new-card-attributes td strong { display: inline-block; margin-right: 6px; color: #fff; font-size: 11px; }
+.new-card-attributes td small { display: block; margin-top: 4px; color: #7897b8; font-size: 9px; overflow-wrap: anywhere; }
+.required-pill { display: inline-block; border-radius: 6px; padding: 2px 5px; background: #48242c; color: #ff9cac; font-size: 8px; font-weight: 900; }
+.new-card-errors { display: grid; gap: 5px; margin: 0 16px 16px; padding: 11px; border: 1px solid #6c3442; border-radius: 10px; color: #ff9cac; font-size: 11px; }
+.new-card-errors.ok { border-color: #2f7653; color: #83efbd; }
+.new-card-actions { display: flex; justify-content: flex-end; gap: 10px; flex-wrap: wrap; padding: 0 16px 16px; }
+
 @media (max-width: 1000px) {
   .lab-agent,
   .lab-head { align-items: stretch; flex-direction: column; }
@@ -216,4 +259,11 @@
   .submission-row img,
   .submission-image-placeholder { width: 58px; height: 64px; }
   .submission-actions { grid-column: 1 / -1; align-items: stretch; }
+  .new-card-summary { grid-template-columns: 72px minmax(0, 1fr); }
+  .new-card-summary > img,
+  .new-card-summary > .market-image-placeholder { width: 72px; height: 82px; }
+  .new-card-plan,
+  .new-card-status { grid-column: 1 / -1; }
+  .new-card-fields { grid-template-columns: 1fr; }
+  .new-card-fields label.wide { grid-column: auto; }
 }

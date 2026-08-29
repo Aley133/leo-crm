@@ -16,6 +16,7 @@ from backend.app.product_registry_api import resolve_product_image
 from backend.app import kaspi_product_photo
 from backend.app.product_test_api import (
     ProductDiscoveryRequest,
+    ProductTestNewCardRequest,
     ProductTestAgentHeartbeat,
     ProductTestInspectRequest,
     ProductTestUpdate,
@@ -25,9 +26,11 @@ from backend.app.product_test_api import (
     build_product_test_xml,
     claim_product_test_job,
     complete_product_test_job,
+    create_product_test_new_card,
     discover_product_candidates,
     heartbeat_product_test_agent,
     inspect_product,
+    prepare_product_test_new_card,
     read_product_test_state,
     update_product_test_item,
     validate_product_supplier,
@@ -438,22 +441,39 @@ def test_two_fast_agents_cannot_cross_workspace_product_test_jobs(db_session) ->
 def test_product_test_ui_uses_local_fast_agent() -> None:
     main = (ROOT / "backend/app/main.py").read_text(encoding="utf-8")
     ui = (ROOT / "backend/app/ui.py").read_text(encoding="utf-8")
-    html = (ROOT / "backend/app/static/product-test.html").read_text(encoding="utf-8")
+    test_html = (ROOT / "backend/app/static/product-test.html").read_text(encoding="utf-8")
+    add_html = (ROOT / "backend/app/static/add-product.html").read_text(encoding="utf-8")
     script = (ROOT / "backend/app/static/product-test.js").read_text(encoding="utf-8")
     agent = (ROOT / "tools/product_test_agent.py").read_text(encoding="utf-8")
     fast_agent = (ROOT / "tools/kaspi_fast_dumping_agent.py").read_text(encoding="utf-8")
     assert "app.include_router(product_test_router)" in main
     assert '@router.get("/crm/product-test"' in ui
-    assert 'id="discover-form"' in html
-    assert 'id="settings-form"' in html
-    assert "ОТДЕЛЬНЫЙ PRODUCT TEST AGENT" in html
-    assert "LEO-Product-Test-Agent.exe" in html
+    assert '@router.get("/crm/add-product"' in ui
+    assert 'data-product-test-page="product-test"' in test_html
+    assert 'data-product-test-page="add-product"' in add_html
+    assert 'id="discover-form"' in test_html
+    assert 'id="discover-form"' not in add_html
+    assert 'id="new-card-form"' not in test_html
+    assert 'id="new-card-form"' in add_html
+    assert 'id="settings-form"' in test_html
+    assert 'id="settings-form"' in add_html
+    assert "ЕДИНЫЙ PRODUCT TEST AGENT" in test_html
+    assert "ЕДИНЫЙ PRODUCT TEST AGENT" in add_html
+    assert "LEO-Product-Test-Agent.exe" in test_html
+    assert "LEO-Product-Test-Agent.exe" in add_html
+    assert 'class="active" href="/crm/product-test"' in test_html
+    assert 'class="active" href="/crm/add-product"' in add_html
     assert "/api/product-test/discover" in script
+    assert "/api/product-test/new-cards/prepare" in script
+    assert "/map-category" in script
+    assert "create_new_card" in script
+    assert "confirm_new_card" in script
     assert "/validate-supplier" in script
     assert "/add`" in script
-    assert 'name="max_undercut_gap_percent"' in html
-    assert 'name="delivery_price_premium_kzt"' in html
-    assert 'name="delivery_advantage_days"' in html
+    assert 'name="max_undercut_gap_percent"' in test_html
+    assert 'name="max_undercut_gap_percent"' in add_html
+    assert 'name="delivery_price_premium_kzt"' in test_html
+    assert 'name="delivery_advantage_days"' in test_html
     assert "renderAgent(payload.agent" in script
     assert "Проверить / заменить ссылку" in script
     assert "Выгрузить на Kaspi" in script
@@ -466,22 +486,36 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert "preOrder ${Math.max(1" in script
     assert "точно по вашей ссылке" in script
     assert '["discover", "validate_supplier"].includes(job.job_type)' in script
-    assert 'id="kaspi-submissions-section"' in html
-    assert "renderSubmissions(submissions)" in script
+    assert 'id="kaspi-submissions-section"' in test_html
+    assert 'id="kaspi-submissions-section"' in add_html
+    assert "renderSubmissions(pageSubmissions)" in script
+    assert 'submission.route === "new_card"' in script
+    assert "isAddProductPage ? isNewCard : !isNewCard" in script
     assert "Повторить выгрузку" in script
     assert "supplier_image_url" in script
     assert 'href="/crm/monitoring"' in script
-    assert "ВИЗУАЛЬНОЕ СОПОСТАВЛЕНИЕ" in html
+    assert "ВИЗУАЛЬНОЕ СОПОСТАВЛЕНИЕ" in test_html
+    assert "НОВАЯ КАРТОЧКА KASPI" in add_html
     assert "/api/product-test-agent/claim" in agent
     assert "inspect_kaspi_product" in agent
     assert "discover_products" in agent
     assert "create_linked_offer" in agent
+    assert 'job_type == "prepare_new_card"' in agent
+    assert 'job_type == "confirm_new_card"' in agent
     assert "/api/product-test-agent/claim" not in fast_agent
     api = (ROOT / "backend/app/product_test_api.py").read_text(encoding="utf-8")
     assert 'status="queued"' in api
     assert "ProductTestJob.workspace_id == payload.workspace_id" in api
     assert "ProductTestItem.workspace_id == job.workspace_id" in api
     assert "Product.workspace_id == job.workspace_id" in api
+
+
+def test_add_product_link_is_present_in_static_crm_navigation() -> None:
+    static_dir = ROOT / "backend/app/static"
+    pages = [path for path in static_dir.glob("*.html") if 'href="/crm/product-test"' in path.read_text(encoding="utf-8")]
+    assert pages
+    for path in pages:
+        assert 'href="/crm/add-product"' in path.read_text(encoding="utf-8"), path.name
 
 
 def test_product_test_inspection_completes_from_local_agent(db_session) -> None:
@@ -1364,3 +1398,181 @@ def test_product_photos_are_lazy_in_core_crm_surfaces() -> None:
         assert "product-image-resolver.js" in page
     photo_css = (ROOT / "backend/app/static/product-images.css").read_text(encoding="utf-8")
     assert ".product-thumb,.order-product-photo,.product-photo,.fast-product-photo,.dumping-product-photo{width:100px;height:100px" in photo_css
+
+
+def test_new_card_route_waits_for_moderation_then_uses_existing_enrollment(db_session) -> None:
+    _seed_agent_account(db_session)
+    identity = ProductTestAgentIdentity(
+        agent_id="product-test-w1",
+        agent_kind="product_test",
+        workspace_id=1,
+        merchant_uid="merchant-1",
+    )
+    supplier_url = "https://www.ozon.kz/product/new-solgar-900000001/"
+    queued = prepare_product_test_new_card(
+        ProductTestNewCardRequest(supplier_url=supplier_url),
+        db_session,
+    )
+    claim = claim_product_test_job(identity, db_session)
+    assert queued["job"]["job_type"] == "prepare_new_card"
+    assert claim["job"]["job_type"] == "prepare_new_card"
+
+    prepared = complete_product_test_job(
+        claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id=identity.agent_id,
+            workspace_id=1,
+            lease_token=claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "draft": {
+                    "source_url": supplier_url,
+                    "sku": "900000001",
+                    "title": "Solgar Test Product 60 capsules",
+                    "brand": "Solgar",
+                    "description": "Подробное описание товара по данным производителя. " * 3,
+                    "weight": "0.25",
+                    "category": "Master - Vitamins",
+                    "category_title": "Витамины и БАД",
+                    "category_hint": "Витамины и БАД",
+                    "categories": [{"code": "Master - Vitamins", "title": "Витамины и БАД"}],
+                    "attributes": [
+                        {
+                            "code": "vitamins*country",
+                            "title": "Страна производства",
+                            "required": True,
+                            "value": "США",
+                        }
+                    ],
+                    "characteristics": [{"name": "Страна производства", "value": "США"}],
+                    "images": ["https://ir.ozone.ru/s3/multimedia/new-card.webp"],
+                    "validation_errors": [],
+                },
+                "supplier": {
+                    "supplier_url": supplier_url,
+                    "supplier_price_kzt": 4200,
+                    "supplier_price_source": "manual_product_page.webPrice.finalPrice",
+                    "supplier_delivery_days": 2,
+                    "supplier_delivery_text": "Доставим через 2 дня",
+                    "supplier_offer_sku": "900000001",
+                    "supplier_seller_name": "Ozon",
+                    "supplier_product_title": "Solgar Test Product 60 capsules",
+                    "supplier_image_url": "https://ir.ozone.ru/s3/multimedia/new-card.webp",
+                    "supplier_image_urls": ["https://ir.ozone.ru/s3/multimedia/new-card.webp"],
+                    "price_confirmed": True,
+                    "validated": True,
+                },
+            },
+        ),
+        db_session,
+    )
+    item_id = prepared["item"]["id"]
+    assert prepared["item"]["status"] == "new_card_ready"
+    assert prepared["item"]["preorder_days"] == 3
+    assert read_product_test_state(db_session)["new_cards"][0]["id"] == item_id
+
+    create_product_test_new_card(item_id, db_session)
+    create_claim = claim_product_test_job(identity, db_session)
+    assert create_claim["job"]["job_type"] == "create_new_card"
+    assert create_claim["job"]["options"]["draft"]["sku"] == "900000001"
+    imported = complete_product_test_job(
+        create_claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id=identity.agent_id,
+            workspace_id=1,
+            lease_token=create_claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "result": "NEW_CARD_ACCEPTED_FOR_MODERATION",
+                "import_code": "import-900000001",
+                "sku": "900000001",
+                "detailed_ok": True,
+                "errors": 0,
+            },
+        ),
+        db_session,
+    )
+    assert imported["item"]["status"] == "new_card_moderation"
+    assert imported["item"]["offers"]["kaspi_submission"]["status"] == "waiting"
+    waiting_state = read_product_test_state(db_session)
+    assert waiting_state["new_cards"] == []
+    assert waiting_state["submissions"][0]["id"] == item_id
+    assert claim_product_test_job(identity, db_session)["job"] is None
+
+    first_check = db_session.scalar(
+        select(ProductTestJob).where(
+            ProductTestJob.item_id == item_id,
+            ProductTestJob.job_type == "confirm_new_card",
+            ProductTestJob.status == "queued",
+        )
+    )
+    first_check.lease_until = product_test_api._now() - timedelta(seconds=1)
+    db_session.commit()
+    moderation_claim = claim_product_test_job(identity, db_session)
+    pending = complete_product_test_job(
+        moderation_claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id=identity.agent_id,
+            workspace_id=1,
+            lease_token=moderation_claim["job"]["lease_token"],
+            status="succeeded",
+            result={"result": "NEW_CARD_PENDING_MODERATION", "official_sku": "900000001"},
+        ),
+        db_session,
+    )
+    assert pending["followup"]["status"] == "queued"
+
+    retry_check = db_session.get(ProductTestJob, pending["followup"]["id"])
+    retry_check.lease_until = product_test_api._now() - timedelta(seconds=1)
+    db_session.commit()
+    retry_claim = claim_product_test_job(identity, db_session)
+    transient = complete_product_test_job(
+        retry_claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id=identity.agent_id,
+            workspace_id=1,
+            lease_token=retry_claim["job"]["lease_token"],
+            status="failed",
+            error_code="AdapterNetworkError",
+            error_message="temporary Merchant Cabinet timeout",
+        ),
+        db_session,
+    )
+    assert transient["retry_job"]["status"] == "queued"
+    db_session.refresh(db_session.get(ProductTestItem, item_id))
+    assert db_session.get(ProductTestItem, item_id).status == "new_card_moderation"
+
+    final_check = db_session.get(ProductTestJob, transient["retry_job"]["id"])
+    final_check.lease_until = product_test_api._now() - timedelta(seconds=1)
+    db_session.commit()
+    final_claim = claim_product_test_job(identity, db_session)
+    item = db_session.get(ProductTestItem, item_id)
+    enrolled = complete_product_test_job(
+        final_claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id=identity.agent_id,
+            workspace_id=1,
+            lease_token=final_claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "result": "CREATED_AND_VISIBLE",
+                "official_sku": "900000001",
+                "new_card_master_sku": "880000001",
+                "merchant_sku": "880000001_900000001",
+                "after": {
+                    "found": True,
+                    "sku": "880000001_900000001",
+                    "price_kzt": int(item.test_price_kzt),
+                    "stock_count": item.stock_count,
+                    "preorder_days": item.preorder_days,
+                },
+            },
+        ),
+        db_session,
+    )
+    product = db_session.scalar(select(Product).where(Product.kaspi_product_id == "880000001"))
+    assert enrolled["item"]["status"] == "enrolled_fast_dumping"
+    assert product is not None and product.merchant_sku == "880000001_900000001"
+    assert db_session.scalar(select(MonitorTarget).where(MonitorTarget.workspace_id == 1)) is not None
+    assert db_session.scalar(select(FastDumpingPolicy).where(FastDumpingPolicy.product_id == product.id)) is not None
+    assert db_session.scalar(select(FastDumpingJob).where(FastDumpingJob.product_id == product.id)) is not None

@@ -4,7 +4,10 @@ const storageKey = "leo_crm_service_token";
 const authPanel = document.querySelector("#auth-panel");
 const page = document.querySelector("#lab-page");
 const message = document.querySelector("#message");
+const pageMode = document.body.dataset.productTestPage || "product-test";
+const isAddProductPage = pageMode === "add-product";
 let refreshTimer = null;
+let currentNewCards = new Map();
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
@@ -81,30 +84,46 @@ const itemRow = (item, index) => {
 
 const submissionRow = (item) => {
   const submission = item.offers?.kaspi_submission || {};
+  const displayImage = item.image_url || item.offers?.new_card?.images?.[0] || item.offers?.supplier?.supplier_image_url || "";
+  const newCardRoute = submission.route === "new_card";
   const status = submission.status || "waiting";
   const waiting = status === "waiting";
   const succeeded = status === "succeeded";
   const autoDismiss = status === "failed" && Boolean(submission.terminal_rejection && submission.hide_after);
-  const title = waiting ? "Ждём появления товара на Kaspi" : succeeded ? "Успешно выгружен и обнаружен на Kaspi" : "Kaspi не подтвердил выгрузку";
+  const retryAllowed = !newCardRoute || submission.stage === "product_import";
+  const title = waiting
+    ? newCardRoute && submission.stage === "product_import"
+      ? "Kaspi проверяет новую карточку"
+      : newCardRoute
+        ? "Карточка принята: ждём masterSku и создаём оффер"
+        : "Ждём появления товара на Kaspi"
+    : succeeded ? "Успешно выгружен и обнаружен на Kaspi" : "Kaspi не подтвердил выгрузку";
   const meta = succeeded
     ? `SKU ${submission.merchant_sku || item.merchant_sku || "—"} · цена ${money(submission.actual_price_kzt || item.test_price_kzt)}`
     : waiting
-      ? `попытка ${Number(submission.attempt || 1)} · поставлен ${dateTime(submission.queued_at)}`
+      ? newCardRoute && submission.stage === "moderation"
+        ? `Product Import ${submission.import_code || "—"} · следующая проверка ${dateTime(submission.next_check_at)}`
+        : `попытка ${Number(submission.attempt || 1)} · поставлен ${dateTime(submission.queued_at)}`
       : (submission.error || item.last_error || "Неизвестная ошибка");
-  return `<article class="submission-row ${escapeHtml(status)}" data-id="${item.id}">
-    ${item.image_url ? `<img src="${escapeHtml(item.image_url)}" alt="${escapeHtml(item.name)}" loading="lazy" referrerpolicy="no-referrer">` : '<div class="submission-image-placeholder">Нет фото</div>'}
+  return `<article class="submission-row ${escapeHtml(status)}" data-id="${item.id}" data-route="${newCardRoute ? "new_card" : "existing_card"}">
+    ${displayImage ? `<img src="${escapeHtml(displayImage)}" alt="${escapeHtml(item.name)}" loading="lazy" referrerpolicy="no-referrer">` : '<div class="submission-image-placeholder">Нет фото</div>'}
     <div class="submission-copy"><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml([item.brand, item.kaspi_product_id].filter(Boolean).join(" · "))}</small><span>${escapeHtml(title)}</span><em>${escapeHtml(meta)}</em></div>
-    <div class="submission-actions"><span class="submission-badge ${escapeHtml(status)}">${waiting ? "ОЖИДАНИЕ" : succeeded ? "УСПЕШНО" : "ОШИБКА"}</span>${succeeded ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div><small>исчезнет после ${dateTime(submission.hide_after)}</small>` : autoDismiss ? `<small>категория недоступна · исчезнет после ${dateTime(submission.hide_after)}</small>` : status === "failed" ? '<button class="button retry" type="button">Повторить выгрузку</button>' : '<small>Product Test Agent проверяет Merchant Cabinet</small>'}</div>
+    <div class="submission-actions"><span class="submission-badge ${escapeHtml(status)}">${waiting ? "ОЖИДАНИЕ" : succeeded ? "УСПЕШНО" : "ОШИБКА"}</span>${succeeded ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div><small>исчезнет после ${dateTime(submission.hide_after)}</small>` : autoDismiss ? `<small>категория недоступна · исчезнет после ${dateTime(submission.hide_after)}</small>` : status === "failed" && retryAllowed ? `<button class="button retry" type="button">${newCardRoute ? "Исправить и повторить" : "Повторить выгрузку"}</button>` : status === "failed" ? `<small>Product Import уже принят · проверьте карточку в кабинете Kaspi</small>` : `<small>${newCardRoute ? "Product Test Agent сам продолжит после модерации" : "Product Test Agent проверяет Merchant Cabinet"}</small>`}</div>
   </article>`;
 };
 
 const renderSubmissions = (submissions) => {
   const section = document.querySelector("#kaspi-submissions-section");
   const list = document.querySelector("#kaspi-submissions");
+  if (!section || !list) return;
   section.classList.toggle("hidden", submissions.length === 0);
   list.innerHTML = submissions.map(submissionRow).join("");
   if (submissions.some((item) => (item.offers?.kaspi_submission?.status || "waiting") === "waiting")) {
-    scheduleRefresh(3000);
+    const hasImmediate = submissions.some((item) => {
+      const value = item.offers?.kaspi_submission || {};
+      return value.status === "waiting" && !(value.route === "new_card" && value.stage === "moderation");
+    });
+    scheduleRefresh(hasImmediate ? 3000 : 30000);
   } else if (submissions.some((item) => item.offers?.kaspi_submission?.hide_after)) {
     const remaining = submissions
       .filter((item) => item.offers?.kaspi_submission?.hide_after)
@@ -114,14 +133,95 @@ const renderSubmissions = (submissions) => {
   }
 };
 
+const newCardStatus = (item) => ({
+  new_card_draft: "Нужно проверить и заполнить обязательные поля",
+  new_card_ready: "Черновик готов к Product Import",
+  new_card_mapping: "Product Test Agent загружает поля категории",
+  new_card_importing: "Kaspi выполняет Product Import",
+  new_card_moderation: "Принято Kaspi, ожидаем masterSku",
+  new_card_error: item.last_error || "Kaspi отклонил карточку — исправьте черновик",
+}[item.status] || item.status || "Черновик");
+
+const newCardRow = (item) => {
+  const draft = item.offers?.new_card || {};
+  const supplier = item.offers?.supplier || {};
+  const locked = ["new_card_mapping", "new_card_importing", "new_card_moderation", "enrolled_fast_dumping"].includes(item.status);
+  const errors = draft.validation_errors || [];
+  const categories = draft.categories || [];
+  const attributes = draft.attributes || [];
+  const displayImage = draft.images?.[0] || supplier.supplier_image_url || item.image_url || "";
+  const delivery = supplier.supplier_delivery_text || (supplier.supplier_delivery_days != null ? `${supplier.supplier_delivery_days} дн.` : "—");
+  const categoryList = categories.map((row) => `<option value="${escapeHtml(row.code)}">${escapeHtml(row.title)}</option>`).join("");
+  const images = (draft.images || []).map((url, index) => `<label class="new-card-image"><img src="${escapeHtml(url)}" alt="Фото Ozon ${index + 1}" loading="lazy" referrerpolicy="no-referrer"><span><input class="new-card-image-use" type="checkbox" data-url="${escapeHtml(url)}" ${index < 10 ? "checked" : ""} ${locked ? "disabled" : ""}> использовать</span></label>`).join("");
+  const attrRows = attributes.map((row, index) => {
+    const allowed = row.allowed_values || [];
+    const listId = `new-card-attr-${item.id}-${index}`;
+    const options = allowed.map((value) => `<option value="${escapeHtml(value.code || value.name || "")}">${escapeHtml(value.name || value.code || "")}</option>`).join("");
+    return `<tr data-index="${index}"><td><strong>${escapeHtml(row.title || row.code)}</strong>${row.required ? '<span class="required-pill">обязательно</span>' : ""}<small>${escapeHtml(row.code || "")}${row.multi_valued ? " · несколько через ;" : ""}</small></td><td><input class="new-card-attr" ${allowed.length ? `list="${listId}"` : ""} value="${escapeHtml(row.value || "")}" ${locked ? "disabled" : ""}>${allowed.length ? `<datalist id="${listId}">${options}</datalist>` : ""}</td><td><small>${escapeHtml([row.source_name, row.source_value].filter(Boolean).join(": ") || "нет источника Ozon")}</small></td></tr>`;
+  }).join("");
+  return `<article class="new-card-editor" data-id="${item.id}" data-category="${escapeHtml(draft.category || "")}">
+    <div class="new-card-summary">
+      ${displayImage ? `<img src="${escapeHtml(displayImage)}" alt="${escapeHtml(item.name)}" loading="lazy" referrerpolicy="no-referrer">` : '<div class="market-image-placeholder">Нет фото</div>'}
+      <div><strong>${escapeHtml(item.name)}</strong><small>${escapeHtml([item.brand, draft.sku].filter(Boolean).join(" · "))}</small><a href="${escapeHtml(item.supplier_url || "")}" target="_blank" rel="noopener">Открыть Ozon ↗</a></div>
+      <div class="new-card-plan"><span>Ozon: <strong>${money(supplier.supplier_price_kzt)}</strong></span><span>доставка: <strong>${escapeHtml(delivery)}</strong></span><span>Kaspi: <strong>${money(item.test_price_kzt)}</strong></span><span>preOrder: <strong>${Math.max(1, Number(item.preorder_days || 1))} дн.</strong></span></div>
+      <span class="new-card-status">${escapeHtml(newCardStatus(item))}</span>
+    </div>
+    <div class="new-card-fields">
+      <label><span>SKU</span><input name="sku" maxlength="64" value="${escapeHtml(draft.sku || "")}" ${locked ? "disabled" : ""}></label>
+      <label><span>Бренд</span><input name="brand" maxlength="255" value="${escapeHtml(draft.brand || "")}" ${locked ? "disabled" : ""}></label>
+      <label class="wide"><span>Название</span><input name="title" maxlength="1024" value="${escapeHtml(draft.title || "")}" ${locked ? "disabled" : ""}></label>
+      <label><span>Вес, кг</span><input name="weight" type="number" min="0.001" max="10000" step="0.001" value="${escapeHtml(draft.weight || "")}" ${locked ? "disabled" : ""}></label>
+      <label><span>Категория Kaspi</span><input name="category" list="new-card-categories-${item.id}" maxlength="255" value="${escapeHtml(draft.category || "")}" ${locked ? "disabled" : ""}><datalist id="new-card-categories-${item.id}">${categoryList}</datalist><small>${escapeHtml(draft.category_title || draft.category_hint || "")}</small></label>
+      <label class="wide"><span>Описание Kaspi (100–1024 символа)</span><textarea name="description" maxlength="1024" ${locked ? "disabled" : ""}>${escapeHtml(draft.description || "")}</textarea></label>
+    </div>
+    <details class="new-card-images" open><summary><strong>Фото Ozon (${(draft.images || []).length})</strong></summary><div>${images || '<span class="muted">Фото не найдены</span>'}</div></details>
+    <details class="new-card-attributes" open><summary><strong>Поля Kaspi (${attributes.length})</strong></summary><div class="new-card-attributes-scroll"><table><thead><tr><th>Поле</th><th>Значение</th><th>Источник Ozon</th></tr></thead><tbody>${attrRows}</tbody></table></div></details>
+    <div class="new-card-errors ${errors.length ? "" : "ok"}">${errors.length ? errors.map((value) => `<span>${escapeHtml(value)}</span>`).join("") : "Все обязательные поля заполнены"}</div>
+    <div class="new-card-actions"><button class="button new-card-save" type="button" ${locked ? "disabled" : ""}>Сохранить черновик</button><button class="button new-card-remap" type="button" ${locked ? "disabled" : ""}>Загрузить поля категории</button><button class="button new-card-create" type="button" ${locked || errors.length ? "disabled" : ""}>Создать новую карточку Kaspi</button></div>
+  </article>`;
+};
+
+const renderNewCards = (items, jobs) => {
+  const list = document.querySelector("#new-cards");
+  const empty = document.querySelector("#new-cards-empty");
+  const jobList = document.querySelector("#new-card-jobs");
+  if (!list || !empty || !jobList) return;
+  currentNewCards = new Map(items.map((item) => [String(item.id), item]));
+  list.innerHTML = items.map(newCardRow).join("");
+  empty.classList.toggle("hidden", items.length > 0);
+  const types = new Set(["prepare_new_card", "map_new_card_category", "create_new_card", "confirm_new_card"]);
+  const relevant = jobs.filter((job) => types.has(job.job_type) && ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
+  const labels = {prepare_new_card:"Чтение новой карточки Ozon", map_new_card_category:"Поля категории Kaspi", create_new_card:"Product Import Kaspi", confirm_new_card:"Ожидание masterSku"};
+  jobList.innerHTML = relevant.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? (job.job_type === "confirm_new_card" ? "ожидает следующей проверки Kaspi" : "ожидает Product Test Agent") : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
+  if (relevant.some((job) => ["queued", "leased"].includes(job.status) && job.job_type !== "confirm_new_card")) scheduleRefresh(3000);
+};
+
+const collectNewCard = (card) => {
+  const item = currentNewCards.get(String(card.dataset.id));
+  const draft = item?.offers?.new_card || {};
+  const attributes = (draft.attributes || []).map((row, index) => ({...row, value:card.querySelector(`tr[data-index="${index}"] .new-card-attr`)?.value.trim() || ""}));
+  return {
+    sku: card.querySelector('[name="sku"]').value.trim(),
+    title: card.querySelector('[name="title"]').value.trim(),
+    brand: card.querySelector('[name="brand"]').value.trim(),
+    description: card.querySelector('[name="description"]').value.trim(),
+    weight: card.querySelector('[name="weight"]').value || null,
+    category: card.querySelector('[name="category"]').value.trim(),
+    attributes,
+    images: [...card.querySelectorAll(".new-card-image-use:checked")].map((input) => input.dataset.url),
+  };
+};
+
 const renderJobs = (jobs) => {
+  const list = document.querySelector("#jobs");
+  if (!list) return;
   const relevant = jobs.filter((job) => ["discover", "validate_supplier"].includes(job.job_type));
   const active = relevant.filter((job) => ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
   const pending = active.filter((job) => ["queued", "leased"].includes(job.status));
   const lastSearch = relevant.find((job) => job.job_type === "discover" && job.status === "succeeded" && job.result);
   const labels = {discover:"Поиск новых товаров", validate_supplier:"Проверка Ozon"};
   const summary = lastSearch ? `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>` : "";
-  document.querySelector("#jobs").innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
+  list.innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
   if (pending.length) scheduleRefresh(3000);
 };
 
@@ -130,6 +230,7 @@ const renderAgent = (payload) => {
   const title = document.querySelector("#product-test-agent-title");
   const meta = document.querySelector("#product-test-agent-meta");
   const badge = document.querySelector("#product-test-agent-status");
+  if (!panel || !title || !meta || !badge) return;
   const agent = payload?.agents?.[0];
   const online = Boolean(payload?.online && agent?.online);
   panel.classList.toggle("ready", online);
@@ -138,7 +239,7 @@ const renderAgent = (payload) => {
   badge.textContent = online ? "В сети" : "Не в сети";
   if (!agent) {
     title.textContent = "Product Test Agent ещё не подключался";
-    meta.textContent = "Скачайте и запустите отдельный агент — он не ждёт мониторинг или Быстрый демпинг.";
+    meta.textContent = "Запустите единый Product Test Agent — он обслуживает вкладки «Тест товара» и «Добавить товар».";
     return;
   }
   title.textContent = online ? `Подключён: ${agent.hostname || agent.agent_id}` : `Нет связи: ${agent.hostname || agent.agent_id}`;
@@ -147,28 +248,41 @@ const renderAgent = (payload) => {
 
 const fillSettings = (settings) => {
   const form = document.querySelector("#settings-form");
+  if (!form) return;
   Object.entries(settings || {}).forEach(([key, value]) => {
     const field = form.elements.namedItem(key); if (!field) return;
     if (key === "image_verify") field.checked = true;
     else if (field.type === "checkbox") field.checked = Boolean(value);
     else field.value = value ?? "";
   });
-  if (settings?.target_new) document.querySelector("#target-new").value = settings.target_new;
+  const targetNew = document.querySelector("#target-new");
+  if (settings?.target_new && targetNew) targetNew.value = settings.target_new;
 };
 
 const render = (payload) => {
   if (refreshTimer) { window.clearTimeout(refreshTimer); refreshTimer = null; }
   const items = payload.items || [];
+  const newCards = payload.new_cards || [];
   const submissions = payload.submissions || [];
-  document.querySelector("#items").innerHTML = items.length ? `<div class="lab-results-table"><div class="lab-table-head"><span>#</span><span>KASPI</span><span>KASPI ЦЕНА</span><span>OZON</span><span>SUPPLIER COST</span><span>ДОСТАВКА</span><span>СТАРТ KASPI</span><span>MATCH</span><span>СТАТУС / ДЕЙСТВИЯ</span></div>${items.map(itemRow).join("")}</div>` : "";
-  document.querySelector("#empty").classList.toggle("hidden", items.length > 0);
-  document.querySelector("#total-count").textContent = items.filter((item) => item.status !== "enrolled_fast_dumping").length;
-  document.querySelector("#ready-count").textContent = items.filter((item) => item.status === "ready_to_add").length;
-  document.querySelector("#job-count").textContent = (payload.jobs || []).filter((job) => ["queued", "leased"].includes(job.status)).length;
-  document.querySelector("#enrolled-count").textContent = submissions.filter((item) => item.offers?.kaspi_submission?.status === "succeeded").length;
+  const jobs = payload.jobs || [];
+  const pageSubmissions = submissions.filter((item) => {
+    const isNewCard = item.offers?.kaspi_submission?.route === "new_card";
+    return isAddProductPage ? isNewCard : !isNewCard;
+  });
+  const itemsList = document.querySelector("#items");
+  const empty = document.querySelector("#empty");
+  if (itemsList) itemsList.innerHTML = items.length ? `<div class="lab-results-table"><div class="lab-table-head"><span>#</span><span>KASPI</span><span>KASPI ЦЕНА</span><span>OZON</span><span>SUPPLIER COST</span><span>ДОСТАВКА</span><span>СТАРТ KASPI</span><span>MATCH</span><span>СТАТУС / ДЕЙСТВИЯ</span></div>${items.map(itemRow).join("")}</div>` : "";
+  if (empty) empty.classList.toggle("hidden", items.length > 0);
+  const newCardJobTypes = new Set(["prepare_new_card", "map_new_card_category", "create_new_card", "confirm_new_card"]);
+  const pageJobs = jobs.filter((job) => isAddProductPage ? newCardJobTypes.has(job.job_type) : !newCardJobTypes.has(job.job_type));
+  document.querySelector("#total-count").textContent = isAddProductPage ? newCards.length : items.filter((item) => item.status !== "enrolled_fast_dumping").length;
+  document.querySelector("#ready-count").textContent = isAddProductPage ? newCards.filter((item) => item.status === "new_card_ready").length : items.filter((item) => item.status === "ready_to_add").length;
+  document.querySelector("#job-count").textContent = pageJobs.filter((job) => ["queued", "leased"].includes(job.status)).length;
+  document.querySelector("#enrolled-count").textContent = pageSubmissions.filter((item) => item.offers?.kaspi_submission?.status === "succeeded").length;
   fillSettings(payload.settings || {});
-  renderJobs(payload.jobs || []);
-  renderSubmissions(submissions);
+  if (isAddProductPage) renderNewCards(newCards, jobs);
+  else renderJobs(jobs);
+  renderSubmissions(pageSubmissions);
   renderAgent(payload.agent || {});
 };
 
@@ -178,21 +292,31 @@ async function load() {
   catch (error) { notify(error.message, "error"); }
 }
 
-document.querySelector("#token-form").addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, document.querySelector("#token").value.trim()); load(); });
-document.querySelector("#refresh").addEventListener("click", load);
-document.querySelector("#discover-form").addEventListener("submit", async (event) => {
+document.querySelector("#token-form")?.addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, document.querySelector("#token").value.trim()); load(); });
+document.querySelector("#refresh")?.addEventListener("click", load);
+document.querySelector("#new-card-form")?.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const button = document.querySelector("#new-card-prepare");
+  setBusy(button, true, "Передаю Agent…");
+  try {
+    await request("/api/product-test/new-cards/prepare", {method:"POST", body:JSON.stringify({supplier_url:document.querySelector("#new-card-url").value.trim()})});
+    notify("Product Test Agent готовит новую карточку по точной ссылке Ozon.", "success");
+    await load();
+  } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
+});
+document.querySelector("#discover-form")?.addEventListener("submit", async (event) => {
   event.preventDefault(); const button = document.querySelector("#discover-button"); setBusy(button, true, "Передаю Agent…");
   try { await request("/api/product-test/discover", {method:"POST", body:JSON.stringify({query:document.querySelector("#query").value.trim(), target_new:Number(document.querySelector("#target-new").value)})}); notify("Быстрый поиск запущен. Кандидаты появятся автоматически.", "success"); await load(); }
   catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
-document.querySelector("#settings-form").addEventListener("submit", async (event) => {
+document.querySelector("#settings-form")?.addEventListener("submit", async (event) => {
   event.preventDefault(); const form = event.currentTarget; const button = form.querySelector("button"); setBusy(button, true, "Сохраняю…");
   const body = {}; new FormData(form).forEach((value, key) => { body[key] = ["city_id", "zone_id"].includes(key) ? String(value) : Number(value); });
   body.image_verify = form.elements.image_verify.checked; body.allow_price_raise = form.elements.allow_price_raise.checked;
   try { await request("/api/product-test/settings", {method:"PATCH", body:JSON.stringify(body)}); notify("Значения по умолчанию сохранены.", "success"); await load(); }
   catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
-document.querySelector("#items").addEventListener("click", async (event) => {
+document.querySelector("#items")?.addEventListener("click", async (event) => {
   const card = event.target.closest(".lab-result-row"); const button = event.target.closest("button"); if (!card || !button) return;
   setBusy(button, true, button.classList.contains("add") ? "Выгружаю…" : "Проверяю…");
   try {
@@ -209,19 +333,47 @@ document.querySelector("#items").addEventListener("click", async (event) => {
     await load();
   } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
-document.querySelector("#items").addEventListener("input", (event) => {
+document.querySelector("#items")?.addEventListener("input", (event) => {
   if (!event.target.classList.contains("supplier")) return;
   const card = event.target.closest(".lab-result-row"); if (!card) return;
   const dirty = event.target.value.trim() !== (card.dataset.supplierUrl || "");
   card.classList.toggle("link-dirty", dirty);
   const add = card.querySelector(".add"); if (add) add.disabled = dirty || card.dataset.canAdd !== "1";
 });
-document.querySelector("#kaspi-submissions").addEventListener("click", async (event) => {
+document.querySelector("#new-cards")?.addEventListener("click", async (event) => {
+  const card = event.target.closest(".new-card-editor");
+  const button = event.target.closest("button");
+  if (!card || !button) return;
+  const payload = collectNewCard(card);
+  const originalCategory = card.dataset.category || "";
+  const action = button.classList.contains("new-card-create") ? "Создаю…" : button.classList.contains("new-card-remap") ? "Загружаю…" : "Сохраняю…";
+  setBusy(button, true, action);
+  try {
+    if (button.classList.contains("new-card-create") && payload.category !== originalCategory) {
+      throw new Error("Категория изменена. Сначала нажмите «Загрузить поля категории».");
+    }
+    await request(`/api/product-test/new-cards/${card.dataset.id}`, {method:"PATCH", body:JSON.stringify(payload)});
+    if (button.classList.contains("new-card-remap")) {
+      await request(`/api/product-test/new-cards/${card.dataset.id}/map-category`, {method:"POST", body:JSON.stringify({category:payload.category})});
+      notify("Product Test Agent загружает реальные поля и enum-значения выбранной категории Kaspi.", "success");
+    } else if (button.classList.contains("new-card-create")) {
+      await request(`/api/product-test/new-cards/${card.dataset.id}/create`, {method:"POST"});
+      notify("Новая карточка передана Product Import. После detailed result агент сам дождётся masterSku, создаст оффер и подключит существующие Мониторинг и Fast Dumping.", "success");
+    } else {
+      notify("Черновик новой карточки сохранён.", "success");
+    }
+    await load();
+  } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
+});
+document.querySelector("#kaspi-submissions")?.addEventListener("click", async (event) => {
   const row = event.target.closest(".submission-row"); const button = event.target.closest("button.retry");
   if (!row || !button) return;
   setBusy(button, true, "Повторяю…");
   try {
-    await request(`/api/product-test/items/${row.dataset.id}/add`, {method:"POST"});
+    const endpoint = row.dataset.route === "new_card"
+      ? `/api/product-test/new-cards/${row.dataset.id}/create`
+      : `/api/product-test/items/${row.dataset.id}/add`;
+    await request(endpoint, {method:"POST"});
     notify("Повторная выгрузка передана Product Test Agent.", "success");
     await load();
   } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }

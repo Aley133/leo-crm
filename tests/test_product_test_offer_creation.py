@@ -206,3 +206,119 @@ def test_product_test_agent_rejects_zero_day_confirmation(monkeypatch) -> None:
             merchant_session=object(),
             store_id="11843018_041600",
         ))
+
+
+def test_product_test_agent_waits_for_new_card_master_sku(monkeypatch) -> None:
+    class FakeMerchantOfferApi:
+        def __init__(self, _session, *, store_id: str, city_id: str) -> None:
+            pass
+
+        def read_offer(self, reference: str) -> OfferState:
+            assert reference == "900000001"
+            return OfferState(found=False, sku=None)
+
+    monkeypatch.setattr(product_test_agent, "MerchantOfferApi", FakeMerchantOfferApi)
+    result = asyncio.run(product_test_agent._execute_job(
+        {
+            "job_type": "confirm_new_card",
+            "city_id": "196220100",
+            "options": {
+                "official_sku": "900000001",
+                "model": "New Solgar card",
+                "initial_price_kzt": 5200,
+                "stock_count": 5,
+                "preorder_days": 1,
+            },
+        },
+        merchant_session=object(),
+        store_id="11843018_041600",
+    ))
+
+    assert result["result"] == "NEW_CARD_PENDING_MODERATION"
+    assert result["official_sku"] == "900000001"
+
+
+def test_product_test_agent_repairs_new_card_offer_with_minimum_preorder(monkeypatch) -> None:
+    captured: dict = {}
+
+    class FakeMerchantOfferApi:
+        def __init__(self, _session, *, store_id: str, city_id: str) -> None:
+            pass
+
+        def read_offer(self, reference: str) -> OfferState:
+            assert reference == "900000001"
+            return OfferState(found=True, sku="900000001", master_sku="880000001")
+
+        def create_linked_offer(self, **kwargs):
+            captured.update(kwargs)
+            return {
+                "result": "ALREADY_EXISTS",
+                "merchant_sku": "880000001_900000001",
+                "after": {
+                    "found": True,
+                    "sku": "880000001_900000001",
+                    "price_kzt": 5200,
+                    "stock_count": 5,
+                    "preorder_days": 1,
+                },
+            }
+
+    monkeypatch.setattr(product_test_agent, "MerchantOfferApi", FakeMerchantOfferApi)
+    result = asyncio.run(product_test_agent._execute_job(
+        {
+            "job_type": "confirm_new_card",
+            "city_id": "196220100",
+            "options": {
+                "official_sku": "900000001",
+                "model": "New Solgar card",
+                "initial_price_kzt": 5200,
+                "stock_count": 5,
+                "preorder_days": 0,
+            },
+        },
+        merchant_session=object(),
+        store_id="11843018_041600",
+    ))
+
+    assert captured["master_sku"] == "880000001"
+    assert captured["preorder"] == 1
+    assert result["new_card_master_sku"] == "880000001"
+
+
+def test_product_test_agent_blocks_duplicate_new_card_import(monkeypatch) -> None:
+    class FakeMerchantOfferApi:
+        def __init__(self, _session, *, store_id: str, city_id: str) -> None:
+            pass
+
+        def read_offer(self, reference: str) -> OfferState:
+            assert reference == "900000001"
+            return OfferState(
+                found=True,
+                sku="880000001_900000001",
+                master_sku="880000001",
+            )
+
+    monkeypatch.setattr(product_test_agent, "MerchantOfferApi", FakeMerchantOfferApi)
+    monkeypatch.setattr(
+        product_test_agent,
+        "prepare_new_card",
+        lambda _token, url: {"source_url": url, "sku": "900000001"},
+    )
+    monkeypatch.setattr(
+        product_test_agent,
+        "validate_supplier_url",
+        lambda *_args, **_kwargs: pytest.fail("supplier validation must not run for a duplicate SKU"),
+    )
+
+    with pytest.raises(RuntimeError, match="уже существует"):
+        asyncio.run(product_test_agent._execute_job(
+            {
+                "job_type": "prepare_new_card",
+                "city_id": "196220100",
+                "reference": "https://www.ozon.kz/product/new-card-900000001/",
+                "options": {"supplier_url": "https://www.ozon.kz/product/new-card-900000001/"},
+            },
+            merchant_session=object(),
+            store_id="11843018_041600",
+            kaspi_api_token_provider=lambda: "secret-token",
+        ))

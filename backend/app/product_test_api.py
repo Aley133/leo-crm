@@ -37,6 +37,9 @@ PRODUCT_TEST_AGENT_KIND = "product_test"
 PRODUCT_TEST_AGENT_ONLINE_SECONDS = 50
 PRODUCT_TEST_SUCCESS_VISIBLE_SECONDS = 15 * 60
 PRODUCT_TEST_CATEGORY_ERROR_VISIBLE_SECONDS = 3 * 60
+PRODUCT_TEST_NEW_CARD_FIRST_CHECK_SECONDS = 60
+PRODUCT_TEST_NEW_CARD_RECHECK_SECONDS = 5 * 60
+PRODUCT_TEST_NEW_CARD_WATCH_SECONDS = 7 * 24 * 60 * 60
 PRODUCT_TEST_CATEGORY_REJECTION_CODES = frozenset({
     "VALIDATE_CHOOSE_REJECTED",
     "VALIDATE_PRICE_STOCK_REJECTED",
@@ -75,6 +78,26 @@ class ProductTestSettingsUpdate(BaseModel):
 
 class SupplierUrlRequest(BaseModel):
     supplier_url: str = Field(min_length=12, max_length=4000, pattern=r"^https://(?:[^/]+\.)?ozon\.(?:ru|kz)/")
+
+
+class ProductTestNewCardRequest(BaseModel):
+    supplier_url: str = Field(min_length=12, max_length=4000, pattern=r"^https://(?:[^/]+\.)?ozon\.(?:ru|kz)/")
+
+
+class ProductTestNewCardCategoryRequest(BaseModel):
+    category: str = Field(min_length=1, max_length=255)
+
+
+class ProductTestNewCardUpdate(BaseModel):
+    sku: str | None = Field(default=None, min_length=1, max_length=64)
+    title: str | None = Field(default=None, min_length=1, max_length=1024)
+    brand: str | None = Field(default=None, min_length=1, max_length=255)
+    description: str | None = Field(default=None, min_length=1, max_length=1024)
+    weight: Decimal | None = Field(default=None, gt=0, le=10000)
+    category: str | None = Field(default=None, min_length=1, max_length=255)
+    category_title: str | None = Field(default=None, max_length=500)
+    attributes: list[dict] | None = Field(default=None, max_length=300)
+    images: list[str] | None = Field(default=None, max_length=20)
 
 
 class ProductTestUpdate(BaseModel):
@@ -236,6 +259,61 @@ def _set_kaspi_submission(item: ProductTestItem, **values: object) -> dict:
     return submission
 
 
+def _is_new_card_item(item: ProductTestItem) -> bool:
+    details = item.offers_json if isinstance(item.offers_json, dict) else {}
+    return details.get("mode") == "new_card" and isinstance(details.get("new_card"), dict)
+
+
+def _new_card_draft(item: ProductTestItem) -> dict:
+    details = item.offers_json if isinstance(item.offers_json, dict) else {}
+    draft = details.get("new_card")
+    return dict(draft) if isinstance(draft, dict) else {}
+
+
+def _set_new_card_draft(item: ProductTestItem, draft: dict) -> None:
+    details = dict(item.offers_json or {})
+    details["mode"] = "new_card"
+    details["new_card"] = draft
+    item.offers_json = details
+
+
+def _new_card_draft_errors(draft: dict) -> list[str]:
+    errors: list[str] = []
+    required = {
+        "sku": "SKU",
+        "title": "Название",
+        "brand": "Бренд",
+        "category": "Категория Kaspi",
+    }
+    for key, label in required.items():
+        if not str(draft.get(key) or "").strip():
+            errors.append(f"Не заполнено: {label}")
+    description = str(draft.get("description") or "").strip()
+    if len(description) < 100 or len(description) > 1024:
+        errors.append("Описание должно содержать от 100 до 1024 символов")
+    images = [value for value in list(draft.get("images") or []) if _external_https_url(value)]
+    if not images:
+        errors.append("Выберите хотя бы одно фото Ozon")
+    for row in list(draft.get("attributes") or []):
+        if not isinstance(row, dict) or not row.get("required"):
+            continue
+        value = row.get("value")
+        if value in (None, "", []):
+            errors.append(f"Обязательное поле Kaspi: {row.get('title') or row.get('code')}")
+    return errors[:100]
+
+
+def _new_card_job_draft(item: ProductTestItem) -> dict:
+    draft = _new_card_draft(item)
+    return {
+        key: draft.get(key)
+        for key in (
+            "source_url", "sku", "title", "brand", "description", "weight",
+            "category", "category_title", "attributes", "images",
+        )
+    }
+
+
 def _submission_is_visible(item: ProductTestItem, *, now: datetime) -> bool:
     submission = _kaspi_submission(item)
     if not submission:
@@ -349,6 +427,7 @@ def _queue_job(
     zone_id: str,
     item_id: int | None = None,
     options: dict | None = None,
+    not_before: datetime | None = None,
 ) -> ProductTestJob:
     running = db.scalar(
         select(ProductTestJob).where(
@@ -368,6 +447,7 @@ def _queue_job(
         city_id=city_id,
         zone_id=zone_id,
         status="queued",
+        lease_until=not_before,
         result_json={},
         options_json=options or {},
     )
@@ -512,7 +592,24 @@ def read_product_test_state(db: Session = Depends(get_db)) -> dict:
         .order_by(ProductTestItem.updated_at.desc(), ProductTestItem.id.desc())
     ).all())
     now = _now()
-    items = [item for item in all_items if item.active and not _kaspi_submission(item)]
+    items = [
+        item
+        for item in all_items
+        if item.active and not _is_new_card_item(item) and not _kaspi_submission(item)
+    ]
+    new_cards = [
+        item
+        for item in all_items
+        if item.active
+        and _is_new_card_item(item)
+        and (
+            not _kaspi_submission(item)
+            or (
+                _kaspi_submission(item).get("status") == "failed"
+                and _kaspi_submission(item).get("stage") == "product_import"
+            )
+        )
+    ]
     submissions = [item for item in all_items if _submission_is_visible(item, now=now)]
     jobs = list(db.scalars(
         select(ProductTestJob)
@@ -525,6 +622,7 @@ def read_product_test_state(db: Session = Depends(get_db)) -> dict:
     db.commit()
     return {
         "items": [_item_payload(item) for item in items],
+        "new_cards": [_item_payload(item) for item in new_cards],
         "submissions": [_item_payload(item) for item in submissions],
         "jobs": [_job_payload(job) for job in jobs],
         "feed": None if feed is None else {"id": feed.id, "source_filename": feed.source_filename, "merchant_id": feed.merchant_id},
@@ -609,6 +707,333 @@ def _finish_job(job: ProductTestJob, result: dict) -> None:
     job.completed_at = _now()
     job.error_code = None
     job.error_message = None
+
+
+def _supplier_payload(result: dict, *, fallback_url: str) -> dict:
+    price = _money(result.get("supplier_price_kzt"))
+    url = str(result.get("supplier_url") or fallback_url or "").strip()[:4000]
+    if price is None or not url or not result.get("price_confirmed", result.get("validated")):
+        raise ValueError("Ozon не подтвердил цену поставщика для новой карточки")
+    return {
+        "supplier_url": url,
+        "supplier_price_kzt": format(price, "f"),
+        "supplier_price_source": result.get("supplier_price_source"),
+        "supplier_delivery_days": result.get("supplier_delivery_days"),
+        "supplier_delivery_text": str(result.get("supplier_delivery_text") or "").strip()[:255] or None,
+        "supplier_delivery_date": str(result.get("supplier_delivery_date") or "").strip()[:32] or None,
+        "supplier_offer_sku": result.get("supplier_offer_sku"),
+        "supplier_seller_name": result.get("supplier_seller_name") or "Ozon",
+        "supplier_seller_rating": result.get("supplier_seller_rating"),
+        "supplier_seller_reviews": result.get("supplier_seller_reviews"),
+        "supplier_offer_count": result.get("supplier_offer_count") or 1,
+        "supplier_product_title": str(result.get("supplier_product_title") or "").strip()[:500] or None,
+        "supplier_image_url": _external_https_url(result.get("supplier_image_url")),
+        "supplier_image_urls": [
+            url
+            for value in list(result.get("supplier_image_urls") or [])[:6]
+            if (url := _external_https_url(value))
+        ],
+        "supplier_rating": result.get("supplier_rating"),
+        "supplier_reviews": result.get("supplier_reviews"),
+        "match_status": "OPERATOR_CONFIRMED",
+        "match_score": 1.0,
+        "match_reasons": ["operator_selected_exact_url"],
+        "image_match": {"status": "OPERATOR_CONFIRMED"},
+        "manual_override": True,
+        "visual_review_required": False,
+        "validated": True,
+        "validation_source": "manual_exact_product_page",
+    }
+
+
+def _clean_new_card_draft(raw: dict, *, source_url: str) -> dict:
+    draft = dict(raw)
+    draft["source_url"] = source_url
+    draft["sku"] = str(draft.get("sku") or "").strip()[:64]
+    draft["title"] = str(draft.get("title") or "").strip()[:1024]
+    draft["brand"] = str(draft.get("brand") or "").strip()[:255]
+    draft["description"] = str(draft.get("description") or "").strip()[:1024]
+    draft["category"] = str(draft.get("category") or "").strip()[:255]
+    draft["category_title"] = str(draft.get("category_title") or "").strip()[:500]
+    draft["category_hint"] = str(draft.get("category_hint") or "").strip()[:500]
+    draft["images"] = [
+        url
+        for value in list(draft.get("images") or [])[:20]
+        if (url := _external_https_url(value))
+    ]
+    draft["characteristics"] = [
+        {
+            "name": str(row.get("name") or "").strip()[:255],
+            "value": str(row.get("value") or "").strip()[:1200],
+        }
+        for row in list(draft.get("characteristics") or [])[:180]
+        if isinstance(row, dict) and str(row.get("name") or "").strip()
+    ]
+    draft["attributes"] = [dict(row) for row in list(draft.get("attributes") or [])[:300] if isinstance(row, dict)]
+    draft["categories"] = [
+        {
+            "code": str(row.get("code") or "").strip()[:255],
+            "title": str(row.get("title") or "").strip()[:500],
+        }
+        for row in list(draft.get("categories") or [])[:1000]
+        if isinstance(row, dict) and str(row.get("code") or "").strip()
+    ]
+    supplied_errors = [str(value)[:500] for value in list(draft.get("validation_errors") or [])[:100]]
+    draft["validation_errors"] = list(dict.fromkeys([*supplied_errors, *_new_card_draft_errors(draft)]))
+    return draft
+
+
+def _persist_new_card_prepare(db: Session, *, job: ProductTestJob, result: dict) -> dict:
+    raw_draft = result.get("draft") if isinstance(result.get("draft"), dict) else {}
+    source_url = str(raw_draft.get("source_url") or job.options_json.get("supplier_url") or job.input_reference).strip()[:4000]
+    draft = _clean_new_card_draft(raw_draft, source_url=source_url)
+    supplier_result = result.get("supplier") if isinstance(result.get("supplier"), dict) else {}
+    supplier = _supplier_payload(supplier_result, fallback_url=source_url)
+    sku = str(draft.get("sku") or "").strip()
+    if not sku or not draft.get("title"):
+        raise ValueError("Ozon вернул неполный черновик новой карточки")
+    existing_product = db.scalar(
+        select(Product.id).where(
+            Product.workspace_id == job.workspace_id,
+            or_(Product.merchant_sku == sku, Product.kaspi_product_id == sku),
+        ).limit(1)
+    )
+    if existing_product is not None:
+        raise ValueError("Этот Ozon SKU уже связан с товаром CRM")
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.workspace_id == job.workspace_id,
+            ProductTestItem.merchant_sku == sku,
+        ).with_for_update()
+    )
+    if item is not None and not _is_new_card_item(item):
+        raise ValueError("SKU уже занят другим заданием Теста товаров")
+    if item is not None and _kaspi_submission(item):
+        raise ValueError(
+            "Этот SKU уже передавался Product Import; используйте сохранённый черновик и не создавайте второй маршрут"
+        )
+    offers = {"mode": "new_card", "supplier": supplier, "new_card": draft}
+    values = {
+        "input_reference": source_url,
+        "kaspi_product_id": f"NEW-{sku}"[:64],
+        "merchant_sku": sku[:128],
+        "name": str(draft["title"])[:500],
+        "brand": str(draft.get("brand") or "")[:255] or None,
+        "image_url": normalize_product_image_url((draft.get("images") or [None])[0]),
+        "kaspi_url": "",
+        "supplier_url": source_url,
+        "offers_json": offers,
+        "status": "new_card_ready" if not draft["validation_errors"] else "new_card_draft",
+        "last_error": None,
+        "active": True,
+    }
+    settings = _settings(db, job.workspace_id)
+    if item is None:
+        item = ProductTestItem(
+            workspace_id=job.workspace_id,
+            observed_price_kzt=None,
+            test_price_kzt=None,
+            preorder_days=1,
+            stock_count=settings.stock_count,
+            city_id=settings.city_id,
+            zone_id=settings.zone_id,
+            **values,
+        )
+        db.add(item)
+    else:
+        for key, value in values.items():
+            setattr(item, key, value)
+    db.flush()
+    _refresh_upload_plan(item, settings)
+    _finish_job(job, {"item_id": item.id, "sku": sku, "validation_errors": draft["validation_errors"]})
+    db.commit()
+    db.refresh(item)
+    return {"job": _job_payload(job), "item": _item_payload(item)}
+
+
+def _persist_new_card_mapping(db: Session, *, job: ProductTestJob, result: dict) -> dict:
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.id == job.item_id,
+            ProductTestItem.workspace_id == job.workspace_id,
+        ).with_for_update()
+    )
+    if item is None or not _is_new_card_item(item):
+        raise ValueError("Черновик новой карточки не найден")
+    draft = _new_card_draft(item)
+    draft["category"] = str(result.get("category") or job.options_json.get("category") or "").strip()[:255]
+    draft["attributes"] = [
+        dict(row) for row in list(result.get("attributes") or [])[:300] if isinstance(row, dict)
+    ]
+    categories = list(draft.get("categories") or [])
+    match = next((row for row in categories if str(row.get("code") or "") == draft["category"]), None)
+    if match is not None:
+        draft["category_title"] = str(match.get("title") or "")[:500]
+    draft["validation_errors"] = _new_card_draft_errors(draft)
+    _set_new_card_draft(item, draft)
+    item.status = "new_card_ready" if not draft["validation_errors"] else "new_card_draft"
+    item.last_error = None
+    _finish_job(job, {"item_id": item.id, "validation_errors": draft["validation_errors"]})
+    db.commit()
+    return {"job": _job_payload(job), "item": _item_payload(item)}
+
+
+def _new_card_confirmation_options(item: ProductTestItem, *, deadline: datetime) -> dict:
+    if item.test_price_kzt is None:
+        raise ValueError("Не рассчитана стартовая цена новой карточки")
+    return {
+        "official_sku": item.merchant_sku,
+        "model": item.name,
+        "initial_price_kzt": int(item.test_price_kzt),
+        "stock_count": max(1, int(item.stock_count or 0)),
+        "preorder_days": max(1, int(item.preorder_days or 0)),
+        "deadline": deadline.isoformat(),
+    }
+
+
+def _new_card_confirmation_deadline(job: ProductTestJob, *, now: datetime) -> datetime:
+    raw_deadline = str((job.options_json or {}).get("deadline") or "").strip()
+    try:
+        deadline = datetime.fromisoformat(raw_deadline.replace("Z", "+00:00"))
+    except ValueError:
+        deadline = now + timedelta(seconds=PRODUCT_TEST_NEW_CARD_WATCH_SECONDS)
+    if deadline.tzinfo is None:
+        deadline = deadline.replace(tzinfo=UTC)
+    return deadline
+
+
+def _reschedule_new_card_confirmation(
+    db: Session,
+    *,
+    job: ProductTestJob,
+    item: ProductTestItem,
+    last_error: str | None = None,
+) -> ProductTestJob | None:
+    """Keep moderation polling alive across temporary Agent/Kaspi failures."""
+
+    now = _now()
+    deadline = _new_card_confirmation_deadline(job, now=now)
+    if deadline <= now:
+        return None
+    # Reuse the single confirmation job instead of adding one row every five
+    # minutes for up to seven days of Kaspi moderation.
+    job.status = "queued"
+    job.agent_id = None
+    job.lease_token = None
+    job.lease_until = now + timedelta(seconds=PRODUCT_TEST_NEW_CARD_RECHECK_SECONDS)
+    job.completed_at = None
+    job.error_code = None
+    job.error_message = None
+    job.options_json = _new_card_confirmation_options(item, deadline=deadline)
+    submission = _kaspi_submission(item)
+    _set_kaspi_submission(
+        item,
+        route="new_card",
+        stage="moderation",
+        status="waiting",
+        check_count=int(submission.get("check_count") or 0) + 1,
+        next_check_at=job.lease_until.isoformat(),
+        last_check_error=(last_error or "")[:1000] or None,
+        error=None,
+        error_code=None,
+        terminal_rejection=False,
+    )
+    item.status = "new_card_moderation"
+    item.last_error = None
+    return job
+
+
+def _persist_new_card_import(db: Session, *, job: ProductTestJob, result: dict) -> dict:
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.id == job.item_id,
+            ProductTestItem.workspace_id == job.workspace_id,
+        ).with_for_update()
+    )
+    if item is None or not _is_new_card_item(item):
+        raise ValueError("Черновик новой карточки не найден")
+    if result.get("result") != "NEW_CARD_ACCEPTED_FOR_MODERATION" or not result.get("detailed_ok"):
+        raise ValueError("Kaspi не подтвердил detailed result новой карточки")
+    official_sku = str(result.get("sku") or item.merchant_sku).strip()[:128]
+    item.merchant_sku = official_sku
+    item.status = "new_card_moderation"
+    item.last_error = None
+    now = _now()
+    deadline = now + timedelta(seconds=PRODUCT_TEST_NEW_CARD_WATCH_SECONDS)
+    _set_kaspi_submission(
+        item,
+        route="new_card",
+        stage="moderation",
+        status="waiting",
+        import_code=str(result.get("import_code") or "")[:255] or None,
+        official_sku=official_sku,
+        queued_at=now.isoformat(),
+        completed_at=None,
+        detected_at=None,
+        hide_after=None,
+        deadline=deadline.isoformat(),
+        error=None,
+        error_code=None,
+        terminal_rejection=False,
+    )
+    _finish_job(job, {
+        "item_id": item.id,
+        "import_code": result.get("import_code"),
+        "detailed_ok": True,
+    })
+    followup = _queue_job(
+        db,
+        workspace_id=job.workspace_id,
+        job_type="confirm_new_card",
+        reference=f"new-card:{item.id}",
+        item_id=item.id,
+        city_id=item.city_id,
+        zone_id=item.zone_id,
+        options=_new_card_confirmation_options(item, deadline=deadline),
+        not_before=now + timedelta(seconds=PRODUCT_TEST_NEW_CARD_FIRST_CHECK_SECONDS),
+    )
+    db.commit()
+    return {"job": _job_payload(job), "followup": _job_payload(followup), "item": _item_payload(item)}
+
+
+def _persist_new_card_confirmation(db: Session, *, job: ProductTestJob, result: dict) -> dict:
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.id == job.item_id,
+            ProductTestItem.workspace_id == job.workspace_id,
+        ).with_for_update()
+    )
+    if item is None or not _is_new_card_item(item):
+        raise ValueError("Новая карточка больше не ожидает подтверждения")
+    if result.get("result") != "NEW_CARD_PENDING_MODERATION":
+        master_sku = str(result.get("new_card_master_sku") or result.get("master_sku") or "").strip()[:64]
+        if not master_sku:
+            raise ValueError("Kaspi не вернул masterSku новой карточки")
+        item.kaspi_product_id = master_sku
+        item.kaspi_url = f"https://kaspi.kz/shop/p/{master_sku}/"
+        return _enroll_created_product(db, job=job, result=result)
+
+    _finish_job(job, {"item_id": item.id, "result": "NEW_CARD_PENDING_MODERATION"})
+    now = _now()
+    deadline = _new_card_confirmation_deadline(job, now=now)
+    if deadline <= now:
+        item.status = "new_card_error"
+        item.last_error = "Kaspi не назначил masterSku новой карточке за 7 дней"
+        _set_kaspi_submission(
+            item,
+            status="failed",
+            stage="moderation_timeout",
+            completed_at=now.isoformat(),
+            error=item.last_error,
+            error_code="NEW_CARD_MODERATION_TIMEOUT",
+        )
+        db.commit()
+        return {"job": _job_payload(job), "item": _item_payload(item)}
+    followup = _reschedule_new_card_confirmation(db, job=job, item=item)
+    if followup is None:  # Guarded by the deadline check above.
+        raise ValueError("Не удалось запланировать следующую проверку новой карточки")
+    db.commit()
+    return {"job": _job_payload(job), "followup": _job_payload(followup), "item": _item_payload(item)}
 
 
 def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dict:
@@ -1101,12 +1526,216 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
             ProductTestItem.active.is_(True),
         ).with_for_update()
     ):
-        if not _kaspi_submission(item):
+        if not _kaspi_submission(item) and not _is_new_card_item(item):
             item.active = False
     _prune_product_test_history(db, workspace_id=workspace_id)
     db.commit()
     db.refresh(job)
     return {"job": _job_payload(job), "queued": True}
+
+
+@router.post("/new-cards/prepare")
+def prepare_product_test_new_card(
+    payload: ProductTestNewCardRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    workspace_id = current_workspace_id()
+    settings = _settings(db, workspace_id)
+    supplier_url = payload.supplier_url.strip()
+    job = _queue_job(
+        db,
+        workspace_id=workspace_id,
+        job_type="prepare_new_card",
+        reference=supplier_url,
+        city_id=settings.city_id,
+        zone_id=settings.zone_id,
+        options={"supplier_url": supplier_url},
+    )
+    _prune_product_test_history(db, workspace_id=workspace_id)
+    db.commit()
+    return {"job": _job_payload(job), "queued": True}
+
+
+@router.patch("/new-cards/{item_id}")
+def update_product_test_new_card(
+    item_id: int,
+    payload: ProductTestNewCardUpdate,
+    db: Session = Depends(get_db),
+) -> dict:
+    workspace_id = current_workspace_id()
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.id == item_id,
+            ProductTestItem.workspace_id == workspace_id,
+        ).with_for_update()
+    )
+    if item is None or not _is_new_card_item(item):
+        raise HTTPException(status_code=404, detail="Черновик новой карточки не найден")
+    if item.status in {"new_card_importing", "new_card_moderation", "enrolled_fast_dumping"}:
+        raise HTTPException(status_code=409, detail="Карточка уже передана Kaspi и временно заблокирована для правок")
+    draft = _new_card_draft(item)
+    changes = payload.model_dump(exclude_unset=True)
+    requested_sku = str(changes.get("sku") or draft.get("sku") or "").strip()[:128]
+    previous_submission = _kaspi_submission(item)
+    if (
+        requested_sku
+        and previous_submission.get("route") == "new_card"
+        and requested_sku != item.merchant_sku
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail="После первой Product Import отправки SKU менять нельзя; исправьте остальные поля и повторите тот же SKU",
+        )
+    if requested_sku and requested_sku != item.merchant_sku:
+        occupied_item = db.scalar(
+            select(ProductTestItem.id).where(
+                ProductTestItem.workspace_id == workspace_id,
+                ProductTestItem.merchant_sku == requested_sku,
+                ProductTestItem.id != item.id,
+            ).limit(1)
+        )
+        occupied_product = db.scalar(
+            select(Product.id).where(
+                Product.workspace_id == workspace_id,
+                or_(
+                    Product.merchant_sku == requested_sku,
+                    Product.kaspi_product_id == requested_sku,
+                ),
+            ).limit(1)
+        )
+        if occupied_item is not None or occupied_product is not None:
+            raise HTTPException(status_code=409, detail="Этот SKU уже занят в CRM или другом задании")
+    for key, value in changes.items():
+        if key == "images":
+            value = [
+                url
+                for raw in list(value or [])[:20]
+                if (url := _external_https_url(raw))
+            ]
+        elif key == "attributes":
+            value = [dict(row) for row in list(value or [])[:300] if isinstance(row, dict)]
+        elif key == "weight":
+            value = None if value is None else format(value, "f")
+        elif isinstance(value, str):
+            value = value.strip()
+        draft[key] = value
+    draft["validation_errors"] = _new_card_draft_errors(draft)
+    _set_new_card_draft(item, draft)
+    item.merchant_sku = str(draft.get("sku") or item.merchant_sku).strip()[:128]
+    item.name = str(draft.get("title") or item.name).strip()[:500]
+    item.brand = str(draft.get("brand") or "").strip()[:255] or None
+    item.image_url = normalize_product_image_url((draft.get("images") or [None])[0])
+    item.status = "new_card_ready" if not draft["validation_errors"] else "new_card_draft"
+    item.last_error = None
+    db.commit()
+    db.refresh(item)
+    return _item_payload(item)
+
+
+@router.post("/new-cards/{item_id}/map-category")
+def map_product_test_new_card_category(
+    item_id: int,
+    payload: ProductTestNewCardCategoryRequest,
+    db: Session = Depends(get_db),
+) -> dict:
+    workspace_id = current_workspace_id()
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.id == item_id,
+            ProductTestItem.workspace_id == workspace_id,
+        ).with_for_update()
+    )
+    if item is None or not _is_new_card_item(item):
+        raise HTTPException(status_code=404, detail="Черновик новой карточки не найден")
+    if item.status in {"new_card_importing", "new_card_moderation", "enrolled_fast_dumping"}:
+        raise HTTPException(status_code=409, detail="Карточка уже передана Kaspi")
+    draft = _new_card_draft(item)
+    category = payload.category.strip()
+    item.status = "new_card_mapping"
+    item.last_error = None
+    job = _queue_job(
+        db,
+        workspace_id=workspace_id,
+        job_type="map_new_card_category",
+        reference=f"new-card:{item.id}",
+        item_id=item.id,
+        city_id=item.city_id,
+        zone_id=item.zone_id,
+        options={
+            "category": category,
+            "characteristics": list(draft.get("characteristics") or [])[:180],
+        },
+    )
+    db.commit()
+    return {"job": _job_payload(job), "item": _item_payload(item)}
+
+
+@router.post("/new-cards/{item_id}/create")
+def create_product_test_new_card(item_id: int, db: Session = Depends(get_db)) -> dict:
+    workspace_id = current_workspace_id()
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.id == item_id,
+            ProductTestItem.workspace_id == workspace_id,
+        ).with_for_update()
+    )
+    if item is None or not _is_new_card_item(item):
+        raise HTTPException(status_code=404, detail="Черновик новой карточки не найден")
+    if item.status in {"new_card_importing", "new_card_moderation", "enrolled_fast_dumping"}:
+        raise HTTPException(status_code=409, detail="Карточка уже передана Kaspi")
+    previous = _kaspi_submission(item)
+    if previous.get("route") == "new_card" and previous.get("stage") != "product_import":
+        raise HTTPException(
+            status_code=409,
+            detail="Product Import уже был принят Kaspi; повторно отправлять SKU нельзя — проверьте карточку в кабинете",
+        )
+    draft = _new_card_draft(item)
+    errors = _new_card_draft_errors(draft)
+    if errors:
+        draft["validation_errors"] = errors
+        _set_new_card_draft(item, draft)
+        db.commit()
+        raise HTTPException(status_code=409, detail="; ".join(errors[:8]))
+    supplier = (item.offers_json or {}).get("supplier") or {}
+    if not supplier.get("validated") or _money(supplier.get("supplier_price_kzt")) is None:
+        raise HTTPException(status_code=409, detail="Ozon не подтвердил цену новой карточки")
+    settings = _settings(db, workspace_id)
+    pricing = _refresh_upload_plan(item, settings)
+    if pricing is None or item.test_price_kzt is None:
+        raise HTTPException(status_code=409, detail="Не рассчитана стартовая цена Kaspi")
+    item.status = "new_card_importing"
+    item.last_error = None
+    job = _queue_job(
+        db,
+        workspace_id=workspace_id,
+        job_type="create_new_card",
+        reference=f"new-card:{item.id}",
+        item_id=item.id,
+        city_id=item.city_id,
+        zone_id=item.zone_id,
+        options={"draft": _new_card_job_draft(item)},
+    )
+    now = _now()
+    _set_kaspi_submission(
+        item,
+        route="new_card",
+        stage="product_import",
+        status="waiting",
+        queued_at=now.isoformat(),
+        completed_at=None,
+        detected_at=None,
+        hide_after=None,
+        job_id=job.id,
+        attempt=int(previous.get("attempt") or 0) + 1,
+        official_sku=item.merchant_sku,
+        initial_price_kzt=format(item.test_price_kzt, "f"),
+        preorder_days=max(1, int(item.preorder_days or 0)),
+        error=None,
+        error_code=None,
+        terminal_rejection=False,
+    )
+    db.commit()
+    return {"job": _job_payload(job), "item": _item_payload(item)}
 
 
 @router.patch("/settings")
@@ -1311,6 +1940,10 @@ def claim_product_test_job(
                 .where(
                     ProductTestJob.workspace_id == payload.workspace_id,
                     ProductTestJob.status == "queued",
+                    or_(
+                        ProductTestJob.lease_until.is_(None),
+                        ProductTestJob.lease_until <= now,
+                    ),
                 )
                 .order_by(ProductTestJob.id)
                 .limit(1)
@@ -1324,7 +1957,9 @@ def claim_product_test_job(
             job.lease_token = uuid4().hex
             lease_seconds = (
                 1800
-                if job.job_type in {"create_offer", "discover"}
+                if job.job_type in {
+                    "create_offer", "create_new_card", "confirm_new_card", "discover"
+                }
                 else PRODUCT_TEST_LEASE_SECONDS
             )
             job.lease_until = now + timedelta(seconds=lease_seconds)
@@ -1397,7 +2032,20 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
                     ).with_for_update()
                 )
                 if item is not None:
-                    item.status = "error"
+                    if _is_new_card_item(item) and job.job_type == "confirm_new_card":
+                        followup = _reschedule_new_card_confirmation(
+                            db,
+                            job=job,
+                            item=item,
+                            last_error=payload.error_message or payload.error_code,
+                        )
+                        if followup is not None:
+                            db.commit()
+                            return {
+                                **_job_payload(job),
+                                "retry_job": _job_payload(followup),
+                            }
+                    item.status = "new_card_error" if _is_new_card_item(item) else "error"
                     item.last_error = (payload.error_message or payload.error_code or "Локальный Agent завершил задание с ошибкой")[:4000]
                     if job.job_type == "create_offer":
                         hide_after = _category_rejection_hide_after(
@@ -1413,6 +2061,18 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
                             error=item.last_error,
                             error_code=payload.error_code,
                         )
+                    elif _is_new_card_item(item) and job.job_type in {"create_new_card", "confirm_new_card"}:
+                        _set_kaspi_submission(
+                            item,
+                            route="new_card",
+                            stage="product_import" if job.job_type == "create_new_card" else "moderation",
+                            status="failed",
+                            completed_at=_now().isoformat(),
+                            hide_after=None,
+                            terminal_rejection=False,
+                            error=item.last_error,
+                            error_code=payload.error_code,
+                        )
             db.commit()
             return _job_payload(job)
 
@@ -1423,6 +2083,14 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
                 return _persist_supplier_validation(db, job=job, result=payload.result)
             if job.job_type == "create_offer":
                 return _enroll_created_product(db, job=job, result=payload.result)
+            if job.job_type == "prepare_new_card":
+                return _persist_new_card_prepare(db, job=job, result=payload.result)
+            if job.job_type == "map_new_card_category":
+                return _persist_new_card_mapping(db, job=job, result=payload.result)
+            if job.job_type == "create_new_card":
+                return _persist_new_card_import(db, job=job, result=payload.result)
+            if job.job_type == "confirm_new_card":
+                return _persist_new_card_confirmation(db, job=job, result=payload.result)
             return _persist_product_inspection(db, job=job, result=payload.result)
         except ValueError as exc:
             job.status = "failed"
@@ -1432,7 +2100,20 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
             if job.item_id is not None:
                 item = db.scalar(select(ProductTestItem).where(ProductTestItem.id == job.item_id).with_for_update())
                 if item is not None:
-                    item.status = "error"
+                    if _is_new_card_item(item) and job.job_type == "confirm_new_card":
+                        followup = _reschedule_new_card_confirmation(
+                            db,
+                            job=job,
+                            item=item,
+                            last_error=job.error_message,
+                        )
+                        if followup is not None:
+                            db.commit()
+                            return {
+                                **_job_payload(job),
+                                "retry_job": _job_payload(followup),
+                            }
+                    item.status = "new_card_error" if _is_new_card_item(item) else "error"
                     item.last_error = job.error_message
                     if job.job_type == "create_offer":
                         hide_after = _category_rejection_hide_after(
@@ -1445,6 +2126,18 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
                             completed_at=_now().isoformat(),
                             hide_after=hide_after,
                             terminal_rejection=bool(hide_after),
+                            error=item.last_error,
+                            error_code=job.error_code,
+                        )
+                    elif _is_new_card_item(item) and job.job_type in {"create_new_card", "confirm_new_card"}:
+                        _set_kaspi_submission(
+                            item,
+                            route="new_card",
+                            stage="product_import" if job.job_type == "create_new_card" else "moderation",
+                            status="failed",
+                            completed_at=_now().isoformat(),
+                            hide_after=None,
+                            terminal_rejection=False,
                             error=item.last_error,
                             error_code=job.error_code,
                         )
