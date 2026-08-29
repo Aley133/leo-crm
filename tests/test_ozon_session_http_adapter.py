@@ -20,6 +20,7 @@ class FakeResolver:
 
 class FakeClient:
     result = {}
+    page_result = {}
 
     def __init__(self, _profile):
         pass
@@ -27,6 +28,11 @@ class FakeClient:
     def product_price_hints(self, url):
         assert url.endswith("-123456789/")
         return self.result
+
+    def product_page_price(self, url, product_id=None):
+        assert url.endswith("-123456789/")
+        assert product_id in {None, "123456789"}
+        return self.page_result
 
     def close(self):
         pass
@@ -62,12 +68,18 @@ def test_session_adapter_returns_normalized_kzt_other_offer(monkeypatch) -> None
 
 def test_session_adapter_does_not_turn_missing_price_into_out_of_stock(monkeypatch) -> None:
     FakeClient.result = {"ok": True, "attempt": {"status_code": 200}, "cheaper_price_kzt": None}
+    FakeClient.page_result = {
+        "ok": False,
+        "attempt": {"status_code": 200, "blocked": False},
+        "product_id": "123456789",
+        "price_kzt": None,
+    }
     monkeypatch.setattr(adapter_module, "OzonSessionHttpClient", FakeClient)
     with pytest.raises(AdapterParseError):
         asyncio.run(OzonSessionHttpAdapter(FakeResolver()).fetch(_request()))
 
 
-def test_session_adapter_accepts_authoritative_empty_seller_list_as_unavailable(monkeypatch) -> None:
+def test_session_adapter_reads_exact_card_when_other_seller_list_is_empty(monkeypatch) -> None:
     FakeClient.result = {
         "ok": True,
         "attempt": {"status_code": 200, "blocked": False},
@@ -77,12 +89,47 @@ def test_session_adapter_accepts_authoritative_empty_seller_list_as_unavailable(
         "cheaper_price_kzt": None,
         "cheaper_offer": None,
     }
+    FakeClient.page_result = {
+        "ok": True,
+        "attempt": {"status_code": 200, "blocked": False},
+        "product_id": "123456789",
+        "price_kzt": 6377,
+        "price_text": "6 377 ₸",
+        "price_source": "webPrice-123456789.finalPrice",
+        "delivery_days": 4,
+        "delivery_text": "Доставим послезавтра",
+        "card": {},
+    }
     monkeypatch.setattr(adapter_module, "OzonSessionHttpClient", FakeClient)
     offer = asyncio.run(OzonSessionHttpAdapter(FakeResolver()).fetch(_request()))
-    assert offer.price is None
-    assert offer.available is False
-    assert offer.stock == 0
-    assert offer.raw_metadata["business_state"] == "no_active_seller_offers"
+    assert offer.price == 6377
+    assert offer.available is True
+    assert offer.stock is None
+    assert offer.delivery_days == 4
+    assert offer.raw_metadata["product_page_fallback"] is True
+    assert offer.raw_metadata["source"] == "product_page.webPrice-123456789.finalPrice"
+
+
+def test_session_adapter_never_treats_empty_modal_and_unpriced_page_as_unavailable(monkeypatch) -> None:
+    FakeClient.result = {
+        "ok": True,
+        "attempt": {"status_code": 200, "blocked": False},
+        "product_id": "123456789",
+        "other_offer_count": 0,
+        "other_offers": [],
+        "cheaper_price_kzt": None,
+        "cheaper_offer": None,
+    }
+    FakeClient.page_result = {
+        "ok": False,
+        "attempt": {"status_code": 200, "blocked": False},
+        "product_id": "123456789",
+        "price_kzt": None,
+    }
+    monkeypatch.setattr(adapter_module, "OzonSessionHttpClient", FakeClient)
+
+    with pytest.raises(AdapterParseError, match="incomplete product response"):
+        asyncio.run(OzonSessionHttpAdapter(FakeResolver()).fetch(_request()))
 
 
 def test_session_adapter_classifies_blocked_response(monkeypatch) -> None:

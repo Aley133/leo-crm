@@ -24,9 +24,14 @@ from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 from tools.ozon_http import OzonSessionResolver
 from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
 from tools.product_discovery.runtime import discover_products, validate_supplier_url
+from tools.product_test_new_card import (
+    create_new_card,
+    map_new_card_category,
+    prepare_new_card,
+)
 
 
-VERSION = "1.0.6"
+VERSION = "1.1.0"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -142,6 +147,7 @@ def _save_config(config: dict, workspace_id: int) -> None:
         "service_token_dpapi",
         "password_dpapi",
         "mc_sid_dpapi",
+        "kaspi_api_token_dpapi",
     }
     payload = {key: value for key, value in config.items() if key in allowed}
     _config_path(workspace_id).write_text(
@@ -320,6 +326,28 @@ def _save_sid(config: dict, workspace_id: int, sid: str) -> None:
         _RUNTIME_SID[workspace_id] = sid
 
 
+def _kaspi_api_token(config: dict, workspace_id: int) -> str:
+    """Resolve the Product Import token only when a new-card job needs it."""
+
+    value = str(os.getenv("KASPI_API_TOKEN") or "").strip()
+    if not value and os.name == "nt" and config.get("kaspi_api_token_dpapi"):
+        try:
+            value = _unprotect_secret(str(config["kaspi_api_token_dpapi"]))
+        except Exception:
+            value = ""
+    if not value:
+        value = _prompt_text(
+            "Kaspi API-токен для официального создания новых карточек",
+            secret=True,
+        )
+    if not value:
+        raise RuntimeError("Kaspi API-токен для новых карточек не настроен")
+    if os.name == "nt":
+        config["kaspi_api_token_dpapi"] = _protect_secret(value)
+        _save_config(config, workspace_id)
+    return value
+
+
 def _acquire_single_instance(workspace_id: int) -> None:
     global _INSTANCE_MUTEX_HANDLE
     if os.name != "nt" or _INSTANCE_MUTEX_HANDLE is not None:
@@ -466,6 +494,7 @@ async def _execute_job(
     *,
     merchant_session: KaspiMerchantSession,
     store_id: str,
+    kaspi_api_token_provider=None,
 ) -> dict:
     job_type = str(job.get("job_type") or "inspect")
     options = job.get("options") if isinstance(job.get("options"), dict) else {}
@@ -492,6 +521,92 @@ async def _execute_job(
             str(options.get("supplier_url") or ""),
             product=options.get("product") if isinstance(options.get("product"), dict) else None,
         )
+    if job_type == "prepare_new_card":
+        if kaspi_api_token_provider is None:
+            raise RuntimeError("Kaspi API-токен для новых карточек недоступен")
+        product_url = str(options.get("supplier_url") or job.get("reference") or "").strip()
+        draft = await asyncio.to_thread(
+            prepare_new_card,
+            kaspi_api_token_provider(),
+            product_url,
+        )
+        creator = MerchantOfferApi(
+            merchant_session,
+            store_id=store_id,
+            city_id=str(job.get("city_id") or "196220100"),
+        )
+        official_sku = str(draft.get("sku") or "").strip()
+        if not official_sku:
+            raise RuntimeError("Не удалось определить Ozon SKU для новой карточки")
+        merchant_state = await asyncio.to_thread(creator.read_offer, official_sku)
+        if merchant_state.found:
+            raise RuntimeError(
+                f"Ozon SKU {official_sku} уже существует в Merchant Cabinet; повторный Product Import запрещён"
+            )
+        draft["merchant_state"] = merchant_state.dict()
+        supplier = await asyncio.to_thread(validate_supplier_url, product_url, product=None)
+        return {"draft": draft, "supplier": supplier}
+    if job_type == "map_new_card_category":
+        if kaspi_api_token_provider is None:
+            raise RuntimeError("Kaspi API-токен для новых карточек недоступен")
+        return await asyncio.to_thread(
+            map_new_card_category,
+            kaspi_api_token_provider(),
+            category=str(options.get("category") or ""),
+            characteristics=(
+                list(options.get("characteristics") or [])
+                if isinstance(options.get("characteristics"), list)
+                else []
+            ),
+        )
+    if job_type == "create_new_card":
+        if kaspi_api_token_provider is None:
+            raise RuntimeError("Kaspi API-токен для новых карточек недоступен")
+        return await asyncio.to_thread(
+            create_new_card,
+            kaspi_api_token_provider(),
+            options.get("draft") if isinstance(options.get("draft"), dict) else {},
+            attempts=KASPI_CONFIRMATION_ATTEMPTS,
+            poll_seconds=3.0,
+        )
+    if job_type == "confirm_new_card":
+        creator = MerchantOfferApi(
+            merchant_session,
+            store_id=store_id,
+            city_id=str(job.get("city_id") or "196220100"),
+        )
+        official_sku = str(options.get("official_sku") or "").strip()
+        state = await asyncio.to_thread(creator.read_offer, official_sku)
+        if not state.found or not state.master_sku:
+            return {
+                "result": "NEW_CARD_PENDING_MODERATION",
+                "official_sku": official_sku,
+                "catalog_state": state.dict(),
+            }
+        result = await asyncio.to_thread(
+            creator.create_linked_offer,
+            master_sku=state.master_sku,
+            model=str(options["model"]),
+            price=int(options["initial_price_kzt"]),
+            stock=int(options["stock_count"]),
+            preorder=max(1, int(options["preorder_days"])),
+            live=True,
+            attempts=KASPI_CONFIRMATION_ATTEMPTS,
+            poll_seconds=KASPI_CONFIRMATION_POLL_SECONDS,
+        )
+        if result.get("result") not in {"CREATED_AND_VISIBLE", "ALREADY_EXISTS"}:
+            raise RuntimeError(str(result.get("result") or "Kaspi offer was not confirmed"))
+        after = result.get("after") or result.get("before") or {}
+        if (
+            not after.get("found")
+            or int(after.get("price_kzt") or 0) != int(options["initial_price_kzt"])
+            or int(after.get("stock_count") or 0) != int(options["stock_count"])
+            or int(after.get("preorder_days") or 0) != max(1, int(options["preorder_days"]))
+        ):
+            raise RuntimeError("Kaspi ещё не подтвердил цену, остаток и предзаказ новой карточки")
+        result["new_card_master_sku"] = state.master_sku
+        result["official_sku"] = official_sku
+        return result
     if job_type == "create_offer":
         creator = MerchantOfferApi(
             merchant_session,
@@ -533,11 +648,12 @@ async def _run_job_with_retry(
     *,
     merchant_session: KaspiMerchantSession,
     store_id: str,
+    kaspi_api_token_provider=None,
 ) -> dict:
     job_type = str(job.get("job_type") or "inspect")
     timeout_seconds = (
         LONG_JOB_TIMEOUT_SECONDS
-        if job_type in {"create_offer", "discover"}
+        if job_type in {"create_offer", "create_new_card", "confirm_new_card", "discover"}
         else SCAN_TIMEOUT_SECONDS
     )
     attempts = 3 if job_type in {"discover", "inspect"} else 1
@@ -548,6 +664,7 @@ async def _run_job_with_retry(
                     job,
                     merchant_session=merchant_session,
                     store_id=store_id,
+                    kaspi_api_token_provider=kaspi_api_token_provider,
                 )
             except Exception as exc:
                 if attempt + 1 >= attempts or not _is_rate_limited(exc):
@@ -566,6 +683,7 @@ async def _process_job(
     workspace_id: int,
     merchant_session: KaspiMerchantSession,
     store_id: str,
+    kaspi_api_token_provider=None,
 ) -> None:
     job_id = int(job["id"])
     _log(
@@ -577,6 +695,7 @@ async def _process_job(
             job,
             merchant_session=merchant_session,
             store_id=store_id,
+            kaspi_api_token_provider=kaspi_api_token_provider,
         )
         payload = {
             "agent_id": agent_id,
@@ -737,7 +856,7 @@ async def main(
         workspace_id=selected_workspace,
     )
     _log(
-        "Выделенная очередь: Kaspi → Ozon → CRM → существующий Fast Dumping.",
+        "Единая очередь: существующая или новая карточка Kaspi → CRM → существующий Fast Dumping.",
         workspace_id=selected_workspace,
     )
     if os.name == "nt" and not once:
@@ -779,6 +898,10 @@ async def main(
                         workspace_id=selected_workspace,
                         merchant_session=merchant_session,
                         store_id=store_id,
+                        kaspi_api_token_provider=lambda: _kaspi_api_token(
+                            config,
+                            selected_workspace,
+                        ),
                     )
                     if once:
                         return 0

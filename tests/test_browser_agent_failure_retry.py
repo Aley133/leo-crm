@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 
 from backend.app.browser_agent_failure import (
     MAX_BROWSER_FAILURE_RETRY_SECONDS,
@@ -6,7 +7,7 @@ from backend.app.browser_agent_failure import (
 )
 from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.models import Product
-from backend.app.monitoring import MonitorStatus, MonitorTarget
+from backend.app.monitoring import MonitorStatus, MonitorTarget, SupplierOfferState
 from backend.app.suppliers import ProductBinding, Supplier, SupplierProduct
 
 
@@ -32,6 +33,9 @@ def test_failed_browser_load_stays_active_and_retries_within_thirty_minutes(
         external_id="ozon-123",
         title="Карточка Ozon",
         url="https://www.ozon.ru/product/ozon-123/",
+        current_price=Decimal("6377"),
+        delivery_days=4,
+        in_stock=True,
     )
     db_session.add(supplier_product)
     db_session.flush()
@@ -50,6 +54,20 @@ def test_failed_browser_load_stays_active_and_retries_within_thirty_minutes(
         consecutive_failures=9,
     )
     db_session.add(target)
+    db_session.flush()
+    state = SupplierOfferState(
+        supplier_product_id=supplier_product.id,
+        price=Decimal("6377"),
+        currency="KZT",
+        available=True,
+        stock=None,
+        delivery_days=4,
+        fingerprint="last-valid-offer",
+        adapter_schema_version="ozon-http-session-v1",
+        observed_at=finished_at - timedelta(minutes=5),
+        last_checked_at=finished_at - timedelta(minutes=5),
+    )
+    db_session.add(state)
     db_session.flush()
     job = BrowserAgentJob(
         monitor_target_id=target.id,
@@ -74,3 +92,9 @@ def test_failed_browser_load_stays_active_and_retries_within_thirty_minutes(
     assert _as_utc(target.next_check_at) == finished_at + timedelta(
         seconds=MAX_BROWSER_FAILURE_RETRY_SECONDS
     )
+    assert supplier_product.current_price == Decimal("6377")
+    assert supplier_product.delivery_days == 4
+    assert supplier_product.in_stock is True
+    assert state.price == Decimal("6377")
+    assert state.available is True
+    assert state.delivery_days == 4

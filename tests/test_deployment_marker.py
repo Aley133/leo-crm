@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.25.7"
-EXPECTED_DEPLOYMENT_MARKER = "product-test-manual-source-and-upload-plan"
+EXPECTED_APP_VERSION = "0.26.2"
+EXPECTED_DEPLOYMENT_MARKER = "ozon-empty-modal-preserves-availability"
 
 
 def test_application_metadata_contract() -> None:

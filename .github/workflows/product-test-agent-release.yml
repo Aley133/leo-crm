@@ -9,6 +9,7 @@ on:
       - "tools/kaspi_fast_dumping_scanner.py"
       - "tools/kaspi_fast_dumping_session.py"
       - "tools/product_discovery/**"
+      - "tools/product_test_new_card/**"
       - "tools/ozon_http/**"
       - ".github/workflows/product-test-agent-release.yml"
   workflow_dispatch:
@@ -42,7 +43,7 @@ jobs:
       - name: Verify isolated imports
         shell: pwsh
         run: |
-          python -c "import tools.product_test_agent; import tools.product_discovery.runtime; import tools.ozon_http"
+          python -c "import tools.product_test_agent; import tools.product_discovery.runtime; import tools.product_test_new_card; import tools.ozon_http"
           @'
           import ast
           from pathlib import Path
@@ -50,6 +51,7 @@ jobs:
           forbidden_roots = {"backend", "sqlalchemy", "playwright"}
           paths = [Path("tools/product_test_agent.py")]
           paths.extend(Path("tools/product_discovery").glob("*.py"))
+          paths.extend(Path("tools/product_test_new_card").glob("*.py"))
           paths.extend(
               path for path in Path("tools/ozon_http").glob("*.py")
               if path.name != "adapter.py"
@@ -80,6 +82,7 @@ jobs:
             --hidden-import tools.kaspi_fast_dumping_scanner `
             --hidden-import tools.kaspi_fast_dumping_session `
             --collect-submodules tools.product_discovery `
+            --collect-submodules tools.product_test_new_card `
             --hidden-import tools.ozon_http.resolver `
             --hidden-import tools.ozon_http.session_store `
             --hidden-import tools.ozon_http.session_profile `
@@ -119,7 +122,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.0.6: ручная Ozon-ссылка стала точным источником цены и доставки; первый Kaspi process сразу отправляет preOrder минимум 1 день; перед выгрузкой CRM показывает план цены и предзаказа."
+          $notes = "LEO Product Test Agent 1.1.0: один Agent обслуживает существующие и новые карточки; новая карточка готовится по точной Ozon-ссылке, отправляется официальным Kaspi Product Import, ждёт masterSku и затем подключается к существующим CRM, Monitoring и Fast Dumping с preOrder минимум 1 день."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

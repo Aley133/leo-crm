@@ -93,7 +93,7 @@ def _require_http_runtime(runtime_kind: str | None) -> None:
             status_code=409,
             detail=(
                 "Установлен устаревший Browser Agent с Chrome/CDP. "
-                "Скачайте актуальный LEO HTTP Agent 0.3.2 или новее."
+                "Скачайте актуальный LEO HTTP Agent 0.3.3 или новее."
             ),
         )
 
