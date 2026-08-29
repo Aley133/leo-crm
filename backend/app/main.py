@@ -76,8 +76,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.2"
-DEPLOYMENT_MARKER = "ozon-empty-modal-preserves-availability"
+APP_VERSION = "0.26.3"
+DEPLOYMENT_MARKER = "new-card-create-and-calendar-delivery"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

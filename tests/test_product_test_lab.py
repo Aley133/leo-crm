@@ -1,11 +1,12 @@
 import asyncio
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from xml.etree import ElementTree
 
 import httpx
 import pytest
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from backend.app.kaspi_xml_import import parse_kaspi_products
@@ -17,6 +18,7 @@ from backend.app import kaspi_product_photo
 from backend.app.product_test_api import (
     ProductDiscoveryRequest,
     ProductTestNewCardRequest,
+    ProductTestNewCardCategoryRequest,
     ProductTestAgentHeartbeat,
     ProductTestInspectRequest,
     ProductTestUpdate,
@@ -30,6 +32,7 @@ from backend.app.product_test_api import (
     discover_product_candidates,
     heartbeat_product_test_agent,
     inspect_product,
+    map_product_test_new_card_category,
     prepare_product_test_new_card,
     read_product_test_state,
     update_product_test_item,
@@ -485,6 +488,9 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert "СТАРТ KASPI" in script
     assert "preOrder ${Math.max(1" in script
     assert "точно по вашей ссылке" in script
+    assert "new-card-action-message" in script
+    assert 'activeJobTypes.has("map_new_card_category")' in script
+    assert "Ожидаем поля категории…" in script
     assert '["discover", "validate_supplier"].includes(job.job_type)' in script
     assert 'id="kaspi-submissions-section"' in test_html
     assert 'id="kaspi-submissions-section"' in add_html
@@ -717,6 +723,31 @@ def test_exact_product_page_parser_prefers_final_kzt_price_over_instalment() -> 
     assert "finalPrice" in parsed["price_source"]
     assert parsed["title"] == "GLS Пивные дрожжи 120 капсул"
     assert parsed["image_url"].endswith("yeast.jpg")
+
+
+def test_exact_product_page_prefers_delivery_date_over_zero_tenge_today() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-484053304-default-1": (
+                '{"finalPrice":"3 644 ₸","installment":{"text":"0 ₸ сегодня"}}'
+            ),
+            "webAddToCart-484053304-default-1": (
+                '{"buttonText":"0 ₸ сегодня · В корзину",'
+                '"deliveryText":"Доставим 2 сентября"}'
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        today=date(2026, 8, 29),
+    )
+
+    assert parsed["price_kzt"] == 3644
+    assert parsed["delivery_text"] == "Доставим 2 сентября"
+    assert parsed["delivery_date"] == "2026-09-02"
+    assert parsed["delivery_days"] == 4
 
 
 def test_ozon_match_uses_exact_product_page_when_modal_and_search_price_are_empty() -> None:
@@ -1470,6 +1501,39 @@ def test_new_card_route_waits_for_moderation_then_uses_existing_enrollment(db_se
     assert prepared["item"]["status"] == "new_card_ready"
     assert prepared["item"]["preorder_days"] == 3
     assert read_product_test_state(db_session)["new_cards"][0]["id"] == item_id
+
+    mapping = map_product_test_new_card_category(
+        item_id,
+        ProductTestNewCardCategoryRequest(category="Master - Vitamins"),
+        db_session,
+    )
+    assert mapping["job"]["job_type"] == "map_new_card_category"
+    with pytest.raises(HTTPException, match="ещё загружает поля категории"):
+        create_product_test_new_card(item_id, db_session)
+
+    mapping_claim = claim_product_test_job(identity, db_session)
+    remapped = complete_product_test_job(
+        mapping_claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id=identity.agent_id,
+            workspace_id=1,
+            lease_token=mapping_claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "category": "Master - Vitamins",
+                "attributes": [
+                    {
+                        "code": "vitamins*country",
+                        "title": "Страна производства",
+                        "required": True,
+                        "value": "США",
+                    }
+                ],
+            },
+        ),
+        db_session,
+    )
+    assert remapped["item"]["status"] == "new_card_ready"
 
     create_product_test_new_card(item_id, db_session)
     create_claim = claim_product_test_job(identity, db_session)

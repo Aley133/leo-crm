@@ -1573,6 +1573,19 @@ def update_product_test_new_card(
         raise HTTPException(status_code=404, detail="Черновик новой карточки не найден")
     if item.status in {"new_card_importing", "new_card_moderation", "enrolled_fast_dumping"}:
         raise HTTPException(status_code=409, detail="Карточка уже передана Kaspi и временно заблокирована для правок")
+    active_mapping = db.scalar(
+        select(ProductTestJob.id).where(
+            ProductTestJob.workspace_id == workspace_id,
+            ProductTestJob.item_id == item.id,
+            ProductTestJob.job_type == "map_new_card_category",
+            ProductTestJob.status.in_(("queued", "leased")),
+        ).limit(1)
+    )
+    if active_mapping is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Product Test Agent ещё загружает поля категории. Дождитесь завершения — кнопка включится автоматически.",
+        )
     draft = _new_card_draft(item)
     changes = payload.model_dump(exclude_unset=True)
     requested_sku = str(changes.get("sku") or draft.get("sku") or "").strip()[:128]
@@ -1649,6 +1662,19 @@ def map_product_test_new_card_category(
         raise HTTPException(status_code=404, detail="Черновик новой карточки не найден")
     if item.status in {"new_card_importing", "new_card_moderation", "enrolled_fast_dumping"}:
         raise HTTPException(status_code=409, detail="Карточка уже передана Kaspi")
+    active_mapping = db.scalar(
+        select(ProductTestJob.id).where(
+            ProductTestJob.workspace_id == workspace_id,
+            ProductTestJob.item_id == item.id,
+            ProductTestJob.job_type == "map_new_card_category",
+            ProductTestJob.status.in_(("queued", "leased")),
+        ).limit(1)
+    )
+    if active_mapping is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Product Test Agent ещё загружает поля категории. Дождитесь завершения и повторите создание.",
+        )
     draft = _new_card_draft(item)
     category = payload.category.strip()
     item.status = "new_card_mapping"
@@ -1683,6 +1709,19 @@ def create_product_test_new_card(item_id: int, db: Session = Depends(get_db)) ->
         raise HTTPException(status_code=404, detail="Черновик новой карточки не найден")
     if item.status in {"new_card_importing", "new_card_moderation", "enrolled_fast_dumping"}:
         raise HTTPException(status_code=409, detail="Карточка уже передана Kaspi")
+    active_mapping = db.scalar(
+        select(ProductTestJob.id).where(
+            ProductTestJob.workspace_id == workspace_id,
+            ProductTestJob.item_id == item.id,
+            ProductTestJob.job_type == "map_new_card_category",
+            ProductTestJob.status.in_(("queued", "leased")),
+        ).limit(1)
+    )
+    if active_mapping is not None:
+        raise HTTPException(
+            status_code=409,
+            detail="Product Test Agent ещё загружает поля категории. Дождитесь завершения и повторите создание.",
+        )
     previous = _kaspi_submission(item)
     if previous.get("route") == "new_card" and previous.get("stage") != "product_import":
         raise HTTPException(

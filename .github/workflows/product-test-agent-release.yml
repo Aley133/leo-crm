@@ -122,7 +122,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.0: один Agent обслуживает существующие и новые карточки; новая карточка готовится по точной Ozon-ссылке, отправляется официальным Kaspi Product Import, ждёт masterSku и затем подключается к существующим CRM, Monitoring и Fast Dumping с preOrder минимум 1 день."
+          $notes = "LEO Product Test Agent 1.1.1: создание новой карточки явно ждёт завершения загрузки полей категории и показывает результат рядом с кнопкой; дата доставки Ozon берётся из текущего товарного виджета, а не из текста рассрочки 0 ₸ сегодня."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `
