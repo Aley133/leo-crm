@@ -18,7 +18,7 @@ from tools.ozon_http import OzonSessionResolver
 run_browser_agent = browser_agent_module.main
 
 API_URL = "https://leo-crm-api.onrender.com"
-APP_VERSION = "0.3.4"
+APP_VERSION = "0.3.5"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
 TOKEN_FILE = APP_DIR / "agent-token.dat"
 LOG_FILE = APP_DIR / "agent.log"
@@ -119,18 +119,27 @@ def _verify_crm(token: str) -> None:
         raise RuntimeError(f"CRM недоступна: {exc}") from exc
 
 
-def _ensure_ozon_session() -> None:
+def _ensure_ozon_session(*, force_replace: bool = False) -> None:
     resolver = OzonSessionResolver()
-    try:
-        resolver.resolve(validate=True)
-        return
-    except Exception:
-        pass
+    if not force_replace:
+        try:
+            resolver.resolve(validate=True)
+            return
+        except Exception:
+            pass
     root = Tk()
     root.withdraw()
+    reason = (
+        "Ozon заблокировал текущую HTTP-сессию. "
+        if force_replace
+        else "Ozon HTTP-сессия не найдена или больше не действует. "
+    )
     curl_text = simpledialog.askstring(
         "LEO HTTP Agent",
-        "Ozon HTTP-сессия не найдена. Вставьте Copy as cURL (bash) любого Network-запроса выдачи /search/ Ozon. Cookies останутся зашифрованы на этом компьютере:",
+        reason
+        + "Откройте выдачу Ozon без CAPTCHA и вставьте Copy as cURL (bash) "
+        "GET Network-запроса с /search/. Cookies останутся зашифрованы "
+        "на этом компьютере:",
         parent=root,
     )
     root.destroy()
@@ -179,7 +188,13 @@ def main() -> int:
         os.environ["BROWSER_AGENT_CONCURRENCY"] = "3"
         os.environ["BROWSER_AGENT_DISPATCH_LIMIT"] = "100"
         os.environ["BROWSER_AGENT_VERSION"] = APP_VERSION
-        return asyncio.run(run_browser_agent())
+        while True:
+            exit_code = asyncio.run(run_browser_agent())
+            if exit_code != browser_agent_module.SESSION_REFRESH_REQUIRED_EXIT:
+                return exit_code
+            print("Pausing HTTP monitoring to replace the blocked Ozon session")
+            _ensure_ozon_session(force_replace=True)
+            print("Ozon HTTP session replaced; restarting monitoring workers")
     except KeyboardInterrupt:
         return 0
     except Exception as exc:

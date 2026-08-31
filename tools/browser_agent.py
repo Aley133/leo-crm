@@ -20,6 +20,14 @@ RUNTIME_KIND = "ozon_http"
 DEFAULT_JOB_TIMEOUT_SECONDS = 45.0
 HEARTBEAT_SECONDS = 15.0
 IDLE_POLL_MAX_SECONDS = 15.0
+SESSION_REFRESH_REQUIRED = "session_refresh_required"
+SESSION_REFRESH_REQUIRED_EXIT = 75
+_SESSION_REFRESH_ERROR_CODES = frozenset(
+    {
+        "AdapterAuthRequiredError",
+        "AdapterBlockedError",
+    }
+)
 
 
 def _required_env(name: str) -> str:
@@ -99,10 +107,11 @@ async def _complete_job(*, api_url: str, token: str, job: dict, adapters: dict[s
             "error_message": f"HTTP monitoring job exceeded {timeout_seconds:g} seconds",
         }
     except Exception as exc:
+        error_code = exc.__class__.__name__
         completion = {
             "lease_token": job["lease_token"],
             "status": "failed",
-            "error_code": exc.__class__.__name__,
+            "error_code": error_code,
             "error_message": str(exc)[:4000],
         }
 
@@ -113,6 +122,12 @@ async def _complete_job(*, api_url: str, token: str, job: dict, adapters: dict[s
         completion,
     )
     print(f"Completed HTTP monitoring job #{job['id']}: {completion['status']}")
+    if completion.get("error_code") in _SESSION_REFRESH_ERROR_CODES:
+        print(
+            "Ozon HTTP session refresh required: "
+            f"{completion['error_code']}"
+        )
+        return SESSION_REFRESH_REQUIRED
     return str(response.get("status") or completion["status"])
 
 
@@ -185,8 +200,15 @@ async def _dispatch_once(*, api_url: str, token: str, dispatch_limit: int) -> tu
     return queued, retry_after
 
 
-async def _dispatch_loop(*, api_url: str, token: str, poll_seconds: float, dispatch_limit: int) -> None:
-    while True:
+async def _dispatch_loop(
+    *,
+    api_url: str,
+    token: str,
+    poll_seconds: float,
+    dispatch_limit: int,
+    session_refresh_required: asyncio.Event,
+) -> None:
+    while not session_refresh_required.is_set():
         retry_after = poll_seconds
         try:
             _queued, retry_after = await _dispatch_once(
@@ -196,13 +218,43 @@ async def _dispatch_loop(*, api_url: str, token: str, poll_seconds: float, dispa
             )
         except Exception as exc:
             print(f"Dispatcher error: {exc}")
-        await asyncio.sleep(max(poll_seconds, retry_after))
+        try:
+            await asyncio.wait_for(
+                session_refresh_required.wait(),
+                timeout=max(poll_seconds, retry_after),
+            )
+        except TimeoutError:
+            pass
 
 
-async def _worker_loop(*, worker_number: int, api_url: str, token: str, agent_id: str, adapters: dict[str, Any], poll_seconds: float) -> None:
+async def _pause_or_timeout(
+    session_refresh_required: asyncio.Event,
+    timeout: float,
+) -> bool:
+    """Return promptly when another worker detects an invalid Ozon session."""
+    try:
+        await asyncio.wait_for(
+            session_refresh_required.wait(),
+            timeout=max(0.0, timeout),
+        )
+    except TimeoutError:
+        return False
+    return True
+
+
+async def _worker_loop(
+    *,
+    worker_number: int,
+    api_url: str,
+    token: str,
+    agent_id: str,
+    adapters: dict[str, Any],
+    poll_seconds: float,
+    session_refresh_required: asyncio.Event,
+) -> None:
     worker_id = f"{agent_id}-w{worker_number}"
     idle_seconds = poll_seconds
-    while True:
+    while not session_refresh_required.is_set():
         try:
             claim = await _claim_one(
                 api_url=api_url,
@@ -211,7 +263,8 @@ async def _worker_loop(*, worker_number: int, api_url: str, token: str, agent_id
             )
         except Exception as exc:
             print(f"Worker {worker_number} claim error: {exc}")
-            await asyncio.sleep(poll_seconds)
+            if await _pause_or_timeout(session_refresh_required, poll_seconds):
+                return
             continue
         job = claim.get("job")
         if not job:
@@ -223,11 +276,20 @@ async def _worker_loop(*, worker_number: int, api_url: str, token: str, agent_id
                     idle_seconds * 2,
                 ),
             )
-            await asyncio.sleep(idle_seconds)
+            if await _pause_or_timeout(session_refresh_required, idle_seconds):
+                return
             continue
         idle_seconds = poll_seconds
         try:
-            await _complete_job(api_url=api_url, token=token, job=job, adapters=adapters)
+            completion_status = await _complete_job(
+                api_url=api_url,
+                token=token,
+                job=job,
+                adapters=adapters,
+            )
+            if completion_status == SESSION_REFRESH_REQUIRED:
+                session_refresh_required.set()
+                return
         except Exception as exc:
             print(f"Worker {worker_number} completion error for job #{job['id']}: {exc}")
 
@@ -277,26 +339,26 @@ async def main(*, once: bool = False) -> int:
             dispatch_limit=1,
         )
 
-    tasks = [
-        asyncio.create_task(
-            _heartbeat_loop(
-                api_url=api_url,
-                token=token,
-                agent_id=agent_id,
-            ),
-            name="browser-agent-heartbeat",
+    session_refresh_required = asyncio.Event()
+    heartbeat_task = asyncio.create_task(
+        _heartbeat_loop(
+            api_url=api_url,
+            token=token,
+            agent_id=agent_id,
         ),
-        asyncio.create_task(
-            _dispatch_loop(
-                api_url=api_url,
-                token=token,
-                poll_seconds=poll_seconds,
-                dispatch_limit=dispatch_limit,
-            ),
-            name="browser-agent-dispatcher",
-        )
-    ]
-    tasks.extend(
+        name="browser-agent-heartbeat",
+    )
+    dispatcher_task = asyncio.create_task(
+        _dispatch_loop(
+            api_url=api_url,
+            token=token,
+            poll_seconds=poll_seconds,
+            dispatch_limit=dispatch_limit,
+            session_refresh_required=session_refresh_required,
+        ),
+        name="browser-agent-dispatcher",
+    )
+    worker_tasks = [
         asyncio.create_task(
             _worker_loop(
                 worker_number=number,
@@ -305,17 +367,42 @@ async def main(*, once: bool = False) -> int:
                 agent_id=agent_id,
                 adapters=adapters,
                 poll_seconds=poll_seconds,
+                session_refresh_required=session_refresh_required,
             ),
             name=f"browser-agent-worker-{number}",
         )
         for number in range(1, concurrency + 1)
+    ]
+    tasks = [heartbeat_task, dispatcher_task, *worker_tasks]
+    refresh_waiter = asyncio.create_task(
+        session_refresh_required.wait(),
+        name="ozon-session-refresh-waiter",
     )
     try:
-        await asyncio.gather(*tasks)
+        done, _pending = await asyncio.wait(
+            [*tasks, refresh_waiter],
+            return_when=asyncio.FIRST_COMPLETED,
+        )
+        if session_refresh_required.is_set():
+            heartbeat_task.cancel()
+            dispatcher_task.cancel()
+            await asyncio.gather(
+                heartbeat_task,
+                dispatcher_task,
+                return_exceptions=True,
+            )
+            # Workers already holding a lease are allowed to report their
+            # result before the renewal dialog opens. Idle workers wake on the
+            # shared event, so no lease is abandoned for three minutes.
+            await asyncio.gather(*worker_tasks, return_exceptions=True)
+            return SESSION_REFRESH_REQUIRED_EXIT
+        for task in done:
+            if task is not refresh_waiter:
+                task.result()
     finally:
-        for task in tasks:
+        for task in [*tasks, refresh_waiter]:
             task.cancel()
-        await asyncio.gather(*tasks, return_exceptions=True)
+        await asyncio.gather(*tasks, refresh_waiter, return_exceptions=True)
     return 0
 
 

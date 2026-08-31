@@ -16,13 +16,13 @@ def test_windows_agent_has_desktop_entrypoint_and_installer_workflow() -> None:
     assert "run_browser_agent" in entrypoint
     assert "CryptProtectData" in entrypoint
     assert "CryptUnprotectData" in entrypoint
-    assert 'APP_VERSION = "0.3.4"' in entrypoint
+    assert 'APP_VERSION = "0.3.5"' in entrypoint
     assert "MUTEX_NAME" in entrypoint
     assert "_browser_watchdog" not in entrypoint
     assert "CreateMutexW" in entrypoint
     assert "OutputBaseFilename=LEO-Browser-Agent-Setup" in installer
     assert "OutputDir=..\\..\\dist" in installer
-    assert '#define MyAppVersion "0.3.4"' in installer
+    assert '#define MyAppVersion "0.3.5"' in installer
     assert "taskkill /F /IM" in installer
     assert "CloseApplications=yes" in installer
     assert "RestartApplications=no" in installer
