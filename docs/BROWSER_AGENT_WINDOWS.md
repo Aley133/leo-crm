@@ -14,4 +14,7 @@ The agent uses three bounded HTTP workers by default. Existing CRM monitor targe
 
 ## Session renewal
 
-When Ozon expires the session, relaunch the agent and import a fresh `/search/` cURL. The old session is replaced locally. Do not share the session file or cURL text.
+When Ozon expires or blocks the session, Agent 0.3.5 pauses monitoring after the
+first affected worker result and asks for a fresh `/search/` cURL. The old
+session is replaced locally and monitoring resumes automatically. Do not share
+the session file or cURL text.
