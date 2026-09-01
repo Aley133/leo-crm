@@ -26,6 +26,7 @@ from backend.app.fast_dumping_service import (
     complete_scan,
     complete_verification,
     ensure_state,
+    normalize_market_snapshot,
     prepare_apply,
     prune_fast_dumping_history,
     queue_scan,
@@ -41,6 +42,7 @@ from tools.kaspi_fast_dumping_scanner import (
     _kaspi_timezone,
     _merchant_id,
     _own_match,
+    _owned_peer_match,
     _page_visible_price,
     _select_delivery_aware_competitor,
 )
@@ -97,6 +99,197 @@ def test_scanner_recognizes_nested_merchant_uid_and_safe_sku_fallback() -> None:
         own_merchant_sku="SKU-1",
     ) is None
 
+
+def test_scanner_recognizes_another_configured_workspace_as_owned_peer() -> None:
+    by_uid = {"merchantUid": "leo-merchant", "merchantName": "LeoXpress"}
+    by_name = {"merchantUid": "legacy-alias", "merchantName": "BARWORK"}
+
+    assert _owned_peer_match(
+        by_uid,
+        own_merchant_id="barwork-merchant",
+        owned_merchant_ids=["barwork-merchant", "leo-merchant"],
+        owned_merchant_names=["BARWORK", "LeoXpress"],
+    ) == "merchant_uid"
+    assert _owned_peer_match(
+        by_name,
+        own_merchant_id="leo-merchant",
+        owned_merchant_ids=["leo-merchant"],
+        owned_merchant_names=["BARWORK", "LeoXpress"],
+    ) == "merchant_name"
+    assert _owned_peer_match(
+        {"merchantUid": "vitami", "merchantName": "vitami.kz"},
+        own_merchant_id="leo-merchant",
+        owned_merchant_ids=["barwork-merchant", "leo-merchant"],
+        owned_merchant_names=["BARWORK", "LeoXpress"],
+    ) is None
+
+
+def test_crm_reclassifies_owned_peer_from_legacy_agent_payload() -> None:
+    market = normalize_market_snapshot(
+        {
+            "offers": [
+                {
+                    "merchant_id": "merchant-leoxpress",
+                    "merchant_name": "LeoXpress",
+                    "is_own": False,
+                    "price_kzt": "8399",
+                    "used_for_dumping": True,
+                }
+            ]
+        },
+        owned_merchant_ids=["merchant-barwork", "merchant-leoxpress"],
+        owned_merchant_names=["BARWORK", "LeoXpress"],
+    )
+
+    offer = market["offers"][0]
+    assert offer["is_owned_group"] is True
+    assert offer["is_owned_peer"] is True
+    assert offer["owned_peer_match"] == "crm_identity"
+    assert offer["used_for_dumping"] is False
+
+
+def _owned_market(*, peer: str) -> list[dict]:
+    return [
+        {
+            "merchant_id": "barwork",
+            "merchant_name": "BARWORK",
+            "is_own": True,
+            "is_owned_group": True,
+            "price_kzt": "8200",
+        },
+        {
+            "merchant_id": "leoxpress",
+            "merchant_name": "LeoXpress",
+            "is_owned_peer": True,
+            "is_owned_group": True,
+            "price_kzt": peer,
+        },
+        {
+            "merchant_id": "vitami",
+            "merchant_name": "vitami.kz",
+            "price_kzt": "8400",
+            "used_for_dumping": True,
+        },
+    ]
+
+
+def test_owned_shops_undercut_only_inside_the_cooperative_band() -> None:
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("8201"),
+        competitor_price_kzt=Decimal("8400"),
+        safe_floor_kzt=Decimal("7000"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("35"),
+        market_offers=_owned_market(peer="8200"),
+        owned_price_band_kzt=200,
+    )
+
+    assert decision.status == "owned_group_band"
+    assert decision.competitor_price_kzt == Decimal("8200.00")
+    assert decision.target_price_kzt == Decimal("8199.00")
+    assert "граница возврата: 8200.00" in decision.reason
+
+
+def test_owned_shop_band_limits_logistics_jump_to_one_final_step() -> None:
+    offers = _owned_market(peer="3200")
+    offers[-1]["price_kzt"] = "3400"
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("3201"),
+        competitor_price_kzt=Decimal("3400"),
+        safe_floor_kzt=Decimal("2500"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("35"),
+        market_offers=offers,
+        owned_price_band_kzt=200,
+    )
+
+    assert decision.status == "owned_group_band"
+    assert decision.target_price_kzt == Decimal("3199.00")
+    assert "Логистический скачок ограничен" in decision.reason
+
+
+def test_owned_shops_reset_together_after_crossing_the_band() -> None:
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("8200"),
+        competitor_price_kzt=Decimal("8400"),
+        safe_floor_kzt=Decimal("7000"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("35"),
+        market_offers=_owned_market(peer="8199"),
+        owned_price_band_kzt=200,
+    )
+
+    assert decision.status == "owned_group_reset"
+    assert decision.target_price_kzt == Decimal("8400.00")
+    assert decision.write_allowed is True
+
+
+def test_owned_shop_reset_uses_real_external_anchor_despite_delivery_premium() -> None:
+    offers = _owned_market(peer="8199")
+    offers[-1].update(
+        {
+            "delivery_gap_days": 5,
+            "price_gap_kzt": "-200",
+            "decision_reason": "Исключён по преимуществу доставки",
+        }
+    )
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("8200"),
+        competitor_price_kzt=None,
+        safe_floor_kzt=Decimal("7000"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("35"),
+        market_offers=offers,
+        delivery_price_premium_kzt=500,
+        delivery_advantage_days=3,
+        page_visible_price_kzt=Decimal("8199"),
+        owned_price_band_kzt=200,
+    )
+
+    assert decision.status == "owned_group_reset"
+    assert decision.target_price_kzt == Decimal("8400.00")
+
+
+def test_external_price_pressure_moves_anchor_and_keeps_ordinary_dumping() -> None:
+    offers = _owned_market(peer="8199")
+    offers[-1]["price_kzt"] = "8198"
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("8200"),
+        competitor_price_kzt=Decimal("8198"),
+        safe_floor_kzt=Decimal("7000"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("35"),
+        market_offers=offers,
+        owned_price_band_kzt=200,
+    )
+
+    assert decision.status == "ready"
+    assert decision.competitor_price_kzt == Decimal("8198.00")
+    assert decision.target_price_kzt == Decimal("8197.00")
+    assert "Внешний продавец остаётся" in decision.reason
+
+
+def test_owned_shops_hold_when_no_external_anchor_exists() -> None:
+    offers = _owned_market(peer="8199")[:-1]
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("8200"),
+        competitor_price_kzt=None,
+        safe_floor_kzt=Decimal("7000"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("35"),
+        market_offers=offers,
+        owned_price_band_kzt=200,
+    )
+
+    assert decision.status == "owned_group_hold"
+    assert decision.target_price_kzt == Decimal("8200.00")
+    assert decision.write_allowed is False
 
 def test_scanner_normalizes_real_kaspi_delivery_date_and_ignores_pickup_steps() -> None:
     today = date(2026, 8, 13)
@@ -420,6 +613,7 @@ def test_fast_dumping_full_scan_prepare_apply_cycle(db_session) -> None:
         )
     assert claimed_payload["delivery_price_premium_kzt"] == 500
     assert claimed_payload["delivery_advantage_days"] == 3
+    assert claimed_payload["owned_price_band_kzt"] == 200
     with workspace_context(1):
         result = complete_scan(
             db_session,
@@ -470,6 +664,69 @@ def test_fast_dumping_full_scan_prepare_apply_cycle(db_session) -> None:
     assert state.active_job_id is None
     assert state.last_operation_id == "operation-1"
     assert state.inventory_on_hand == 4
+
+
+def test_fast_agent_claim_includes_all_active_owned_shop_identities(db_session) -> None:
+    db_session.info["include_all_workspaces"] = True
+    try:
+        for workspace_id, name, merchant_uid in (
+            (1, "BARWORK", "merchant-barwork"),
+            (3, "LeoXpress", "merchant-leoxpress"),
+        ):
+            workspace = Workspace(
+                id=workspace_id,
+                name=name,
+                slug=name.casefold(),
+                is_active=True,
+            )
+            account = MarketplaceAccount(
+                workspace_id=workspace_id,
+                provider="kaspi",
+                external_account_id=merchant_uid,
+                display_name=name,
+                timezone="Asia/Almaty",
+            )
+            db_session.add_all((workspace, account))
+            db_session.flush()
+            db_session.add(
+                KaspiAccountCredential(
+                    workspace_id=workspace_id,
+                    marketplace_account_id=account.id,
+                    partner_id=merchant_uid,
+                    api_token_encrypted="not-needed-for-claim-contract",
+                )
+            )
+        db_session.commit()
+    finally:
+        db_session.info.pop("include_all_workspaces", None)
+
+    _product, _batch, policy, _state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        job, _created = queue_scan(
+            db_session,
+            policy=policy,
+            workspace_id=1,
+            reason="owned_group_contract",
+        )
+        db_session.commit()
+    leased = _claim(db_session, 1)
+    assert leased.id == job.id
+
+    db_session.info["include_all_workspaces"] = True
+    try:
+        payload = serialize_claimed_job(
+            db_session,
+            job=leased,
+            workspace_id=1,
+        )
+    finally:
+        db_session.info.pop("include_all_workspaces", None)
+
+    assert payload["owned_merchant_ids"] == [
+        "merchant-barwork",
+        "merchant-leoxpress",
+    ]
+    assert payload["owned_merchant_names"] == ["BARWORK", "LeoXpress"]
 
 
 def test_fast_dumping_cancels_stale_stock_before_write(db_session) -> None:
@@ -901,6 +1158,20 @@ def test_fast_dumping_validates_delivery_advantage_thresholds() -> None:
             raise AssertionError(f"Unsafe delivery threshold was accepted: {invalid}")
 
 
+def test_fast_dumping_defaults_owned_shop_corridor_to_two_hundred_tenge() -> None:
+    defaults = FastDumpingPolicyUpsert()
+    disabled = FastDumpingPolicyUpsert(owned_price_band_kzt=0)
+
+    assert defaults.owned_price_band_kzt == 200
+    assert disabled.owned_price_band_kzt == 0
+    try:
+        FastDumpingPolicyUpsert(owned_price_band_kzt=-1)
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("Negative owned-shop corridor was accepted")
+
+
 def test_delivery_advantage_holds_price_when_all_cheaper_offers_are_slow(db_session) -> None:
     _product, _batch, policy, state = _seed_fast_product(db_session)
     with workspace_context(1):
@@ -1046,8 +1317,10 @@ def test_fast_dumping_ui_and_agent_are_separate_from_ordinary_dumping() -> None:
     assert 'id="city-id" maxlength="32" value="196220100"' in html
     assert 'id="delivery-premium"' in html
     assert 'id="delivery-days"' in html
+    assert 'id="owned-price-band"' in html
     assert "delivery_price_premium_kzt" in javascript
     assert "delivery_advantage_days" in javascript
+    assert "owned_price_band_kzt" in javascript
     assert "decision_reason" in javascript
     assert 'document.querySelector("#city-id").value = ordinary.policy.city_id' not in javascript
     assert "password_dpapi" in agent and "mc_sid_dpapi" in agent

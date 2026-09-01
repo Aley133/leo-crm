@@ -64,6 +64,26 @@ def test_position_can_be_selected_higher_or_lower() -> None:
     assert eighth.exact is True
 
 
+def test_preorder_position_does_not_count_another_owned_shop_as_external() -> None:
+    offers = _offers(9000, 10000, 11000, 12000)
+    offers[0]["merchant_name"] = "LeoXpress"
+    offers[0]["is_owned_group"] = True
+    offers[0]["is_owned_peer"] = True
+
+    decision = decide_preorder_position(
+        own_price_kzt=Decimal("9500"),
+        safe_floor_kzt=Decimal("7000"),
+        target_position=2,
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=True,
+        max_undercut_gap_percent=Decimal("100"),
+        market_offers=offers,
+    )
+
+    assert decision.external_sellers == 3
+    assert decision.target_price_kzt == Decimal("10999.00")
+
+
 def test_floor_wins_over_requested_position() -> None:
     decision = decide_preorder_position(
         own_price_kzt=Decimal("13000"),

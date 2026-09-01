@@ -89,6 +89,12 @@ class FastDumpingPolicy(WorkspaceOwned, Base):
         default=3,
         server_default="3",
     )
+    owned_price_band_kzt: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=200,
+        server_default="200",
+    )
     preorder_target_position: Mapped[int] = mapped_column(
         Integer,
         nullable=False,

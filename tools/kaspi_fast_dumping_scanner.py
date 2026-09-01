@@ -590,6 +590,18 @@ def _merchant_sku(offer: dict[str, Any]) -> str:
     return str(value or "").strip()
 
 
+def _merchant_name(offer: dict[str, Any]) -> str:
+    direct = offer.get("merchantName") or offer.get("merchant_name")
+    if direct not in (None, ""):
+        return str(direct).strip()
+    merchant = offer.get("merchant")
+    if isinstance(merchant, dict):
+        nested = merchant.get("name") or merchant.get("displayName")
+        if nested not in (None, ""):
+            return str(nested).strip()
+    return ""
+
+
 def _own_match(
     offer: dict[str, Any],
     *,
@@ -613,11 +625,42 @@ def _own_match(
     return None
 
 
+def _owned_peer_match(
+    offer: dict[str, Any],
+    *,
+    own_merchant_id: str,
+    owned_merchant_ids: tuple[str, ...] | list[str] | None,
+    owned_merchant_names: tuple[str, ...] | list[str] | None,
+) -> str | None:
+    """Recognize another configured workspace without weakening own matching."""
+
+    merchant_id = _identity(_merchant_id(offer))
+    own_id = _identity(own_merchant_id)
+    peer_ids = {
+        _identity(value)
+        for value in (owned_merchant_ids or ())
+        if _identity(value) and _identity(value) != own_id
+    }
+    if merchant_id and merchant_id in peer_ids:
+        return "merchant_uid"
+    merchant_name = _identity(_merchant_name(offer))
+    peer_names = {
+        _identity(value)
+        for value in (owned_merchant_names or ())
+        if _identity(value)
+    }
+    if merchant_name and merchant_name in peer_names:
+        return "merchant_name"
+    return None
+
+
 def _offer_debug(
     offer: dict[str, Any],
     own_merchant_id: str,
     *,
     own_merchant_sku: str | None,
+    owned_merchant_ids: tuple[str, ...] | list[str] | None,
+    owned_merchant_names: tuple[str, ...] | list[str] | None,
     page_visible_price: Decimal | None,
     selected_competitor: dict[str, Any] | None = None,
     delivery_assessment: DeliveryAssessment | None = None,
@@ -630,18 +673,35 @@ def _offer_debug(
         own_merchant_sku=own_merchant_sku,
     )
     is_own = own_match is not None
+    owned_peer_match = (
+        None
+        if is_own
+        else _owned_peer_match(
+            offer,
+            own_merchant_id=own_merchant_id,
+            owned_merchant_ids=owned_merchant_ids,
+            owned_merchant_names=owned_merchant_names,
+        )
+    )
+    is_owned_peer = owned_peer_match is not None
+    is_owned_group = is_own or is_owned_peer
     decision_reason = (
         None if delivery_assessment is None else delivery_assessment.reason
     )
-    used_for_dumping = not is_own and offer is selected_competitor
-    if not is_own and page_visible_price is not None and price is not None and price < page_visible_price:
+    used_for_dumping = not is_owned_group and offer is selected_competitor
+    if is_owned_peer:
+        decision_reason = (
+            "Свой магазин: участвует только в кооперативном коридоре CRM, "
+            "но не заменяет внешний рыночный ориентир."
+        )
+    elif not is_owned_group and page_visible_price is not None and price is not None and price < page_visible_price:
         decision_reason = "API price ниже цены, видимой на карточке; другой price/delivery context"
         used_for_dumping = False
-    elif not is_own and delivery_assessment is not None and delivery_assessment.ignored:
+    elif not is_owned_group and delivery_assessment is not None and delivery_assessment.ignored:
         decision_reason = delivery_assessment.reason
         used_for_dumping = False
     elif (
-        not is_own
+        not is_owned_group
         and selected_competitor is None
         and delivery_assessment is not None
         and delivery_assessment.price_gap_kzt is not None
@@ -651,7 +711,7 @@ def _offer_debug(
             "Не выбран: наша текущая цена уже не выше этого оффера; "
             "повышение сверх защищённой доплаты за доставку запрещено."
         )
-    elif not is_own and offer is not selected_competitor:
+    elif not is_owned_group and offer is not selected_competitor:
         decision_reason = "Не выбран: найден более выгодный допустимый ценовой ориентир."
     price_fields: dict[str, str] = {}
     for key, value in offer.items():
@@ -659,9 +719,12 @@ def _offer_debug(
             price_fields[str(key)] = str(value)
     return {
         "merchant_id": _merchant_id(offer),
-        "merchant_name": str(offer.get("merchantName") or "") or None,
+        "merchant_name": _merchant_name(offer) or None,
         "is_own": is_own,
         "own_match": own_match,
+        "is_owned_group": is_owned_group,
+        "is_owned_peer": is_owned_peer,
+        "owned_peer_match": owned_peer_match,
         "price_kzt": None if price is None else format(price, "f"),
         "used_for_dumping": used_for_dumping,
         "ignored_reason": None if used_for_dumping else decision_reason,
@@ -670,7 +733,7 @@ def _offer_debug(
         "delivery": _delivery_summary(offer),
         "delivery_days": (
             delivery_days
-            if is_own
+            if is_owned_group
             else None if delivery_assessment is None else delivery_assessment.competitor_delivery_days
         ),
         "delivery_gap_days": (
@@ -908,6 +971,8 @@ async def scan_kaspi_competitors(
     kaspi_product_id: str,
     own_merchant_id: str,
     own_merchant_sku: str | None = None,
+    owned_merchant_ids: tuple[str, ...] | list[str] | None = None,
+    owned_merchant_names: tuple[str, ...] | list[str] | None = None,
     city_id: str,
     zone_id: str,
     product_name_hint: str | None = None,
@@ -991,6 +1056,24 @@ async def scan_kaspi_competitors(
     )
     own = None if own_index is None else rows[own_index]
 
+    owned_peers = [
+        row
+        for row in rows
+        if _own_match(
+            row,
+            own_merchant_id=own_merchant_id,
+            own_merchant_sku=own_merchant_sku,
+        )
+        is None
+        and _owned_peer_match(
+            row,
+            own_merchant_id=own_merchant_id,
+            owned_merchant_ids=owned_merchant_ids,
+            owned_merchant_names=owned_merchant_names,
+        )
+        is not None
+    ]
+
     external = [
         row
         for row in rows
@@ -1000,6 +1083,7 @@ async def scan_kaspi_competitors(
             own_merchant_sku=own_merchant_sku,
         )
         is None
+        and row not in owned_peers
     ]
     market_context_ok = False
     market_context_reason: str | None = None
@@ -1018,9 +1102,16 @@ async def scan_kaspi_competitors(
         # that headline price exactly. Otherwise context remains ambiguous.
         own_price = None if own is None else _offer_price(own)
         exact_external = [row for row in trusted_external if _offer_price(row) == page_visible_price]
+        exact_owned_peer = [row for row in owned_peers if _offer_price(row) == page_visible_price]
         if own_price == page_visible_price:
             market_context_ok = True
             market_context_reason = "Публичная цена совпадает с нашей; офферы ниже неё исключены как другой context."
+        elif exact_owned_peer:
+            market_context_ok = True
+            market_context_reason = (
+                "Публичная цена совпадает со вторым своим магазином; "
+                "внешний рыночный ориентир проверяется отдельно."
+            )
         elif exact_external:
             market_context_ok = True
             market_context_reason = "Лучший конкурент подтверждён публичной ценой карточки."
@@ -1061,6 +1152,8 @@ async def scan_kaspi_competitors(
             row,
             own_merchant_id,
             own_merchant_sku=own_merchant_sku,
+            owned_merchant_ids=owned_merchant_ids,
+            owned_merchant_names=owned_merchant_names,
             page_visible_price=page_visible_price,
             selected_competitor=competitor,
             delivery_assessment=delivery_assessments.get(id(row)),

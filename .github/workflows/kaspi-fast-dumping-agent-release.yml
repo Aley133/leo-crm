@@ -116,7 +116,7 @@ jobs:
           git tag -f kaspi-fast-dumping-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/kaspi-fast-dumping-agent-latest --force
           gh release view kaspi-fast-dumping-agent-latest *> $null
-          $notes = "LEO Agent 1.2.1: Быстрый демпинг и фоновые фото изолированы от новой отдельной очереди Product Test Agent."
+          $notes = "LEO Agent 1.2.2: LeoXpress и BARWORK распознаются как одна группа и работают в ограниченном ценовом коридоре вокруг внешнего конкурента."
           if ($LASTEXITCODE -ne 0) {
             gh release create kaspi-fast-dumping-agent-latest `
               --target "$env:GITHUB_SHA" `

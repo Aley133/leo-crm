@@ -9,7 +9,7 @@ from tools import kaspi_fast_dumping_agent as base
 from tools import kaspi_fast_offer_runtime as offer_runtime
 
 
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 _RUNTIME_SESSION = None
 _RUNTIME_STORE_ID: str | None = None
 
