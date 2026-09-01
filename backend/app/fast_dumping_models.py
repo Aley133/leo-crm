@@ -180,6 +180,10 @@ class FastDumpingState(WorkspaceOwned, Base):
     own_price_kzt: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     competitor_price_kzt: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     competitor_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    owned_cycle_anchor_price_kzt: Mapped[Decimal | None] = mapped_column(
+        Numeric(18, 2),
+        nullable=True,
+    )
     target_price_kzt: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     desired_stock_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
     own_position: Mapped[int | None] = mapped_column(Integer, nullable=True)

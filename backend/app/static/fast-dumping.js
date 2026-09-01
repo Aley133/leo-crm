@@ -140,7 +140,7 @@ const card = (row) => {
       <div><span>Последний apply</span><strong>${dateTime(state.last_applied_at)}</strong><small>${state.last_operation_id ? `operation ${escapeHtml(state.last_operation_id)}` : "операций ещё нет"}</small></div>
       <div><span>Интервал</span><strong>${Number(row.policy.scan_interval_seconds) / 60} мин.</strong><small>проверка и максимум один write · аномалия ${Number(row.policy.max_undercut_gap_percent)}%</small></div>
       <div><span>Преимущество доставки</span><strong>до ${money(row.policy.delivery_price_premium_kzt)}</strong><small>для физического FIFO</small></div>
-      <div><span>Коридор своих магазинов</span><strong>${money(row.policy.owned_price_band_kzt)}</strong><small>общий внешний ориентир</small></div>
+      <div><span>Цикл BARWORK ↔ LeoXpress</span><strong>${money(row.policy.owned_price_band_kzt)}</strong><small>якорь ${money(state.owned_cycle_anchor_price_kzt)}</small></div>
       <div><span>Agent / версия решения</span><strong>${escapeHtml(state.last_agent_id || "—")}</strong><small>state v${Number(state.state_version || 0)}</small></div>
       <div><span>Канал</span><strong>Realtime API</strong><small>XML — страховочное зеркало</small></div>
     </div>

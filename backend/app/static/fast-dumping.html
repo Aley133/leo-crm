@@ -89,7 +89,7 @@
             <label><span>Место в предзаказе</span><input id="preorder-position" type="number" min="1" max="50" step="1" value="4" required><small>Только при FIFO=0 и supplier preorder. По умолчанию №4</small></label>
             <label><span>Доплата за быструю доставку, ₸</span><input id="delivery-premium" type="number" min="0" max="100000" step="1" value="500" required><small>Работает для физического FIFO; supplier preorder использует стратегию «Место»</small></label>
             <label><span>Преимущество доставки, дней</span><input id="delivery-days" type="number" min="1" max="30" step="1" value="3" required><small>Для физического FIFO</small></label>
-            <label><span>Коридор своих магазинов, ₸</span><input id="owned-price-band" type="number" min="0" max="100000" step="1" value="200" required><small>LeoXpress и BARWORK вернутся к внешней цене после прохождения этого диапазона; 0 отключает цикл</small></label>
+            <label><span>Цикл BARWORK ↔ LeoXpress, ₸</span><input id="owned-price-band" type="number" min="0" max="100000" step="1" value="200" required><small>Магазины всегда делают шаги друг за другом; после диапазона возвращаются к внешней или сохранённой стартовой цене</small></label>
             <label><span>Защита аномалии, %</span><input id="max-gap" type="number" min="0.01" max="100" step="0.01" value="35" required></label>
             <label><span>Город Kaspi</span><input id="city-id" maxlength="32" value="196220100" required></label>
             <label><span>Зона Kaspi</span><input id="zone-id" maxlength="64" value="Magnum_ZONE1" required></label>
@@ -123,7 +123,7 @@
         <label><span>Место в предзаказе</span><input id="edit-preorder-position" type="number" min="1" max="50" step="1" required><small>Действует только при supplier preorder; default №4</small></label>
         <label><span>Доплата за быструю доставку, ₸</span><input id="edit-delivery-premium" type="number" min="0" max="100000" step="1" required><small>Для физического FIFO</small></label>
         <label><span>Преимущество доставки, дней</span><input id="edit-delivery-days" type="number" min="1" max="30" step="1" required><small>Для физического FIFO</small></label>
-        <label><span>Коридор своих магазинов, ₸</span><input id="edit-owned-price-band" type="number" min="0" max="100000" step="1" required><small>По умолчанию 200 ₸; 0 отключает кооперативный цикл</small></label>
+        <label><span>Цикл BARWORK ↔ LeoXpress, ₸</span><input id="edit-owned-price-band" type="number" min="0" max="100000" step="1" required><small>По умолчанию 200 ₸; работает и когда внешних продавцов нет</small></label>
         <label><span>Аномалия, %</span><input id="edit-max-gap" type="number" min="0.01" max="100" step="0.01" required></label>
         <label><span>Город Kaspi</span><input id="edit-city-id" maxlength="32" required></label>
         <label><span>Зона Kaspi</span><input id="edit-zone-id" maxlength="64" required></label>
@@ -136,7 +136,7 @@
 
   <script src="/static/workspace-context.js?v=20260731-1"></script>
   <script src="/static/product-image-resolver.js?v=20260819-2" defer></script>
-  <script src="/static/fast-dumping.js?v=20260831-1" defer></script>
+  <script src="/static/fast-dumping.js?v=20260901-2" defer></script>
   <script src="/static/fast-dumping-remove.js?v=20260824-1" defer></script>
 </body>
 </html>

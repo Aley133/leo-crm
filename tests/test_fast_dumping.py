@@ -21,6 +21,7 @@ from backend.app.fast_dumping_models import (
 )
 from backend.app.fast_dumping_pricing import decide_fast_price
 from backend.app.fast_dumping_service import (
+    _refresh_owned_cycle_anchor,
     claim_job,
     complete_apply,
     complete_scan,
@@ -274,7 +275,7 @@ def test_external_price_pressure_moves_anchor_and_keeps_ordinary_dumping() -> No
     assert "Внешний продавец остаётся" in decision.reason
 
 
-def test_owned_shops_hold_when_no_external_anchor_exists() -> None:
+def test_owned_shops_keep_dumping_without_an_external_seller() -> None:
     offers = _owned_market(peer="8199")[:-1]
     decision = decide_fast_price(
         own_price_kzt=Decimal("8200"),
@@ -287,9 +288,50 @@ def test_owned_shops_hold_when_no_external_anchor_exists() -> None:
         owned_price_band_kzt=200,
     )
 
-    assert decision.status == "owned_group_hold"
-    assert decision.target_price_kzt == Decimal("8200.00")
-    assert decision.write_allowed is False
+    assert decision.status == "owned_group_band"
+    assert decision.target_price_kzt == Decimal("8198.00")
+    assert decision.write_allowed is True
+    assert "Старт цикла: 8200.00" in decision.reason
+
+
+def test_owned_shops_reset_to_saved_start_without_an_external_seller() -> None:
+    offers = _owned_market(peer="8199")[:-1]
+    decision = decide_fast_price(
+        own_price_kzt=Decimal("8200"),
+        competitor_price_kzt=None,
+        safe_floor_kzt=Decimal("7000"),
+        undercut_step_kzt=Decimal("1"),
+        allow_price_raise=False,
+        max_undercut_gap_percent=Decimal("35"),
+        market_offers=offers,
+        owned_price_band_kzt=200,
+        owned_cycle_anchor_price_kzt=Decimal("8400"),
+    )
+
+    assert decision.status == "owned_group_reset"
+    assert decision.target_price_kzt == Decimal("8400.00")
+    assert decision.write_allowed is True
+    assert "сохранённому старту цикла" in decision.reason
+
+
+def test_owned_cycle_anchor_survives_when_external_seller_disappears() -> None:
+    state = FastDumpingState(
+        workspace_id=1,
+        policy_id=1,
+        product_id=1,
+        own_price_kzt=Decimal("8200"),
+        page_visible_price_kzt=Decimal("8199"),
+        offers_json=_owned_market(peer="8199"),
+    )
+
+    _refresh_owned_cycle_anchor(state)
+    assert state.owned_cycle_anchor_price_kzt == Decimal("8400.00")
+
+    state.offers_json = _owned_market(peer="8198")[:-1]
+    state.own_price_kzt = Decimal("8199")
+    _refresh_owned_cycle_anchor(state)
+
+    assert state.owned_cycle_anchor_price_kzt == Decimal("8400.00")
 
 def test_scanner_normalizes_real_kaspi_delivery_date_and_ignores_pickup_steps() -> None:
     today = date(2026, 8, 13)
@@ -1305,6 +1347,7 @@ def test_fast_dumping_ui_and_agent_are_separate_from_ordinary_dumping() -> None:
     html = (ROOT / "backend/app/static/fast-dumping.html").read_text(encoding="utf-8")
     javascript = (ROOT / "backend/app/static/fast-dumping.js").read_text(encoding="utf-8")
     agent = (ROOT / "tools/kaspi_fast_dumping_agent.py").read_text(encoding="utf-8")
+    ui = (ROOT / "backend/app/ui.py").read_text(encoding="utf-8")
     ordinary = (ROOT / "backend/app/dumping_models.py").read_text(encoding="utf-8")
 
     assert "/crm/fast-dumping" in html
@@ -1318,9 +1361,13 @@ def test_fast_dumping_ui_and_agent_are_separate_from_ordinary_dumping() -> None:
     assert 'id="delivery-premium"' in html
     assert 'id="delivery-days"' in html
     assert 'id="owned-price-band"' in html
+    assert "Цикл BARWORK ↔ LeoXpress" in html
+    assert "работает и когда внешних продавцов нет" in html
     assert "delivery_price_premium_kzt" in javascript
     assert "delivery_advantage_days" in javascript
     assert "owned_price_band_kzt" in javascript
+    assert "owned_cycle_anchor_price_kzt" in javascript
+    assert 'headers={"Cache-Control": "no-store"}' in ui
     assert "decision_reason" in javascript
     assert 'document.querySelector("#city-id").value = ordinary.policy.city_id' not in javascript
     assert "password_dpapi" in agent and "mc_sid_dpapi" in agent

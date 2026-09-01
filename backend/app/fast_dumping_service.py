@@ -21,7 +21,11 @@ from .fast_dumping_models import (
     FastDumpingPolicy,
     FastDumpingState,
 )
-from .fast_dumping_pricing import FastPriceDecision, decide_fast_price
+from .fast_dumping_pricing import (
+    FastPriceDecision,
+    decide_fast_price,
+    external_anchor_price,
+)
 from .models import MarketplaceAccount, Product
 from .product_images import normalize_product_image_url
 from .workspace_models import KaspiAccountCredential, Workspace
@@ -136,6 +140,39 @@ def _owned_shop_identities(db: Session) -> tuple[list[str], list[str]]:
         )
     )
     return merchant_ids, merchant_names
+
+
+def _refresh_owned_cycle_anchor(state: FastDumpingState) -> None:
+    """Keep one durable reset point even when only the owner's shops remain."""
+
+    external = external_anchor_price(
+        state.offers_json or [],
+        page_visible_price_kzt=state.page_visible_price_kzt,
+    )
+    if external is not None:
+        state.owned_cycle_anchor_price_kzt = external
+        return
+
+    owned_prices: list[Decimal] = []
+    if state.own_price_kzt is not None:
+        owned_prices.append(Decimal(state.own_price_kzt))
+    for offer in state.offers_json or []:
+        if not isinstance(offer, dict) or bool(offer.get("is_own")):
+            continue
+        if not (bool(offer.get("is_owned_peer")) or bool(offer.get("is_owned_group"))):
+            continue
+        price = _decimal(offer.get("price_kzt"), field="offer.price_kzt")
+        if price is not None:
+            owned_prices.append(price)
+    if not owned_prices:
+        return
+
+    current_start = max(owned_prices)
+    if (
+        state.owned_cycle_anchor_price_kzt is None
+        or current_start > state.owned_cycle_anchor_price_kzt
+    ):
+        state.owned_cycle_anchor_price_kzt = current_start
 
 
 def normalize_market_snapshot(
@@ -838,6 +875,7 @@ def complete_scan(
     state.market_context_reason = market.get("market_context_reason")
     state.offers_json = market.get("offers") or []
     state.offers_count = len(state.offers_json)
+    _refresh_owned_cycle_anchor(state)
     state.last_error_code = None
     state.last_error_message = None
     state.state_version += 1
@@ -949,6 +987,7 @@ def complete_scan(
         delivery_advantage_days=policy.delivery_advantage_days,
         page_visible_price_kzt=state.page_visible_price_kzt,
         owned_price_band_kzt=policy.owned_price_band_kzt,
+        owned_cycle_anchor_price_kzt=state.owned_cycle_anchor_price_kzt,
     )
     delivery_selection_reason = market.get("delivery_selection_reason")
     if delivery_selection_reason:
@@ -1132,6 +1171,7 @@ def prepare_apply(
                 market.get("page_visible_price_kzt"), field="page_visible_price_kzt"
             ),
             owned_price_band_kzt=policy.owned_price_band_kzt,
+            owned_cycle_anchor_price_kzt=state.owned_cycle_anchor_price_kzt,
         )
         previous_target = _decimal(
             (job.decision_json or {}).get("target_price_kzt"),

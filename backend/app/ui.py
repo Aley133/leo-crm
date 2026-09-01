@@ -41,7 +41,10 @@ def crm_dumping() -> FileResponse:
 
 @router.get("/crm/fast-dumping", response_class=FileResponse)
 def crm_fast_dumping() -> FileResponse:
-    return FileResponse(STATIC_DIR / "fast-dumping.html")
+    return FileResponse(
+        STATIC_DIR / "fast-dumping.html",
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 @router.get("/crm/product-test", response_class=FileResponse)
