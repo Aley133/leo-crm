@@ -44,7 +44,11 @@ def _external_prices(
     page_floor = None if page_visible_price_kzt is None else _money(page_visible_price_kzt)
     prices: list[Decimal] = []
     for raw in market_offers or []:
-        if not isinstance(raw, dict) or bool(raw.get("is_own")):
+        if (
+            not isinstance(raw, dict)
+            or bool(raw.get("is_own"))
+            or bool(raw.get("is_owned_group"))
+        ):
             continue
         price = _offer_price(raw.get("price_kzt"))
         if price is None:

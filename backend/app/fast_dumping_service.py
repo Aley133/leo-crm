@@ -22,8 +22,9 @@ from .fast_dumping_models import (
     FastDumpingState,
 )
 from .fast_dumping_pricing import FastPriceDecision, decide_fast_price
-from .models import Product
+from .models import MarketplaceAccount, Product
 from .product_images import normalize_product_image_url
+from .workspace_models import KaspiAccountCredential, Workspace
 
 
 ACTIVE_JOB_STATUSES = {
@@ -98,9 +99,55 @@ def _json_money(value: Decimal | None) -> str | None:
     return None if value is None else format(value, "f")
 
 
-def normalize_market_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+def _identity(value: object) -> str:
+    return "".join(str(value or "").split()).casefold()
+
+
+def _owned_shop_identities(db: Session) -> tuple[list[str], list[str]]:
+    rows = db.execute(
+        select(
+            KaspiAccountCredential.partner_id,
+            Workspace.name,
+            MarketplaceAccount.display_name,
+        )
+        .join(Workspace, Workspace.id == KaspiAccountCredential.workspace_id)
+        .join(
+            MarketplaceAccount,
+            MarketplaceAccount.id == KaspiAccountCredential.marketplace_account_id,
+        )
+        .where(Workspace.is_active.is_(True))
+        .order_by(Workspace.id)
+        .limit(20)
+        .execution_options(include_all_workspaces=True)
+    ).all()
+    merchant_ids = list(
+        dict.fromkeys(
+            str(partner_id).strip()
+            for partner_id, _workspace_name, _display_name in rows
+            if str(partner_id or "").strip()
+        )
+    )
+    merchant_names = list(
+        dict.fromkeys(
+            name.strip()
+            for _partner_id, workspace_name, display_name in rows
+            for name in (str(workspace_name or ""), str(display_name or ""))
+            if name.strip()
+        )
+    )
+    return merchant_ids, merchant_names
+
+
+def normalize_market_snapshot(
+    payload: dict[str, Any],
+    *,
+    owned_merchant_ids: list[str] | tuple[str, ...] | None = None,
+    owned_merchant_names: list[str] | tuple[str, ...] | None = None,
+) -> dict[str, Any]:
     """Accept only bounded, non-secret market facts from the local agent."""
 
+    known_owned_ids = {_identity(value) for value in (owned_merchant_ids or ())}
+    known_owned_names = {_identity(value) for value in (owned_merchant_names or ())}
     raw_offers = payload.get("offers")
     offers: list[dict[str, Any]] = []
     if isinstance(raw_offers, list):
@@ -112,16 +159,37 @@ def normalize_market_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
                 str(key)[:80]: str(value)[:120]
                 for key, value in (price_fields.items() if isinstance(price_fields, dict) else [])
             }
+            merchant_id = _text(raw.get("merchant_id"), limit=128)
+            merchant_name = _text(raw.get("merchant_name"), limit=255)
+            is_own = bool(raw.get("is_own"))
+            known_peer = not is_own and bool(
+                (_identity(merchant_id) and _identity(merchant_id) in known_owned_ids)
+                or (
+                    _identity(merchant_name)
+                    and _identity(merchant_name) in known_owned_names
+                )
+            )
+            is_owned_peer = bool(raw.get("is_owned_peer")) or known_peer
+            is_owned_group = (
+                is_own or is_owned_peer or bool(raw.get("is_owned_group"))
+            )
             offers.append(
                 {
-                    "merchant_id": _text(raw.get("merchant_id"), limit=128),
-                    "merchant_name": _text(raw.get("merchant_name"), limit=255),
-                    "is_own": bool(raw.get("is_own")),
+                    "merchant_id": merchant_id,
+                    "merchant_name": merchant_name,
+                    "is_own": is_own,
                     "own_match": _text(raw.get("own_match"), limit=32),
+                    "is_owned_group": is_owned_group,
+                    "is_owned_peer": is_owned_peer,
+                    "owned_peer_match": _text(
+                        raw.get("owned_peer_match"), limit=32
+                    )
+                    or ("crm_identity" if known_peer else None),
                     "price_kzt": _json_money(
                         _decimal(raw.get("price_kzt"), field="offer.price_kzt")
                     ),
-                    "used_for_dumping": bool(raw.get("used_for_dumping")),
+                    "used_for_dumping": bool(raw.get("used_for_dumping"))
+                    and not is_owned_group,
                     "ignored_reason": _text(raw.get("ignored_reason"), limit=500),
                     "decision_reason": _text(raw.get("decision_reason"), limit=500),
                     "price_fields": safe_price_fields,
@@ -628,6 +696,7 @@ def serialize_claimed_job(
         stage = "apply"
     else:
         stage = "verify"
+    owned_merchant_ids, owned_merchant_names = _owned_shop_identities(db)
     payload: dict[str, Any] = {
         "id": job.id,
         "lease_token": job.lease_token,
@@ -643,6 +712,9 @@ def serialize_claimed_job(
         "scan_interval_seconds": _policy_interval_seconds(policy),
         "delivery_price_premium_kzt": policy.delivery_price_premium_kzt,
         "delivery_advantage_days": policy.delivery_advantage_days,
+        "owned_price_band_kzt": policy.owned_price_band_kzt,
+        "owned_merchant_ids": owned_merchant_ids,
+        "owned_merchant_names": owned_merchant_names,
     }
     if stage == "verify":
         payload["target_price_kzt"] = (job.decision_json or {}).get(
@@ -740,7 +812,12 @@ def complete_scan(
         state.next_scan_at = _next_scan(policy, now=now)
         return {"status": state.status, "queued_apply": False}
 
-    market = normalize_market_snapshot(market_payload or {})
+    owned_merchant_ids, owned_merchant_names = _owned_shop_identities(db)
+    market = normalize_market_snapshot(
+        market_payload or {},
+        owned_merchant_ids=owned_merchant_ids,
+        owned_merchant_names=owned_merchant_names,
+    )
     job.market_json = market
     state.last_scanned_at = now
     state.own_price_kzt = _decimal(market.get("own_price_kzt"), field="own_price_kzt")
@@ -871,6 +948,7 @@ def complete_scan(
         delivery_price_premium_kzt=policy.delivery_price_premium_kzt,
         delivery_advantage_days=policy.delivery_advantage_days,
         page_visible_price_kzt=state.page_visible_price_kzt,
+        owned_price_band_kzt=policy.owned_price_band_kzt,
     )
     delivery_selection_reason = market.get("delivery_selection_reason")
     if delivery_selection_reason:
@@ -1053,6 +1131,7 @@ def prepare_apply(
             page_visible_price_kzt=_decimal(
                 market.get("page_visible_price_kzt"), field="page_visible_price_kzt"
             ),
+            owned_price_band_kzt=policy.owned_price_band_kzt,
         )
         previous_target = _decimal(
             (job.decision_json or {}).get("target_price_kzt"),

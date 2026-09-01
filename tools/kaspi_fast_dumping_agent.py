@@ -27,7 +27,7 @@ from tools.kaspi_fast_dumping_scanner import (
     scan_kaspi_competitors,
 )
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
-VERSION = "1.2.1"
+VERSION = "1.2.2"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -634,6 +634,16 @@ async def _scan(job: dict, merchant_uid: str) -> KaspiCompetitorSnapshot:
             own_merchant_sku=(
                 str(job.get("merchant_sku") or "").strip() or None
             ),
+            owned_merchant_ids=[
+                str(value).strip()[:128]
+                for value in (job.get("owned_merchant_ids") or [])
+                if str(value or "").strip()
+            ],
+            owned_merchant_names=[
+                str(value).strip()[:255]
+                for value in (job.get("owned_merchant_names") or [])
+                if str(value or "").strip()
+            ],
             city_id=str(job["city_id"]),
             zone_id=str(job["zone_id"]),
             product_name_hint=str(job.get("name") or "") or None,

@@ -78,13 +78,14 @@ const statusView = (row) => {
 const offersTable = (offers) => {
   if (!Array.isArray(offers) || !offers.length) return '<p class="fast-card-reason">Диагностика офферов появится после первой проверки.</p>';
   return `<div class="offers-wrap"><table class="offers-table"><thead><tr><th>Продавец</th><th>Цена API</th><th>Роль</th><th>Доставка</th><th>В расчёте</th><th>Решение</th></tr></thead><tbody>${offers.map((offer) => {
-    const rowClass = offer.is_own ? "offer-own" : offer.used_for_dumping ? "" : "offer-ignore";
+    const rowClass = offer.is_owned_group ? "offer-own" : offer.used_for_dumping ? "" : "offer-ignore";
     const delivery = offer.delivery_days == null ? (offer.delivery || "не распознано") : `${Number(offer.delivery_days)} дн. · ${offer.delivery || "срок Kaspi"}`;
     const deliveryGap = offer.delivery_gap_days == null ? null : Number(offer.delivery_gap_days) > 0 ? `наша быстрее на ${Number(offer.delivery_gap_days)} дн.` : Number(offer.delivery_gap_days) < 0 ? `конкурент быстрее на ${Math.abs(Number(offer.delivery_gap_days))} дн.` : "одинаковый срок";
-    const comparison = offer.is_own ? "" : [offer.price_gap_kzt == null ? null : `разница ${money(offer.price_gap_kzt)}`, deliveryGap].filter(Boolean).join(" · ");
+    const comparison = offer.is_owned_group ? "" : [offer.price_gap_kzt == null ? null : `разница ${money(offer.price_gap_kzt)}`, deliveryGap].filter(Boolean).join(" · ");
     const reason = offer.decision_reason || offer.ignored_reason || (offer.used_for_dumping ? "Выбран как ценовой ориентир" : "Не выбран");
-    const decision = offer.is_own ? "Наша доставка" : comparison ? `${comparison}. ${reason}` : reason;
-    return `<tr class="${rowClass}"><td>${escapeHtml(offer.merchant_name || offer.merchant_id || "—")}</td><td>${money(offer.price_kzt)}</td><td>${offer.is_own ? "Наша строка" : "Конкурент"}</td><td>${escapeHtml(delivery)}</td><td>${offer.is_own ? "—" : offer.used_for_dumping ? "Да" : "Нет"}</td><td>${escapeHtml(decision)}</td></tr>`;
+    const decision = offer.is_own ? "Наша доставка" : offer.is_owned_peer ? reason : comparison ? `${comparison}. ${reason}` : reason;
+    const role = offer.is_own ? "Наша строка" : offer.is_owned_peer ? "Свой магазин" : "Конкурент";
+    return `<tr class="${rowClass}"><td>${escapeHtml(offer.merchant_name || offer.merchant_id || "—")}</td><td>${money(offer.price_kzt)}</td><td>${role}</td><td>${escapeHtml(delivery)}</td><td>${offer.is_owned_group ? "—" : offer.used_for_dumping ? "Да" : "Нет"}</td><td>${escapeHtml(decision)}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 };
 
@@ -139,6 +140,7 @@ const card = (row) => {
       <div><span>Последний apply</span><strong>${dateTime(state.last_applied_at)}</strong><small>${state.last_operation_id ? `operation ${escapeHtml(state.last_operation_id)}` : "операций ещё нет"}</small></div>
       <div><span>Интервал</span><strong>${Number(row.policy.scan_interval_seconds) / 60} мин.</strong><small>проверка и максимум один write · аномалия ${Number(row.policy.max_undercut_gap_percent)}%</small></div>
       <div><span>Преимущество доставки</span><strong>до ${money(row.policy.delivery_price_premium_kzt)}</strong><small>для физического FIFO</small></div>
+      <div><span>Коридор своих магазинов</span><strong>${money(row.policy.owned_price_band_kzt)}</strong><small>общий внешний ориентир</small></div>
       <div><span>Agent / версия решения</span><strong>${escapeHtml(state.last_agent_id || "—")}</strong><small>state v${Number(state.state_version || 0)}</small></div>
       <div><span>Канал</span><strong>Realtime API</strong><small>XML — страховочное зеркало</small></div>
     </div>
@@ -261,6 +263,7 @@ const policyPayload = (prefix="") => ({
   scan_interval_seconds:Number(document.querySelector(`#${prefix}scan-interval`).value),
   delivery_price_premium_kzt:Number(document.querySelector(`#${prefix}delivery-premium`).value),
   delivery_advantage_days:Number(document.querySelector(`#${prefix}delivery-days`).value),
+  owned_price_band_kzt:Number(document.querySelector(`#${prefix}owned-price-band`).value),
   preorder_target_position:Number(document.querySelector(`#${prefix}preorder-position`).value),
   city_id:document.querySelector(`#${prefix}city-id`).value.trim(),
   zone_id:document.querySelector(`#${prefix}zone-id`).value.trim(),
@@ -279,6 +282,7 @@ const openEdit = (row) => {
   document.querySelector("#edit-max-gap").value = policy.max_undercut_gap_percent;
   document.querySelector("#edit-delivery-premium").value = policy.delivery_price_premium_kzt;
   document.querySelector("#edit-delivery-days").value = policy.delivery_advantage_days;
+  document.querySelector("#edit-owned-price-band").value = policy.owned_price_band_kzt ?? 200;
   document.querySelector("#edit-preorder-position").value = policy.preorder_target_position || 4;
   document.querySelector("#edit-city-id").value = policy.city_id;
   document.querySelector("#edit-zone-id").value = policy.zone_id;
