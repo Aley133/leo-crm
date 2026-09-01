@@ -116,6 +116,7 @@ def _state_payload(
         "own_price_kzt": state.own_price_kzt,
         "competitor_price_kzt": state.competitor_price_kzt,
         "competitor_name": state.competitor_name,
+        "owned_cycle_anchor_price_kzt": state.owned_cycle_anchor_price_kzt,
         "target_price_kzt": state.target_price_kzt,
         "desired_stock_count": state.desired_stock_count,
         "own_position": state.own_position,

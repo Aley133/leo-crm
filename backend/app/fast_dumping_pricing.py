@@ -248,7 +248,7 @@ def _owned_peer_prices(
     return peers
 
 
-def _external_anchor_price(
+def external_anchor_price(
     market_offers: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
     *,
     page_visible_price_kzt: Decimal | None,
@@ -276,17 +276,17 @@ def _decide_owned_group_price(
     effective_competitor_price_kzt: Decimal | None,
     safe_floor_kzt: Decimal,
     undercut_step_kzt: Decimal,
-    allow_price_raise: bool,
     max_undercut_gap_percent: Decimal,
     market_offers: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None,
     owned_price_band_kzt: Decimal | int | str | None,
+    owned_cycle_anchor_price_kzt: Decimal | int | str | None,
 ) -> FastPriceDecision | None:
-    """Coordinate the owner's shops around one real external price anchor.
+    """Coordinate owned shops around an external or durable internal anchor.
 
     Inside the configured band the shops may alternate the ordinary one-step
-    undercut. Once either owned row moves below that band, every owned agent
-    independently receives the same external reset target. This makes the
-    reset converge even when the two Windows agents scan a few minutes apart.
+    undercut. Once either owned row moves below that band, both agents receive
+    the same reset target. If all external sellers disappear, the last anchor
+    is preserved so the owned shops continue the cycle instead of stopping.
     """
 
     peers = _owned_peer_prices(market_offers)
@@ -294,81 +294,69 @@ def _decide_owned_group_price(
     if not peers or band is None or band <= 0:
         return None
 
-    base = _decide_fast_price_core(
-        own_price_kzt=own_price_kzt,
-        competitor_price_kzt=effective_competitor_price_kzt,
-        safe_floor_kzt=safe_floor_kzt,
-        undercut_step_kzt=undercut_step_kzt,
-        allow_price_raise=allow_price_raise,
-        max_undercut_gap_percent=max_undercut_gap_percent,
-    )
     peer_price, peer_name = peers[0]
-    if external_anchor_price_kzt is None:
-        return replace(
-            base,
-            status="owned_group_hold",
-            reason=(
-                f"Найден свой магазин {peer_name} ({format(peer_price, 'f')} ₸), "
-                "но внешний продавец не найден. Свои магазины не демпингуют друг друга."
-            ),
-        )
-
     own = None if own_price_kzt is None else _money(own_price_kzt)
-    external = _money(external_anchor_price_kzt)
     floor = _money(safe_floor_kzt)
     band_money = _money(band)
     group_prices = [peer_price]
     if own is not None:
         group_prices.append(own)
+    external = (
+        None
+        if external_anchor_price_kzt is None
+        else _money(external_anchor_price_kzt)
+    )
+    saved_anchor = _optional_money(owned_cycle_anchor_price_kzt)
+    # Without an external seller both stores must still complete the same
+    # bounded cycle. The durable anchor comes from FastDumpingState; on the
+    # first scan the highest current owned price becomes the cycle start.
+    anchor = external or max(saved_anchor or Decimal("0"), max(group_prices))
     group_min = min(group_prices)
-    reset_boundary = _money(external - band_money)
+    reset_boundary = _money(anchor - band_money)
 
     # The safe floor always wins. A market already below floor is handled by
     # the ordinary floor-limited decision and cannot trigger an upward cycle.
-    if external > floor and group_min < reset_boundary:
-        if own is not None and not allow_price_raise and external > own:
-            return replace(
-                base,
-                own_price_kzt=own,
-                target_price_kzt=own,
-                status="hold_no_raise",
-                reason=(
-                    f"Свои магазины прошли коридор {format(band_money, 'f')} ₸, "
-                    "но автоматическое повышение отключено."
-                ),
-                write_allowed=False,
-            )
+    if anchor > floor and group_min < reset_boundary:
+        anchor_kind = (
+            "внешнему ориентиру"
+            if external is not None
+            else "сохранённому старту цикла"
+        )
         return FastPriceDecision(
             safe_floor_kzt=floor,
-            competitor_price_kzt=external,
+            competitor_price_kzt=anchor,
             own_price_kzt=own,
-            target_price_kzt=external,
+            target_price_kzt=anchor,
             undercut_step_kzt=_money(undercut_step_kzt),
             status="owned_group_reset",
             reason=(
                 f"LeoXpress/BARWORK прошли кооперативный коридор "
-                f"{format(band_money, 'f')} ₸ ниже внешнего ориентира "
-                f"{format(external, 'f')} ₸. Цена возвращается к внешнему "
-                "ориентиру; после синхронизации цикл начнётся заново."
+                f"{format(band_money, 'f')} ₸ ниже цены "
+                f"{format(anchor, 'f')} ₸. Цена возвращается к {anchor_kind}; "
+                "после синхронизации цикл начнётся заново."
             ),
             write_allowed=True,
             max_undercut_gap_percent=_percent(max_undercut_gap_percent),
         )
 
-    active_competitor = (
-        peer_price
-        if effective_competitor_price_kzt is None
-        else min(_money(effective_competitor_price_kzt), peer_price)
-    )
+    active_competitor = peer_price
+    if external is not None and effective_competitor_price_kzt is not None:
+        active_competitor = min(
+            _money(effective_competitor_price_kzt),
+            peer_price,
+        )
     decision = _decide_fast_price_core(
         own_price_kzt=own_price_kzt,
         competitor_price_kzt=active_competitor,
         safe_floor_kzt=safe_floor_kzt,
         undercut_step_kzt=undercut_step_kzt,
-        allow_price_raise=allow_price_raise,
+        # A controlled return within the owned-shop cycle is not an ordinary
+        # market price raise, so it must remain possible even when following
+        # an external market increase is disabled.
+        allow_price_raise=True,
         max_undercut_gap_percent=max_undercut_gap_percent,
     )
-    if peer_price < external:
+    if external is None or peer_price < anchor:
         # Keep Kaspi's logistics-price shortcut inside the cooperative cycle.
         # At the lower edge we intentionally allow the final ordinary step
         # (for example 3200 -> 3199) so that the next scan deterministically
@@ -404,8 +392,9 @@ def _decide_owned_group_price(
             ),
             reason=(
                 f"Свой магазин {peer_name} временно задаёт шаг внутри коридора "
-                f"{format(band_money, 'f')} ₸. Внешний ориентир: "
-                f"{format(external, 'f')} ₸; граница возврата: "
+                f"{format(band_money, 'f')} ₸. "
+                f"{'Внешний ориентир' if external is not None else 'Старт цикла'}: "
+                f"{format(anchor, 'f')} ₸; граница возврата: "
                 f"{format(reset_boundary, 'f')} ₸. {decision.reason}"
             ),
         )
@@ -561,6 +550,7 @@ def decide_fast_price(
     page_visible_price_kzt: Decimal | None = None,
     top_visible_sellers: int = DEFAULT_VISIBLE_SELLERS,
     owned_price_band_kzt: Decimal | int | str | None = None,
+    owned_cycle_anchor_price_kzt: Decimal | int | str | None = None,
 ) -> FastPriceDecision:
     """Use the proven lab rule plus delivery-premium, TOP-5 and tariff guards."""
 
@@ -578,17 +568,17 @@ def decide_fast_price(
     effective_competitor = competitor_price_kzt if plan is None else plan.effective_competitor_price_kzt
     decision = _decide_owned_group_price(
         own_price_kzt=own_price_kzt,
-        external_anchor_price_kzt=_external_anchor_price(
+        external_anchor_price_kzt=external_anchor_price(
             market_offers,
             page_visible_price_kzt=page_visible_price_kzt,
         ),
         effective_competitor_price_kzt=effective_competitor,
         safe_floor_kzt=safe_floor_kzt,
         undercut_step_kzt=step,
-        allow_price_raise=allow_price_raise,
         max_undercut_gap_percent=max_undercut_gap_percent,
         market_offers=market_offers,
         owned_price_band_kzt=owned_price_band_kzt,
+        owned_cycle_anchor_price_kzt=owned_cycle_anchor_price_kzt,
     ) or _decide_fast_price_core(
         own_price_kzt=own_price_kzt,
         competitor_price_kzt=effective_competitor,
