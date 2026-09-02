@@ -33,7 +33,7 @@ const scheduleRefresh = (delay = 3000) => {
 
 const statusText = (item) => ({
   ready_to_add: "Готово к вашей визуальной проверке",
-  needs_supplier_link: item.last_error || "Точное совпадение Ozon не найдено — вставьте ссылку",
+  needs_supplier_link: item.last_error || (item.offers?.discovery?.mode === "popular" ? "Ходовой товар отобран — вставьте ссылку Ozon" : "Точное совпадение Ozon не найдено — вставьте ссылку"),
   needs_supplier_validation: "Ссылка изменена — проверьте",
   validating_supplier: "Проверяем ссылку",
   adding_to_kaspi: "Выгружаем на Kaspi и ждём реальный SKU",
@@ -48,9 +48,9 @@ const ratingLine = (rating, reviews) => {
   return `<span class="rating">★ ${Number.isFinite(score) ? score.toFixed(1) : "—"}${Number.isFinite(count) ? ` · ${count.toLocaleString("ru-RU")} отзывов` : ""}</span>`;
 };
 
-const marketProduct = ({market, title, brand, sku, image, url, rating, reviews}) => `<div class="market-product ${market.toLowerCase()}">
+const marketProduct = ({market, title, brand, sku, image, url, rating, reviews, sellers}) => `<div class="market-product ${market.toLowerCase()}">
   ${image ? `<img src="${escapeHtml(image)}" alt="${escapeHtml(`${market}: ${title}`)}" loading="lazy" referrerpolicy="no-referrer">` : `<div class="market-image-placeholder">Нет фото ${escapeHtml(market)}</div>`}
-  <div class="market-copy"><strong>${escapeHtml(title || `Карточка ${market}`)}</strong><small>${escapeHtml([brand, sku].filter(Boolean).join(" · ") || "—")}</small>${ratingLine(rating, reviews)}${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(market)} ↗</a>` : '<span class="muted">Ссылка не найдена</span>'}</div>
+  <div class="market-copy"><strong>${escapeHtml(title || `Карточка ${market}`)}</strong><small>${escapeHtml([brand, sku].filter(Boolean).join(" · ") || "—")}</small>${ratingLine(rating, reviews)}${sellers != null && Number.isFinite(Number(sellers)) ? `<span class="seller-count">${Number(sellers).toLocaleString("ru-RU")} продавцов</span>` : ""}${url ? `<a href="${escapeHtml(url)}" target="_blank" rel="noopener">${escapeHtml(market)} ↗</a>` : '<span class="muted">Ссылка не найдена</span>'}</div>
 </div>`;
 
 const itemRow = (item, index) => {
@@ -75,7 +75,7 @@ const itemRow = (item, index) => {
   const matchClass = ["CONFIRMED", "OPERATOR_CONFIRMED"].includes(supplier.match_status) ? "found" : supplier.match_status === "REVIEW" || supplier.match_status === "MANUAL_REVIEW" ? "review" : "missing";
   return `<article class="lab-result-row ${matchClass}" data-id="${item.id}" data-supplier-url="${escapeHtml(item.supplier_url || "")}" data-can-add="${canAdd ? "1" : "0"}">
     <div class="row-number">${index + 1}</div>
-    <div data-label="KASPI">${marketProduct({market:"Kaspi", title:item.name, brand:item.brand, sku:item.kaspi_product_id, image:item.image_url, url:item.kaspi_url, rating:kaspi.rating, reviews:kaspi.reviews})}</div>
+    <div data-label="KASPI">${marketProduct({market:"Kaspi", title:item.name, brand:item.brand, sku:item.kaspi_product_id, image:item.image_url, url:item.kaspi_url, rating:kaspi.rating, reviews:kaspi.reviews, sellers:kaspi.seller_count})}</div>
     <div class="table-value" data-label="KASPI ЦЕНА"><strong>${money(item.observed_price_kzt)}</strong><small>конкурент</small></div>
     <div data-label="OZON">${marketProduct({market:"Ozon", title:ozonTitle, brand:autoOzon.brand, sku:supplier.supplier_offer_sku || autoOzon.sku, image:ozonImage, url:item.supplier_url, rating:supplier.supplier_rating ?? autoOzon.rating, reviews:supplier.supplier_reviews ?? autoOzon.reviews})}</div>
     <div class="table-value supplier-cost" data-label="SUPPLIER COST"><strong>${money(supplier.supplier_price_kzt)}</strong><small>${escapeHtml(supplierLabel)}</small><em>${escapeHtml(priceSource)}</em></div>
@@ -302,12 +302,15 @@ const scheduleNewCardAutosave = (card) => {
 const renderJobs = (jobs) => {
   const list = document.querySelector("#jobs");
   if (!list) return;
-  const relevant = jobs.filter((job) => ["discover", "validate_supplier"].includes(job.job_type));
+  const relevant = jobs.filter((job) => ["discover", "discover_popular", "validate_supplier"].includes(job.job_type));
   const active = relevant.filter((job) => ["queued", "leased", "failed"].includes(job.status)).slice(0, 6);
   const pending = active.filter((job) => ["queued", "leased"].includes(job.status));
-  const lastSearch = relevant.find((job) => job.job_type === "discover" && job.status === "succeeded" && job.result);
-  const labels = {discover:"Поиск новых товаров", validate_supplier:"Проверка Ozon"};
-  const summary = lastSearch ? `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>` : "";
+  const lastSearch = relevant.find((job) => ["discover", "discover_popular"].includes(job.job_type) && job.status === "succeeded" && job.result);
+  const labels = {discover:"Поиск новых товаров", discover_popular:"Поиск ходовых товаров", validate_supplier:"Проверка Ozon"};
+  const popularSummary = lastSearch?.job_type === "discover_popular" || lastSearch?.result?.mode === "popular";
+  const summary = !lastSearch ? "" : popularSummary
+    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено продавцов ${Number(lastSearch.result.seller_counts_checked || 0)}, отсеяно по отзывам ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, по продавцам ${Number(lastSearch.result.excluded_too_many_sellers || 0)}</div>`
+    : `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>`;
   list.innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
   if (pending.length) scheduleRefresh(3000);
 };
@@ -346,6 +349,31 @@ const fillSettings = (settings) => {
   if (settings?.target_new && targetNew) targetNew.value = settings.target_new;
 };
 
+const syncDiscoveryModeControls = () => {
+  const mode = document.querySelector("#discover-mode")?.value || "full";
+  document.querySelectorAll(".popular-filter").forEach((field) => field.classList.toggle("hidden", mode !== "popular"));
+  const hint = document.querySelector("#discover-mode-hint");
+  const button = document.querySelector("#discover-button");
+  if (hint) hint.textContent = mode === "popular"
+    ? "Без автоматического Ozon-сопоставления: только Kaspi-карточки с нужным спросом и числом продавцов. Ссылку Ozon вы вставите вручную."
+    : "Agent автоматически найдёт и проверит точные пары Kaspi ↔ Ozon.";
+  if (button && !button.disabled) button.textContent = mode === "popular" ? "Найти ходовые товары" : "Найти товары";
+  if (button) button.dataset.label = mode === "popular" ? "Найти ходовые товары" : "Найти товары";
+};
+
+const renderResultMode = (items) => {
+  const popular = items.some((item) => item.offers?.discovery?.mode === "popular");
+  const kicker = document.querySelector("#result-kicker");
+  const title = document.querySelector("#result-title");
+  const description = document.querySelector("#result-description");
+  if (!kicker || !title || !description) return;
+  kicker.textContent = popular ? "ОТБОР ХОДОВЫХ ТОВАРОВ" : "ВИЗУАЛЬНОЕ СОПОСТАВЛЕНИЕ";
+  title.textContent = popular ? "Популярные товары Kaspi" : "Kaspi ↔ Ozon";
+  description.textContent = popular
+    ? "В списке только карточки, прошедшие ваши фильтры отзывов и продавцов. Автопоиск Ozon отключён: найдите точную Ozon-ссылку, вставьте её в строку и нажмите «Проверить / заменить»."
+    : "Сначала сравните две фотографии. Если товар совпал — нажмите «Выгрузить на Kaspi». Если нет — вставьте правильную Ozon-ссылку и повторно проверьте. После подтверждения создаётся обычный товар и существующая привязка Мониторинга; параллельных путей нет.";
+};
+
 const render = (payload) => {
   if (refreshTimer) { window.clearTimeout(refreshTimer); refreshTimer = null; }
   const items = payload.items || [];
@@ -367,6 +395,8 @@ const render = (payload) => {
   document.querySelector("#job-count").textContent = pageJobs.filter((job) => ["queued", "leased"].includes(job.status)).length;
   document.querySelector("#enrolled-count").textContent = pageSubmissions.filter((item) => item.offers?.kaspi_submission?.status === "succeeded").length;
   fillSettings(payload.settings || {});
+  syncDiscoveryModeControls();
+  renderResultMode(items);
   if (isAddProductPage) renderNewCards(newCards, jobs);
   else renderJobs(jobs);
   renderSubmissions(pageSubmissions);
@@ -381,6 +411,7 @@ async function load() {
 
 document.querySelector("#token-form")?.addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, document.querySelector("#token").value.trim()); load(); });
 document.querySelector("#refresh")?.addEventListener("click", load);
+document.querySelector("#discover-mode")?.addEventListener("change", syncDiscoveryModeControls);
 document.querySelector("#new-card-form")?.addEventListener("submit", async (event) => {
   event.preventDefault();
   const button = document.querySelector("#new-card-prepare");
@@ -393,7 +424,15 @@ document.querySelector("#new-card-form")?.addEventListener("submit", async (even
 });
 document.querySelector("#discover-form")?.addEventListener("submit", async (event) => {
   event.preventDefault(); const button = document.querySelector("#discover-button"); setBusy(button, true, "Передаю Agent…");
-  try { await request("/api/product-test/discover", {method:"POST", body:JSON.stringify({query:document.querySelector("#query").value.trim(), target_new:Number(document.querySelector("#target-new").value)})}); notify("Быстрый поиск запущен. Кандидаты появятся автоматически.", "success"); await load(); }
+  const mode = document.querySelector("#discover-mode").value;
+  const body = {
+    query:document.querySelector("#query").value.trim(),
+    target_new:Number(document.querySelector("#target-new").value),
+    mode,
+    minimum_reviews:Number(document.querySelector("#minimum-reviews").value),
+    maximum_sellers:Number(document.querySelector("#maximum-sellers").value),
+  };
+  try { await request("/api/product-test/discover", {method:"POST", body:JSON.stringify(body)}); notify(mode === "popular" ? "Отбор ходовых товаров Kaspi запущен. Ozon автоматически не проверяется." : "Быстрый поиск запущен. Кандидаты появятся автоматически.", "success"); await load(); }
   catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 document.querySelector("#settings-form")?.addEventListener("submit", async (event) => {

@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import asyncio
+import math
 import re
+from collections.abc import Callable
 from typing import TYPE_CHECKING, Any
 from urllib.parse import unquote, urlsplit
 
+from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
 from tools.ozon_http.image_verify import ImageVerifier
 from tools.ozon_http.matcher import build_search_queries, rank_product
 from tools.ozon_http.resolver import OzonSessionResolver
@@ -13,6 +17,56 @@ from .kaspi_search import KaspiProductSearch
 
 if TYPE_CHECKING:
     from .kaspi_offer_creator import MerchantOfferApi
+
+
+SellerCountResolver = Callable[[dict[str, Any], str, str, int], tuple[int | None, dict[str, Any]]]
+
+
+def _count(value: Any) -> int | None:
+    if isinstance(value, bool) or value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return max(0, int(value))
+    digits = "".join(character for character in str(value) if character.isdigit())
+    return int(digits) if digits else None
+
+
+def _rating(value: Any) -> float:
+    try:
+        return float(str(value).replace(",", "."))
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _resolve_kaspi_seller_count(
+    product: dict[str, Any],
+    city_id: str,
+    zone_id: str,
+    maximum_sellers: int,
+) -> tuple[int | None, dict[str, Any]]:
+    # Kaspi pages contain five offers per page. Reading one page beyond the
+    # configured maximum is enough to distinguish "at most N" from "more than
+    # N" without downloading an unbounded seller list. The search-card counter
+    # is intentionally not trusted for admission because Kaspi can describe it
+    # as either all offers or additional offers in different storefront shapes.
+    max_pages = min(20, max(2, math.ceil((maximum_sellers + 1) / 5)))
+    inspected = asyncio.run(
+        inspect_kaspi_product(
+            reference=str(product.get("kaspi_url") or product.get("master_sku") or ""),
+            city_id=city_id,
+            zone_id=zone_id,
+            max_pages=max_pages,
+        )
+    )
+    offers = inspected.get("offers") if isinstance(inspected.get("offers"), dict) else {}
+    count = _count(offers.get("seller_count_scanned"))
+    if count is None or count <= 0:
+        return None, {"seller_count_source": "unavailable"}
+    return count, {
+        "seller_count_source": "kaspi_offer_pages",
+        "seller_count_scanned": count,
+        "top_offers": list(offers.get("top_offers") or [])[:10],
+    }
 
 
 def _image_urls(row: dict[str, Any]) -> list[str]:
@@ -373,6 +427,7 @@ def discover_products(
             verifier.close()
     rows = (confirmed_rows + review_rows)[:requested]
     return {
+        "mode": "full",
         "query": query,
         "rows": rows,
         "scanned": len(kaspi.get("products") or []),
@@ -384,6 +439,146 @@ def discover_products(
         "matched_products_checked": matched_products_checked,
         "confirmed_pairs": len(confirmed_rows),
         "manual_review_pairs": len(review_rows),
+        "lookup_errors": lookup_errors[:12],
+        "elapsed_ms": (kaspi.get("stats") or {}).get("elapsed_ms"),
+        "browser_used": False,
+    }
+
+
+def discover_popular_products(
+    *,
+    query: str,
+    city_id: str,
+    zone_id: str,
+    target_new: int,
+    max_kaspi_scan: int,
+    minimum_reviews: int = 50,
+    maximum_sellers: int = 5,
+    existing_kaspi_ids: set[str] | None = None,
+    merchant_catalog: "MerchantOfferApi | None" = None,
+    seller_count_resolver: SellerCountResolver | None = None,
+) -> dict[str, Any]:
+    """Find proven Kaspi demand without attempting any automatic Ozon match."""
+
+    requested = max(1, int(target_new))
+    minimum_reviews = max(0, int(minimum_reviews))
+    maximum_sellers = max(1, int(maximum_sellers))
+    existing = {str(value) for value in (existing_kaspi_ids or set())}
+    search = KaspiProductSearch(city_id)
+    try:
+        kaspi = search.search(query, sort="rating", limit=max_kaspi_scan, mode="text")
+    finally:
+        search.close()
+
+    scanned = list(kaspi.get("products") or [])
+    crm_new = [row for row in scanned if str(row.get("master_sku")) not in existing]
+    reviewed = [row for row in crm_new if (_count(row.get("reviews")) or 0) >= minimum_reviews]
+    reviewed.sort(
+        key=lambda row: (
+            -(_count(row.get("reviews")) or 0),
+            -_rating(row.get("rating")),
+            _count(row.get("seller_count")) or 10**9,
+            str(row.get("title") or "").casefold(),
+        )
+    )
+    merchant_results = (
+        merchant_catalog.check_many(
+            [str(row.get("master_sku") or "") for row in reviewed],
+            workers=6,
+        )
+        if merchant_catalog is not None and reviewed
+        else {}
+    )
+    eligible = [
+        row
+        for row in reviewed
+        if not merchant_results.get(str(row.get("master_sku") or ""), {}).get("exists")
+        and not merchant_results.get(str(row.get("master_sku") or ""), {}).get("error")
+    ]
+
+    resolver = seller_count_resolver or _resolve_kaspi_seller_count
+    rows: list[dict[str, Any]] = []
+    lookup_errors: list[dict[str, str]] = []
+    sellers_checked = 0
+    excluded_too_many_sellers = 0
+    excluded_unknown_sellers = 0
+    for product in eligible:
+        sellers_checked += 1
+        try:
+            seller_count, seller_details = resolver(
+                product,
+                city_id,
+                zone_id,
+                maximum_sellers,
+            )
+        except Exception as exc:
+            seller_count = None
+            seller_details = {"seller_count_source": "error"}
+            lookup_errors.append({
+                "kaspi_product_id": str(product.get("master_sku") or ""),
+                "error": f"{type(exc).__name__}: {exc}"[:500],
+            })
+        if seller_count is None:
+            excluded_unknown_sellers += 1
+            continue
+        if seller_count > maximum_sellers:
+            excluded_too_many_sellers += 1
+            continue
+
+        kaspi_details = {
+            **product,
+            "seller_count": seller_count,
+            **seller_details,
+        }
+        rows.append({
+            "kaspi_product_id": str(product.get("master_sku") or ""),
+            "merchant_sku": str(product.get("master_sku") or ""),
+            "product_name": product.get("title"),
+            "brand": product.get("brand"),
+            "image_url": product.get("image_url"),
+            "product_url": product.get("kaspi_url"),
+            "page_visible_price_kzt": product.get("price_kzt"),
+            "supplier_url": None,
+            "supplier_price_kzt": None,
+            "match_status": "NO_RESULT",
+            "match_score": None,
+            "offers": {
+                "kaspi": kaspi_details,
+                "discovery": {
+                    "mode": "popular",
+                    "minimum_reviews": minimum_reviews,
+                    "maximum_sellers": maximum_sellers,
+                    "reviews": _count(product.get("reviews")) or 0,
+                    "rating": _rating(product.get("rating")),
+                    "seller_count": seller_count,
+                },
+            },
+        })
+        if len(rows) >= requested:
+            break
+
+    return {
+        "mode": "popular",
+        "query": query,
+        "rows": rows,
+        "scanned": len(scanned),
+        "excluded_existing_crm": len(existing),
+        "excluded_below_min_reviews": len(crm_new) - len(reviewed),
+        "excluded_existing_merchant": sum(
+            bool(value.get("exists")) for value in merchant_results.values()
+        ),
+        "merchant_membership_errors": sum(
+            bool(value.get("error")) for value in merchant_results.values()
+        ),
+        "eligible_new": len(eligible),
+        "minimum_reviews": minimum_reviews,
+        "maximum_sellers": maximum_sellers,
+        "seller_counts_checked": sellers_checked,
+        "excluded_too_many_sellers": excluded_too_many_sellers,
+        "excluded_unknown_sellers": excluded_unknown_sellers,
+        "matched_products_checked": 0,
+        "confirmed_pairs": 0,
+        "manual_review_pairs": len(rows),
         "lookup_errors": lookup_errors[:12],
         "elapsed_ms": (kaspi.get("stats") or {}).get("elapsed_ms"),
         "browser_used": False,

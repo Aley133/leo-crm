@@ -217,6 +217,22 @@ def test_kaspi_discovery_retries_one_rate_limited_page(monkeypatch) -> None:
     assert sleeps == [0.8]
 
 
+def test_kaspi_discovery_normalizes_seller_count_for_popular_filter() -> None:
+    card = kaspi_search.normalize_card(
+        {
+            "id": "110000001",
+            "title": "Popular product",
+            "reviewsQuantity": "1 250",
+            "offersCount": 4,
+            "shopLink": "/p/popular-product-110000001/",
+        },
+        "196220100",
+    )
+
+    assert card["reviews"] == "1 250"
+    assert card["seller_count"] == 4
+
+
 def test_backend_photo_reader_prefers_mobile_json_endpoint(monkeypatch) -> None:
     requests: list[httpx.Request] = []
 
@@ -457,6 +473,9 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert 'data-product-test-page="product-test"' in test_html
     assert 'data-product-test-page="add-product"' in add_html
     assert 'id="discover-form"' in test_html
+    assert 'id="discover-mode"' in test_html
+    assert 'id="minimum-reviews"' in test_html
+    assert 'id="maximum-sellers"' in test_html
     assert 'id="discover-form"' not in add_html
     assert 'id="new-card-form"' not in test_html
     assert 'id="new-card-form"' in add_html
@@ -469,6 +488,11 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert 'class="active" href="/crm/product-test"' in test_html
     assert 'class="active" href="/crm/add-product"' in add_html
     assert "/api/product-test/discover" in script
+    assert 'discover_popular:"Поиск ходовых товаров"' in script
+    assert 'mode === "popular"' in script
+    assert "minimum_reviews" in script
+    assert "maximum_sellers" in script
+    assert "seller-count" in script
     assert "/api/product-test/new-cards/prepare" in script
     assert "/map-category" in script
     assert "create_new_card" in script
@@ -497,7 +521,7 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert "автоподстановка не перезапишет" in script
     assert 'activeJobTypes.has("map_new_card_category")' in script
     assert "Ожидаем поля категории…" in script
-    assert '["discover", "validate_supplier"].includes(job.job_type)' in script
+    assert '["discover", "discover_popular", "validate_supplier"].includes(job.job_type)' in script
     assert 'id="kaspi-submissions-section"' in test_html
     assert 'id="kaspi-submissions-section"' in add_html
     assert "renderSubmissions(pageSubmissions)" in script
@@ -935,6 +959,108 @@ def test_discovery_keeps_scanning_until_complete_visual_pairs(monkeypatch) -> No
     assert result["rows"][0]["supplier_reviews"] == 500
 
 
+def test_popular_discovery_filters_kaspi_and_never_opens_ozon(monkeypatch) -> None:
+    products = [
+        {
+            "master_sku": "2001",
+            "title": "Ежовик лидер",
+            "brand": "Brand A",
+            "kaspi_url": "https://kaspi.kz/shop/p/a-2001/",
+            "image_url": "https://resources.cdn-kaspi.kz/img/m/p/a.jpg",
+            "price_kzt": 5500,
+            "rating": 4.9,
+            "reviews": 800,
+            "seller_count": 3,
+        },
+        {
+            "master_sku": "2002",
+            "title": "Ежовик массовый",
+            "brand": "Brand B",
+            "kaspi_url": "https://kaspi.kz/shop/p/b-2002/",
+            "image_url": "https://resources.cdn-kaspi.kz/img/m/p/b.jpg",
+            "price_kzt": 5000,
+            "rating": 5.0,
+            "reviews": 700,
+            "seller_count": 9,
+        },
+        {
+            "master_sku": "2003",
+            "title": "Ежовик второй",
+            "brand": "Brand C",
+            "kaspi_url": "https://kaspi.kz/shop/p/c-2003/",
+            "image_url": "https://resources.cdn-kaspi.kz/img/m/p/c.jpg",
+            "price_kzt": 4500,
+            "rating": 4.8,
+            "reviews": 120,
+            "seller_count": None,
+        },
+        {
+            "master_sku": "2004",
+            "title": "Ежовик без спроса",
+            "brand": "Brand D",
+            "kaspi_url": "https://kaspi.kz/shop/p/d-2004/",
+            "image_url": "https://resources.cdn-kaspi.kz/img/m/p/d.jpg",
+            "price_kzt": 4000,
+            "rating": 5.0,
+            "reviews": 49,
+            "seller_count": 1,
+        },
+    ]
+
+    class FakeSearch:
+        def __init__(self, city_id):
+            self.city_id = city_id
+
+        def search(self, *args, **kwargs):
+            assert kwargs["sort"] == "rating"
+            assert kwargs["mode"] == "text"
+            return {"products": products, "stats": {"elapsed_ms": 7}}
+
+        def close(self):
+            return None
+
+    def seller_count(product, city_id, zone_id, maximum_sellers):
+        assert city_id == "196220100"
+        assert zone_id == "Magnum_ZONE1"
+        assert maximum_sellers == 5
+        return ({"2001": 3, "2002": 9, "2003": 2}[product["master_sku"]], {"seller_count_source": "test"})
+
+    monkeypatch.setattr(product_discovery_runtime, "KaspiProductSearch", FakeSearch)
+    monkeypatch.setattr(
+        product_discovery_runtime,
+        "OzonSessionResolver",
+        lambda: pytest.fail("popular mode must not resolve an Ozon session"),
+    )
+
+    result = product_discovery_runtime.discover_popular_products(
+        query="Ежовик гребенчатый",
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        target_new=2,
+        max_kaspi_scan=200,
+        minimum_reviews=50,
+        maximum_sellers=5,
+        seller_count_resolver=seller_count,
+    )
+
+    assert result["mode"] == "popular"
+    assert [row["kaspi_product_id"] for row in result["rows"]] == ["2001", "2003"]
+    assert result["rows"][0]["supplier_url"] is None
+    assert result["rows"][0]["offers"]["kaspi"]["seller_count"] == 3
+    assert result["rows"][0]["offers"]["discovery"] == {
+        "mode": "popular",
+        "minimum_reviews": 50,
+        "maximum_sellers": 5,
+        "reviews": 800,
+        "rating": 4.9,
+        "seller_count": 3,
+    }
+    assert result["excluded_below_min_reviews"] == 1
+    assert result["excluded_too_many_sellers"] == 1
+    assert result["matched_products_checked"] == 0
+    assert result["confirmed_pairs"] == 0
+
+
 def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_session) -> None:
     _seed_agent_account(db_session)
     db_session.add(Product(workspace_id=1, kaspi_product_id="111", merchant_sku="111_own", name="Already ours"))
@@ -1008,6 +1134,85 @@ def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_sessio
     assert completed["items"][0]["offers"]["supplier"]["validation_source"] == "strict_multimodal_card_price_fallback"
     assert completed["items"][0]["offers"]["supplier"]["priced_strict_candidates"] == 2
     assert completed["items"][0]["offers"]["supplier"]["total_supplier_offers_checked"] == 9
+
+
+def test_popular_discovery_queues_separate_job_and_persists_manual_ozon_candidate(db_session) -> None:
+    _seed_agent_account(db_session)
+    queued = discover_product_candidates(
+        ProductDiscoveryRequest(
+            query="Ежовик гребенчатый",
+            target_new=4,
+            mode="popular",
+            minimum_reviews=75,
+            maximum_sellers=3,
+        ),
+        db_session,
+    )
+    claim = claim_product_test_job(
+        ProductTestAgentIdentity(
+            agent_id="agent-w1",
+            agent_kind="product_test",
+            workspace_id=1,
+            merchant_uid="merchant-1",
+        ),
+        db_session,
+    )
+
+    assert queued["queued"] is True
+    assert claim["job"]["job_type"] == "discover_popular"
+    assert claim["job"]["options"]["minimum_reviews"] == 75
+    assert claim["job"]["options"]["maximum_sellers"] == 3
+    completed = complete_product_test_job(
+        claim["job"]["id"],
+        ProductTestAgentResult(
+            agent_id="agent-w1",
+            workspace_id=1,
+            lease_token=claim["job"]["lease_token"],
+            status="succeeded",
+            result={
+                "mode": "popular",
+                "scanned": 30,
+                "eligible_new": 8,
+                "minimum_reviews": 75,
+                "maximum_sellers": 3,
+                "seller_counts_checked": 4,
+                "excluded_below_min_reviews": 20,
+                "excluded_too_many_sellers": 3,
+                "manual_review_pairs": 1,
+                "rows": [{
+                    "kaspi_product_id": "730000001",
+                    "merchant_sku": "730000001",
+                    "product_name": "Ежовик популярный",
+                    "brand": "Lab",
+                    "image_url": "https://resources.cdn-kaspi.kz/img/m/p/popular.jpg",
+                    "product_url": "https://kaspi.kz/shop/p/popular-730000001/",
+                    "page_visible_price_kzt": "7500",
+                    "supplier_url": None,
+                    "supplier_price_kzt": None,
+                    "match_status": "NO_RESULT",
+                    "offers": {
+                        "kaspi": {"rating": 4.9, "reviews": 250, "seller_count": 2},
+                        "discovery": {
+                            "mode": "popular",
+                            "minimum_reviews": 75,
+                            "maximum_sellers": 3,
+                            "reviews": 250,
+                            "rating": 4.9,
+                            "seller_count": 2,
+                        },
+                    },
+                }],
+            },
+        ),
+        db_session,
+    )
+
+    assert completed["job"]["result"]["mode"] == "popular"
+    assert completed["job"]["result"]["seller_counts_checked"] == 4
+    assert completed["items"][0]["status"] == "needs_supplier_link"
+    assert completed["items"][0]["supplier_url"] is None
+    assert completed["items"][0]["offers"]["kaspi"]["seller_count"] == 2
+    assert completed["items"][0]["offers"]["discovery"]["mode"] == "popular"
 
 
 def test_new_discovery_replaces_candidates_but_keeps_kaspi_submissions(db_session) -> None:

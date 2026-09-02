@@ -36,6 +36,13 @@ def _as_int(value: Any) -> int | None:
     return int(digits) if digits else None
 
 
+def _as_float(value: Any) -> float:
+    try:
+        return float(str(value).strip().replace(",", "."))
+    except (TypeError, ValueError):
+        return 0.0
+
+
 def _brand(value: Any) -> str | None:
     if isinstance(value, str):
         return value.strip() or None
@@ -64,6 +71,28 @@ def _images(card: dict[str, Any]) -> list[str]:
 def _image(card: dict[str, Any]) -> str | None:
     images = _images(card)
     return images[0] if images else None
+
+
+def _seller_count(card: dict[str, Any]) -> int | None:
+    """Read the total number of Kaspi sellers from known storefront shapes."""
+
+    for key in (
+        "offersCount",
+        "offerCount",
+        "offersQuantity",
+        "merchantCount",
+        "merchantsCount",
+        "sellerCount",
+        "sellersCount",
+    ):
+        value = _as_int(card.get(key))
+        if value is not None and value > 0:
+            return value
+    for key in ("offers", "merchants", "sellers"):
+        value = card.get(key)
+        if isinstance(value, list) and value:
+            return len(value)
+    return None
 
 
 def _link(raw: Any, city_id: str) -> str | None:
@@ -99,6 +128,7 @@ def normalize_card(card: dict[str, Any], city_id: str) -> dict[str, Any]:
         "price_formatted": card.get("priceFormatted"),
         "rating": card.get("rating"),
         "reviews": card.get("reviewsQuantity"),
+        "seller_count": _seller_count(card),
         "delivery": card.get("deliveryDuration"),
         "category": category_text,
         "best_merchant": card.get("bestMerchant"),
@@ -343,7 +373,14 @@ class KaspiProductSearch:
         elif sort == "price-desc":
             products.sort(key=lambda x: (x.get("price_kzt") is not None, x.get("price_kzt") or 0), reverse=True)
         elif sort == "rating":
-            products.sort(key=lambda x: (x.get("rating") is not None, x.get("rating") or 0), reverse=True)
+            products.sort(
+                key=lambda x: (
+                    _as_int(x.get("reviews")) or 0,
+                    _as_float(x.get("rating")),
+                    -(_as_int(x.get("seller_count")) or 10**9),
+                ),
+                reverse=True,
+            )
 
         return {
             "query": text,

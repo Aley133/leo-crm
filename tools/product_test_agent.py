@@ -23,7 +23,11 @@ from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
 from tools.ozon_http import OzonSessionResolver
 from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
-from tools.product_discovery.runtime import discover_products, validate_supplier_url
+from tools.product_discovery.runtime import (
+    discover_popular_products,
+    discover_products,
+    validate_supplier_url,
+)
 from tools.product_test_new_card import (
     create_new_card,
     map_new_card_category,
@@ -31,7 +35,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.2"
+VERSION = "1.1.3"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -498,12 +502,25 @@ async def _execute_job(
 ) -> dict:
     job_type = str(job.get("job_type") or "inspect")
     options = job.get("options") if isinstance(job.get("options"), dict) else {}
-    if job_type == "discover":
+    if job_type in {"discover", "discover_popular"}:
         merchant_catalog = MerchantOfferApi(
             merchant_session,
             store_id=store_id,
             city_id=str(job.get("city_id") or "196220100"),
         )
+        if job_type == "discover_popular":
+            return await asyncio.to_thread(
+                discover_popular_products,
+                query=str(job.get("reference") or ""),
+                city_id=str(job.get("city_id") or "196220100"),
+                zone_id=str(job.get("zone_id") or "Magnum_ZONE1"),
+                target_new=int(options.get("target_new") or 10),
+                max_kaspi_scan=int(options.get("max_kaspi_scan") or 200),
+                minimum_reviews=int(options.get("minimum_reviews", 50)),
+                maximum_sellers=int(options.get("maximum_sellers", 5)),
+                existing_kaspi_ids={str(value) for value in options.get("existing_kaspi_ids") or []},
+                merchant_catalog=merchant_catalog,
+            )
         return await asyncio.to_thread(
             discover_products,
             query=str(job.get("reference") or ""),
@@ -653,10 +670,10 @@ async def _run_job_with_retry(
     job_type = str(job.get("job_type") or "inspect")
     timeout_seconds = (
         LONG_JOB_TIMEOUT_SECONDS
-        if job_type in {"create_offer", "create_new_card", "confirm_new_card", "discover"}
+        if job_type in {"create_offer", "create_new_card", "confirm_new_card", "discover", "discover_popular"}
         else SCAN_TIMEOUT_SECONDS
     )
-    attempts = 3 if job_type in {"discover", "inspect"} else 1
+    attempts = 3 if job_type in {"discover", "discover_popular", "inspect"} else 1
     async with asyncio.timeout(timeout_seconds):
         for attempt in range(attempts):
             try:
