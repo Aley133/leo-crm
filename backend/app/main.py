@@ -76,8 +76,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.7"
-DEPLOYMENT_MARKER = "product-test-deep-scan-and-exact-delivery"
+APP_VERSION = "0.26.8"
+DEPLOYMENT_MARKER = "product-test-internal-sku-delivery"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

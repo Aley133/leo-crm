@@ -122,7 +122,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.4: глубокая пагинация режима ходовых товаров до объективного результата, подробная статистика отбора и строгая доставка только с точной Ozon-карточки без ложных сроков в 365 дней."
+          $notes = "LEO Product Test Agent 1.1.5: срок доставки берётся из основного блока точной Ozon-карточки даже когда Ozon использует внутренний SKU предложения; даты из рекомендаций и ложные сроки по-прежнему исключаются."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `
