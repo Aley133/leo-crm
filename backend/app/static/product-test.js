@@ -299,6 +299,14 @@ const scheduleNewCardAutosave = (card) => {
   }, 900));
 };
 
+const popularCompletionLabel = (result) => ({
+  target_reached: "нужное количество найдено",
+  kaspi_results_exhausted: "результаты Kaspi закончились",
+  scan_budget_exhausted: "исчерпан бюджет проверки",
+  page_safety_limit: "достигнут безопасный предел страниц",
+  unknown: "Kaspi завершил выдачу",
+}[result?.completion_reason] || result?.completion_reason || "Kaspi завершил выдачу");
+
 const renderJobs = (jobs) => {
   const list = document.querySelector("#jobs");
   if (!list) return;
@@ -309,7 +317,7 @@ const renderJobs = (jobs) => {
   const labels = {discover:"Поиск новых товаров", discover_popular:"Поиск ходовых товаров", validate_supplier:"Проверка Ozon"};
   const popularSummary = lastSearch?.job_type === "discover_popular" || lastSearch?.result?.mode === "popular";
   const summary = !lastSearch ? "" : popularSummary
-    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено продавцов ${Number(lastSearch.result.seller_counts_checked || 0)}, отсеяно по отзывам ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, по продавцам ${Number(lastSearch.result.excluded_too_many_sellers || 0)}</div>`
+    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · запрошено ${Number(lastSearch.result.requested_results || 0)}, найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено карточек Kaspi ${Number(lastSearch.result.scanned || 0)} на ${Number(lastSearch.result.search_pages_requested || 0)} стр., точно проверено карточек по продавцам ${Number(lastSearch.result.seller_counts_checked || 0)}. Отсеяно: уже есть у нас ${Number(lastSearch.result.excluded_existing_crm || 0)}, мало отзывов ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, много продавцов ${Number(lastSearch.result.excluded_too_many_sellers || 0)}, продавцы не определены ${Number(lastSearch.result.excluded_unknown_sellers || 0)}. Результат: ${escapeHtml(popularCompletionLabel(lastSearch.result))}${Number(lastSearch.result.result_shortfall || 0) > 0 ? `, не хватило ${Number(lastSearch.result.result_shortfall)} товаров` : ""}.</div>`
     : `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>`;
   list.innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
   if (pending.length) scheduleRefresh(3000);

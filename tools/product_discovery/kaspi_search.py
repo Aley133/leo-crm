@@ -17,8 +17,11 @@ UA = (
 )
 VALID_SORTS = {"relevance", "price-asc", "price-desc", "rating", "created-desc"}
 VALID_MODES = {"text", "brand"}
-MAX_BATCH = 1000
-ASSUMED_PAGE_SIZE = 12
+MAX_BATCH = 2000
+# The current desktop /results transport commonly returns 10 cards, but Kaspi
+# can vary the page size.  This value is only a paging-budget estimate; a
+# short non-empty page is not proof that the result set has ended.
+ASSUMED_PAGE_SIZE = 10
 # Exact q observed in Chrome Network while paging through Solgar results.
 NETWORK_Q = ":availableInZones:Magnum_ZONE1:category:Categories"
 REFERER_Q = ":availableInZones:Magnum_ZONE1"
@@ -273,7 +276,7 @@ class KaspiProductSearch:
         started_total = time.perf_counter()
         request_id = self._request_id()
 
-        max_pages = min(120, max(1, math.ceil(limit / ASSUMED_PAGE_SIZE) + 16))
+        max_pages = min(220, max(1, math.ceil(limit / ASSUMED_PAGE_SIZE) + 16))
         pages_attempted = 0
         successful_pages = 0
         stop_reason = "limit_reached"
@@ -353,10 +356,6 @@ class KaspiProductSearch:
             if page_new == 0:
                 stop_reason = "no_new_cards"
                 break
-            if len(cards) < ASSUMED_PAGE_SIZE and len(products) < limit:
-                stop_reason = "short_last_page"
-                break
-
             current += 1
             if self.page_delay_ms and len(products) < limit:
                 time.sleep(self.page_delay_ms / 1000)
