@@ -63,7 +63,7 @@ class ProductDiscoveryRequest(BaseModel):
 
 class ProductTestSettingsUpdate(BaseModel):
     target_new: int | None = Field(default=None, ge=1, le=100)
-    max_kaspi_scan: int | None = Field(default=None, ge=1, le=1000)
+    max_kaspi_scan: int | None = Field(default=None, ge=1, le=2000)
     max_ozon_queries: int | None = Field(default=None, ge=1, le=8)
     image_verify: bool | None = None
     stock_count: int | None = Field(default=None, ge=1, le=1000000)
@@ -1212,8 +1212,22 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
     _finish_job(job, {
         "mode": result.get("mode") or (job.options_json or {}).get("mode") or "full",
         "persisted_count": len(persisted),
+        "requested_results": result.get("requested_results"),
+        "found_results": result.get("found_results"),
+        "result_shortfall": result.get("result_shortfall"),
+        "target_reached": result.get("target_reached"),
+        "scan_budget": result.get("scan_budget"),
         "scanned": result.get("scanned"),
+        "available_matches": result.get("available_matches"),
+        "search_pages_requested": result.get("search_pages_requested"),
+        "search_pages_succeeded": result.get("search_pages_succeeded"),
+        "search_stop_reason": result.get("search_stop_reason"),
+        "completion_reason": result.get("completion_reason"),
+        "excluded_existing_crm": result.get("excluded_existing_crm"),
+        "excluded_existing_merchant": result.get("excluded_existing_merchant"),
+        "merchant_membership_errors": result.get("merchant_membership_errors"),
         "eligible_new": result.get("eligible_new"),
+        "review_filter_passed": result.get("review_filter_passed"),
         "matched_products_checked": result.get("matched_products_checked"),
         "confirmed_pairs": result.get("confirmed_pairs"),
         "manual_review_pairs": result.get("manual_review_pairs"),
@@ -1566,6 +1580,17 @@ def inspect_product(payload: ProductTestInspectRequest, db: Session = Depends(ge
 def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = Depends(get_db)) -> dict:
     workspace_id = current_workspace_id()
     settings = _settings(db, workspace_id)
+    requested_results = payload.target_new or settings.target_new
+    # Popular discovery has two selective filters after the storefront search:
+    # review count and an exact seller-count inspection.  A request for 100
+    # results therefore cannot reuse the old 200-card discovery budget.  Keep
+    # the operator setting as a floor and automatically reserve enough depth
+    # to either fill the request or report a meaningful exhausted budget.
+    effective_kaspi_scan = (
+        min(2000, max(settings.max_kaspi_scan, requested_results * 15))
+        if payload.mode == "popular"
+        else settings.max_kaspi_scan
+    )
     existing_ids = list(
         db.scalars(
             select(Product.kaspi_product_id).where(Product.workspace_id == workspace_id)
@@ -1580,8 +1605,9 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
         zone_id=settings.zone_id,
         options={
             "mode": payload.mode,
-            "target_new": payload.target_new or settings.target_new,
-            "max_kaspi_scan": settings.max_kaspi_scan,
+            "target_new": requested_results,
+            "max_kaspi_scan": effective_kaspi_scan,
+            "configured_max_kaspi_scan": settings.max_kaspi_scan,
             "max_ozon_queries": settings.max_ozon_queries,
             "minimum_reviews": payload.minimum_reviews,
             "maximum_sellers": payload.maximum_sellers,
@@ -2071,9 +2097,11 @@ def claim_product_test_job(
             job.agent_id = payload.agent_id
             job.lease_token = uuid4().hex
             lease_seconds = (
-                1800
+                7200
+                if job.job_type == "discover_popular"
+                else 1800
                 if job.job_type in {
-                    "create_offer", "create_new_card", "confirm_new_card", "discover", "discover_popular"
+                    "create_offer", "create_new_card", "confirm_new_card", "discover"
                 }
                 else PRODUCT_TEST_LEASE_SECONDS
             )

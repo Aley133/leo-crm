@@ -431,7 +431,7 @@ def discover_products(
         "query": query,
         "rows": rows,
         "scanned": len(kaspi.get("products") or []),
-        "excluded_existing_crm": len(existing),
+        "excluded_existing_crm": len(kaspi.get("products") or []) - len(crm_new),
         "excluded_existing_merchant": sum(bool(value.get("exists")) for value in merchant_results.values()),
         "merchant_membership_errors": sum(bool(value.get("error")) for value in merchant_results.values()),
         "eligible_new": len(eligible),
@@ -557,12 +557,39 @@ def discover_popular_products(
         if len(rows) >= requested:
             break
 
+    search_stats = kaspi.get("stats") if isinstance(kaspi.get("stats"), dict) else {}
+    target_reached = len(rows) >= requested
+    search_stop_reason = str(search_stats.get("stop_reason") or "unknown")
+    if target_reached:
+        completion_reason = "target_reached"
+    elif search_stop_reason in {
+        "empty_page",
+        "no_new_cards",
+        "repeated_page",
+        "results_http_400_after_success",
+    }:
+        completion_reason = "kaspi_results_exhausted"
+    elif len(scanned) >= max_kaspi_scan:
+        completion_reason = "scan_budget_exhausted"
+    else:
+        completion_reason = search_stop_reason
+
     return {
         "mode": "popular",
         "query": query,
         "rows": rows,
+        "requested_results": requested,
+        "found_results": len(rows),
+        "result_shortfall": max(0, requested - len(rows)),
+        "target_reached": target_reached,
+        "scan_budget": max_kaspi_scan,
         "scanned": len(scanned),
-        "excluded_existing_crm": len(existing),
+        "available_matches": search_stats.get("available_matches"),
+        "search_pages_requested": search_stats.get("pages_requested"),
+        "search_pages_succeeded": search_stats.get("successful_pages"),
+        "search_stop_reason": search_stop_reason,
+        "completion_reason": completion_reason,
+        "excluded_existing_crm": len(scanned) - len(crm_new),
         "excluded_below_min_reviews": len(crm_new) - len(reviewed),
         "excluded_existing_merchant": sum(
             bool(value.get("exists")) for value in merchant_results.values()
@@ -571,6 +598,7 @@ def discover_popular_products(
             bool(value.get("error")) for value in merchant_results.values()
         ),
         "eligible_new": len(eligible),
+        "review_filter_passed": len(reviewed),
         "minimum_reviews": minimum_reviews,
         "maximum_sellers": maximum_sellers,
         "seller_counts_checked": sellers_checked,
@@ -604,13 +632,23 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
     price = page_detail.get("price_kzt")
     if not isinstance(price, int) or isinstance(price, bool) or price <= 0:
         raise RuntimeError("По ссылке Ozon не найдена подтверждённая цена в KZT")
+    delivery_days = page_detail.get("delivery_days")
+    if (
+        not isinstance(delivery_days, int)
+        or isinstance(delivery_days, bool)
+        or not 0 <= delivery_days <= 60
+    ):
+        raise RuntimeError(
+            "По точной ссылке Ozon не найдена подтверждённая доставка. "
+            "Ложный срок не сохранён; повторите проверку после обновления страницы Ozon."
+        )
     card = page_detail.get("card") if isinstance(page_detail.get("card"), dict) else {}
     exact_product_id = str(page_detail.get("product_id") or product_id or "").strip() or None
     return {
         "supplier_url": url,
         "supplier_price_kzt": price,
         "supplier_price_source": f"manual_product_page.{page_detail.get('price_source') or 'webPrice'}",
-        "supplier_delivery_days": page_detail.get("delivery_days"),
+        "supplier_delivery_days": delivery_days,
         "supplier_delivery_text": page_detail.get("delivery_text"),
         "supplier_delivery_date": page_detail.get("delivery_date"),
         "supplier_offer_sku": exact_product_id,

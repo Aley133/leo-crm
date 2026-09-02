@@ -180,6 +180,7 @@ class OzonSessionHttpClient:
                 payload,
                 base=self.profile.origin,
                 expected_currency=self.config.expected_currency,
+                expected_product_id=pid,
             )
             if isinstance(payload, dict)
             else {}

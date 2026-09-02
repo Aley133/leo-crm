@@ -445,6 +445,7 @@ PAYMENT_TIMING_MARKERS = (
     "monthly",
     "permonth",
 )
+MAX_CONFIRMED_DELIVERY_DAYS = 60
 
 
 def _delivery_date_from_text(text: str, today: date | None = None) -> tuple[str | None, int | None]:
@@ -478,8 +479,14 @@ def _delivery_date_from_text(text: str, today: date | None = None) -> tuple[str 
     return None, None
 
 
-def _delivery(item: dict[str, Any], *, today: date | None = None) -> dict[str, Any]:
+def _delivery(
+    item: dict[str, Any],
+    *,
+    today: date | None = None,
+    expected_product_id: str | None = None,
+) -> dict[str, Any]:
     candidates: list[tuple[float, str, str]] = []
+    expected_id = str(expected_product_id or "").strip().casefold()
     for order, (path, text, meta) in enumerate(_walk_context(item)):
         raw = str(text or "").strip()
         if not raw or len(raw) > 180:
@@ -492,6 +499,13 @@ def _delivery(item: dict[str, Any], *, today: date | None = None) -> dict[str, A
         ctx = f"{path_low} {str(meta or '').casefold()} {low}"
         explicit_delivery = any(marker in low for marker in DELIVERY_WORDS)
         current_product_widget = any(marker in path_low for marker in CURRENT_PRODUCT_DELIVERY_WIDGETS)
+        exact_product_scope = bool(expected_id and expected_id in path_low)
+        scoped_ids = set(re.findall(r"\d{6,}", path_low))
+        # Exact product pages also contain recommendation cards with their own
+        # add-to-cart and delivery dates.  A numeric widget scoped to another
+        # SKU must never become the delivery promise for the pasted URL.
+        if expected_id and scoped_ids and not exact_product_scope:
+            continue
         payment_context = any(marker in ctx for marker in PAYMENT_TIMING_MARKERS)
         price_timing = bool(PRICE_RE.search(raw)) and any(
             marker in low for marker in ("сегодня", "завтра", "послезавтра")
@@ -503,6 +517,8 @@ def _delivery(item: dict[str, Any], *, today: date | None = None) -> dict[str, A
         score = 0.0
         if current_product_widget:
             score += 180.0
+        if exact_product_scope:
+            score += 500.0
         if explicit_delivery:
             score += 120.0
         if any(x in path_low for x in ("delivery", "date", "cart", "button", "eta")):
@@ -518,9 +534,19 @@ def _delivery(item: dict[str, Any], *, today: date | None = None) -> dict[str, A
     if not candidates:
         return {"text": None, "date": None, "days": None, "source": None}
     candidates.sort(key=lambda x: x[0], reverse=True)
-    _, text, path = candidates[0]
-    iso, days = _delivery_date_from_text(text, today=today)
-    return {"text": text, "date": iso, "days": days, "source": path}
+    rejected: list[dict[str, Any]] = []
+    for _, text, path in candidates:
+        iso, days = _delivery_date_from_text(text, today=today)
+        if isinstance(days, int) and 0 <= days <= MAX_CONFIRMED_DELIVERY_DAYS:
+            return {"text": text, "date": iso, "days": days, "source": path}
+        rejected.append({"text": text, "date": iso, "days": days, "source": path})
+    return {
+        "text": None,
+        "date": None,
+        "days": None,
+        "source": None,
+        "rejected": rejected[:3],
+    }
 
 
 def _brand(item: dict[str, Any]) -> str | None:
@@ -672,6 +698,7 @@ def parse_product_page(
     expected_currency: str | None = "KZT",
     *,
     today: date | None = None,
+    expected_product_id: str | None = None,
 ) -> dict[str, Any]:
     """Read the displayed price from an exact Ozon product-page payload.
 
@@ -746,7 +773,11 @@ def parse_product_page(
     }
     title = _title(heading_states) if heading_states else ""
     images = _images(gallery_states) if gallery_states else []
-    delivery = _delivery(combined, today=today)
+    delivery = _delivery(
+        combined,
+        today=today,
+        expected_product_id=expected_product_id,
+    )
     rating, reviews = _rating_reviews(combined)
     return {
         "price_kzt": best["value"],

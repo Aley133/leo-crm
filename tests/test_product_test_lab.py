@@ -217,6 +217,36 @@ def test_kaspi_discovery_retries_one_rate_limited_page(monkeypatch) -> None:
     assert sleeps == [0.8]
 
 
+def test_kaspi_discovery_continues_after_ten_card_page(monkeypatch) -> None:
+    search = kaspi_search.KaspiProductSearch("196220100", page_delay_ms=0)
+    pages: list[int] = []
+
+    def fake_page(_text, page, _request_id):
+        pages.append(page)
+        start = page * 10
+        cards = [
+            {
+                "id": str(110000000 + index),
+                "title": f"Product {index}",
+                "shopLink": f"/p/product-{110000000 + index}/",
+            }
+            for index in range(start, start + 10)
+        ]
+        request = httpx.Request("GET", "https://kaspi.kz/yml/product-view/pl/results")
+        return httpx.Response(200, json={"data": cards}, request=request), str(request.url), {}, 0
+
+    monkeypatch.setattr(search, "_page_with_rate_limit_retry", fake_page)
+    try:
+        result = search.search("БАДы", sort="rating", limit=25, mode="text")
+    finally:
+        search.close()
+
+    assert len(result["products"]) == 25
+    assert pages == [0, 1, 2]
+    assert result["stats"]["pages_requested"] == 3
+    assert result["stats"]["stop_reason"] == "limit_reached"
+
+
 def test_kaspi_discovery_normalizes_seller_count_for_popular_filter() -> None:
     card = kaspi_search.normalize_card(
         {
@@ -875,6 +905,41 @@ def test_manual_ozon_url_uses_only_exact_product_page_price_and_delivery(monkeyp
     assert result["validated"] is True
 
 
+def test_manual_ozon_url_rejects_implausible_delivery_instead_of_saving_365_days(monkeypatch) -> None:
+    url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def product_page_price(self, product_url: str, product_id: str) -> dict:
+            assert product_url == url
+            assert product_id == "555555555"
+            return {
+                "ok": True,
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice-555555555.finalPrice",
+                "delivery_text": "Доставим 28 августа",
+                "delivery_date": "2027-08-28",
+                "delivery_days": 360,
+                "card": {},
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="подтверждённая доставка"):
+        product_discovery_runtime.validate_supplier_url(url)
+
+
 def test_discovery_keeps_scanning_until_complete_visual_pairs(monkeypatch) -> None:
     products = [
         {
@@ -1059,6 +1124,60 @@ def test_popular_discovery_filters_kaspi_and_never_opens_ozon(monkeypatch) -> No
     assert result["excluded_too_many_sellers"] == 1
     assert result["matched_products_checked"] == 0
     assert result["confirmed_pairs"] == 0
+    assert result["requested_results"] == 2
+    assert result["found_results"] == 2
+    assert result["result_shortfall"] == 0
+    assert result["target_reached"] is True
+    assert result["completion_reason"] == "target_reached"
+
+
+def test_popular_discovery_expands_scan_budget_for_one_hundred_results(db_session) -> None:
+    _seed_agent_account(db_session)
+    discover_product_candidates(
+        ProductDiscoveryRequest(
+            query="БАДы",
+            target_new=100,
+            mode="popular",
+            minimum_reviews=50,
+            maximum_sellers=4,
+        ),
+        db_session,
+    )
+
+    claim = claim_product_test_job(
+        ProductTestAgentIdentity(
+            agent_id="agent-w1",
+            agent_kind="product_test",
+            workspace_id=1,
+            merchant_uid="merchant-1",
+        ),
+        db_session,
+    )
+
+    assert claim["job"]["options"]["target_new"] == 100
+    assert claim["job"]["options"]["configured_max_kaspi_scan"] == 200
+    assert claim["job"]["options"]["max_kaspi_scan"] == 1500
+
+
+def test_exact_product_delivery_ignores_foreign_recommendation_date() -> None:
+    payload = {
+        "widgetStates": {
+            "webAddToCart-999999999-default-1": '{"deliveryText":"Доставим 28 августа"}',
+            "webPrice-484053304-default-1": '{"finalPrice":"5 215 ₸"}',
+            "webAddToCart-484053304-default-1": '{"deliveryText":"Доставим завтра"}',
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="484053304",
+        today=date(2026, 9, 2),
+    )
+
+    assert parsed["delivery_text"] == "Доставим завтра"
+    assert parsed["delivery_date"] == "2026-09-03"
+    assert parsed["delivery_days"] == 1
 
 
 def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_session) -> None:

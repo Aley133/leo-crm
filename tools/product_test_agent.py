@@ -35,7 +35,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.3"
+VERSION = "1.1.4"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -45,6 +45,7 @@ CRM_RETRY_ATTEMPTS = 4
 CRM_BACKOFF_MAX_SECONDS = 60.0
 SCAN_TIMEOUT_SECONDS = 180
 LONG_JOB_TIMEOUT_SECONDS = 1800
+POPULAR_DISCOVERY_TIMEOUT_SECONDS = 7200
 KASPI_CONFIRMATION_ATTEMPTS = 180
 KASPI_CONFIRMATION_POLL_SECONDS = 5.0
 TRANSIENT_HTTP_STATUSES = {
@@ -669,8 +670,10 @@ async def _run_job_with_retry(
 ) -> dict:
     job_type = str(job.get("job_type") or "inspect")
     timeout_seconds = (
-        LONG_JOB_TIMEOUT_SECONDS
-        if job_type in {"create_offer", "create_new_card", "confirm_new_card", "discover", "discover_popular"}
+        POPULAR_DISCOVERY_TIMEOUT_SECONDS
+        if job_type == "discover_popular"
+        else LONG_JOB_TIMEOUT_SECONDS
+        if job_type in {"create_offer", "create_new_card", "confirm_new_card", "discover"}
         else SCAN_TIMEOUT_SECONDS
     )
     attempts = 3 if job_type in {"discover", "discover_popular", "inspect"} else 1
