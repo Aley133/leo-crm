@@ -7,6 +7,45 @@ from tools import product_test_agent
 from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi, OfferState
 
 
+def test_product_test_agent_dispatches_popular_discovery_without_ozon(monkeypatch) -> None:
+    merchant_catalog = object()
+    captured: dict = {}
+
+    monkeypatch.setattr(product_test_agent, "MerchantOfferApi", lambda *_args, **_kwargs: merchant_catalog)
+
+    def fake_discover(**kwargs):
+        captured.update(kwargs)
+        return {"mode": "popular", "rows": []}
+
+    monkeypatch.setattr(product_test_agent, "discover_popular_products", fake_discover)
+    result = asyncio.run(
+        product_test_agent._execute_job(
+            {
+                "job_type": "discover_popular",
+                "reference": "Ежовик гребенчатый",
+                "city_id": "196220100",
+                "zone_id": "Magnum_ZONE1",
+                "options": {
+                    "target_new": 10,
+                    "max_kaspi_scan": 200,
+                    "minimum_reviews": 50,
+                    "maximum_sellers": 5,
+                    "existing_kaspi_ids": ["123"],
+                },
+            },
+            merchant_session=object(),
+            store_id="store-1",
+        )
+    )
+
+    assert result == {"mode": "popular", "rows": []}
+    assert captured["query"] == "Ежовик гребенчатый"
+    assert captured["minimum_reviews"] == 50
+    assert captured["maximum_sellers"] == 5
+    assert captured["existing_kaspi_ids"] == {"123"}
+    assert captured["merchant_catalog"] is merchant_catalog
+
+
 def test_initial_creation_process_includes_minimum_preorder(monkeypatch) -> None:
     api = object.__new__(MerchantOfferApi)
     api.store_id = "11843018_041600"

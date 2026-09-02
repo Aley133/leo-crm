@@ -4,6 +4,7 @@ import json
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from threading import Lock
+from typing import Literal
 from xml.etree import ElementTree
 from uuid import uuid4
 
@@ -55,6 +56,9 @@ class ProductTestInspectRequest(BaseModel):
 class ProductDiscoveryRequest(BaseModel):
     query: str = Field(min_length=2, max_length=500)
     target_new: int | None = Field(default=None, ge=1, le=100)
+    mode: Literal["full", "popular"] = "full"
+    minimum_reviews: int = Field(default=50, ge=0, le=10_000_000)
+    maximum_sellers: int = Field(default=5, ge=1, le=100)
 
 
 class ProductTestSettingsUpdate(BaseModel):
@@ -1206,12 +1210,19 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
         _refresh_upload_plan(item, settings)
         persisted.append(item)
     _finish_job(job, {
+        "mode": result.get("mode") or (job.options_json or {}).get("mode") or "full",
         "persisted_count": len(persisted),
         "scanned": result.get("scanned"),
         "eligible_new": result.get("eligible_new"),
         "matched_products_checked": result.get("matched_products_checked"),
         "confirmed_pairs": result.get("confirmed_pairs"),
         "manual_review_pairs": result.get("manual_review_pairs"),
+        "minimum_reviews": result.get("minimum_reviews"),
+        "maximum_sellers": result.get("maximum_sellers"),
+        "seller_counts_checked": result.get("seller_counts_checked"),
+        "excluded_below_min_reviews": result.get("excluded_below_min_reviews"),
+        "excluded_too_many_sellers": result.get("excluded_too_many_sellers"),
+        "excluded_unknown_sellers": result.get("excluded_unknown_sellers"),
         "lookup_error_count": len(list(result.get("lookup_errors") or [])),
     })
     db.commit()
@@ -1563,14 +1574,17 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
     job = _queue_job(
         db,
         workspace_id=workspace_id,
-        job_type="discover",
+        job_type="discover_popular" if payload.mode == "popular" else "discover",
         reference=payload.query.strip(),
         city_id=settings.city_id,
         zone_id=settings.zone_id,
         options={
+            "mode": payload.mode,
             "target_new": payload.target_new or settings.target_new,
             "max_kaspi_scan": settings.max_kaspi_scan,
             "max_ozon_queries": settings.max_ozon_queries,
+            "minimum_reviews": payload.minimum_reviews,
+            "maximum_sellers": payload.maximum_sellers,
             # Visual verification is part of the operator approval contract and
             # cannot be disabled for new discovery jobs.
             "image_verify": True,
@@ -2059,7 +2073,7 @@ def claim_product_test_job(
             lease_seconds = (
                 1800
                 if job.job_type in {
-                    "create_offer", "create_new_card", "confirm_new_card", "discover"
+                    "create_offer", "create_new_card", "confirm_new_card", "discover", "discover_popular"
                 }
                 else PRODUCT_TEST_LEASE_SECONDS
             )
@@ -2178,7 +2192,7 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
             return _job_payload(job)
 
         try:
-            if job.job_type == "discover":
+            if job.job_type in {"discover", "discover_popular"}:
                 return _persist_discovery(db, job=job, result=payload.result)
             if job.job_type == "validate_supplier":
                 return _persist_supplier_validation(db, job=job, result=payload.result)

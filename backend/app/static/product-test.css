@@ -50,6 +50,7 @@
 }
 
 .inspect-form .wide { grid-column: 1 / -1; }
+.discover-mode-hint { margin: 0; color: #7897b8; font-size: 12px; }
 .inspect-form label,
 .lab-field { display: flex; flex-direction: column; gap: 7px; color: #9db4cf; }
 .inspect-form input,
@@ -148,6 +149,7 @@
 }
 
 .market-image-placeholder { display: grid; place-items: center; padding: 7px; background: #14243a; color: #7897b8; font-size: 10px; text-align: center; }
+.seller-count { color: #83efbd; font-size: 11px; font-weight: 800; }
 .market-copy { display: flex; min-width: 0; flex-direction: column; gap: 5px; }
 .market-copy strong { color: #fff; font-size: 12px; line-height: 1.35; }
 .market-copy small,

@@ -6,11 +6,12 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_product_test_agent_is_a_standalone_dedicated_runtime() -> None:
     source = (ROOT / "tools/product_test_agent.py").read_text(encoding="utf-8")
-    assert 'VERSION = "1.1.2"' in source
+    assert 'VERSION = "1.1.3"' in source
     assert 'AGENT_KIND = "product_test"' in source
     assert "/api/product-test-agent/heartbeat" in source
     assert "/api/product-test-agent/claim" in source
     assert "discover_products" in source
+    assert "discover_popular_products" in source
     assert "validate_supplier_url" in source
     assert "create_linked_offer" in source
     assert 'job_type == "prepare_new_card"' in source
