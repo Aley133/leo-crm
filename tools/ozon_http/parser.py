@@ -437,6 +437,13 @@ CURRENT_PRODUCT_DELIVERY_WIDGETS = (
     "webcurrentdelivery",
     "webproductdelivery",
 )
+RECOMMENDATION_WIDGET_MARKERS = (
+    "recommend",
+    "carousel",
+    "similar",
+    "alsobought",
+    "advise",
+)
 PAYMENT_TIMING_MARKERS = (
     "installment",
     "payment",
@@ -498,13 +505,24 @@ def _delivery(
         path_low = path.casefold()
         ctx = f"{path_low} {str(meta or '').casefold()} {low}"
         explicit_delivery = any(marker in low for marker in DELIVERY_WORDS)
-        current_product_widget = any(marker in path_low for marker in CURRENT_PRODUCT_DELIVERY_WIDGETS)
+        root_widget = path_low.split(".", 1)[0].split("[", 1)[0]
+        current_product_widget = any(
+            root_widget.startswith(marker)
+            for marker in CURRENT_PRODUCT_DELIVERY_WIDGETS
+        )
+        recommendation_widget = any(
+            marker in root_widget
+            for marker in RECOMMENDATION_WIDGET_MARKERS
+        )
         exact_product_scope = bool(expected_id and expected_id in path_low)
         scoped_ids = set(re.findall(r"\d{6,}", path_low))
         # Exact product pages also contain recommendation cards with their own
-        # add-to-cart and delivery dates.  A numeric widget scoped to another
-        # SKU must never become the delivery promise for the pasted URL.
-        if expected_id and scoped_ids and not exact_product_scope:
+        # add-to-cart and delivery dates. Reject those containers, but do not
+        # require the article from the URL in a top-level delivery widget:
+        # Ozon sometimes keys that widget by an internal offer SKU instead.
+        if recommendation_widget:
+            continue
+        if expected_id and scoped_ids and not exact_product_scope and not current_product_widget:
             continue
         payment_context = any(marker in ctx for marker in PAYMENT_TIMING_MARKERS)
         price_timing = bool(PRICE_RE.search(raw)) and any(

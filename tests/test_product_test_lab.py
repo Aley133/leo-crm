@@ -1180,6 +1180,55 @@ def test_exact_product_delivery_ignores_foreign_recommendation_date() -> None:
     assert parsed["delivery_days"] == 1
 
 
+def test_exact_product_delivery_accepts_internal_offer_sku_widget() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1902717482-default-1": '{"finalPrice":"1 181 ₸"}',
+            "webHorizontalCarousel-1902717482": (
+                '{"items":[{"sku":"777777777","deliveryText":"Доставим завтра"}]}'
+            ),
+            # The add-to-cart widget can be keyed by Ozon's internal offer SKU,
+            # which is different from the public article in the pasted URL.
+            "webAddToCart-9275848611-default-1": (
+                '{"buttonText":"В корзину","deliveryText":"Доставим 9 сентября"}'
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1902717482",
+        today=date(2026, 9, 2),
+    )
+
+    assert parsed["price_kzt"] == 1181
+    assert parsed["delivery_text"] == "Доставим 9 сентября"
+    assert parsed["delivery_date"] == "2026-09-09"
+    assert parsed["delivery_days"] == 7
+
+
+def test_exact_product_delivery_rejects_recommendation_without_main_promise() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1902717482-default-1": '{"finalPrice":"1 181 ₸"}',
+            "webHorizontalCarousel-1902717482": (
+                '{"items":[{"sku":"777777777","deliveryText":"Доставим завтра"}]}'
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1902717482",
+        today=date(2026, 9, 2),
+    )
+
+    assert parsed["delivery_text"] is None
+    assert parsed["delivery_days"] is None
+
+
 def test_discovery_excludes_catalog_and_persists_strict_supplier_match(db_session) -> None:
     _seed_agent_account(db_session)
     db_session.add(Product(workspace_id=1, kaspi_product_id="111", merchant_sku="111_own", name="Already ours"))
