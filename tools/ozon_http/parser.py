@@ -430,11 +430,25 @@ MONTHS_RU = {
     "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
 }
 DATE_RU_RE = re.compile(r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b", re.I)
+NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
+DELIVERY_DAY_RANGE_RE = re.compile(
+    r"(?<!\d)(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*(?:дн(?:я|ей)?|день|дней|days?)\.?\b",
+    re.I,
+)
+DELIVERY_DAY_COUNT_RE = re.compile(
+    r"(?<!\d)(\d{1,2})\s*(?:дн(?:я|ей)?|день|дней|days?)\.?\b",
+    re.I,
+)
 DELIVERY_WORDS = ("достав", "delivery", "получ", "привез", "pickup")
 CURRENT_PRODUCT_DELIVERY_WIDGETS = (
     "webaddtocart",
+    "webbuybox",
+    "webpurchase",
     "webdelivery",
+    "webdeliveryandreturn",
     "webcurrentdelivery",
+    "webpdpgrid",
+    "webproductaction",
     "webproductdelivery",
 )
 RECOMMENDATION_WIDGET_MARKERS = (
@@ -475,6 +489,24 @@ def _delivery_date_from_text(text: str, today: date | None = None) -> tuple[str 
             except ValueError:
                 return None, None
         return target.isoformat(), (target - today).days
+    numeric = NUMERIC_DATE_RE.search(low)
+    if numeric:
+        day = int(numeric.group(1))
+        month = int(numeric.group(2))
+        raw_year = numeric.group(3)
+        year = int(raw_year) if raw_year else today.year
+        if raw_year and len(raw_year) == 2:
+            year += 2000
+        try:
+            target = date(year, month, day)
+        except ValueError:
+            return None, None
+        if not raw_year and target < today - timedelta(days=3):
+            try:
+                target = date(year + 1, month, day)
+            except ValueError:
+                return None, None
+        return target.isoformat(), (target - today).days
     if "послезавтра" in low:
         target = today + timedelta(days=2)
         return target.isoformat(), 2
@@ -483,7 +515,72 @@ def _delivery_date_from_text(text: str, today: date | None = None) -> tuple[str 
         return target.isoformat(), 1
     if "сегодня" in low:
         return today.isoformat(), 0
+    day_range = DELIVERY_DAY_RANGE_RE.search(low)
+    if day_range:
+        # The upper edge is the safe promise for a displayed range such as
+        # ``5–7 дней``. Using the lower edge could publish an unrealistically
+        # short Kaspi preOrder.
+        days = max(int(day_range.group(1)), int(day_range.group(2)))
+        target = today + timedelta(days=days)
+        return target.isoformat(), days
+    day_count = DELIVERY_DAY_COUNT_RE.search(low)
+    if day_count:
+        days = int(day_count.group(1))
+        target = today + timedelta(days=days)
+        return target.isoformat(), days
     return None, None
+
+
+def _structured_delivery_days(
+    value: Any,
+    *,
+    today: date | None = None,
+) -> tuple[str | None, int | None, str | None]:
+    """Read a bounded delivery promise from an explicitly named delivery field."""
+
+    if isinstance(value, bool) or value is None:
+        return None, None, None
+    if isinstance(value, (int, float)):
+        if float(value).is_integer():
+            days = int(value)
+            if 0 <= days <= MAX_CONFIRMED_DELIVERY_DAYS:
+                target = (today or date.today()) + timedelta(days=days)
+                return target.isoformat(), days, f"{days} дн."
+        return None, None, None
+    if isinstance(value, str):
+        text = value.strip()
+        iso, days = _delivery_date_from_text(text, today=today)
+        if isinstance(days, int) and 0 <= days <= MAX_CONFIRMED_DELIVERY_DAYS:
+            return iso, days, text
+        if text.isdigit():
+            days = int(text)
+            if 0 <= days <= MAX_CONFIRMED_DELIVERY_DAYS:
+                target = (today or date.today()) + timedelta(days=days)
+                return target.isoformat(), days, f"{days} дн."
+        return None, None, None
+    if isinstance(value, dict):
+        preferred = (
+            "maxDeliveryDays",
+            "deliveryDays",
+            "delivery_days",
+            "maxValue",
+            "value",
+            "minDeliveryDays",
+            "minValue",
+        )
+        for key in preferred:
+            if key not in value:
+                continue
+            iso, days, text = _structured_delivery_days(value.get(key), today=today)
+            if days is not None:
+                return iso, days, text
+        return None, None, None
+    if isinstance(value, list):
+        parsed = [_structured_delivery_days(item, today=today) for item in value[:12]]
+        valid = [item for item in parsed if item[1] is not None]
+        if valid:
+            return max(valid, key=lambda item: int(item[1] or 0))
+    return None, None, None
 
 
 def _delivery(
@@ -499,7 +596,12 @@ def _delivery(
         if not raw or len(raw) > 180:
             continue
         low = raw.lower().replace("ё", "е")
-        has_date = bool(DATE_RU_RE.search(low)) or any(x in low for x in ("сегодня", "завтра", "послезавтра"))
+        has_date = (
+            bool(DATE_RU_RE.search(low))
+            or bool(NUMERIC_DATE_RE.search(low))
+            or bool(DELIVERY_DAY_COUNT_RE.search(low))
+            or any(x in low for x in ("сегодня", "завтра", "послезавтра"))
+        )
         if not has_date:
             continue
         path_low = path.casefold()
@@ -549,15 +651,60 @@ def _delivery(
         score += 20.0
         score -= order * 0.001
         candidates.append((score, raw, path))
-    if not candidates:
+
+    structured_candidates: list[tuple[float, str, str, str, int]] = []
+    delivery_field_names = {
+        "deliverydays",
+        "delivery_days",
+        "maxdeliverydays",
+        "mindeliverydays",
+        "deliveryperiod",
+        "deliverytime",
+        "deliverydate",
+        "delivery_date",
+        "etadays",
+        "etadate",
+    }
+    for order, (path, node) in enumerate(_walk_dicts(item)):
+        path_low = path.casefold()
+        root_widget = path_low.split(".", 1)[0].split("[", 1)[0]
+        if any(marker in root_widget for marker in RECOMMENDATION_WIDGET_MARKERS):
+            continue
+        current_product_widget = any(
+            root_widget.startswith(marker)
+            for marker in CURRENT_PRODUCT_DELIVERY_WIDGETS
+        )
+        exact_product_scope = bool(expected_id and expected_id in path_low)
+        scoped_ids = set(re.findall(r"\d{6,}", path_low))
+        if expected_id and scoped_ids and not exact_product_scope and not current_product_widget:
+            continue
+        if not (current_product_widget or exact_product_scope):
+            continue
+        for key, value in node.items():
+            normalized_key = re.sub(r"[^a-z_]", "", str(key).casefold())
+            if normalized_key not in delivery_field_names:
+                continue
+            iso, days, text = _structured_delivery_days(value, today=today)
+            if days is None or not iso or not text:
+                continue
+            source = f"{path}.{key}" if path else str(key)
+            score = 260.0 + (500.0 if exact_product_scope else 0.0) - order * 0.001
+            structured_candidates.append((score, text, source, iso, days))
+
+    if not candidates and not structured_candidates:
         return {"text": None, "date": None, "days": None, "source": None}
-    candidates.sort(key=lambda x: x[0], reverse=True)
+    resolved = list(structured_candidates)
     rejected: list[dict[str, Any]] = []
-    for _, text, path in candidates:
+    for score, text, path in candidates:
         iso, days = _delivery_date_from_text(text, today=today)
         if isinstance(days, int) and 0 <= days <= MAX_CONFIRMED_DELIVERY_DAYS:
-            return {"text": text, "date": iso, "days": days, "source": path}
+            resolved.append((score, text, path, str(iso), days))
+            continue
         rejected.append({"text": text, "date": iso, "days": days, "source": path})
+    if resolved:
+        resolved.sort(key=lambda candidate: candidate[0], reverse=True)
+        _, text, path, iso, days = resolved[0]
+        return {"text": text, "date": iso, "days": days, "source": path}
     return {
         "text": None,
         "date": None,

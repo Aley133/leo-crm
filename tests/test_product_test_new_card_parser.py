@@ -53,6 +53,18 @@ def test_curl_profile_rewrites_composer_url_without_browser():
     assert profile.request_headers_for_page("https://www.ozon.kz/product/omega-123456/")["Cookie"] == "a=b"
 
 
+def test_curl_profile_preserves_exact_product_query_when_rewriting_page_url():
+    raw = "curl 'https://www.ozon.kz/api/composer-api.bx/page/json/v2?url=%2Fsearch%2F%3Ftext%3Domega' -H 'User-Agent: Chrome'"
+    profile = CurlProfile.parse(raw)
+
+    target = profile.rewritten_page_url(
+        "https://www.ozon.kz/product/omega-123456/?at=selected-offer-token&sh=share-token"
+    )
+
+    assert "at%3Dselected-offer-token" in target
+    assert "sh%3Dshare-token" in target
+
+
 def test_parser_filters_ozon_widget_metadata_cleans_title_and_deduplicates_gallery():
     payload = {
         "widgetStates": {
