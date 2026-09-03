@@ -318,7 +318,7 @@ const renderJobs = (jobs) => {
   const popularSummary = lastSearch?.job_type === "discover_popular" || lastSearch?.result?.mode === "popular";
   const searchIdentity = !lastSearch ? "" : `Задание #${Number(lastSearch.id)} · запрос «${escapeHtml(lastSearch.reference || "—")}» · завершено ${dateTime(lastSearch.completed_at || lastSearch.updated_at)}`;
   const summary = !lastSearch ? "" : popularSummary
-    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · ${searchIdentity}. Запрошено до ${Number(lastSearch.result.requested_results || 0)}, найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено карточек Kaspi ${Number(lastSearch.result.scanned || 0)} на ${Number(lastSearch.result.search_pages_requested || 0)} стр., точно проверено карточек по продавцам ${Number(lastSearch.result.seller_counts_checked || 0)}. Отсеяно: уже есть у нас ${Number(lastSearch.result.excluded_existing_crm || 0)}, мало отзывов ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, много продавцов ${Number(lastSearch.result.excluded_too_many_sellers || 0)}, продавцы не определены ${Number(lastSearch.result.excluded_unknown_sellers || 0)}. Результат: ${escapeHtml(popularCompletionLabel(lastSearch.result))}${Number(lastSearch.result.result_shortfall || 0) > 0 ? `, не хватило ${Number(lastSearch.result.result_shortfall)} товаров. Заданное количество — верхняя цель; фильтры отзывов и продавцов не ослабляются.` : ""}</div>`
+    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · ${searchIdentity}. Фильтры: от ${money(lastSearch.result.minimum_price_kzt || 0)}, от ${Number(lastSearch.result.minimum_reviews || 0).toLocaleString("ru-RU")} отзывов, до ${Number(lastSearch.result.maximum_sellers || 0).toLocaleString("ru-RU")} продавцов. Запрошено до ${Number(lastSearch.result.requested_results || 0)}, найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено карточек Kaspi ${Number(lastSearch.result.scanned || 0)} на ${Number(lastSearch.result.search_pages_requested || 0)} стр., точно проверено карточек по продавцам ${Number(lastSearch.result.seller_counts_checked || 0)}. Отсеяно: уже есть у нас ${Number(lastSearch.result.excluded_existing_crm || 0)}, ниже минимальной цены ${Number(lastSearch.result.excluded_below_min_price || 0)}, мало отзывов ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, много продавцов ${Number(lastSearch.result.excluded_too_many_sellers || 0)}, продавцы не определены ${Number(lastSearch.result.excluded_unknown_sellers || 0)}. Результат: ${escapeHtml(popularCompletionLabel(lastSearch.result))}${Number(lastSearch.result.result_shortfall || 0) > 0 ? `, не хватило ${Number(lastSearch.result.result_shortfall)} товаров. Заданное количество — верхняя цель; фильтры цены, отзывов и продавцов не ослабляются.` : ""}</div>`
     : `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>`;
   list.innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
   if (pending.length) scheduleRefresh(3000);
@@ -444,6 +444,7 @@ document.querySelector("#discover-form")?.addEventListener("submit", async (even
     target_new:Number(document.querySelector("#target-new").value),
     mode,
     minimum_reviews:Number(document.querySelector("#minimum-reviews").value),
+    minimum_price_kzt:Number(document.querySelector("#minimum-price-kzt").value),
     maximum_sellers:Number(document.querySelector("#maximum-sellers").value),
   };
   try {
@@ -451,7 +452,7 @@ document.querySelector("#discover-form")?.addEventListener("submit", async (even
     await load();
     const jobId = Number(queued?.job?.id || 0);
     notify(
-      `${jobId ? `Задание #${jobId}` : "Новое задание"} принято: запрошено до ${body.target_new} товаров. ${mode === "popular" ? "Фильтры отзывов и продавцов применяются строго." : "Кандидаты появятся автоматически."}`,
+      `${jobId ? `Задание #${jobId}` : "Новое задание"} принято: запрошено до ${body.target_new} товаров. ${mode === "popular" ? `Фильтры применяются строго: цена от ${money(body.minimum_price_kzt)}, отзывы от ${body.minimum_reviews}, продавцов до ${body.maximum_sellers}.` : "Кандидаты появятся автоматически."}`,
       "success",
     );
   }

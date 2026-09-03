@@ -502,12 +502,14 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert '@router.get("/crm/add-product"' in ui
     assert 'data-product-test-page="product-test"' in test_html
     assert 'data-product-test-page="add-product"' in add_html
-    assert 'product-test.js?v=20260903-1' in test_html
-    assert 'product-test.js?v=20260903-1' in add_html
+    assert 'product-test.js?v=20260903-2' in test_html
+    assert 'product-test.js?v=20260903-2' in add_html
     assert ui.count('headers={"Cache-Control": "no-store"}') >= 3
     assert 'id="discover-form"' in test_html
     assert 'id="discover-mode"' in test_html
     assert 'id="minimum-reviews"' in test_html
+    assert 'id="minimum-price-kzt"' in test_html
+    assert 'value="20000"' in test_html
     assert 'id="maximum-sellers"' in test_html
     assert 'id="discover-form"' not in add_html
     assert 'id="new-card-form"' not in test_html
@@ -527,6 +529,8 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert "принято: запрошено до ${body.target_new} товаров" in script
     assert 'mode === "popular"' in script
     assert "minimum_reviews" in script
+    assert "minimum_price_kzt" in script
+    assert "ниже минимальной цены" in script
     assert "maximum_sellers" in script
     assert "seller-count" in script
     assert "/api/product-test/new-cards/prepare" in script
@@ -1121,6 +1125,7 @@ def test_popular_discovery_filters_kaspi_and_never_opens_ozon(monkeypatch) -> No
     assert result["rows"][0]["offers"]["discovery"] == {
         "mode": "popular",
         "minimum_reviews": 50,
+        "minimum_price_kzt": 0,
         "maximum_sellers": 5,
         "reviews": 800,
         "rating": 4.9,
@@ -1161,8 +1166,81 @@ def test_popular_discovery_expands_scan_budget_for_one_hundred_results(db_sessio
     )
 
     assert claim["job"]["options"]["target_new"] == 100
+    assert claim["job"]["options"]["minimum_price_kzt"] == 20000
     assert claim["job"]["options"]["configured_max_kaspi_scan"] == 200
     assert claim["job"]["options"]["max_kaspi_scan"] == 1500
+
+
+def test_popular_discovery_filters_by_configured_minimum_kaspi_price(monkeypatch) -> None:
+    products = [
+        {
+            "master_sku": "price-19999",
+            "title": "Дешевле порога",
+            "price_kzt": 19999,
+            "rating": 5.0,
+            "reviews": 1000,
+        },
+        {
+            "master_sku": "price-20000",
+            "title": "Ровно порог",
+            "price_kzt": 20000,
+            "rating": 4.9,
+            "reviews": 900,
+        },
+        {
+            "master_sku": "price-25000",
+            "title": "Выше порога",
+            "price_kzt": "25 000 ₸",
+            "rating": 4.8,
+            "reviews": 800,
+        },
+        {
+            "master_sku": "price-missing",
+            "title": "Цена неизвестна",
+            "price_kzt": None,
+            "rating": 5.0,
+            "reviews": 1200,
+        },
+    ]
+
+    class FakeSearch:
+        def __init__(self, _city_id):
+            pass
+
+        def search(self, *_args, **_kwargs):
+            return {"products": products, "stats": {"stop_reason": "empty_page"}}
+
+        def close(self):
+            return None
+
+    checked: list[str] = []
+
+    def seller_count(product, *_args):
+        checked.append(product["master_sku"])
+        return 1, {"seller_count_source": "test"}
+
+    monkeypatch.setattr(product_discovery_runtime, "KaspiProductSearch", FakeSearch)
+    result = product_discovery_runtime.discover_popular_products(
+        query="дорогие БАДы",
+        city_id="196220100",
+        zone_id="Magnum_ZONE1",
+        target_new=10,
+        max_kaspi_scan=200,
+        minimum_reviews=50,
+        minimum_price_kzt=20000,
+        maximum_sellers=5,
+        seller_count_resolver=seller_count,
+    )
+
+    assert [row["kaspi_product_id"] for row in result["rows"]] == [
+        "price-20000",
+        "price-25000",
+    ]
+    assert checked == ["price-20000", "price-25000"]
+    assert result["minimum_price_kzt"] == 20000
+    assert result["excluded_below_min_price"] == 2
+    assert result["excluded_below_min_reviews"] == 0
+    assert result["rows"][0]["offers"]["discovery"]["minimum_price_kzt"] == 20000
 
 
 def test_exact_product_delivery_ignores_foreign_recommendation_date() -> None:
@@ -1318,6 +1396,7 @@ def test_popular_discovery_queues_separate_job_and_persists_manual_ozon_candidat
             target_new=4,
             mode="popular",
             minimum_reviews=75,
+            minimum_price_kzt=20_000,
             maximum_sellers=3,
         ),
         db_session,
@@ -1335,6 +1414,7 @@ def test_popular_discovery_queues_separate_job_and_persists_manual_ozon_candidat
     assert queued["queued"] is True
     assert claim["job"]["job_type"] == "discover_popular"
     assert claim["job"]["options"]["minimum_reviews"] == 75
+    assert claim["job"]["options"]["minimum_price_kzt"] == 20000
     assert claim["job"]["options"]["maximum_sellers"] == 3
     completed = complete_product_test_job(
         claim["job"]["id"],
@@ -1348,9 +1428,11 @@ def test_popular_discovery_queues_separate_job_and_persists_manual_ozon_candidat
                 "scanned": 30,
                 "eligible_new": 8,
                 "minimum_reviews": 75,
+                "minimum_price_kzt": 20000,
                 "maximum_sellers": 3,
                 "seller_counts_checked": 4,
                 "excluded_below_min_reviews": 20,
+                "excluded_below_min_price": 6,
                 "excluded_too_many_sellers": 3,
                 "manual_review_pairs": 1,
                 "rows": [{
@@ -1360,7 +1442,7 @@ def test_popular_discovery_queues_separate_job_and_persists_manual_ozon_candidat
                     "brand": "Lab",
                     "image_url": "https://resources.cdn-kaspi.kz/img/m/p/popular.jpg",
                     "product_url": "https://kaspi.kz/shop/p/popular-730000001/",
-                    "page_visible_price_kzt": "7500",
+                    "page_visible_price_kzt": "25000",
                     "supplier_url": None,
                     "supplier_price_kzt": None,
                     "match_status": "NO_RESULT",
@@ -1369,6 +1451,7 @@ def test_popular_discovery_queues_separate_job_and_persists_manual_ozon_candidat
                         "discovery": {
                             "mode": "popular",
                             "minimum_reviews": 75,
+                            "minimum_price_kzt": 20000,
                             "maximum_sellers": 3,
                             "reviews": 250,
                             "rating": 4.9,
@@ -1383,6 +1466,8 @@ def test_popular_discovery_queues_separate_job_and_persists_manual_ozon_candidat
 
     assert completed["job"]["result"]["mode"] == "popular"
     assert completed["job"]["result"]["seller_counts_checked"] == 4
+    assert completed["job"]["result"]["minimum_price_kzt"] == 20000
+    assert completed["job"]["result"]["excluded_below_min_price"] == 6
     assert completed["items"][0]["status"] == "needs_supplier_link"
     assert completed["items"][0]["supplier_url"] is None
     assert completed["items"][0]["offers"]["kaspi"]["seller_count"] == 2

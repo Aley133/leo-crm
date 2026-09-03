@@ -58,6 +58,7 @@ class ProductDiscoveryRequest(BaseModel):
     target_new: int | None = Field(default=None, ge=1, le=100)
     mode: Literal["full", "popular"] = "full"
     minimum_reviews: int = Field(default=50, ge=0, le=10_000_000)
+    minimum_price_kzt: int = Field(default=20_000, ge=0, le=100_000_000)
     maximum_sellers: int = Field(default=5, ge=1, le=100)
 
 
@@ -1102,9 +1103,19 @@ def _persist_new_card_confirmation(db: Session, *, job: ProductTestJob, result: 
 def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dict:
     persisted: list[ProductTestItem] = []
     settings = _settings(db, job.workspace_id)
+    options = job.options_json or {}
+    minimum_price = _money(options.get("minimum_price_kzt")) if job.job_type == "discover_popular" else None
+    backend_excluded_below_min_price = 0
     for row in list(result.get("rows") or [])[:100]:
         if not isinstance(row, dict):
             continue
+        if minimum_price is not None:
+            row_price = _money(row.get("page_visible_price_kzt"))
+            if row_price is None or row_price < minimum_price:
+                # Keep the filter authoritative even while an older Agent is
+                # still running during the rolling desktop update.
+                backend_excluded_below_min_price += 1
+                continue
         kaspi_id = str(row.get("kaspi_product_id") or "").strip()[:64]
         name = str(row.get("product_name") or "").strip()[:500]
         kaspi_url = str(row.get("product_url") or "").strip()[:4000]
@@ -1209,13 +1220,20 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
                 setattr(item, key, value)
         _refresh_upload_plan(item, settings)
         persisted.append(item)
+    result_mode = result.get("mode") or options.get("mode") or "full"
+    requested_results = int(result.get("requested_results") or options.get("target_new") or len(persisted))
+    popular_result = result_mode == "popular"
     _finish_job(job, {
-        "mode": result.get("mode") or (job.options_json or {}).get("mode") or "full",
+        "mode": result_mode,
         "persisted_count": len(persisted),
-        "requested_results": result.get("requested_results"),
-        "found_results": result.get("found_results"),
-        "result_shortfall": result.get("result_shortfall"),
-        "target_reached": result.get("target_reached"),
+        "requested_results": requested_results,
+        "found_results": len(persisted) if popular_result else result.get("found_results"),
+        "result_shortfall": max(0, requested_results - len(persisted))
+        if popular_result
+        else result.get("result_shortfall"),
+        "target_reached": len(persisted) >= requested_results
+        if popular_result
+        else result.get("target_reached"),
         "scan_budget": result.get("scan_budget"),
         "scanned": result.get("scanned"),
         "available_matches": result.get("available_matches"),
@@ -1232,9 +1250,12 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
         "confirmed_pairs": result.get("confirmed_pairs"),
         "manual_review_pairs": result.get("manual_review_pairs"),
         "minimum_reviews": result.get("minimum_reviews"),
+        "minimum_price_kzt": result.get("minimum_price_kzt", options.get("minimum_price_kzt")),
         "maximum_sellers": result.get("maximum_sellers"),
         "seller_counts_checked": result.get("seller_counts_checked"),
         "excluded_below_min_reviews": result.get("excluded_below_min_reviews"),
+        "excluded_below_min_price": int(result.get("excluded_below_min_price") or 0)
+        + backend_excluded_below_min_price,
         "excluded_too_many_sellers": result.get("excluded_too_many_sellers"),
         "excluded_unknown_sellers": result.get("excluded_unknown_sellers"),
         "lookup_error_count": len(list(result.get("lookup_errors") or [])),
@@ -1610,6 +1631,7 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
             "configured_max_kaspi_scan": settings.max_kaspi_scan,
             "max_ozon_queries": settings.max_ozon_queries,
             "minimum_reviews": payload.minimum_reviews,
+            "minimum_price_kzt": payload.minimum_price_kzt,
             "maximum_sellers": payload.maximum_sellers,
             # Visual verification is part of the operator approval contract and
             # cannot be disabled for new discovery jobs.

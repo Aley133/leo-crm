@@ -453,6 +453,7 @@ def discover_popular_products(
     target_new: int,
     max_kaspi_scan: int,
     minimum_reviews: int = 50,
+    minimum_price_kzt: int = 0,
     maximum_sellers: int = 5,
     existing_kaspi_ids: set[str] | None = None,
     merchant_catalog: "MerchantOfferApi | None" = None,
@@ -462,6 +463,7 @@ def discover_popular_products(
 
     requested = max(1, int(target_new))
     minimum_reviews = max(0, int(minimum_reviews))
+    minimum_price_kzt = max(0, int(minimum_price_kzt))
     maximum_sellers = max(1, int(maximum_sellers))
     existing = {str(value) for value in (existing_kaspi_ids or set())}
     search = KaspiProductSearch(city_id)
@@ -472,7 +474,19 @@ def discover_popular_products(
 
     scanned = list(kaspi.get("products") or [])
     crm_new = [row for row in scanned if str(row.get("master_sku")) not in existing]
-    reviewed = [row for row in crm_new if (_count(row.get("reviews")) or 0) >= minimum_reviews]
+    price_eligible = [
+        row
+        for row in crm_new
+        if minimum_price_kzt <= 0
+        or (
+            _count(row.get("price_kzt")) is not None
+            and (_count(row.get("price_kzt")) or 0) >= minimum_price_kzt
+        )
+    ]
+    reviewed = [
+        row for row in price_eligible
+        if (_count(row.get("reviews")) or 0) >= minimum_reviews
+    ]
     reviewed.sort(
         key=lambda row: (
             -(_count(row.get("reviews")) or 0),
@@ -547,6 +561,7 @@ def discover_popular_products(
                 "discovery": {
                     "mode": "popular",
                     "minimum_reviews": minimum_reviews,
+                    "minimum_price_kzt": minimum_price_kzt,
                     "maximum_sellers": maximum_sellers,
                     "reviews": _count(product.get("reviews")) or 0,
                     "rating": _rating(product.get("rating")),
@@ -590,7 +605,8 @@ def discover_popular_products(
         "search_stop_reason": search_stop_reason,
         "completion_reason": completion_reason,
         "excluded_existing_crm": len(scanned) - len(crm_new),
-        "excluded_below_min_reviews": len(crm_new) - len(reviewed),
+        "excluded_below_min_price": len(crm_new) - len(price_eligible),
+        "excluded_below_min_reviews": len(price_eligible) - len(reviewed),
         "excluded_existing_merchant": sum(
             bool(value.get("exists")) for value in merchant_results.values()
         ),
@@ -600,6 +616,7 @@ def discover_popular_products(
         "eligible_new": len(eligible),
         "review_filter_passed": len(reviewed),
         "minimum_reviews": minimum_reviews,
+        "minimum_price_kzt": minimum_price_kzt,
         "maximum_sellers": maximum_sellers,
         "seller_counts_checked": sellers_checked,
         "excluded_too_many_sellers": excluded_too_many_sellers,

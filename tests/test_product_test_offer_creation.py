@@ -41,6 +41,7 @@ def test_product_test_agent_dispatches_popular_discovery_without_ozon(monkeypatc
     assert result == {"mode": "popular", "rows": []}
     assert captured["query"] == "Ежовик гребенчатый"
     assert captured["minimum_reviews"] == 50
+    assert captured["minimum_price_kzt"] == 20000
     assert captured["maximum_sellers"] == 5
     assert captured["existing_kaspi_ids"] == {"123"}
     assert captured["merchant_catalog"] is merchant_catalog
