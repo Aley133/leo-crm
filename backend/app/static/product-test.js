@@ -316,8 +316,9 @@ const renderJobs = (jobs) => {
   const lastSearch = relevant.find((job) => ["discover", "discover_popular"].includes(job.job_type) && job.status === "succeeded" && job.result);
   const labels = {discover:"Поиск новых товаров", discover_popular:"Поиск ходовых товаров", validate_supplier:"Проверка Ozon"};
   const popularSummary = lastSearch?.job_type === "discover_popular" || lastSearch?.result?.mode === "popular";
+  const searchIdentity = !lastSearch ? "" : `Задание #${Number(lastSearch.id)} · запрос «${escapeHtml(lastSearch.reference || "—")}» · завершено ${dateTime(lastSearch.completed_at || lastSearch.updated_at)}`;
   const summary = !lastSearch ? "" : popularSummary
-    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · запрошено ${Number(lastSearch.result.requested_results || 0)}, найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено карточек Kaspi ${Number(lastSearch.result.scanned || 0)} на ${Number(lastSearch.result.search_pages_requested || 0)} стр., точно проверено карточек по продавцам ${Number(lastSearch.result.seller_counts_checked || 0)}. Отсеяно: уже есть у нас ${Number(lastSearch.result.excluded_existing_crm || 0)}, мало отзывов ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, много продавцов ${Number(lastSearch.result.excluded_too_many_sellers || 0)}, продавцы не определены ${Number(lastSearch.result.excluded_unknown_sellers || 0)}. Результат: ${escapeHtml(popularCompletionLabel(lastSearch.result))}${Number(lastSearch.result.result_shortfall || 0) > 0 ? `, не хватило ${Number(lastSearch.result.result_shortfall)} товаров` : ""}.</div>`
+    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · ${searchIdentity}. Запрошено до ${Number(lastSearch.result.requested_results || 0)}, найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено карточек Kaspi ${Number(lastSearch.result.scanned || 0)} на ${Number(lastSearch.result.search_pages_requested || 0)} стр., точно проверено карточек по продавцам ${Number(lastSearch.result.seller_counts_checked || 0)}. Отсеяно: уже есть у нас ${Number(lastSearch.result.excluded_existing_crm || 0)}, мало отзывов ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, много продавцов ${Number(lastSearch.result.excluded_too_many_sellers || 0)}, продавцы не определены ${Number(lastSearch.result.excluded_unknown_sellers || 0)}. Результат: ${escapeHtml(popularCompletionLabel(lastSearch.result))}${Number(lastSearch.result.result_shortfall || 0) > 0 ? `, не хватило ${Number(lastSearch.result.result_shortfall)} товаров. Заданное количество — верхняя цель; фильтры отзывов и продавцов не ослабляются.` : ""}</div>`
     : `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>`;
   list.innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
   if (pending.length) scheduleRefresh(3000);
@@ -354,7 +355,12 @@ const fillSettings = (settings) => {
     else field.value = value ?? "";
   });
   const targetNew = document.querySelector("#target-new");
-  if (settings?.target_new && targetNew) targetNew.value = settings.target_new;
+  // Settings are refreshed while a job is running. Initialise this separate
+  // search field once, but never overwrite the number the operator just typed.
+  if (settings?.target_new && targetNew && !targetNew.dataset.initialized) {
+    targetNew.value = settings.target_new;
+    targetNew.dataset.initialized = "1";
+  }
 };
 
 const syncDiscoveryModeControls = () => {
@@ -440,7 +446,15 @@ document.querySelector("#discover-form")?.addEventListener("submit", async (even
     minimum_reviews:Number(document.querySelector("#minimum-reviews").value),
     maximum_sellers:Number(document.querySelector("#maximum-sellers").value),
   };
-  try { await request("/api/product-test/discover", {method:"POST", body:JSON.stringify(body)}); notify(mode === "popular" ? "Отбор ходовых товаров Kaspi запущен. Ozon автоматически не проверяется." : "Быстрый поиск запущен. Кандидаты появятся автоматически.", "success"); await load(); }
+  try {
+    const queued = await request("/api/product-test/discover", {method:"POST", body:JSON.stringify(body)});
+    await load();
+    const jobId = Number(queued?.job?.id || 0);
+    notify(
+      `${jobId ? `Задание #${jobId}` : "Новое задание"} принято: запрошено до ${body.target_new} товаров. ${mode === "popular" ? "Фильтры отзывов и продавцов применяются строго." : "Кандидаты появятся автоматически."}`,
+      "success",
+    );
+  }
   catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 document.querySelector("#settings-form")?.addEventListener("submit", async (event) => {
