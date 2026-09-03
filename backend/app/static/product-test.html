@@ -45,6 +45,7 @@
             <label><span>Режим поиска</span><select id="discover-mode"><option value="full">Все товары + Ozon</option><option value="popular">Ходовые товары Kaspi</option></select></label>
             <label><span>Новых товаров</span><input id="target-new" type="number" min="1" max="100" value="10" required></label>
             <label class="popular-filter hidden"><span>Минимум отзывов</span><input id="minimum-reviews" type="number" min="0" max="10000000" value="50" required></label>
+            <label class="popular-filter hidden"><span>Минимальная цена Kaspi, ₸</span><input id="minimum-price-kzt" type="number" min="0" max="100000000" step="1000" value="20000" required><small>0 — без ограничения</small></label>
             <label class="popular-filter hidden"><span>Максимум продавцов</span><input id="maximum-sellers" type="number" min="1" max="100" value="5" required></label>
             <button id="discover-button" class="button" type="submit">Найти товары</button>
             <p id="discover-mode-hint" class="discover-mode-hint wide">Agent автоматически найдёт и проверит точные пары Kaspi ↔ Ozon.</p>
@@ -97,6 +98,6 @@
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/product-test.js?v=20260903-1" defer></script>
+  <script src="/static/product-test.js?v=20260903-2" defer></script>
 </body>
 </html>
