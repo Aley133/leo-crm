@@ -1292,6 +1292,110 @@ def test_exact_product_delivery_accepts_internal_offer_sku_widget() -> None:
     assert parsed["delivery_days"] == 7
 
 
+def test_exact_product_delivery_accepts_day_count_from_current_widget() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1902717482-default-1": '{"finalPrice":"1 181 ₸"}',
+            "webAddToCart-9275848611-default-1": (
+                '{"buttonText":"В корзину","deliveryText":"Доставим через 8 дней"}'
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1902717482",
+        today=date(2026, 9, 3),
+    )
+
+    assert parsed["delivery_text"] == "Доставим через 8 дней"
+    assert parsed["delivery_date"] == "2026-09-11"
+    assert parsed["delivery_days"] == 8
+
+
+def test_exact_product_delivery_accepts_structured_days_from_current_widget() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1902717482-default-1": '{"finalPrice":"1 181 ₸"}',
+            "webPdpGrid-9275848611-default-1": (
+                '{"delivery":{"deliveryPeriod":{"minValue":6,"maxValue":8}}}'
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1902717482",
+        today=date(2026, 9, 3),
+    )
+
+    assert parsed["delivery_text"] == "8 дн."
+    assert parsed["delivery_date"] == "2026-09-11"
+    assert parsed["delivery_days"] == 8
+
+
+def test_exact_product_delivery_prefers_explicit_promise_over_weaker_structured_value() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1902717482-default-1": '{"finalPrice":"1 181 ₸"}',
+            "webAddToCart-9275848611-default-1": (
+                '{"deliveryDays":1,"deliveryText":"Доставим 9 сентября"}'
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1902717482",
+        today=date(2026, 9, 3),
+    )
+
+    assert parsed["delivery_text"] == "Доставим 9 сентября"
+    assert parsed["delivery_days"] == 6
+
+
+def test_exact_product_delivery_accepts_numeric_calendar_date() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1902717482-default-1": '{"finalPrice":"1 181 ₸"}',
+            "webDelivery-9275848611-default-1": '{"deliveryDate":"09.09.2026"}',
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1902717482",
+        today=date(2026, 9, 3),
+    )
+
+    assert parsed["delivery_text"] == "09.09.2026"
+    assert parsed["delivery_date"] == "2026-09-09"
+    assert parsed["delivery_days"] == 6
+
+
+def test_exact_product_delivery_rejects_structured_365_day_false_positive() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1902717482-default-1": '{"finalPrice":"1 181 ₸"}',
+            "webPdpGrid-9275848611-default-1": '{"deliveryDays":365}',
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1902717482",
+        today=date(2026, 9, 3),
+    )
+
+    assert parsed["delivery_text"] is None
+    assert parsed["delivery_days"] is None
+
+
 def test_exact_product_delivery_rejects_recommendation_without_main_promise() -> None:
     payload = {
         "widgetStates": {
@@ -1307,6 +1411,27 @@ def test_exact_product_delivery_rejects_recommendation_without_main_promise() ->
         expected_currency="KZT",
         expected_product_id="1902717482",
         today=date(2026, 9, 2),
+    )
+
+    assert parsed["delivery_text"] is None
+    assert parsed["delivery_days"] is None
+
+
+def test_exact_product_delivery_ignores_structured_recommendation_days() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-1902717482-default-1": '{"finalPrice":"1 181 ₸"}',
+            "webHorizontalCarousel-1902717482": (
+                '{"items":[{"sku":"777777777","deliveryDays":1}]}'
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1902717482",
+        today=date(2026, 9, 3),
     )
 
     assert parsed["delivery_text"] is None
