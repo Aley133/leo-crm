@@ -443,6 +443,11 @@ DELIVERY_WORDS = ("достав", "delivery", "получ", "привез", "pic
 CURRENT_PRODUCT_DELIVERY_WIDGETS = (
     "webaddtocart",
     "webbuybox",
+    # The current Ozon Kazakhstan PDP renders the blue purchase CTA as a
+    # ``webSaleBlock*`` widget.  Its key is commonly scoped by an internal
+    # offer SKU rather than the public product id from the URL, so it must be
+    # recognized as first-party delivery evidence before the SKU guard below.
+    "websaleblock",
     "webpurchase",
     "webdelivery",
     "webdeliveryandreturn",

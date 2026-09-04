@@ -1292,6 +1292,28 @@ def test_exact_product_delivery_accepts_internal_offer_sku_widget() -> None:
     assert parsed["delivery_days"] == 7
 
 
+def test_exact_product_delivery_accepts_current_sale_block_internal_offer_sku() -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-5060213445-default-1": '{"finalPrice":"12 796 ₸"}',
+            "webSaleBlockButton-9275848611-default-1": (
+                '{"buttonText":"В корзину","deliveryText":"Доставим с 19 сентября"}'
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="5060213445",
+        today=date(2026, 9, 4),
+    )
+
+    assert parsed["delivery_text"] == "Доставим с 19 сентября"
+    assert parsed["delivery_date"] == "2026-09-19"
+    assert parsed["delivery_days"] == 15
+
+
 def test_exact_product_delivery_accepts_day_count_from_current_widget() -> None:
     payload = {
         "widgetStates": {
