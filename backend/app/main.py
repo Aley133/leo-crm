@@ -79,8 +79,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.13"
-DEPLOYMENT_MARKER = "ozon-exact-card-price-alert-thresholds"
+APP_VERSION = "0.26.14"
+DEPLOYMENT_MARKER = "ozon-canonical-http-session-search"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

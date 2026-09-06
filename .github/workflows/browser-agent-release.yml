@@ -111,7 +111,7 @@ jobs:
           git tag -f browser-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/browser-agent-latest --force
           gh release view browser-agent-latest *> $null
-          $notes = "LEO HTTP Agent 0.3.6: при неверном Copy as cURL окно ввода открывается повторно без перезапуска. Сохранённая сессия по-прежнему проверяется до запуска мониторинга."
+          $notes = "LEO HTTP Agent 0.3.7: принимает товарную выдачу Ozon из /search/ и автоматически выбранного /category/. Новый поиск строится без устаревших brand, paginator_token и search_page_state; причина отказа показывается в окне повторного ввода."
           if ($LASTEXITCODE -ne 0) {
             gh release create browser-agent-latest --title "LEO Windows Agents" --notes $notes
           } else {

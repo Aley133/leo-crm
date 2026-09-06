@@ -35,7 +35,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.9"
+VERSION = "1.1.10"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -389,7 +389,8 @@ def _ensure_ozon_session() -> None:
         curl_text = _prompt_text(
             reason
             + "Вставьте Copy as cURL (bash) любого Network-запроса выдачи "
-            "/search/ Ozon. Cookies останутся зашифрованы на этом компьютере.",
+            "Ozon, который возвращает карточки товаров (/search/ или /category/). "
+            "Cookies останутся зашифрованы на этом компьютере.",
             multiline=True,
         )
         if not curl_text:
@@ -400,8 +401,9 @@ def _ensure_ozon_session() -> None:
             print(f"Ozon HTTP session rejected: {type(exc).__name__}", flush=True)
             _show_message(
                 "LEO Product Test Agent",
-                "HTTP-сеанс Ozon не принят. Скопируйте GET-запрос /search/ "
-                "со страницы без CAPTCHA и вставьте его ещё раз.",
+                "HTTP-сеанс Ozon не принят. Скопируйте GET-запрос page/json/v2 "
+                "с карточками товаров со страницы без CAPTCHA и вставьте его ещё раз.\n\n"
+                f"Причина: {exc}",
                 error=True,
             )
             reason = "Предыдущий HTTP-сеанс не принят. "
