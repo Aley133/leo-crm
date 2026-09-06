@@ -698,6 +698,7 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
     product_id = _product_id_from_ozon_url(url)
     search_candidate: dict[str, Any] | None = None
     search_attempts: list[dict[str, Any]] = []
+    exact_offer: dict[str, Any] | None = None
     try:
         page_detail = client.product_page_price(url, product_id)
         page_card = page_detail.get("card") if isinstance(page_detail.get("card"), dict) else {}
@@ -723,6 +724,37 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                     "error": type(exc).__name__,
                     "items": 0,
                 }]
+        search_days = (search_candidate or {}).get("delivery_days")
+        search_delivery_valid = (
+            isinstance(search_days, int) and not isinstance(search_days, bool)
+            and 0 <= search_days <= 60
+        )
+        # Monitoring reads this seller endpoint. Only the very same SKU and
+        # displayed KZT price may fill the selected card's missing promise.
+        reader = getattr(client, "other_seller_offers", None)
+        if product_id and not page_delivery_valid and not search_delivery_valid and callable(reader):
+            try:
+                modal = reader(url, product_id=product_id)
+                attempt = modal.get("attempt") or {}
+                search_attempts.append({
+                    "source": "exact_seller_offer", "http_status": attempt.get("status_code"),
+                    "blocked": bool(attempt.get("blocked")),
+                    "items": len(modal.get("offers") or []),
+                })
+                if modal.get("ok") and attempt.get("status_code") == 200 and not attempt.get("blocked"):
+                    for offer in modal.get("offers") or []:
+                        sku = str(offer.get("offer_sku") or "").strip()
+                        linked_id = _product_id_from_ozon_url(str(offer.get("product_url") or ""))
+                        days = offer.get("delivery_days")
+                        if (sku == product_id and (not linked_id or linked_id == product_id)
+                                and offer.get("currency_code") == "KZT"
+                                and offer.get("price_kzt") == page_detail.get("price_kzt")
+                                and isinstance(days, int) and not isinstance(days, bool)
+                                and 0 <= days <= 60):
+                            exact_offer = offer
+                            break
+            except Exception as exc:
+                search_attempts.append({"source": "exact_seller_offer", "error": type(exc).__name__})
     finally:
         client.close()
 
@@ -761,14 +793,27 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
             delivery_text = search_candidate.get("delivery_text")
             delivery_date = search_candidate.get("delivery_date")
             delivery_source = "exact_search_card"
+    if exact_offer is not None:
+        delivery_days = exact_offer["delivery_days"]
+        delivery_text = exact_offer.get("delivery_text")
+        delivery_date = exact_offer.get("delivery_date")
+        delivery_source = "exact_seller_offer"
     if (
         not isinstance(delivery_days, int)
         or isinstance(delivery_days, bool)
         or not 0 <= delivery_days <= 60
     ):
+        page_status = (page_detail.get("attempt") or {}).get("status_code") or "неизвестно"
+        diagnostics = "; ".join(
+            f"{row.get('source') or 'поиск'}: HTTP {row.get('http_status') or 'неизвестно'}, "
+            f"карточек {row.get('items', 0)}"
+            + (f", {row['error']}" if row.get("error") else "")
+            for row in search_attempts
+        )
         raise RuntimeError(
             "По точной ссылке Ozon не найдена подтверждённая доставка. "
-            "Ложный срок не сохранён; повторите проверку после обновления страницы Ozon."
+            f"Страница: HTTP {page_status}; {diagnostics or 'дополнительных данных нет'}. "
+            "Срок не сохранён: ни один источник не подтвердил доставку выбранной карточки."
         )
     exact_product_id = str(page_detail.get("product_id") or product_id or "").strip() or None
     return {

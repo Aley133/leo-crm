@@ -1110,6 +1110,56 @@ def test_manual_ozon_url_uses_exact_product_page_price_and_delivery(monkeypatch)
     assert result["validated"] is True
 
 
+@pytest.mark.parametrize("change,accepted", [
+    ({}, True),
+    ({"offer_sku": "999999999"}, False),
+    ({"product_url": "https://ozon.kz/product/other-999999999/"}, False),
+    ({"price_kzt": 2200}, False),
+    ({"currency_code": "RUB"}, False),
+    ({"delivery_days": 365}, False),
+    ({"delivery_days": None}, False),
+    ({"delivery_days": True}, False),
+    ({"blocked": True}, False),
+    ({"http_status": 403}, False),
+])
+def test_manual_delivery_uses_only_same_seller_offer(monkeypatch, change, accepted):
+    from types import SimpleNamespace
+    url = "https://ozon.kz/product/example-555555555/"
+    closed = []
+    class Client:
+        def __init__(self, profile):
+            pass
+        def product_page_price(self, product_url, product_id):
+            return {"product_id": product_id, "price_kzt": 2250, "price_source": "webPrice",
+                    "delivery_days": None, "card": {"image_url": "https://ir.ozone.ru/correct.jpg"}}
+        def search(self, *args, **kwargs):
+            return {"items": [], "attempt": {"status_code": 200}}
+        def other_seller_offers(self, product_url, product_id):
+            assert product_url == url
+            assert product_id == "555555555"
+            offer = {"offer_sku": product_id, "product_url": url, "currency_code": "KZT",
+                     "price_kzt": 2250, "delivery_days": 2, "delivery_text": "Послезавтра", **change}
+            return {"ok": True, "attempt": {"status_code": change.get("http_status", 200),
+                    "blocked": change.get("blocked", False)},
+                    "offers": [{"offer_sku": "999999999", "price_kzt": 1000,
+                                "currency_code": "KZT", "delivery_days": 0}, offer]}
+        def close(self):
+            closed.append(True)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", lambda: SimpleNamespace(resolve=lambda: object()))
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", Client)
+    if accepted:
+        result = product_discovery_runtime.validate_supplier_url(url)
+        assert result["supplier_delivery_source"] == "exact_seller_offer"
+        assert result["supplier_delivery_days"] == 2
+        assert result["supplier_price_kzt"] == 2250
+        assert result["supplier_url"] == url
+        assert result["supplier_image_url"] == "https://ir.ozone.ru/correct.jpg"
+    else:
+        with pytest.raises(RuntimeError, match="подтверждённая доставка"):
+            product_discovery_runtime.validate_supplier_url(url)
+    assert closed == [True]
+
+
 def test_manual_ozon_url_backfills_media_and_delivery_from_same_search_card(monkeypatch) -> None:
     url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
 
