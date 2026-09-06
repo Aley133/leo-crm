@@ -35,7 +35,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.8"
+VERSION = "1.1.9"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -384,15 +384,29 @@ def _ensure_ozon_session() -> None:
         return
     except Exception:
         pass
-    curl_text = _prompt_text(
-        "Ozon HTTP-сессия не найдена. Вставьте Copy as cURL (bash) любого "
-        "Network-запроса выдачи /search/ Ozon. Cookies останутся зашифрованы "
-        "на этом компьютере.",
-        multiline=True,
-    )
-    if not curl_text:
-        raise RuntimeError("Ozon HTTP session не настроена")
-    resolver.import_curl(curl_text, validate=True)
+    reason = "Ozon HTTP-сессия не найдена. "
+    while True:
+        curl_text = _prompt_text(
+            reason
+            + "Вставьте Copy as cURL (bash) любого Network-запроса выдачи "
+            "/search/ Ozon. Cookies останутся зашифрованы на этом компьютере.",
+            multiline=True,
+        )
+        if not curl_text:
+            raise RuntimeError("Ozon HTTP session не настроена")
+        try:
+            resolver.import_curl(curl_text, validate=True)
+        except Exception as exc:
+            print(f"Ozon HTTP session rejected: {type(exc).__name__}", flush=True)
+            _show_message(
+                "LEO Product Test Agent",
+                "HTTP-сеанс Ozon не принят. Скопируйте GET-запрос /search/ "
+                "со страницы без CAPTCHA и вставьте его ещё раз.",
+                error=True,
+            )
+            reason = "Предыдущий HTTP-сеанс не принят. "
+            continue
+        return
 
 
 def _post_json(url: str, token: str, payload: dict) -> dict:

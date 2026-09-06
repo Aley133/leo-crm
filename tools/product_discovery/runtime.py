@@ -634,22 +634,81 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
     """Validate an operator-selected Ozon card without changing its identity.
 
     A pasted URL is an explicit operator decision.  Its displayed product-page
-    price and delivery are authoritative; search results and the other-sellers
-    modal must never replace it with another card or offer.
+    price is authoritative; search results and the other-sellers modal must
+    never replace it with another card or offer.  Ozon does not always include
+    delivery or gallery widgets in the product-page composer response, so the
+    exact same public product ID may safely backfill those missing fields from
+    the search card.
     """
 
     profile = OzonSessionResolver().resolve()
     client = OzonSessionHttpClient(profile)
     product_id = _product_id_from_ozon_url(url)
+    search_candidate: dict[str, Any] | None = None
+    search_attempts: list[dict[str, Any]] = []
     try:
         page_detail = client.product_page_price(url, product_id)
+        page_card = page_detail.get("card") if isinstance(page_detail.get("card"), dict) else {}
+        page_delivery_days = page_detail.get("delivery_days")
+        page_delivery_valid = (
+            isinstance(page_delivery_days, int)
+            and not isinstance(page_delivery_days, bool)
+            and 0 <= page_delivery_days <= 60
+        )
+        page_has_image = bool(
+            page_card.get("image_url") or page_card.get("image_urls")
+        )
+        if product_id and (not page_delivery_valid or not page_has_image):
+            try:
+                search_candidate, search_attempts = _manual_url_candidate(
+                    client,
+                    url,
+                    product_id=product_id,
+                )
+            except Exception as exc:
+                search_attempts = [{
+                    "query": product_id,
+                    "error": type(exc).__name__,
+                    "items": 0,
+                }]
     finally:
         client.close()
 
     price = page_detail.get("price_kzt")
     if not isinstance(price, int) or isinstance(price, bool) or price <= 0:
         raise RuntimeError("По ссылке Ozon не найдена подтверждённая цена в KZT")
+    card = dict(page_detail.get("card")) if isinstance(page_detail.get("card"), dict) else {}
+    if search_candidate is not None:
+        for field in ("title", "image_url", "rating", "reviews"):
+            if card.get(field) in (None, "") and search_candidate.get(field) not in (None, ""):
+                card[field] = search_candidate[field]
+        if not card.get("image_urls") and search_candidate.get("image_urls"):
+            card["image_urls"] = list(search_candidate["image_urls"])
+    if not card.get("image_url") and card.get("image_urls"):
+        card["image_url"] = card["image_urls"][0]
+
     delivery_days = page_detail.get("delivery_days")
+    delivery_text = page_detail.get("delivery_text")
+    delivery_date = page_detail.get("delivery_date")
+    delivery_source = "product_page"
+    if (
+        (
+            not isinstance(delivery_days, int)
+            or isinstance(delivery_days, bool)
+            or not 0 <= delivery_days <= 60
+        )
+        and search_candidate is not None
+    ):
+        candidate_delivery_days = search_candidate.get("delivery_days")
+        if (
+            isinstance(candidate_delivery_days, int)
+            and not isinstance(candidate_delivery_days, bool)
+            and 0 <= candidate_delivery_days <= 60
+        ):
+            delivery_days = candidate_delivery_days
+            delivery_text = search_candidate.get("delivery_text")
+            delivery_date = search_candidate.get("delivery_date")
+            delivery_source = "exact_search_card"
     if (
         not isinstance(delivery_days, int)
         or isinstance(delivery_days, bool)
@@ -659,15 +718,15 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
             "По точной ссылке Ozon не найдена подтверждённая доставка. "
             "Ложный срок не сохранён; повторите проверку после обновления страницы Ozon."
         )
-    card = page_detail.get("card") if isinstance(page_detail.get("card"), dict) else {}
     exact_product_id = str(page_detail.get("product_id") or product_id or "").strip() or None
     return {
         "supplier_url": url,
         "supplier_price_kzt": price,
         "supplier_price_source": f"manual_product_page.{page_detail.get('price_source') or 'webPrice'}",
         "supplier_delivery_days": delivery_days,
-        "supplier_delivery_text": page_detail.get("delivery_text"),
-        "supplier_delivery_date": page_detail.get("delivery_date"),
+        "supplier_delivery_text": delivery_text,
+        "supplier_delivery_date": delivery_date,
+        "supplier_delivery_source": delivery_source,
         "supplier_offer_sku": exact_product_id,
         "supplier_seller_name": "Ozon",
         "supplier_seller_rating": None,
@@ -682,7 +741,7 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
         "match_score": 1.0,
         "match_reasons": ["operator_selected_exact_url"],
         "image_match": {"status": "OPERATOR_CONFIRMED"},
-        "search_attempts": [],
+        "search_attempts": search_attempts,
         "price_hint_error": None,
         "manual_override": True,
         "visual_review_required": False,

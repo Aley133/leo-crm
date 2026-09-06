@@ -7,6 +7,42 @@ from tools import product_test_agent
 from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi, OfferState
 
 
+def test_product_test_agent_reprompts_after_invalid_ozon_session(monkeypatch) -> None:
+    answers = iter(("curl invalid", "curl https://www.ozon.kz/search/?text=Solgar"))
+    imports: list[str] = []
+    messages: list[str] = []
+
+    class Resolver:
+        def resolve(self, *, validate=False):
+            raise RuntimeError("saved session rejected")
+
+        def import_curl(self, value, *, validate=False):
+            imports.append(value)
+            if value == "curl invalid":
+                raise ValueError("invalid cURL")
+
+    monkeypatch.setattr(product_test_agent, "OzonSessionResolver", Resolver)
+    monkeypatch.setattr(
+        product_test_agent,
+        "_prompt_text",
+        lambda *_args, **_kwargs: next(answers),
+    )
+    monkeypatch.setattr(
+        product_test_agent,
+        "_show_message",
+        lambda _title, message, **_kwargs: messages.append(message),
+    )
+
+    product_test_agent._ensure_ozon_session()
+
+    assert imports == [
+        "curl invalid",
+        "curl https://www.ozon.kz/search/?text=Solgar",
+    ]
+    assert len(messages) == 1
+    assert "вставьте его ещё раз" in messages[0]
+
+
 def test_product_test_agent_dispatches_popular_discovery_without_ozon(monkeypatch) -> None:
     merchant_catalog = object()
     captured: dict = {}

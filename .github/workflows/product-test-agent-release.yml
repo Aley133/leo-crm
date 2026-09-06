@@ -122,7 +122,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.8: точная ссылка Ozon читает дату доставки из актуального блока покупки webSaleBlock, даже когда Ozon использует внутренний offer SKU. Поддерживаются даты, сроки в днях и структурированные поля; ложные сроки свыше 60 дней отбрасываются."
+          $notes = "LEO Product Test Agent 1.1.9: облегчённая ручная проверка сохраняет цену строго с указанной страницы Ozon и восстанавливает недостающие фото и доставку только из карточки поиска с тем же Ozon ID. Неверный HTTP-сеанс можно сразу ввести повторно без перезапуска агента."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

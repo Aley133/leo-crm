@@ -14,12 +14,25 @@ from sqlalchemy.orm import Session
 
 from .db import SessionLocal
 from .models import OutboxEvent, Product
-from .price_drop_alerts import PRICE_DROP_EVENT_TYPE
+from .price_drop_alerts import (
+    ALLOWED_PRICE_DROP_THRESHOLDS,
+    DEFAULT_PRICE_DROP_THRESHOLD_PERCENT,
+    PRICE_DROP_EVENT_TYPE,
+)
 
 
 PUBLISH_INTERVAL_SECONDS = 10
 PUBLISH_BATCH_SIZE = 10
 SessionFactory = Callable[[], Session]
+PRICE_ALERT_RUNTIME_STATUS: dict[str, object] = {
+    "status": "starting",
+    "configured": None,
+    "last_cycle_at": None,
+    "last_success_at": None,
+    "last_error": None,
+    "sent_count": 0,
+    "failed_count": 0,
+}
 
 
 class TelegramDeliveryError(RuntimeError):
@@ -48,6 +61,16 @@ class TelegramPriceAlertSettings:
             chat_id=chat_id,
             api_base_url=api_base_url or "https://api.telegram.org",
         )
+
+
+def price_alert_runtime_status() -> dict[str, object]:
+    """Return safe publisher diagnostics without Telegram credentials."""
+
+    return dict(PRICE_ALERT_RUNTIME_STATUS)
+
+
+def _now_iso() -> str:
+    return datetime.now(UTC).isoformat()
 
 
 def _money(value: object, currency: object) -> str:
@@ -86,6 +109,7 @@ def format_price_drop_message(payload: dict[str, object]) -> str:
             f"Обычная цена: <s>{normal_price}</s>",
             f"Сейчас: <b>{current_price}</b>",
             f"Снижение: <b>−{drop_percent}%</b>",
+            f"Порог сигнала: {escape(str(payload.get('threshold_percent') or 50))}%",
             "",
             "Цена аномально низкая — можно рассмотреть закупку даже без текущего заказа.",
         ]
@@ -163,7 +187,27 @@ def _pending_events(
             except (TypeError, ValueError):
                 product = None
             if product is not None and product.sudden_price_alert_enabled:
-                pending.append((event.id, payload))
+                raw_threshold_percent = int(
+                    product.sudden_price_alert_threshold_percent
+                    or DEFAULT_PRICE_DROP_THRESHOLD_PERCENT
+                )
+                threshold_percent = (
+                    raw_threshold_percent
+                    if raw_threshold_percent in ALLOWED_PRICE_DROP_THRESHOLDS
+                    else DEFAULT_PRICE_DROP_THRESHOLD_PERCENT
+                )
+                try:
+                    drop_percent = Decimal(str(payload.get("drop_percent")))
+                except Exception:
+                    drop_percent = Decimal("0")
+                if drop_percent >= Decimal(threshold_percent):
+                    pending.append((event.id, payload))
+                    continue
+                event.published_at = datetime.now(UTC)
+                event.last_error = (
+                    "suppressed: product price alert threshold changed"
+                )
+                suppressed = True
                 continue
             event.published_at = datetime.now(UTC)
             event.last_error = "suppressed: product price alert disabled"
@@ -221,11 +265,16 @@ async def publish_pending_price_alerts(
                 )
             except Exception as exc:
                 failed += 1
+                safe_error = (
+                    f"{type(exc).__name__}: {exc}"
+                    if isinstance(exc, TelegramDeliveryError)
+                    else f"{type(exc).__name__}: Telegram delivery failed"
+                )
                 await asyncio.to_thread(
                     _record_publish_result,
                     session_factory,
                     event_id=event_id,
-                    error=f"{type(exc).__name__}: {exc}"[:2000],
+                    error=safe_error[:2000],
                     include_all_workspaces=include_all_workspaces,
                 )
             else:
@@ -244,25 +293,61 @@ async def publish_pending_price_alerts(
 
 
 async def price_alert_publisher_loop(stop_event: asyncio.Event) -> None:
-    settings = TelegramPriceAlertSettings.from_environment()
-    if settings is None:
-        return
-
     async with httpx.AsyncClient(timeout=15) as client:
         while not stop_event.is_set():
-            try:
-                await publish_pending_price_alerts(
-                    settings=settings,
-                    client=client,
-                    include_all_workspaces=True,
-                )
-            except asyncio.CancelledError:
-                raise
-            except Exception:
-                # Individual errors are persisted on the outbox event. This
-                # outer guard keeps a transient database failure from killing
-                # the background publisher permanently.
-                pass
+            settings = TelegramPriceAlertSettings.from_environment()
+            if settings is None:
+                PRICE_ALERT_RUNTIME_STATUS.update({
+                    "status": "not_configured",
+                    "configured": False,
+                    "last_cycle_at": _now_iso(),
+                    "last_error": "telegram_credentials_missing",
+                })
+            else:
+                PRICE_ALERT_RUNTIME_STATUS.update({
+                    "status": "running",
+                    "configured": True,
+                    "last_cycle_at": _now_iso(),
+                })
+                try:
+                    sent, failed = await publish_pending_price_alerts(
+                        settings=settings,
+                        client=client,
+                        include_all_workspaces=True,
+                    )
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    # Individual errors are persisted on the outbox event. This
+                    # outer guard keeps a transient database failure from killing
+                    # the background publisher permanently and exposes a safe
+                    # error class through /health.
+                    PRICE_ALERT_RUNTIME_STATUS.update({
+                        "status": "degraded",
+                        "last_cycle_at": _now_iso(),
+                        "last_error": type(exc).__name__,
+                    })
+                else:
+                    PRICE_ALERT_RUNTIME_STATUS["sent_count"] = (
+                        int(PRICE_ALERT_RUNTIME_STATUS["sent_count"]) + sent
+                    )
+                    PRICE_ALERT_RUNTIME_STATUS["failed_count"] = (
+                        int(PRICE_ALERT_RUNTIME_STATUS["failed_count"]) + failed
+                    )
+                    PRICE_ALERT_RUNTIME_STATUS.update({
+                        "status": "degraded" if failed else "running",
+                        "last_cycle_at": _now_iso(),
+                        "last_success_at": (
+                            _now_iso()
+                            if sent
+                            else PRICE_ALERT_RUNTIME_STATUS["last_success_at"]
+                        ),
+                        "last_error": (
+                            f"{failed} telegram notification(s) failed"
+                            if failed
+                            else None
+                        ),
+                    })
             try:
                 await asyncio.wait_for(
                     stop_event.wait(),

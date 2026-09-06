@@ -121,6 +121,12 @@ class Product(Base):
         default=False,
         server_default="false",
     )
+    sudden_price_alert_threshold_percent: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=50,
+        server_default="50",
+    )
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now(), onupdate=func.now())
 

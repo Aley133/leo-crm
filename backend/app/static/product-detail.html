@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Карточка товара</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260723-10">
-  <link rel="stylesheet" href="/static/product-detail.css?v=20260729-2">
+  <link rel="stylesheet" href="/static/product-detail.css?v=20260906-1">
   <link rel="stylesheet" href="/static/product-images.css?v=20260819-2">
   <link rel="stylesheet" href="/static/product-detail-source-edit.css?v=20260804-1">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
@@ -42,9 +42,17 @@
           <div class="panel-title"><h2>Сигналы о выгодной закупке</h2><span>Только для этой карточки товара</span></div>
           <div class="price-alert-setting">
             <label class="switch-setting" for="price-drop-alert-enabled">
-              <span class="switch-copy"><strong>Сообщать об аномальном падении цены</strong><small>При снижении закупочной цены на 50% и более CRM отправит уведомление в Telegram.</small></span>
+              <span class="switch-copy"><strong>Сообщать об аномальном падении цены</strong><small>CRM сравнивает новую закупочную цену с обычной ценой последних проверок и отправляет уведомление в Telegram.</small></span>
               <input id="price-drop-alert-enabled" type="checkbox" role="switch" aria-describedby="price-alert-result">
               <span class="switch-control" aria-hidden="true"></span>
+            </label>
+            <label class="price-alert-threshold" for="price-drop-alert-threshold">
+              <span><strong>Сигнал при снижении на</strong><small>Настройка действует только для этой карточки.</small></span>
+              <select id="price-drop-alert-threshold" aria-describedby="price-alert-result">
+                <option value="10">10%</option>
+                <option value="20">20%</option>
+                <option value="50">50%</option>
+              </select>
             </label>
             <div id="price-alert-result" class="message price-alert-result" role="status" aria-live="polite"></div>
           </div>
@@ -65,7 +73,7 @@
   <dialog id="supplier-dialog" class="supplier-dialog"><form id="supplier-form"><div class="dialog-head"><div><p class="eyebrow">Источник закупки</p><h2 id="supplier-dialog-title">Добавить или обновить источник</h2></div><button id="close-supplier-dialog" class="icon-button" type="button">×</button></div><label><span>Тип источника</span><select id="supplier-source-type"><option value="online">Онлайн-поставщик</option><option value="offline">Офлайн-поставщик / аптека</option><option value="production">Собственное производство</option></select></label><div id="online-source-fields"><p id="supplier-online-help" class="muted">Онлайн-источник будет проверяться Browser Agent.</p><label><span>Ссылка поставщика</span><input id="supplier-url" type="url" placeholder="https://www.ozon.ru/product/..."></label><label><span>Название у поставщика</span><input id="supplier-title" type="text" maxlength="1000" placeholder="Необязательно"></label><label class="check"><input id="supplier-run-check" type="checkbox" checked><span>Сразу запустить первую проверку</span></label></div><div id="fixed-source-fields" class="hidden"><p class="muted">Фиксированная цена хранится в CRM и не подлежит автоматическому мониторингу.</p><label><span>Название источника</span><input id="fixed-source-name" type="text" maxlength="255" placeholder="Например: Аптека 24/7 или Собственное производство"></label><label><span>Закупочная цена, ₸</span><input id="fixed-source-price" type="number" min="0" step="0.01" placeholder="0"></label><label><span>Срок получения, дней</span><input id="fixed-source-delivery-days" type="number" min="0" max="365" value="0"></label></div><label class="check"><input id="supplier-primary" type="checkbox" checked><span>Сделать основным источником закупки</span></label><div id="supplier-result" class="message"></div><div class="dialog-actions"><button id="cancel-supplier" class="button secondary" type="button">Отмена</button><button id="save-supplier" class="button" type="submit">Сохранить источник</button></div></form></dialog>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
   <script src="/static/product-image-resolver.js?v=20260819-2" defer></script>
-  <script src="/static/product-detail.js?v=20260819-2" defer></script>
+  <script src="/static/product-detail.js?v=20260906-1" defer></script>
   <script src="/static/product-economics.js?v=20260723-5" defer></script>
   <script src="/static/product-inventory.js?v=20260803-1" defer></script>
   <script>
