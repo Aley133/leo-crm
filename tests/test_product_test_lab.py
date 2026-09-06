@@ -247,6 +247,99 @@ def test_kaspi_discovery_continues_after_ten_card_page(monkeypatch) -> None:
     assert result["stats"]["stop_reason"] == "limit_reached"
 
 
+def test_kaspi_popular_discovery_can_scan_more_than_ten_thousand_cards(monkeypatch) -> None:
+    search = kaspi_search.KaspiProductSearch("196220100", page_delay_ms=0)
+    pages: list[int] = []
+    cards_seen = 0
+
+    def fake_page(_text, page, _request_id):
+        pages.append(page)
+        cards = [
+            {
+                "id": "deep-target" if page == 1000 and index == 9 else f"{page}-{index}",
+                "title": f"Product {page}-{index}",
+                "shopLink": f"/p/product-{page}-{index}/",
+            }
+            for index in range(10)
+        ]
+        request = httpx.Request("GET", "https://kaspi.kz/yml/product-view/pl/results")
+        return httpx.Response(200, json={"data": cards}, request=request), str(request.url), {}, 0
+
+    def stop_after_page(cards):
+        nonlocal cards_seen
+        cards_seen += len(cards)
+        return any(card["master_sku"] == "deep-target" for card in cards)
+
+    monkeypatch.setattr(search, "_page_with_rate_limit_retry", fake_page)
+    try:
+        result = search.search_until("БАДы", stop_after_page=stop_after_page)
+    finally:
+        search.close()
+
+    assert cards_seen == 10_010
+    assert pages[0] == 0
+    assert pages[-1] == 1000
+    assert result["stats"]["pages_requested"] == 1001
+    assert result["stats"]["stop_reason"] == "target_reached"
+
+
+def test_kaspi_popular_discovery_confirms_empty_end_with_fresh_request_ids(monkeypatch) -> None:
+    search = kaspi_search.KaspiProductSearch("196220100", page_delay_ms=0)
+    calls: list[tuple[int, str]] = []
+
+    def fake_page(_text, page, request_id):
+        calls.append((page, request_id))
+        cards = (
+            [{"id": "first", "title": "First", "shopLink": "/p/first/"}]
+            if page == 0
+            else []
+        )
+        request = httpx.Request("GET", "https://kaspi.kz/yml/product-view/pl/results")
+        return httpx.Response(200, json={"data": cards}, request=request), str(request.url), {}, 0
+
+    monkeypatch.setattr(search, "_page_with_rate_limit_retry", fake_page)
+    try:
+        result = search.search_until("БАДы", stop_after_page=lambda _cards: False)
+    finally:
+        search.close()
+
+    end_calls = [request_id for page, request_id in calls if page == 1]
+    assert len(end_calls) == kaspi_search.END_BOUNDARY_CONFIRMATIONS
+    assert len(set(end_calls)) == kaspi_search.END_BOUNDARY_CONFIRMATIONS
+    assert result["stats"]["stop_reason"] == "empty_page"
+
+
+def test_kaspi_popular_discovery_recovers_from_one_transient_empty_page(monkeypatch) -> None:
+    search = kaspi_search.KaspiProductSearch("196220100", page_delay_ms=0)
+    page_one_calls = 0
+
+    def fake_page(_text, page, _request_id):
+        nonlocal page_one_calls
+        if page == 0:
+            cards = [{"id": "first", "title": "First", "shopLink": "/p/first/"}]
+        else:
+            page_one_calls += 1
+            cards = [] if page_one_calls == 1 else [
+                {"id": "target", "title": "Target", "shopLink": "/p/target/"}
+            ]
+        request = httpx.Request("GET", "https://kaspi.kz/yml/product-view/pl/results")
+        return httpx.Response(200, json={"data": cards}, request=request), str(request.url), {}, 0
+
+    monkeypatch.setattr(search, "_page_with_rate_limit_retry", fake_page)
+    try:
+        result = search.search_until(
+            "БАДы",
+            stop_after_page=lambda cards: any(
+                card["master_sku"] == "target" for card in cards
+            ),
+        )
+    finally:
+        search.close()
+
+    assert page_one_calls == 2
+    assert result["stats"]["stop_reason"] == "target_reached"
+
+
 def test_kaspi_discovery_normalizes_seller_count_for_popular_filter() -> None:
     card = kaspi_search.normalize_card(
         {
@@ -502,8 +595,8 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert '@router.get("/crm/add-product"' in ui
     assert 'data-product-test-page="product-test"' in test_html
     assert 'data-product-test-page="add-product"' in add_html
-    assert 'product-test.js?v=20260903-2' in test_html
-    assert 'product-test.js?v=20260903-2' in add_html
+    assert 'product-test.js?v=20260906-1' in test_html
+    assert 'product-test.js?v=20260906-1' in add_html
     assert ui.count('headers={"Cache-Control": "no-store"}') >= 3
     assert 'id="discover-form"' in test_html
     assert 'id="discover-mode"' in test_html
@@ -524,9 +617,9 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert 'class="active" href="/crm/add-product"' in add_html
     assert "/api/product-test/discover" in script
     assert 'discover_popular:"Поиск ходовых товаров"' in script
-    assert "Заданное количество — верхняя цель" in script
+    assert "после проверки всей доступной выдачи Kaspi" in script
     assert "!targetNew.dataset.initialized" in script
-    assert "принято: запрошено до ${body.target_new} товаров" in script
+    assert "принято: цель ${body.target_new} товаров" in script
     assert 'mode === "popular"' in script
     assert "minimum_reviews" in script
     assert "minimum_price_kzt" in script
@@ -1198,10 +1291,22 @@ def test_popular_discovery_filters_kaspi_and_never_opens_ozon(monkeypatch) -> No
         def __init__(self, city_id):
             self.city_id = city_id
 
-        def search(self, *args, **kwargs):
+        def search_until(self, *args, **kwargs):
             assert kwargs["sort"] == "rating"
             assert kwargs["mode"] == "text"
-            return {"products": products, "stats": {"elapsed_ms": 7}}
+            stopped = False
+            for batch in (products[:2], products[2:]):
+                stopped = kwargs["stop_after_page"](batch)
+                if stopped:
+                    break
+            return {
+                "products": products,
+                "stats": {
+                    "elapsed_ms": 7,
+                    "pages_requested": 2,
+                    "stop_reason": "target_reached" if stopped else "empty_page",
+                },
+            }
 
         def close(self):
             return None
@@ -1254,7 +1359,7 @@ def test_popular_discovery_filters_kaspi_and_never_opens_ozon(monkeypatch) -> No
     assert result["completion_reason"] == "target_reached"
 
 
-def test_popular_discovery_expands_scan_budget_for_one_hundred_results(db_session) -> None:
+def test_popular_discovery_queues_exhaustive_scan_for_one_hundred_results(db_session) -> None:
     _seed_agent_account(db_session)
     discover_product_candidates(
         ProductDiscoveryRequest(
@@ -1280,7 +1385,8 @@ def test_popular_discovery_expands_scan_budget_for_one_hundred_results(db_sessio
     assert claim["job"]["options"]["target_new"] == 100
     assert claim["job"]["options"]["minimum_price_kzt"] == 20000
     assert claim["job"]["options"]["configured_max_kaspi_scan"] == 200
-    assert claim["job"]["options"]["max_kaspi_scan"] == 1500
+    assert claim["job"]["options"]["max_kaspi_scan"] == 2000
+    assert claim["job"]["options"]["scan_until_target_or_exhausted"] is True
 
 
 def test_popular_discovery_filters_by_configured_minimum_kaspi_price(monkeypatch) -> None:
@@ -1288,6 +1394,7 @@ def test_popular_discovery_filters_by_configured_minimum_kaspi_price(monkeypatch
         {
             "master_sku": "price-19999",
             "title": "Дешевле порога",
+            "kaspi_url": "https://kaspi.kz/shop/p/price-19999/",
             "price_kzt": 19999,
             "rating": 5.0,
             "reviews": 1000,
@@ -1295,6 +1402,7 @@ def test_popular_discovery_filters_by_configured_minimum_kaspi_price(monkeypatch
         {
             "master_sku": "price-20000",
             "title": "Ровно порог",
+            "kaspi_url": "https://kaspi.kz/shop/p/price-20000/",
             "price_kzt": 20000,
             "rating": 4.9,
             "reviews": 900,
@@ -1302,6 +1410,7 @@ def test_popular_discovery_filters_by_configured_minimum_kaspi_price(monkeypatch
         {
             "master_sku": "price-25000",
             "title": "Выше порога",
+            "kaspi_url": "https://kaspi.kz/shop/p/price-25000/",
             "price_kzt": "25 000 ₸",
             "rating": 4.8,
             "reviews": 800,
@@ -1309,6 +1418,7 @@ def test_popular_discovery_filters_by_configured_minimum_kaspi_price(monkeypatch
         {
             "master_sku": "price-missing",
             "title": "Цена неизвестна",
+            "kaspi_url": "https://kaspi.kz/shop/p/price-missing/",
             "price_kzt": None,
             "rating": 5.0,
             "reviews": 1200,
@@ -1319,8 +1429,12 @@ def test_popular_discovery_filters_by_configured_minimum_kaspi_price(monkeypatch
         def __init__(self, _city_id):
             pass
 
-        def search(self, *_args, **_kwargs):
-            return {"products": products, "stats": {"stop_reason": "empty_page"}}
+        def search_until(self, *_args, **kwargs):
+            stopped = kwargs["stop_after_page"](products)
+            return {
+                "products": products,
+                "stats": {"stop_reason": "target_reached" if stopped else "empty_page"},
+            }
 
         def close(self):
             return None
@@ -1764,13 +1878,16 @@ def test_new_discovery_replaces_candidates_but_keeps_kaspi_submissions(db_sessio
     db_session.add_all([old_candidate, waiting])
     db_session.commit()
 
-    discover_product_candidates(ProductDiscoveryRequest(query="new batch", target_new=10), db_session)
+    queued = discover_product_candidates(ProductDiscoveryRequest(query="new batch", target_new=10), db_session)
     state = read_product_test_state(db_session)
 
     db_session.refresh(old_candidate)
     db_session.refresh(waiting)
+    queued_job = db_session.get(ProductTestJob, queued["job"]["id"])
     assert old_candidate.active is False
     assert waiting.active is True
+    assert queued_job is not None
+    assert "710000002" in queued_job.options_json["existing_kaspi_ids"]
     assert state["items"] == []
     assert [row["id"] for row in state["submissions"]] == [waiting.id]
 

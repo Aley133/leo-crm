@@ -79,8 +79,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.14"
-DEPLOYMENT_MARKER = "ozon-canonical-http-session-search"
+APP_VERSION = "0.26.15"
+DEPLOYMENT_MARKER = "popular-discovery-exhaustive-fill"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

@@ -1223,6 +1223,10 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
     result_mode = result.get("mode") or options.get("mode") or "full"
     requested_results = int(result.get("requested_results") or options.get("target_new") or len(persisted))
     popular_result = result_mode == "popular"
+    persisted_shortfall = popular_result and len(persisted) < requested_results
+    completion_reason = result.get("completion_reason")
+    if persisted_shortfall and result.get("target_reached"):
+        completion_reason = "persistence_shortfall"
     _finish_job(job, {
         "mode": result_mode,
         "persisted_count": len(persisted),
@@ -1235,13 +1239,15 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
         if popular_result
         else result.get("target_reached"),
         "scan_budget": result.get("scan_budget"),
+        "scan_mode": result.get("scan_mode"),
         "scanned": result.get("scanned"),
         "available_matches": result.get("available_matches"),
         "search_pages_requested": result.get("search_pages_requested"),
         "search_pages_succeeded": result.get("search_pages_succeeded"),
         "search_stop_reason": result.get("search_stop_reason"),
-        "completion_reason": result.get("completion_reason"),
+        "completion_reason": completion_reason,
         "excluded_existing_crm": result.get("excluded_existing_crm"),
+        "excluded_incomplete_cards": result.get("excluded_incomplete_cards"),
         "excluded_existing_merchant": result.get("excluded_existing_merchant"),
         "merchant_membership_errors": result.get("merchant_membership_errors"),
         "eligible_new": result.get("eligible_new"),
@@ -1602,21 +1608,26 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
     workspace_id = current_workspace_id()
     settings = _settings(db, workspace_id)
     requested_results = payload.target_new or settings.target_new
-    # Popular discovery has two selective filters after the storefront search:
-    # review count and an exact seller-count inspection.  A request for 100
-    # results therefore cannot reuse the old 200-card discovery budget.  Keep
-    # the operator setting as a floor and automatically reserve enough depth
-    # to either fill the request or report a meaningful exhausted budget.
+    # Product Test Agent 1.1.11 scans popular results until the requested count
+    # is filled or Kaspi itself ends the result set. Keep the largest legacy
+    # budget for an older agent that happens to claim a job during rollout.
     effective_kaspi_scan = (
-        min(2000, max(settings.max_kaspi_scan, requested_results * 15))
+        2000
         if payload.mode == "popular"
         else settings.max_kaspi_scan
     )
-    existing_ids = list(
+    existing_ids = set(
         db.scalars(
             select(Product.kaspi_product_id).where(Product.workspace_id == workspace_id)
         ).all()
     )
+    # Rows already handed to Kaspi are preserved by _persist_discovery and
+    # therefore must not consume one of the requested result slots.
+    for item in db.scalars(
+        select(ProductTestItem).where(ProductTestItem.workspace_id == workspace_id)
+    ):
+        if _kaspi_submission(item):
+            existing_ids.add(item.kaspi_product_id)
     job = _queue_job(
         db,
         workspace_id=workspace_id,
@@ -1629,6 +1640,7 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
             "target_new": requested_results,
             "max_kaspi_scan": effective_kaspi_scan,
             "configured_max_kaspi_scan": settings.max_kaspi_scan,
+            "scan_until_target_or_exhausted": payload.mode == "popular",
             "max_ozon_queries": settings.max_ozon_queries,
             "minimum_reviews": payload.minimum_reviews,
             "minimum_price_kzt": payload.minimum_price_kzt,
@@ -1636,7 +1648,7 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
             # Visual verification is part of the operator approval contract and
             # cannot be disabled for new discovery jobs.
             "image_verify": True,
-            "existing_kaspi_ids": existing_ids,
+            "existing_kaspi_ids": sorted(str(value) for value in existing_ids if value),
         },
     )
     # Starting a new scan replaces the visual-candidate batch immediately.

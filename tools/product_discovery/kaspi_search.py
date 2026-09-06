@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 import secrets
 import time
+from collections.abc import Callable
 from typing import Any
 from urllib.parse import quote
 
@@ -18,6 +19,9 @@ UA = (
 VALID_SORTS = {"relevance", "price-asc", "price-desc", "rating", "created-desc"}
 VALID_MODES = {"text", "brand"}
 MAX_BATCH = 2000
+PAGE_RETRY_ATTEMPTS = 6
+RETRYABLE_STATUSES = {408, 425, 429, 500, 502, 503, 504}
+END_BOUNDARY_CONFIRMATIONS = 3
 # The current desktop /results transport commonly returns 10 cards, but Kaspi
 # can vary the page size.  This value is only a paging-budget estimate; a
 # short non-empty page is not proof that the result set has ended.
@@ -249,23 +253,38 @@ class KaspiProductSearch:
         response: httpx.Response | None = None
         url = RESULTS_URL
         params: dict[str, Any] = {}
-        for attempt in range(3):
-            if page == 0:
-                response, url, params = self._bootstrap_page_zero(text, request_id)
-            else:
-                response, url, params = self._get_page(text, page, request_id)
-            if response.status_code != 429 or attempt == 2:
+        for attempt in range(PAGE_RETRY_ATTEMPTS):
+            try:
+                if page == 0:
+                    response, url, params = self._bootstrap_page_zero(text, request_id)
+                else:
+                    response, url, params = self._get_page(text, page, request_id)
+            except httpx.TransportError:
+                if attempt + 1 >= PAGE_RETRY_ATTEMPTS:
+                    raise
+                time.sleep(min(20.0, 0.8 * (2 ** attempt)))
+                continue
+            if response.status_code not in RETRYABLE_STATUSES or attempt + 1 >= PAGE_RETRY_ATTEMPTS:
                 return response, url, params, attempt
             raw_retry = response.headers.get("Retry-After")
             try:
                 delay = float(raw_retry) if raw_retry else 1.25 * (2 ** attempt)
             except (TypeError, ValueError):
                 delay = 1.25 * (2 ** attempt)
-            time.sleep(min(8.0, max(0.8, delay)))
+            time.sleep(min(20.0, max(0.8, delay)))
         assert response is not None
-        return response, url, params, 2
+        return response, url, params, PAGE_RETRY_ATTEMPTS - 1
 
-    def _scan_once(self, text: str, *, page: int, sort: str, limit: int, mode: str) -> dict[str, Any]:
+    def _scan_once(
+        self,
+        text: str,
+        *,
+        page: int,
+        sort: str,
+        limit: int | None,
+        mode: str,
+        stop_after_page: Callable[[list[dict[str, Any]]], bool] | None = None,
+    ) -> dict[str, Any]:
         products: list[dict[str, Any]] = []
         seen: set[str] = set()
         seen_page_signatures: set[tuple[str, ...]] = set()
@@ -275,13 +294,40 @@ class KaspiProductSearch:
         duplicates = 0
         started_total = time.perf_counter()
         request_id = self._request_id()
+        boundary_confirmations = 0
 
-        max_pages = min(220, max(1, math.ceil(limit / ASSUMED_PAGE_SIZE) + 16))
-        pages_attempted = 0
+        def retry_unconfirmed_boundary(reason: str, request_row: dict[str, Any]) -> bool:
+            """Confirm a possible result-set boundary with a fresh request id."""
+
+            nonlocal boundary_confirmations, request_id
+            boundary_confirmations += 1
+            request_row["boundary_reason"] = reason
+            request_row["boundary_confirmation"] = boundary_confirmations
+            if boundary_confirmations >= END_BOUNDARY_CONFIRMATIONS:
+                return False
+            request_id = self._request_id()
+            if self.page_delay_ms:
+                time.sleep(self.page_delay_ms / 1000)
+            return True
+
+        # Ordinary discovery retains its configured card budget. Popular
+        # discovery passes limit=None and relies on the real Kaspi end markers
+        # (empty/repeated/no-new/HTTP 400) so searches with 10k+ cards are not
+        # truncated by an arbitrary local page ceiling.
+        max_pages = (
+            max(1, math.ceil(limit / ASSUMED_PAGE_SIZE) + 16)
+            if limit is not None
+            else None
+        )
         successful_pages = 0
-        stop_reason = "limit_reached"
+        stop_reason = "limit_reached" if limit is not None else "unknown"
 
-        while len(products) < limit and pages_attempted < max_pages:
+        while limit is None or len(products) < limit:
+            # Boundary-confirmation retries reuse the same logical page and do
+            # not consume the ordinary discovery page budget.
+            if max_pages is not None and current - page >= max_pages:
+                stop_reason = "page_safety_limit"
+                break
             started = time.perf_counter()
             response, url, params, rate_limit_retries = self._page_with_rate_limit_retry(
                 text,
@@ -301,7 +347,6 @@ class KaspiProductSearch:
                 "rate_limit_retries": rate_limit_retries,
             }
             requests.append(request_row)
-            pages_attempted += 1
 
             if response.status_code == 429:
                 raise RuntimeError(
@@ -311,8 +356,14 @@ class KaspiProductSearch:
             if response.status_code == 400:
                 request_row["response_preview"] = response.text[:500]
                 # Once /results has already returned valid pages, a 400 on the
-                # next page is treated as the end boundary of this result set.
+                # next page is an end-boundary candidate. Confirm it because a
+                # long scan can outlive the requestId accepted by Kaspi.
                 if successful_pages > 0:
+                    if retry_unconfirmed_boundary(
+                        "results_http_400_after_success",
+                        request_row,
+                    ):
+                        continue
                     stop_reason = "results_http_400_after_success"
                     break
                 raise httpx.HTTPStatusError(
@@ -327,10 +378,13 @@ class KaspiProductSearch:
             if not first_meta and meta:
                 first_meta = meta
             if not cards:
+                if retry_unconfirmed_boundary("empty_page", request_row):
+                    continue
                 stop_reason = "empty_page"
                 break
 
             page_skus: list[str] = []
+            page_products: list[dict[str, Any]] = []
             page_new = 0
             for card in cards:
                 normalized = normalize_card(card, self.city_id)
@@ -343,25 +397,31 @@ class KaspiProductSearch:
                     continue
                 seen.add(master_sku)
                 products.append(normalized)
+                page_products.append(normalized)
                 page_new += 1
-                if len(products) >= limit:
+                if limit is not None and len(products) >= limit:
                     break
 
             signature = tuple(page_skus)
             if signature and signature in seen_page_signatures:
+                if retry_unconfirmed_boundary("repeated_page", request_row):
+                    continue
                 stop_reason = "repeated_page"
                 break
             if signature:
                 seen_page_signatures.add(signature)
             if page_new == 0:
+                if retry_unconfirmed_boundary("no_new_cards", request_row):
+                    continue
                 stop_reason = "no_new_cards"
                 break
+            boundary_confirmations = 0
+            if stop_after_page is not None and stop_after_page(page_products):
+                stop_reason = "target_reached"
+                break
             current += 1
-            if self.page_delay_ms and len(products) < limit:
+            if self.page_delay_ms and (limit is None or len(products) < limit):
                 time.sleep(self.page_delay_ms / 1000)
-        else:
-            if pages_attempted >= max_pages and len(products) < limit:
-                stop_reason = "page_safety_limit"
 
         # Deep transport is known-good in relevance order from Network HAR.
         # Other UI sorts are applied locally after collecting cards.
@@ -381,6 +441,7 @@ class KaspiProductSearch:
                 reverse=True,
             )
 
+        result_products = products if limit is None else products[:limit]
         return {
             "query": text,
             "mode": mode,
@@ -390,12 +451,12 @@ class KaspiProductSearch:
             "transport_sort": "relevance",
             "total": first_meta.get("total"),
             "category_title": first_meta.get("title"),
-            "products": products[:limit],
+            "products": result_products,
             "http": requests,
             "stats": {
                 "requested_limit": limit,
                 "available_matches": _as_int(first_meta.get("total")),
-                "unique_cards": len(products[:limit]),
+                "unique_cards": len(result_products),
                 "duplicates_skipped": duplicates,
                 "pages_requested": len(requests),
                 "successful_pages": successful_pages,
@@ -433,6 +494,50 @@ class KaspiProductSearch:
         result["sort_fallback_reason"] = (
             "Kaspi deep pagination uses relevance in the captured Network flow; "
             "requested sort is applied locally after HTTP collection."
+            if sort != "relevance" else None
+        )
+        return result
+
+    def search_until(
+        self,
+        text: str,
+        *,
+        stop_after_page: Callable[[list[dict[str, Any]]], bool],
+        page: int = 0,
+        sort: str = "rating",
+        mode: str = "text",
+    ) -> dict[str, Any]:
+        """Scan every Kaspi page until the consumer reaches its target.
+
+        Unlike ``search(limit=...)``, this path has no local card/page budget.
+        Repeated pages, an empty page, no new SKUs, or Kaspi's post-success HTTP
+        400 become normal exhaustion boundaries only after three confirmations
+        with fresh request IDs.
+        """
+
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("Введи название, бренд или поисковую фразу")
+        if not callable(stop_after_page):
+            raise ValueError("Для полного поиска нужен обработчик страницы")
+        sort = sort if sort in VALID_SORTS else "rating"
+        mode = mode if mode in VALID_MODES else "text"
+        page = max(0, int(page))
+
+        result = self._scan_once(
+            text,
+            page=page,
+            sort=sort,
+            limit=None,
+            mode=mode,
+            stop_after_page=stop_after_page,
+        )
+        result["requested_sort"] = sort
+        result["effective_sort"] = sort
+        result["sort_fallback"] = sort != "relevance"
+        result["sort_fallback_reason"] = (
+            "Kaspi deep pagination uses relevance in the captured Network flow; "
+            "the strict popular-product filters are applied page by page."
             if sort != "relevance" else None
         )
         return result

@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.26.14"
-EXPECTED_DEPLOYMENT_MARKER = "ozon-canonical-http-session-search"
+EXPECTED_APP_VERSION = "0.26.15"
+EXPECTED_DEPLOYMENT_MARKER = "popular-discovery-exhaustive-fill"
 
 
 def test_application_metadata_contract() -> None:

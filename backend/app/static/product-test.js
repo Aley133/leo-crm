@@ -304,8 +304,21 @@ const popularCompletionLabel = (result) => ({
   kaspi_results_exhausted: "результаты Kaspi закончились",
   scan_budget_exhausted: "исчерпан бюджет проверки",
   page_safety_limit: "достигнут безопасный предел страниц",
+  persistence_shortfall: "часть кандидатов изменилась до сохранения",
   unknown: "Kaspi завершил выдачу",
 }[result?.completion_reason] || result?.completion_reason || "Kaspi завершил выдачу");
+
+const popularShortfallLabel = (result) => {
+  const shortfall = Number(result?.result_shortfall || 0);
+  if (shortfall <= 0) return "";
+  if (result?.completion_reason === "kaspi_results_exhausted") {
+    return `, не хватило ${shortfall} товаров после проверки всей доступной выдачи Kaspi. Строгие фильтры не ослаблялись.`;
+  }
+  if (result?.completion_reason === "persistence_shortfall") {
+    return `, не хватило ${shortfall} товаров: часть карточек изменилась до сохранения. Запустите поиск повторно.`;
+  }
+  return `, не хватило ${shortfall} товаров: поиск остановился до подтверждённого конца выдачи.`;
+};
 
 const renderJobs = (jobs) => {
   const list = document.querySelector("#jobs");
@@ -318,7 +331,7 @@ const renderJobs = (jobs) => {
   const popularSummary = lastSearch?.job_type === "discover_popular" || lastSearch?.result?.mode === "popular";
   const searchIdentity = !lastSearch ? "" : `Задание #${Number(lastSearch.id)} · запрос «${escapeHtml(lastSearch.reference || "—")}» · завершено ${dateTime(lastSearch.completed_at || lastSearch.updated_at)}`;
   const summary = !lastSearch ? "" : popularSummary
-    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · ${searchIdentity}. Фильтры: от ${money(lastSearch.result.minimum_price_kzt || 0)}, от ${Number(lastSearch.result.minimum_reviews || 0).toLocaleString("ru-RU")} отзывов, до ${Number(lastSearch.result.maximum_sellers || 0).toLocaleString("ru-RU")} продавцов. Запрошено до ${Number(lastSearch.result.requested_results || 0)}, найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено карточек Kaspi ${Number(lastSearch.result.scanned || 0)} на ${Number(lastSearch.result.search_pages_requested || 0)} стр., точно проверено карточек по продавцам ${Number(lastSearch.result.seller_counts_checked || 0)}. Отсеяно: уже есть у нас ${Number(lastSearch.result.excluded_existing_crm || 0)}, ниже минимальной цены ${Number(lastSearch.result.excluded_below_min_price || 0)}, мало отзывов ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, много продавцов ${Number(lastSearch.result.excluded_too_many_sellers || 0)}, продавцы не определены ${Number(lastSearch.result.excluded_unknown_sellers || 0)}. Результат: ${escapeHtml(popularCompletionLabel(lastSearch.result))}${Number(lastSearch.result.result_shortfall || 0) > 0 ? `, не хватило ${Number(lastSearch.result.result_shortfall)} товаров. Заданное количество — верхняя цель; фильтры цены, отзывов и продавцов не ослабляются.` : ""}</div>`
+    ? `<div class="job success"><strong>Отбор ходовых товаров завершён</strong> · ${searchIdentity}. Фильтры: от ${money(lastSearch.result.minimum_price_kzt || 0)}, от ${Number(lastSearch.result.minimum_reviews || 0).toLocaleString("ru-RU")} отзывов, до ${Number(lastSearch.result.maximum_sellers || 0).toLocaleString("ru-RU")} продавцов. Цель ${Number(lastSearch.result.requested_results || 0)}, найдено ${Number(lastSearch.result.persisted_count || 0)}, проверено карточек Kaspi ${Number(lastSearch.result.scanned || 0)} на ${Number(lastSearch.result.search_pages_requested || 0)} стр., точно проверено карточек по продавцам ${Number(lastSearch.result.seller_counts_checked || 0)}. Отсеяно: уже есть у нас ${Number(lastSearch.result.excluded_existing_crm || 0)}, неполные карточки ${Number(lastSearch.result.excluded_incomplete_cards || 0)}, ниже минимальной цены ${Number(lastSearch.result.excluded_below_min_price || 0)}, мало отзывов ${Number(lastSearch.result.excluded_below_min_reviews || 0)}, много продавцов ${Number(lastSearch.result.excluded_too_many_sellers || 0)}, продавцы не определены ${Number(lastSearch.result.excluded_unknown_sellers || 0)}. Результат: ${escapeHtml(popularCompletionLabel(lastSearch.result))}${escapeHtml(popularShortfallLabel(lastSearch.result))}</div>`
     : `<div class="job success"><strong>Последний поиск завершён</strong> · проверено ${Number(lastSearch.result.matched_products_checked || 0)}, точных пар ${Number(lastSearch.result.confirmed_pairs || 0)}, на ручную проверку ${Number(lastSearch.result.manual_review_pairs || 0)}</div>`;
   list.innerHTML = summary + active.map((job) => `<div class="job ${job.status === "failed" ? "failed" : "pending"}"><strong>${escapeHtml(labels[job.job_type] || job.job_type)}</strong> · ${job.status === "leased" ? "Product Test Agent выполняет" : job.status === "queued" ? "ожидает Product Test Agent" : escapeHtml(job.error_message || "ошибка")}</div>`).join("");
   if (pending.length) scheduleRefresh(3000);
@@ -369,7 +382,7 @@ const syncDiscoveryModeControls = () => {
   const hint = document.querySelector("#discover-mode-hint");
   const button = document.querySelector("#discover-button");
   if (hint) hint.textContent = mode === "popular"
-    ? "Без автоматического Ozon-сопоставления: только Kaspi-карточки с нужным спросом и числом продавцов. Ссылку Ozon вы вставите вручную."
+    ? "Без автоматического Ozon-сопоставления: Agent листает Kaspi до набора заданного количества или до реального конца выдачи. Ссылку Ozon вы вставите вручную."
     : "Agent автоматически найдёт и проверит точные пары Kaspi ↔ Ozon.";
   if (button && !button.disabled) button.textContent = mode === "popular" ? "Найти ходовые товары" : "Найти товары";
   if (button) button.dataset.label = mode === "popular" ? "Найти ходовые товары" : "Найти товары";
@@ -452,7 +465,7 @@ document.querySelector("#discover-form")?.addEventListener("submit", async (even
     await load();
     const jobId = Number(queued?.job?.id || 0);
     notify(
-      `${jobId ? `Задание #${jobId}` : "Новое задание"} принято: запрошено до ${body.target_new} товаров. ${mode === "popular" ? `Фильтры применяются строго: цена от ${money(body.minimum_price_kzt)}, отзывы от ${body.minimum_reviews}, продавцов до ${body.maximum_sellers}.` : "Кандидаты появятся автоматически."}`,
+      `${jobId ? `Задание #${jobId}` : "Новое задание"} принято: цель ${body.target_new} товаров. ${mode === "popular" ? `Поиск продолжится до набора цели или конца выдачи Kaspi. Фильтры применяются строго: цена от ${money(body.minimum_price_kzt)}, отзывы от ${body.minimum_reviews}, продавцов до ${body.maximum_sellers}.` : "Кандидаты появятся автоматически."}`,
       "success",
     );
   }
