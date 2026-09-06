@@ -461,116 +461,172 @@ def discover_popular_products(
 ) -> dict[str, Any]:
     """Find proven Kaspi demand without attempting any automatic Ozon match."""
 
+    # Kept in the public signature for compatibility with already queued jobs.
+    # Popular discovery no longer treats this legacy value as a stop budget.
+    del max_kaspi_scan
     requested = max(1, int(target_new))
     minimum_reviews = max(0, int(minimum_reviews))
     minimum_price_kzt = max(0, int(minimum_price_kzt))
     maximum_sellers = max(1, int(maximum_sellers))
     existing = {str(value) for value in (existing_kaspi_ids or set())}
-    search = KaspiProductSearch(city_id)
-    try:
-        kaspi = search.search(query, sort="rating", limit=max_kaspi_scan, mode="text")
-    finally:
-        search.close()
-
-    scanned = list(kaspi.get("products") or [])
-    crm_new = [row for row in scanned if str(row.get("master_sku")) not in existing]
-    price_eligible = [
-        row
-        for row in crm_new
-        if minimum_price_kzt <= 0
-        or (
-            _count(row.get("price_kzt")) is not None
-            and (_count(row.get("price_kzt")) or 0) >= minimum_price_kzt
-        )
-    ]
-    reviewed = [
-        row for row in price_eligible
-        if (_count(row.get("reviews")) or 0) >= minimum_reviews
-    ]
-    reviewed.sort(
-        key=lambda row: (
-            -(_count(row.get("reviews")) or 0),
-            -_rating(row.get("rating")),
-            _count(row.get("seller_count")) or 10**9,
-            str(row.get("title") or "").casefold(),
-        )
-    )
-    merchant_results = (
-        merchant_catalog.check_many(
-            [str(row.get("master_sku") or "") for row in reviewed],
-            workers=6,
-        )
-        if merchant_catalog is not None and reviewed
-        else {}
-    )
-    eligible = [
-        row
-        for row in reviewed
-        if not merchant_results.get(str(row.get("master_sku") or ""), {}).get("exists")
-        and not merchant_results.get(str(row.get("master_sku") or ""), {}).get("error")
-    ]
-
     resolver = seller_count_resolver or _resolve_kaspi_seller_count
     rows: list[dict[str, Any]] = []
     lookup_errors: list[dict[str, str]] = []
+    scanned_count = 0
+    excluded_existing_crm = 0
+    excluded_incomplete_cards = 0
+    excluded_below_min_price = 0
+    excluded_below_min_reviews = 0
+    excluded_existing_merchant = 0
+    merchant_membership_errors = 0
+    review_filter_passed = 0
+    eligible_new = 0
     sellers_checked = 0
     excluded_too_many_sellers = 0
     excluded_unknown_sellers = 0
-    for product in eligible:
-        sellers_checked += 1
-        try:
-            seller_count, seller_details = resolver(
-                product,
-                city_id,
-                zone_id,
-                maximum_sellers,
-            )
-        except Exception as exc:
-            seller_count = None
-            seller_details = {"seller_count_source": "error"}
-            lookup_errors.append({
-                "kaspi_product_id": str(product.get("master_sku") or ""),
-                "error": f"{type(exc).__name__}: {exc}"[:500],
-            })
-        if seller_count is None:
-            excluded_unknown_sellers += 1
-            continue
-        if seller_count > maximum_sellers:
-            excluded_too_many_sellers += 1
-            continue
+    next_progress_at = 250
 
-        kaspi_details = {
-            **product,
-            "seller_count": seller_count,
-            **seller_details,
-        }
-        rows.append({
-            "kaspi_product_id": str(product.get("master_sku") or ""),
-            "merchant_sku": str(product.get("master_sku") or ""),
-            "product_name": product.get("title"),
-            "brand": product.get("brand"),
-            "image_url": product.get("image_url"),
-            "product_url": product.get("kaspi_url"),
-            "page_visible_price_kzt": product.get("price_kzt"),
-            "supplier_url": None,
-            "supplier_price_kzt": None,
-            "match_status": "NO_RESULT",
-            "match_score": None,
-            "offers": {
-                "kaspi": kaspi_details,
-                "discovery": {
-                    "mode": "popular",
-                    "minimum_reviews": minimum_reviews,
-                    "minimum_price_kzt": minimum_price_kzt,
-                    "maximum_sellers": maximum_sellers,
-                    "reviews": _count(product.get("reviews")) or 0,
-                    "rating": _rating(product.get("rating")),
-                    "seller_count": seller_count,
+    def process_page(page_products: list[dict[str, Any]]) -> bool:
+        nonlocal scanned_count
+        nonlocal excluded_existing_crm, excluded_incomplete_cards
+        nonlocal excluded_below_min_price, excluded_below_min_reviews
+        nonlocal excluded_existing_merchant, merchant_membership_errors
+        nonlocal review_filter_passed, eligible_new, sellers_checked
+        nonlocal excluded_too_many_sellers, excluded_unknown_sellers
+        nonlocal next_progress_at
+
+        scanned_count += len(page_products)
+        reviewed: list[dict[str, Any]] = []
+        for product in page_products:
+            product_id = str(product.get("master_sku") or "")
+            if product_id in existing:
+                excluded_existing_crm += 1
+                continue
+            if (
+                not str(product.get("title") or "").strip()
+                or not str(product.get("kaspi_url") or "").strip()
+            ):
+                excluded_incomplete_cards += 1
+                continue
+            price = _count(product.get("price_kzt"))
+            if minimum_price_kzt > 0 and (price is None or price < minimum_price_kzt):
+                excluded_below_min_price += 1
+                continue
+            if (_count(product.get("reviews")) or 0) < minimum_reviews:
+                excluded_below_min_reviews += 1
+                continue
+            reviewed.append(product)
+
+        review_filter_passed += len(reviewed)
+        reviewed.sort(
+            key=lambda product: (
+                -(_count(product.get("reviews")) or 0),
+                -_rating(product.get("rating")),
+                _count(product.get("seller_count")) or 10**9,
+                str(product.get("title") or "").casefold(),
+            )
+        )
+        merchant_results = (
+            merchant_catalog.check_many(
+                [str(product.get("master_sku") or "") for product in reviewed],
+                workers=6,
+            )
+            if merchant_catalog is not None and reviewed
+            else {}
+        )
+
+        for product in reviewed:
+            product_id = str(product.get("master_sku") or "")
+            merchant_state = merchant_results.get(product_id, {})
+            if merchant_state.get("exists"):
+                excluded_existing_merchant += 1
+                continue
+            if merchant_state.get("error"):
+                merchant_membership_errors += 1
+                continue
+
+            eligible_new += 1
+            seller_count_hint = _count(product.get("seller_count"))
+            # The storefront counter is not reliable enough for admission, but
+            # a value already above the maximum is safe for early rejection:
+            # whether it means all or additional offers, the limit is exceeded.
+            if seller_count_hint is not None and seller_count_hint > maximum_sellers:
+                excluded_too_many_sellers += 1
+                continue
+            sellers_checked += 1
+            try:
+                seller_count, seller_details = resolver(
+                    product,
+                    city_id,
+                    zone_id,
+                    maximum_sellers,
+                )
+            except Exception as exc:
+                seller_count = None
+                seller_details = {"seller_count_source": "error"}
+                lookup_errors.append({
+                    "kaspi_product_id": product_id,
+                    "error": f"{type(exc).__name__}: {exc}"[:500],
+                })
+            if seller_count is None:
+                excluded_unknown_sellers += 1
+                continue
+            if seller_count > maximum_sellers:
+                excluded_too_many_sellers += 1
+                continue
+
+            kaspi_details = {
+                **product,
+                "seller_count": seller_count,
+                **seller_details,
+            }
+            rows.append({
+                "kaspi_product_id": product_id,
+                "merchant_sku": product_id,
+                "product_name": product.get("title"),
+                "brand": product.get("brand"),
+                "image_url": product.get("image_url"),
+                "product_url": product.get("kaspi_url"),
+                "page_visible_price_kzt": product.get("price_kzt"),
+                "supplier_url": None,
+                "supplier_price_kzt": None,
+                "match_status": "NO_RESULT",
+                "match_score": None,
+                "offers": {
+                    "kaspi": kaspi_details,
+                    "discovery": {
+                        "mode": "popular",
+                        "minimum_reviews": minimum_reviews,
+                        "minimum_price_kzt": minimum_price_kzt,
+                        "maximum_sellers": maximum_sellers,
+                        "reviews": _count(product.get("reviews")) or 0,
+                        "rating": _rating(product.get("rating")),
+                        "seller_count": seller_count,
+                    },
                 },
-            },
-        })
-        if len(rows) >= requested:
-            break
+            })
+            if len(rows) >= requested:
+                break
+
+        if scanned_count >= next_progress_at:
+            print(
+                f"Kaspi popular scan: checked={scanned_count}, "
+                f"selected={len(rows)}/{requested}",
+                flush=True,
+            )
+            next_progress_at = ((scanned_count // 250) + 1) * 250
+        return len(rows) >= requested
+
+    search = KaspiProductSearch(city_id)
+    try:
+        kaspi = search.search_until(
+            query,
+            sort="rating",
+            mode="text",
+            stop_after_page=process_page,
+        )
+    finally:
+        search.close()
 
     search_stats = kaspi.get("stats") if isinstance(kaspi.get("stats"), dict) else {}
     target_reached = len(rows) >= requested
@@ -584,8 +640,6 @@ def discover_popular_products(
         "results_http_400_after_success",
     }:
         completion_reason = "kaspi_results_exhausted"
-    elif len(scanned) >= max_kaspi_scan:
-        completion_reason = "scan_budget_exhausted"
     else:
         completion_reason = search_stop_reason
 
@@ -597,24 +651,22 @@ def discover_popular_products(
         "found_results": len(rows),
         "result_shortfall": max(0, requested - len(rows)),
         "target_reached": target_reached,
-        "scan_budget": max_kaspi_scan,
-        "scanned": len(scanned),
+        "scan_budget": None,
+        "scan_mode": "until_target_or_kaspi_exhausted",
+        "scanned": scanned_count,
         "available_matches": search_stats.get("available_matches"),
         "search_pages_requested": search_stats.get("pages_requested"),
         "search_pages_succeeded": search_stats.get("successful_pages"),
         "search_stop_reason": search_stop_reason,
         "completion_reason": completion_reason,
-        "excluded_existing_crm": len(scanned) - len(crm_new),
-        "excluded_below_min_price": len(crm_new) - len(price_eligible),
-        "excluded_below_min_reviews": len(price_eligible) - len(reviewed),
-        "excluded_existing_merchant": sum(
-            bool(value.get("exists")) for value in merchant_results.values()
-        ),
-        "merchant_membership_errors": sum(
-            bool(value.get("error")) for value in merchant_results.values()
-        ),
-        "eligible_new": len(eligible),
-        "review_filter_passed": len(reviewed),
+        "excluded_existing_crm": excluded_existing_crm,
+        "excluded_incomplete_cards": excluded_incomplete_cards,
+        "excluded_below_min_price": excluded_below_min_price,
+        "excluded_below_min_reviews": excluded_below_min_reviews,
+        "excluded_existing_merchant": excluded_existing_merchant,
+        "merchant_membership_errors": merchant_membership_errors,
+        "eligible_new": eligible_new,
+        "review_filter_passed": review_filter_passed,
         "minimum_reviews": minimum_reviews,
         "minimum_price_kzt": minimum_price_kzt,
         "maximum_sellers": maximum_sellers,
