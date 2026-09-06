@@ -79,8 +79,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.16"
-DEPLOYMENT_MARKER = "shared-inventory-detach-relink"
+APP_VERSION = "0.26.17"
+DEPLOYMENT_MARKER = "product-test-lease-bandwidth"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

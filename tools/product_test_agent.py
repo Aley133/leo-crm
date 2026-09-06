@@ -5,6 +5,7 @@ import asyncio
 import base64
 import ctypes
 import getpass
+import gzip
 import json
 import os
 import platform
@@ -35,7 +36,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.11"
+VERSION = "1.1.12"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -418,12 +419,16 @@ def _post_json(url: str, token: str, payload: dict) -> dict:
         headers={
             "Authorization": f"Bearer {token}",
             "Content-Type": "application/json",
+            "Accept-Encoding": "gzip",
         },
         method="POST",
     )
     try:
         with urlopen(request, timeout=CRM_HTTP_TIMEOUT_SECONDS) as response:
-            body = response.read().decode("utf-8")
+            raw = response.read()
+            if response.headers.get("Content-Encoding", "").lower() == "gzip":
+                raw = gzip.decompress(raw)
+            body = raw.decode("utf-8")
             return json.loads(body) if body else {}
     except HTTPError as exc:
         body = exc.read().decode("utf-8", errors="replace")
@@ -721,12 +726,29 @@ async def _process_job(
     merchant_session: KaspiMerchantSession,
     store_id: str,
     kaspi_api_token_provider=None,
+    identity: dict | None = None,
 ) -> None:
     job_id = int(job["id"])
     _log(
         f"Задание #{job_id}: {job.get('job_type') or 'inspect'}",
         workspace_id=workspace_id,
     )
+    async def renew_lease() -> None:
+        while True:
+            await asyncio.sleep(HEARTBEAT_SECONDS)
+            try:
+                await _post_json_with_retry(
+                    f"{api_url}/api/product-test-agent/heartbeat",
+                    token,
+                    {**(identity or {}), "agent_id": agent_id, "workspace_id": workspace_id,
+                     "agent_kind": AGENT_KIND, "job_id": job_id,
+                     "lease_token": job["lease_token"], "version": VERSION},
+                    operation=f"Продление задания #{job_id}",
+                )
+            except Exception as exc:
+                _log(f"Продление задания #{job_id}: {exc}", workspace_id=workspace_id)
+
+    lease_task = asyncio.create_task(renew_lease())
     try:
         result = await _run_job_with_retry(
             job,
@@ -751,16 +773,26 @@ async def _process_job(
             "error_code": type(exc).__name__,
             "error_message": str(exc)[:4000],
         }
-    completed = await _post_json_with_retry(
-        f"{api_url}/api/product-test-agent/jobs/{job_id}/complete",
-        token,
-        payload,
-        operation=f"Сохранение задания #{job_id}",
-    )
+    except BaseException:
+        lease_task.cancel()
+        await asyncio.gather(lease_task, return_exceptions=True)
+        raise
+    try:
+        completed = await _post_json_with_retry(
+            f"{api_url}/api/product-test-agent/jobs/{job_id}/complete",
+            token,
+            {**payload, "compact_response": True},
+            operation=f"Сохранение задания #{job_id}",
+        )
+    finally:
+        lease_task.cancel()
+        await asyncio.gather(lease_task, return_exceptions=True)
     _log(
         f"Задание #{job_id}: {(completed.get('job') or completed).get('status')}",
         workspace_id=workspace_id,
     )
+    if payload.get("error_message"):
+        _log(f"Причина #{job_id}: {payload['error_message']}", workspace_id=workspace_id)
 
 
 def _confirm_and_clear_config(workspace_id: int, reason: str) -> bool:
@@ -903,9 +935,13 @@ async def main(
             "работают отдельно от мониторинга и Быстрого демпинга. Не закрывайте окно.",
         )
 
+    active_job = None
+
     async def heartbeat() -> None:
         while True:
             await asyncio.sleep(HEARTBEAT_SECONDS)
+            if active_job is not None:
+                continue  # The job's renewal also updates agent presence.
             try:
                 await _post_json_with_retry(
                     f"{api_url}/api/product-test-agent/heartbeat",
@@ -917,6 +953,7 @@ async def main(
                 _log(f"Heartbeat: {exc}", workspace_id=selected_workspace)
 
     async def worker() -> int:
+        nonlocal active_job
         while True:
             try:
                 claim = await _post_json_with_retry(
@@ -927,10 +964,12 @@ async def main(
                 )
                 job = claim.get("job")
                 if job:
+                    active_job = job
                     await _process_job(
                         api_url=api_url,
                         token=token,
                         job=job,
+                        identity=identity,
                         agent_id=agent_id,
                         workspace_id=selected_workspace,
                         merchant_session=merchant_session,
@@ -940,6 +979,7 @@ async def main(
                             selected_workspace,
                         ),
                     )
+                    active_job = None
                     if once:
                         return 0
                     continue
@@ -951,6 +991,7 @@ async def main(
             except AgentReconfigureRequired:
                 raise
             except Exception as exc:
+                active_job = None
                 _log(f"Worker: {exc}", workspace_id=selected_workspace)
                 if once:
                     return 1

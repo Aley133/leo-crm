@@ -431,10 +431,15 @@ const render = (payload) => {
 };
 
 async function load() {
+  if (document.hidden) return;
   if (!localStorage.getItem(storageKey)) { authPanel.classList.remove("hidden"); page.classList.add("hidden"); return; }
-  try { const state = await request("/api/product-test"); authPanel.classList.add("hidden"); page.classList.remove("hidden"); render(state); notify(""); }
+  try { const state = await request("/api/product-test", {cache:"no-cache"}); authPanel.classList.add("hidden"); page.classList.remove("hidden"); render(state); notify(""); }
   catch (error) { notify(error.message, "error"); }
 }
+
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) load();
+});
 
 document.querySelector("#token-form")?.addEventListener("submit", (event) => { event.preventDefault(); localStorage.setItem(storageKey, document.querySelector("#token").value.trim()); load(); });
 document.querySelector("#refresh")?.addEventListener("click", load);
