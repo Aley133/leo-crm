@@ -861,7 +861,7 @@ def test_ozon_match_uses_exact_product_page_when_modal_and_search_price_are_empt
     assert result["best"]["supplier_delivery_days"] == 1
 
 
-def test_manual_ozon_url_uses_only_exact_product_page_price_and_delivery(monkeypatch) -> None:
+def test_manual_ozon_url_uses_exact_product_page_price_and_delivery(monkeypatch) -> None:
     url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
 
     class FakeResolver:
@@ -876,7 +876,7 @@ def test_manual_ozon_url_uses_only_exact_product_page_price_and_delivery(monkeyp
             raise AssertionError(f"manual URL must not inspect other sellers: {product_url}")
 
         def search(self, query: str, page: int = 1) -> dict:
-            raise AssertionError(f"manual URL must not start a search: {query} {page}")
+            raise AssertionError(f"complete product page must not start a search: {query} {page}")
 
         def product_page_price(self, product_url: str, product_id: str) -> dict:
             assert product_url == url
@@ -910,9 +910,115 @@ def test_manual_ozon_url_uses_only_exact_product_page_price_and_delivery(monkeyp
     assert result["supplier_price_source"] == "manual_product_page.webPrice-555555555.finalPrice"
     assert result["supplier_delivery_days"] == 1
     assert result["supplier_delivery_text"] == "Доставим завтра"
+    assert result["supplier_delivery_source"] == "product_page"
     assert result["match_status"] == "OPERATOR_CONFIRMED"
     assert result["manual_override"] is True
     assert result["validated"] is True
+
+
+def test_manual_ozon_url_backfills_media_and_delivery_from_same_search_card(monkeypatch) -> None:
+    url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def product_page_price(self, product_url: str, product_id: str) -> dict:
+            assert product_url == url
+            assert product_id == "555555555"
+            return {
+                "ok": True,
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice-555555555.finalPrice",
+                "delivery_days": None,
+                "card": {},
+            }
+
+        def search(self, query: str, page: int = 1) -> dict:
+            assert query == "555555555"
+            assert page == 1
+            return {
+                "attempt": {"status_code": 200, "blocked": False},
+                "items": [{
+                    "sku": "555555555",
+                    "ozon_url": url,
+                    "title": "Solgar Magnesium",
+                    "image_url": "https://ir.ozone.ru/s3/multimedia/manual.jpg",
+                    "image_urls": ["https://ir.ozone.ru/s3/multimedia/manual.jpg"],
+                    "rating": 4.9,
+                    "reviews": 120,
+                    "delivery_text": "Доставим завтра",
+                    "delivery_date": "2026-09-07",
+                    "delivery_days": 1,
+                }],
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+
+    result = product_discovery_runtime.validate_supplier_url(url)
+
+    assert result["supplier_price_kzt"] == 2250
+    assert result["supplier_price_source"] == "manual_product_page.webPrice-555555555.finalPrice"
+    assert result["supplier_delivery_days"] == 1
+    assert result["supplier_delivery_source"] == "exact_search_card"
+    assert result["supplier_product_title"] == "Solgar Magnesium"
+    assert result["supplier_image_url"] == "https://ir.ozone.ru/s3/multimedia/manual.jpg"
+    assert result["search_attempts"] == [{
+        "query": "555555555",
+        "http_status": 200,
+        "blocked": False,
+        "items": 1,
+    }]
+
+
+def test_manual_ozon_url_never_backfills_from_a_different_search_card(monkeypatch) -> None:
+    url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def product_page_price(self, product_url: str, product_id: str) -> dict:
+            return {
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice-555555555.finalPrice",
+                "delivery_days": None,
+                "card": {},
+            }
+
+        def search(self, query: str, page: int = 1) -> dict:
+            return {
+                "attempt": {"status_code": 200, "blocked": False},
+                "items": [{
+                    "sku": "999999999",
+                    "ozon_url": "https://www.ozon.kz/product/other-999999999/",
+                    "image_url": "https://ir.ozone.ru/wrong.jpg",
+                    "delivery_days": 1,
+                }],
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+
+    with pytest.raises(RuntimeError, match="подтверждённая доставка"):
+        product_discovery_runtime.validate_supplier_url(url)
 
 
 def test_manual_ozon_url_rejects_implausible_delivery_instead_of_saving_365_days(monkeypatch) -> None:
@@ -938,6 +1044,12 @@ def test_manual_ozon_url_rejects_implausible_delivery_instead_of_saving_365_days
                 "delivery_date": "2027-08-28",
                 "delivery_days": 360,
                 "card": {},
+            }
+
+        def search(self, query: str, page: int = 1) -> dict:
+            return {
+                "attempt": {"status_code": 200, "blocked": False},
+                "items": [],
             }
 
         def close(self):

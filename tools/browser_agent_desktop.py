@@ -18,7 +18,7 @@ from tools.ozon_http import OzonSessionResolver
 run_browser_agent = browser_agent_module.main
 
 API_URL = "https://leo-crm-api.onrender.com"
-APP_VERSION = "0.3.5"
+APP_VERSION = "0.3.6"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
 TOKEN_FILE = APP_DIR / "agent-token.dat"
 LOG_FILE = APP_DIR / "agent.log"
@@ -127,25 +127,40 @@ def _ensure_ozon_session(*, force_replace: bool = False) -> None:
             return
         except Exception:
             pass
-    root = Tk()
-    root.withdraw()
     reason = (
         "Ozon заблокировал текущую HTTP-сессию. "
         if force_replace
         else "Ozon HTTP-сессия не найдена или больше не действует. "
     )
-    curl_text = simpledialog.askstring(
-        "LEO HTTP Agent",
-        reason
-        + "Откройте выдачу Ozon без CAPTCHA и вставьте Copy as cURL (bash) "
-        "GET Network-запроса с /search/. Cookies останутся зашифрованы "
-        "на этом компьютере:",
-        parent=root,
-    )
-    root.destroy()
-    if not curl_text or not curl_text.strip():
-        raise RuntimeError("Ozon HTTP session не настроена")
-    resolver.import_curl(curl_text.strip(), validate=True)
+    root = Tk()
+    root.withdraw()
+    try:
+        while True:
+            curl_text = simpledialog.askstring(
+                "LEO HTTP Agent",
+                reason
+                + "Откройте выдачу Ozon без CAPTCHA и вставьте Copy as cURL (bash) "
+                "GET Network-запроса с /search/. Cookies останутся зашифрованы "
+                "на этом компьютере:",
+                parent=root,
+            )
+            if not curl_text or not curl_text.strip():
+                raise RuntimeError("Ozon HTTP session не настроена")
+            try:
+                resolver.import_curl(curl_text.strip(), validate=True)
+            except Exception as exc:
+                print(f"Ozon HTTP session rejected: {type(exc).__name__}")
+                messagebox.showerror(
+                    "LEO HTTP Agent",
+                    "HTTP-сеанс Ozon не принят. Проверьте, что скопирован именно "
+                    "GET-запрос /search/ со страницы без CAPTCHA, и вставьте его ещё раз.",
+                    parent=root,
+                )
+                reason = "Предыдущий HTTP-сеанс не принят. "
+                continue
+            return
+    finally:
+        root.destroy()
 
 
 def _acquire_single_instance() -> None:

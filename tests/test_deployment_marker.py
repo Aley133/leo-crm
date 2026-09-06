@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.26.12"
-EXPECTED_DEPLOYMENT_MARKER = "product-test-ozon-sale-block-delivery"
+EXPECTED_APP_VERSION = "0.26.13"
+EXPECTED_DEPLOYMENT_MARKER = "ozon-exact-card-price-alert-thresholds"
 
 
 def test_application_metadata_contract() -> None:
@@ -23,3 +23,5 @@ def test_health_exposes_dumping_scheduler_state() -> None:
     assert "recovery_jobs" in payload["dumping_scheduler"]
     assert "data_retention" in payload
     assert "status" in payload["data_retention"]
+    assert "telegram_price_alerts" in payload
+    assert "configured" in payload["telegram_price_alerts"]

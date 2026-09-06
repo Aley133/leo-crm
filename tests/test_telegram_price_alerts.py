@@ -13,9 +13,12 @@ from backend.app.db import Base
 from backend.app.models import OutboxEvent, Product
 from backend.app.price_drop_alerts import PRICE_DROP_EVENT_TYPE
 from backend.app.telegram_price_alerts import (
+    PRICE_ALERT_RUNTIME_STATUS,
     TelegramDeliveryError,
     TelegramPriceAlertSettings,
     format_price_drop_message,
+    price_alert_publisher_loop,
+    price_alert_runtime_status,
     publish_pending_price_alerts,
     send_price_drop_message,
 )
@@ -23,12 +26,13 @@ from backend.app.telegram_price_alerts import (
 
 def _payload() -> dict[str, object]:
     return {
-        "version": 1,
+        "version": 2,
         "supplier_product_id": 7,
         "observation_id": 42,
         "baseline_price": "3050.00",
         "current_price": "1000.00",
         "drop_percent": "67.2",
+        "threshold_percent": 50,
         "currency": "KZT",
         "baseline_sample_size": 6,
         "observed_at": datetime(2026, 7, 29, 10, 6, tzinfo=UTC).isoformat(),
@@ -51,6 +55,7 @@ def test_message_is_actionable_and_html_safe() -> None:
     assert "Обычная цена: <s>3 050 ₸</s>" in message
     assert "Сейчас: <b>1 000 ₸</b>" in message
     assert "−67.2%" in message
+    assert "Порог сигнала: 50%" in message
     assert "даже без текущего заказа" in message
     assert "Берберин &lt;500 мг&gt;" in message
     assert "from=crm&amp;price=low" in message
@@ -69,6 +74,40 @@ def test_environment_requires_both_telegram_values(monkeypatch) -> None:
     assert settings is not None
     assert settings.bot_token == "secret"
     assert settings.chat_id == "-100123"
+
+
+def test_publisher_reports_missing_configuration_instead_of_stopping_silently(
+    monkeypatch,
+) -> None:
+    monkeypatch.delenv("TELEGRAM_BOT_TOKEN", raising=False)
+    monkeypatch.delenv("TELEGRAM_CHAT_ID", raising=False)
+    PRICE_ALERT_RUNTIME_STATUS.update({
+        "status": "starting",
+        "configured": None,
+        "last_cycle_at": None,
+        "last_success_at": None,
+        "last_error": None,
+        "sent_count": 0,
+        "failed_count": 0,
+    })
+
+    async def run() -> dict[str, object]:
+        stop_event = asyncio.Event()
+        task = asyncio.create_task(price_alert_publisher_loop(stop_event))
+        for _attempt in range(10):
+            await asyncio.sleep(0)
+            if price_alert_runtime_status()["configured"] is False:
+                break
+        snapshot = price_alert_runtime_status()
+        stop_event.set()
+        await task
+        return snapshot
+
+    status = asyncio.run(run())
+    assert status["status"] == "not_configured"
+    assert status["configured"] is False
+    assert status["last_error"] == "telegram_credentials_missing"
+    assert status["last_cycle_at"] is not None
 
 
 def test_telegram_rejection_does_not_expose_the_bot_token() -> None:
@@ -226,6 +265,73 @@ def test_pending_event_is_suppressed_if_product_was_disabled() -> None:
         assert event.published_at is not None
         assert event.publish_attempts == 0
         assert event.last_error == "suppressed: product price alert disabled"
+
+    Base.metadata.drop_all(engine)
+    engine.dispose()
+
+
+def test_pending_event_respects_a_threshold_changed_before_delivery() -> None:
+    engine = create_engine(
+        "sqlite+pysqlite:///:memory:",
+        connect_args={"check_same_thread": False},
+        poolclass=StaticPool,
+    )
+    Base.metadata.create_all(engine)
+    factory = sessionmaker(bind=engine, expire_on_commit=False)
+    event_id = uuid4()
+    payload = _payload()
+    payload["drop_percent"] = "20.0"
+    payload["threshold_percent"] = 10
+    with factory() as session:
+        session.add(
+            Product(
+                id=3,
+                kaspi_product_id="101010101",
+                merchant_sku="BERB-60",
+                name="Берберин 500 мг",
+                sudden_price_alert_enabled=True,
+                sudden_price_alert_threshold_percent=50,
+            )
+        )
+        session.add(
+            OutboxEvent(
+                id=event_id,
+                aggregate_type="supplier_product",
+                aggregate_id="7",
+                event_type=PRICE_DROP_EVENT_TYPE,
+                idempotency_key="supplier-price-drop:7:observation:threshold-changed",
+                payload_json=payload,
+            )
+        )
+        session.commit()
+
+    requests: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        return httpx.Response(200, json={"ok": True})
+
+    settings = TelegramPriceAlertSettings(
+        bot_token="secret",
+        chat_id="-100123",
+        api_base_url="https://telegram.example",
+    )
+
+    async def run() -> tuple[int, int]:
+        async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as client:
+            return await publish_pending_price_alerts(
+                settings=settings,
+                session_factory=factory,
+                client=client,
+            )
+
+    assert asyncio.run(run()) == (0, 0)
+    assert requests == []
+    with factory() as session:
+        event = session.get(OutboxEvent, event_id)
+        assert event is not None
+        assert event.published_at is not None
+        assert event.last_error == "suppressed: product price alert threshold changed"
 
     Base.metadata.drop_all(engine)
     engine.dispose()

@@ -57,6 +57,50 @@ def test_desktop_agent_force_replaces_blocked_http_session(monkeypatch) -> None:
     ]
 
 
+def test_desktop_agent_reprompts_after_invalid_http_session(monkeypatch) -> None:
+    imports: list[str] = []
+    errors: list[str] = []
+    answers = iter(("curl invalid", "curl https://www.ozon.kz/search/?text=Solgar"))
+
+    class Resolver:
+        def resolve(self, *, validate=False):
+            raise RuntimeError("saved session rejected")
+
+        def import_curl(self, value, *, validate=False):
+            imports.append(value)
+            if value == "curl invalid":
+                raise ValueError("invalid cURL")
+
+    class Root:
+        def withdraw(self):
+            return None
+
+        def destroy(self):
+            return None
+
+    monkeypatch.setattr(desktop, "OzonSessionResolver", Resolver)
+    monkeypatch.setattr(desktop, "Tk", Root)
+    monkeypatch.setattr(
+        desktop.simpledialog,
+        "askstring",
+        lambda *args, **kwargs: next(answers),
+    )
+    monkeypatch.setattr(
+        desktop.messagebox,
+        "showerror",
+        lambda _title, message, **_kwargs: errors.append(message),
+    )
+
+    desktop._ensure_ozon_session()
+
+    assert imports == [
+        "curl invalid",
+        "curl https://www.ozon.kz/search/?text=Solgar",
+    ]
+    assert len(errors) == 1
+    assert "вставьте его ещё раз" in errors[0]
+
+
 def test_desktop_agent_has_no_cdp_or_browser_watchdog() -> None:
     source = (ROOT / "tools/browser_agent_desktop.py").read_text(encoding="utf-8")
     assert "CHROME_CDP_ENDPOINT" not in source

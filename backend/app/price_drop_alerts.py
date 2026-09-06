@@ -17,7 +17,8 @@ from .suppliers import ProductBinding, Supplier, SupplierProduct
 
 
 PRICE_DROP_EVENT_TYPE = "supplier.price_drop_detected"
-PRICE_DROP_THRESHOLD = Decimal("0.50")
+ALLOWED_PRICE_DROP_THRESHOLDS = frozenset({10, 20, 50})
+DEFAULT_PRICE_DROP_THRESHOLD_PERCENT = 50
 PRICE_BASELINE_WINDOW = 6
 
 
@@ -99,6 +100,10 @@ def _alert_context(
     supplier_product, supplier, binding, product = row
     return {
         "price_drop_alert_enabled": product.sudden_price_alert_enabled,
+        "price_drop_threshold_percent": (
+            product.sudden_price_alert_threshold_percent
+        ),
+        "workspace_id": product.workspace_id,
         "product_id": product.id,
         "product_name": product.name,
         "merchant_sku": product.merchant_sku,
@@ -133,6 +138,13 @@ def enqueue_price_drop_alert(
     context = _alert_context(session, observation)
     if context is None or not context.pop("price_drop_alert_enabled"):
         return None
+    workspace_id = int(context.pop("workspace_id"))
+    raw_threshold_percent = context.pop("price_drop_threshold_percent")
+    threshold_percent = (
+        int(raw_threshold_percent)
+        if raw_threshold_percent in ALLOWED_PRICE_DROP_THRESHOLDS
+        else DEFAULT_PRICE_DROP_THRESHOLD_PERCENT
+    )
 
     prices = _historical_prices(session, observation=observation)
     if not prices:
@@ -140,7 +152,8 @@ def enqueue_price_drop_alert(
 
     current_price = Decimal(str(observation.price))
     baseline_price = Decimal(str(median(prices)))
-    alert_price_ceiling = baseline_price * (Decimal("1") - PRICE_DROP_THRESHOLD)
+    threshold = Decimal(threshold_percent) / Decimal("100")
+    alert_price_ceiling = baseline_price * (Decimal("1") - threshold)
     if current_price > alert_price_ceiling:
         return None
 
@@ -157,6 +170,7 @@ def enqueue_price_drop_alert(
         * Decimal("100")
     ).quantize(Decimal("0.1"), rounding=ROUND_HALF_UP)
     event = OutboxEvent(
+        workspace_id=workspace_id,
         aggregate_type="supplier_product",
         aggregate_id=str(observation.supplier_product_id),
         event_type=PRICE_DROP_EVENT_TYPE,
@@ -165,12 +179,13 @@ def enqueue_price_drop_alert(
             f"observation:{observation.id}"
         ),
         payload_json={
-            "version": 1,
+            "version": 2,
             "supplier_product_id": observation.supplier_product_id,
             "observation_id": observation.id,
             "baseline_price": f"{baseline_price:.2f}",
             "current_price": f"{current_price:.2f}",
             "drop_percent": str(drop_percent),
+            "threshold_percent": threshold_percent,
             "currency": observation.currency or "KZT",
             "baseline_sample_size": len(prices),
             "observed_at": observation.observed_at.isoformat(),

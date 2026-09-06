@@ -25,9 +25,11 @@ const supplierRunCheckInput = document.querySelector("#supplier-run-check");
 const supplierPrimaryInput = document.querySelector("#supplier-primary");
 const saveSupplierButton = document.querySelector("#save-supplier");
 const priceDropAlertToggle = document.querySelector("#price-drop-alert-enabled");
+const priceDropAlertThreshold = document.querySelector("#price-drop-alert-threshold");
 const priceAlertResult = document.querySelector("#price-alert-result");
 let visibleBindings = [];
 let editingBinding = null;
+let savedPriceAlertSettings = {enabled:false, thresholdPercent:50};
 
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value, currency = "KZT") => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ${currency || "KZT"}`.trim();
@@ -130,7 +132,12 @@ const render = (data, action) => {
   }
   setText("product-name", product.name); setText("product-meta", `Kaspi ${product.kaspi_product_id}${product.brand ? ` · ${product.brand}` : ""}${product.merchant_sku ? ` · SKU ${product.merchant_sku}` : ""}`);
   setText("kaspi-product-id", product.kaspi_product_id); setText("merchant-sku", product.merchant_sku || "—"); setText("product-brand", product.brand || "—"); setText("product-status", statusLabel(product.status)); setText("product-updated-at", `Обновлено в CRM ${dateTime(product.updated_at)}`);
-  priceDropAlertToggle.checked = Boolean(product.sudden_price_alert_enabled);
+  savedPriceAlertSettings = {
+    enabled:Boolean(product.sudden_price_alert_enabled),
+    thresholdPercent:[10,20,50].includes(Number(product.sudden_price_alert_threshold_percent)) ? Number(product.sudden_price_alert_threshold_percent) : 50,
+  };
+  priceDropAlertToggle.checked = savedPriceAlertSettings.enabled;
+  priceDropAlertThreshold.value = String(savedPriceAlertSettings.thresholdPercent);
   setText("units-sold", Number(sales.units_sold || 0).toLocaleString("ru-RU")); setText("orders-count", `строк заказов: ${Number(sales.orders_count || 0).toLocaleString("ru-RU")}`); setText("revenue-kzt", money(sales.revenue_kzt)); setText("last-ordered-at", `последняя продажа: ${dateTime(sales.last_ordered_at)}`);
   setText("bindings-count", bindings.length); setText("observations-count", observations.length); setText("available-count", bindings.filter((item) => item.available === true).length); setText("failures-count", bindings.filter((item) => item.consecutive_failures > 0).length); setText("updated-at", `Обновлено ${new Date().toLocaleTimeString("ru-RU", {hour:"2-digit",minute:"2-digit"})}`);
   renderBestOffer(bestOffer, bestOfferDecision, bindings); renderActionCenter(action); renderDecisionTimeline(decisionTimeline); renderBindings(bindings, supplierScores); renderObservations(observations); authPanel.classList.add("hidden"); detailPage.classList.remove("hidden");
@@ -220,30 +227,45 @@ supplierForm.addEventListener("submit", async (event) => {
   } catch (error) { supplierResult.textContent = error instanceof Error ? error.message : "Не удалось сохранить источник закупки."; } finally { saveButton.disabled = false; }
 });
 
-priceDropAlertToggle.addEventListener("change", async () => {
+const savePriceAlertSettings = async () => {
   const token = localStorage.getItem(storageKey);
   const enabled = priceDropAlertToggle.checked;
+  const thresholdPercent = Number(priceDropAlertThreshold.value);
   priceDropAlertToggle.disabled = true;
+  priceDropAlertThreshold.disabled = true;
   priceAlertResult.textContent = "Сохраняю настройку…";
   try {
     const response = await fetch(`/api/products/${productId}/price-drop-alert`, {
       method:"PATCH",
       headers:{Authorization:`Bearer ${token}`,"Content-Type":"application/json"},
-      body:JSON.stringify({enabled}),
+      body:JSON.stringify({enabled, threshold_percent:thresholdPercent}),
     });
     if (!response.ok) throw await responseError(response);
     const result = await response.json();
-    priceDropAlertToggle.checked = Boolean(result.enabled);
-    priceAlertResult.textContent = result.enabled
-      ? "Сигнал включён. При аномальном падении цены CRM отправит уведомление."
-      : "Сигнал выключен. Эта карточка не будет отправлять уведомления об аномальной цене.";
+    savedPriceAlertSettings = {enabled:Boolean(result.enabled), thresholdPercent:Number(result.threshold_percent)};
+    priceDropAlertToggle.checked = savedPriceAlertSettings.enabled;
+    priceDropAlertThreshold.value = String(savedPriceAlertSettings.thresholdPercent);
+    if (result.enabled && result.publisher?.configured === false) {
+      priceAlertResult.textContent = `Порог ${result.threshold_percent}% сохранён, но Telegram не настроен на сервере: проверьте TELEGRAM_BOT_TOKEN и TELEGRAM_CHAT_ID.`;
+    } else if (result.enabled && result.publisher?.status === "degraded") {
+      priceAlertResult.textContent = `Порог ${result.threshold_percent}% сохранён, но последняя отправка Telegram завершилась ошибкой. Состояние видно в /health.`;
+    } else {
+      priceAlertResult.textContent = result.enabled
+        ? `Сигнал включён: Telegram уведомит при падении цены на ${result.threshold_percent}% и более.`
+        : `Сигнал выключен. Выбранный порог ${result.threshold_percent}% сохранён для этой карточки.`;
+    }
   } catch (error) {
-    priceDropAlertToggle.checked = !enabled;
+    priceDropAlertToggle.checked = savedPriceAlertSettings.enabled;
+    priceDropAlertThreshold.value = String(savedPriceAlertSettings.thresholdPercent);
     priceAlertResult.textContent = error instanceof Error ? error.message : "Не удалось сохранить настройку.";
   } finally {
     priceDropAlertToggle.disabled = false;
+    priceDropAlertThreshold.disabled = false;
   }
-});
+};
+
+priceDropAlertToggle.addEventListener("change", savePriceAlertSettings);
+priceDropAlertThreshold.addEventListener("change", savePriceAlertSettings);
 
 tokenForm.addEventListener("submit", (event) => { event.preventDefault(); const token = tokenInput.value.trim(); if (!token) return; localStorage.setItem(storageKey, token); tokenInput.value = ""; loadDetail(); });
 refreshButton.addEventListener("click", loadDetail);

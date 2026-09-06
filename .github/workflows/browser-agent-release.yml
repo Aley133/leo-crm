@@ -111,8 +111,11 @@ jobs:
           git tag -f browser-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/browser-agent-latest --force
           gh release view browser-agent-latest *> $null
+          $notes = "LEO HTTP Agent 0.3.6: при неверном Copy as cURL окно ввода открывается повторно без перезапуска. Сохранённая сессия по-прежнему проверяется до запуска мониторинга."
           if ($LASTEXITCODE -ne 0) {
-            gh release create browser-agent-latest --title "LEO Windows Agents" --notes "Автоматическая сборка Browser Agent и Kaspi Competitor Agent."
+            gh release create browser-agent-latest --title "LEO Windows Agents" --notes $notes
+          } else {
+            gh release edit browser-agent-latest --title "LEO Windows Agents" --notes $notes
           }
           gh release upload browser-agent-latest dist/LEO-Browser-Agent-Setup.exe --clobber
           gh release upload browser-agent-latest dist/LEO-Kaspi-Competitor-Agent.exe --clobber

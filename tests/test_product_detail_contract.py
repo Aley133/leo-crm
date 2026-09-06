@@ -25,6 +25,7 @@ def test_product_detail_contract_contains_sales_bindings_and_history() -> None:
         "observations", "supplier_product_url", "monitor_status", "consecutive_failures",
         "price", "currency", "available", "delivery_days", "observed_at", "next_check_at",
         "sudden_price_alert_enabled",
+        "sudden_price_alert_threshold_percent",
     ):
         assert field in source
 
@@ -53,6 +54,7 @@ def test_product_detail_ui_route_and_assets_are_exposed() -> None:
         'id="supplier-dialog"', 'id="supplier-form"', 'id="supplier-url"',
         'id="supplier-dialog-title"', 'id="supplier-online-help"',
         'id="price-drop-alert-enabled"', 'id="price-alert-result"',
+        'id="price-drop-alert-threshold"',
     ):
         assert element_id in html
     assert '/api/products/${productId}/detail?observation_limit=100' in script
@@ -102,6 +104,11 @@ def test_product_detail_exposes_price_alert_opt_in() -> None:
     assert '"/{product_id}/price-drop-alert"' in source
     assert '"/{product_id}/price-drop-alert/test"' not in source
     assert "sudden_price_alert_enabled" in script
+    assert "sudden_price_alert_threshold_percent" in script
+    assert "threshold_percent" in source
+    assert 'value="10"' in html
+    assert 'value="20"' in html
+    assert 'value="50"' in html
     assert 'method:"PATCH"' in script
     assert "test-price-alert" not in html
     assert "test-price-alert" not in script

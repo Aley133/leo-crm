@@ -24,13 +24,17 @@ def test_product_price_alert_is_disabled_by_default_and_can_be_enabled(
 ) -> None:
     product = _product(db_session)
     assert product.sudden_price_alert_enabled is False
+    assert product.sudden_price_alert_threshold_percent == 50
 
     result = update_product_price_alert(
         product.id,
-        ProductPriceAlertUpdate(enabled=True),
+        ProductPriceAlertUpdate(enabled=True, threshold_percent=20),
         db_session,
     )
 
     assert result.enabled is True
+    assert result.threshold_percent == 20
+    assert "configured" in result.publisher
     db_session.refresh(product)
     assert product.sudden_price_alert_enabled is True
+    assert product.sudden_price_alert_threshold_percent == 20

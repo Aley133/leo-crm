@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 from decimal import Decimal
+from typing import Literal
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
@@ -24,6 +25,7 @@ from .monitoring import (
 )
 from .supplier_intelligence import BestOfferEngine, SupplierCandidate, SupplierScore
 from .suppliers import ProductBinding, Supplier, SupplierProduct
+from .telegram_price_alerts import price_alert_runtime_status
 
 
 class ProductDetailHeader(BaseModel):
@@ -35,6 +37,7 @@ class ProductDetailHeader(BaseModel):
     image_url: str | None
     status: str
     sudden_price_alert_enabled: bool
+    sudden_price_alert_threshold_percent: int
     created_at: datetime
     updated_at: datetime
 
@@ -139,10 +142,13 @@ class ProductDetailResponse(BaseModel):
 
 class ProductPriceAlertUpdate(BaseModel):
     enabled: bool
+    threshold_percent: Literal[10, 20, 50] = 50
 
 
 class ProductPriceAlertRead(BaseModel):
     enabled: bool
+    threshold_percent: Literal[10, 20, 50]
+    publisher: dict[str, object]
 
 
 router = APIRouter(
@@ -181,8 +187,13 @@ def update_product_price_alert(
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
     product.sudden_price_alert_enabled = payload.enabled
+    product.sudden_price_alert_threshold_percent = payload.threshold_percent
     db.commit()
-    return ProductPriceAlertRead(enabled=product.sudden_price_alert_enabled)
+    return ProductPriceAlertRead(
+        enabled=product.sudden_price_alert_enabled,
+        threshold_percent=product.sudden_price_alert_threshold_percent,
+        publisher=price_alert_runtime_status(),
+    )
 
 
 @router.get("/{product_id}/detail", response_model=ProductDetailResponse)
@@ -345,6 +356,9 @@ def get_product_detail(
             image_url=product.image_url,
             status=product.status,
             sudden_price_alert_enabled=product.sudden_price_alert_enabled,
+            sudden_price_alert_threshold_percent=(
+                product.sudden_price_alert_threshold_percent
+            ),
             created_at=product.created_at,
             updated_at=product.updated_at,
         ),

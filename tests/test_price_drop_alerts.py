@@ -21,12 +21,14 @@ def _seed_target(
     session: Session,
     *,
     price_alert_enabled: bool = True,
+    threshold_percent: int = 50,
 ) -> tuple[MonitorTarget, SupplierProduct]:
     product = Product(
         kaspi_product_id="PRICE-DROP-001",
         merchant_sku="SKU-DROP-001",
         name="Выгодный товар",
         sudden_price_alert_enabled=price_alert_enabled,
+        sudden_price_alert_threshold_percent=threshold_percent,
     )
     supplier = Supplier(code="ozon", name="Ozon")
     session.add_all([product, supplier])
@@ -128,12 +130,13 @@ def test_six_price_baseline_detects_a_sudden_ozon_drop(db_session: Session) -> N
     alerts = _alerts(db_session)
     assert len(alerts) == 1
     assert alerts[0].payload_json == {
-        "version": 1,
+        "version": 2,
         "supplier_product_id": supplier_product.id,
         "observation_id": alerts[0].payload_json["observation_id"],
         "baseline_price": "3050.00",
         "current_price": "1000.00",
         "drop_percent": "67.2",
+        "threshold_percent": 50,
         "currency": "KZT",
         "baseline_sample_size": 6,
         "observed_at": (STARTED_AT + timedelta(minutes=6)).isoformat(),
@@ -147,6 +150,7 @@ def test_six_price_baseline_detects_a_sudden_ozon_drop(db_session: Session) -> N
         "supplier_product_url": "https://www.ozon.ru/product/price-drop-001/",
         "binding_id": alerts[0].payload_json["binding_id"],
     }
+    assert alerts[0].workspace_id == 1
 
 
 def test_product_must_explicitly_opt_in_to_price_drop_alerts(
@@ -216,6 +220,57 @@ def test_exactly_fifty_percent_drop_alerts(db_session: Session) -> None:
     alerts = _alerts(db_session)
     assert len(alerts) == 1
     assert alerts[0].payload_json["drop_percent"] == "50.0"
+    assert alerts[0].payload_json["threshold_percent"] == 50
+
+
+def test_selected_twenty_percent_threshold_alerts_at_twenty_percent(
+    db_session: Session,
+) -> None:
+    target, supplier_product = _seed_target(db_session, threshold_percent=20)
+    _record(
+        db_session,
+        target=target,
+        supplier_product=supplier_product,
+        price="3000",
+        minute=0,
+    )
+    _record(
+        db_session,
+        target=target,
+        supplier_product=supplier_product,
+        price="2400",
+        minute=1,
+    )
+
+    alerts = _alerts(db_session)
+    assert len(alerts) == 1
+    assert alerts[0].payload_json["drop_percent"] == "20.0"
+    assert alerts[0].payload_json["threshold_percent"] == 20
+
+
+def test_selected_ten_percent_threshold_alerts_at_ten_percent(
+    db_session: Session,
+) -> None:
+    target, supplier_product = _seed_target(db_session, threshold_percent=10)
+    _record(
+        db_session,
+        target=target,
+        supplier_product=supplier_product,
+        price="3000",
+        minute=0,
+    )
+    _record(
+        db_session,
+        target=target,
+        supplier_product=supplier_product,
+        price="2700",
+        minute=1,
+    )
+
+    alerts = _alerts(db_session)
+    assert len(alerts) == 1
+    assert alerts[0].payload_json["drop_percent"] == "10.0"
+    assert alerts[0].payload_json["threshold_percent"] == 10
 
 
 def test_low_price_state_does_not_repeat_until_price_recovers(db_session: Session) -> None:

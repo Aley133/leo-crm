@@ -65,7 +65,10 @@ from .revenue_api import router as revenue_router
 from .supplier_products_api import router as supplier_products_router
 from .supplier_state_api import router as supplier_state_router
 from .suppliers import router as suppliers_router
-from .telegram_price_alerts import price_alert_publisher_loop
+from .telegram_price_alerts import (
+    price_alert_publisher_loop,
+    price_alert_runtime_status,
+)
 from .ui import router as ui_router
 from .workspace_api import router as workspace_router
 from .workspace_context import (
@@ -76,8 +79,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.12"
-DEPLOYMENT_MARKER = "product-test-ozon-sale-block-delivery"
+APP_VERSION = "0.26.13"
+DEPLOYMENT_MARKER = "ozon-exact-card-price-alert-thresholds"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -302,6 +305,7 @@ async def root() -> dict[str, object]:
         "kaspi_order_maintenance": dict(KASPI_MAINTENANCE_STATUS),
         "dumping_scheduler": dict(DUMPING_SCHEDULER_STATUS),
         "data_retention": dict(RETENTION_CLEANUP_STATUS),
+        "telegram_price_alerts": price_alert_runtime_status(),
     }
 
 
@@ -321,6 +325,7 @@ async def health() -> dict[str, object]:
         "kaspi_order_maintenance": dict(KASPI_MAINTENANCE_STATUS),
         "dumping_scheduler": dict(DUMPING_SCHEDULER_STATUS),
         "data_retention": dict(RETENTION_CLEANUP_STATUS),
+        "telegram_price_alerts": price_alert_runtime_status(),
     }
 
 
