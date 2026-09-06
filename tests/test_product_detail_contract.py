@@ -65,6 +65,25 @@ def test_product_detail_ui_route_and_assets_are_exposed() -> None:
     assert 'href="/crm/products/${row.product_id}"' in products_script
 
 
+def test_product_detail_can_detach_and_relink_shared_inventory() -> None:
+    api = (ROOT / "backend" / "app" / "inventory_api.py").read_text(encoding="utf-8")
+    html = (ROOT / "backend" / "app" / "static" / "product-detail.html").read_text(
+        encoding="utf-8"
+    )
+    script = (
+        ROOT / "backend" / "app" / "static" / "product-inventory.js"
+    ).read_text(encoding="utf-8")
+
+    assert '@router.delete("/{product_id}/inventory-owner"' in api
+    assert 'id="unlink-inventory"' in html
+    assert "product-inventory.js?v=20260906-2" in html
+    assert "Отвязать эту карточку" in script
+    assert "Разъединить всю группу" in script
+    assert 'fetch(`/api/products/${productId}/inventory-owner`' in script
+    assert 'method: "DELETE"' in script
+    assert "теперь её можно объединить с правильной карточкой" in script
+
+
 def test_product_detail_distinguishes_render_outage_from_domain_errors() -> None:
     script = (ROOT / "backend" / "app" / "static" / "product-detail.js").read_text(encoding="utf-8")
 

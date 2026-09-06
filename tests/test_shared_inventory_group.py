@@ -7,7 +7,12 @@ from fastapi import HTTPException
 from sqlalchemy import select
 
 from backend.app.dumping_models import DumpingPolicy, KaspiXmlFeed
-from backend.app.inventory_api import InventoryOwnerUpdate, merge_product_inventory
+from backend.app.inventory_api import (
+    InventoryOwnerUpdate,
+    detach_product_inventory,
+    get_product_inventory,
+    merge_product_inventory,
+)
 from backend.app.inventory_models import InventoryAllocation, InventoryBatch
 from backend.app.inventory_service import (
     build_incoming_reservations,
@@ -223,3 +228,144 @@ def test_inventory_groups_cannot_cross_workspaces(db_session) -> None:
     # account mismatch check. Both paths reject the merge before any write.
     assert exc_info.value.status_code in {404, 409}
     assert first.inventory_owner_product_id is None
+
+
+def test_shared_inventory_member_can_detach_and_relink_without_moving_owner_batches(
+    db_session,
+) -> None:
+    owner = _product(db_session, "OWNER-DETACH")
+    wrong_member = _product(db_session, "WRONG-MEMBER")
+    correct_owner = _product(db_session, "CORRECT-OWNER")
+    wrong_member.inventory_owner_product_id = owner.id
+    account = MarketplaceAccount(
+        provider="kaspi",
+        external_account_id="shared-detach-account",
+        display_name="Kaspi",
+        timezone="Asia/Almaty",
+    )
+    db_session.add(account)
+    db_session.flush()
+    owner_line = _order_line(
+        db_session,
+        account,
+        owner,
+        code="owner-active-order",
+        ordered_at=NOW,
+    )
+    wrong_line = _order_line(
+        db_session,
+        account,
+        wrong_member,
+        code="wrong-active-order",
+        ordered_at=NOW + timedelta(minutes=1),
+    )
+    xml = f"""<kaspi_catalog><offers>
+      <offer sku='{owner.merchant_sku}'><cityprices><cityprice cityId='750000000'>5000</cityprice></cityprices><availability available='yes' preOrder='0' stockCount='2'/></offer>
+      <offer sku='{wrong_member.merchant_sku}'><cityprices><cityprice cityId='750000000'>5000</cityprice></cityprices><availability available='yes' preOrder='0' stockCount='2'/></offer>
+    </offers></kaspi_catalog>"""
+    feed = KaspiXmlFeed(
+        merchant_id="shared-detach-account",
+        source_filename="catalog.xml",
+        source_xml=xml,
+        generated_xml=xml,
+        active=True,
+    )
+    batch = InventoryBatch(
+        product_id=owner.id,
+        received_at=NOW - timedelta(days=1),
+        quantity_received=2,
+        quantity_remaining=2,
+        unit_cost=Decimal("2000"),
+        is_received=True,
+    )
+    db_session.add_all(
+        [
+            feed,
+            batch,
+            DumpingPolicy(
+                product_id=owner.id,
+                enabled=True,
+                auto_publish_xml=True,
+            ),
+            DumpingPolicy(
+                product_id=wrong_member.id,
+                enabled=True,
+                auto_publish_xml=True,
+            ),
+        ]
+    )
+    db_session.flush()
+    assert rebuild_product_fifo(db_session, product_id=owner.id) == 2
+
+    detached = detach_product_inventory(wrong_member.id, db_session)
+
+    db_session.refresh(owner)
+    db_session.refresh(wrong_member)
+    db_session.refresh(batch)
+    assert owner.inventory_owner_product_id is None
+    assert wrong_member.inventory_owner_product_id is None
+    assert batch.product_id == owner.id
+    assert batch.quantity_remaining == 1
+    assert detached.inventory_owner_product_id == wrong_member.id
+    assert detached.on_hand == 0
+    assert [row.product_id for row in detached.shared_products] == [wrong_member.id]
+    allocations = db_session.scalars(select(InventoryAllocation)).all()
+    assert [row.marketplace_order_line_id for row in allocations] == [owner_line.id]
+    assert wrong_line.id not in {
+        row.marketplace_order_line_id for row in allocations
+    }
+    assert _offer_stock(feed.generated_xml, owner.merchant_sku or "") == ("yes", "1")
+    assert _offer_stock(feed.generated_xml, wrong_member.merchant_sku or "") == ("no", "0")
+
+    owner_inventory = get_product_inventory(owner.id, db_session)
+    assert owner_inventory.on_hand == 1
+    assert [row.product_id for row in owner_inventory.shared_products] == [owner.id]
+
+    relinked = merge_product_inventory(
+        wrong_member.id,
+        InventoryOwnerUpdate(owner_product_id=correct_owner.id),
+        db_session,
+    )
+
+    db_session.refresh(wrong_member)
+    assert wrong_member.inventory_owner_product_id == correct_owner.id
+    assert relinked.inventory_owner_product_id == correct_owner.id
+    assert {row.product_id for row in relinked.shared_products} == {
+        wrong_member.id,
+        correct_owner.id,
+    }
+
+
+def test_detaching_inventory_owner_breaks_whole_group_and_keeps_its_batches(
+    db_session,
+) -> None:
+    owner = _product(db_session, "OWNER-SPLIT")
+    first_member = _product(db_session, "FIRST-MEMBER")
+    second_member = _product(db_session, "SECOND-MEMBER")
+    first_member.inventory_owner_product_id = owner.id
+    second_member.inventory_owner_product_id = owner.id
+    batch = InventoryBatch(
+        product_id=owner.id,
+        received_at=NOW,
+        quantity_received=7,
+        quantity_remaining=7,
+        unit_cost=Decimal("1800"),
+        is_received=True,
+    )
+    db_session.add(batch)
+    db_session.flush()
+
+    result = detach_product_inventory(owner.id, db_session)
+
+    db_session.refresh(owner)
+    db_session.refresh(first_member)
+    db_session.refresh(second_member)
+    db_session.refresh(batch)
+    assert owner.inventory_owner_product_id is None
+    assert first_member.inventory_owner_product_id is None
+    assert second_member.inventory_owner_product_id is None
+    assert batch.product_id == owner.id
+    assert result.on_hand == 7
+    assert [row.product_id for row in result.shared_products] == [owner.id]
+    assert get_product_inventory(first_member.id, db_session).on_hand == 0
+    assert get_product_inventory(second_member.id, db_session).on_hand == 0
