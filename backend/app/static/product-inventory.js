@@ -18,6 +18,7 @@
   let editingBatchId = null;
   let batchesById = new Map();
   let ownerSearchTimer = null;
+  let currentInventory = null;
 
   const money = (value) => value == null ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits: 2})} KZT`;
   const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}) : "—";
@@ -40,6 +41,7 @@
     const ownerName = document.querySelector("#inventory-owner-name");
     const groupSummary = document.querySelector("#inventory-group-summary");
     const mergeButton = document.querySelector("#merge-inventory");
+    const unlinkButton = document.querySelector("#unlink-inventory");
     const members = inventory.shared_products || [];
     if (ownerName) ownerName.textContent = members.length > 1 ? inventory.inventory_owner_name : "Отдельный остаток";
     if (groupSummary) {
@@ -48,6 +50,11 @@
         : "Только эта Kaspi-карточка";
     }
     if (mergeButton) mergeButton.textContent = members.length > 1 ? "Добавить ещё карточку" : "Объединить с другой карточкой";
+    if (unlinkButton) {
+      const currentIsOwner = Number(inventory.inventory_owner_product_id) === productId;
+      unlinkButton.textContent = currentIsOwner ? "Разъединить всю группу" : "Отвязать эту карточку";
+      unlinkButton.classList.toggle("hidden", members.length <= 1);
+    }
   };
 
   const renderProductionOrders = (batch) => {
@@ -70,6 +77,7 @@
   };
 
   const render = (inventory) => {
+    currentInventory = inventory;
     setSummary(inventory);
     const batches = inventory.batches || [];
     batchesById = new Map(batches.map((batch) => [Number(batch.id), batch]));
@@ -242,6 +250,45 @@
       ownerResult.textContent = error instanceof Error ? error.message : "Не удалось объединить склад.";
     } finally {
       save.disabled = false;
+    }
+  });
+
+  document.querySelector("#unlink-inventory")?.addEventListener("click", async (event) => {
+    const members = currentInventory?.shared_products || [];
+    if (members.length <= 1) return;
+    const currentIsOwner = Number(currentInventory.inventory_owner_product_id) === productId;
+    const ownerName = currentInventory.inventory_owner_name || "владельца общего склада";
+    const question = currentIsOwner
+      ? `Разъединить общий склад из ${members.length} карточек? Все существующие партии останутся у этой карточки. Остальные карточки получат отдельный нулевой склад, а FIFO активных заказов и XML будут пересчитаны.`
+      : `Отвязать эту Kaspi-карточку от «${ownerName}»? Все существующие партии останутся у владельца общего склада. Эта карточка получит отдельный нулевой склад, а FIFO активных заказов и XML будут пересчитаны.`;
+    if (!confirm(question)) return;
+
+    const button = event.currentTarget;
+    button.disabled = true;
+    const pageMessage = document.querySelector("#message");
+    if (pageMessage) pageMessage.textContent = "Разъединяю склад и пересчитываю FIFO…";
+    try {
+      const token = localStorage.getItem(storageKey);
+      const response = await fetch(`/api/products/${productId}/inventory-owner`, {
+        method: "DELETE",
+        headers: {Authorization: `Bearer ${token}`},
+      });
+      if (!response.ok) {
+        let detail = `API вернул ошибку ${response.status}`;
+        try { const payload = await response.json(); if (payload.detail) detail = String(payload.detail); } catch {}
+        throw new Error(detail);
+      }
+      render(await response.json());
+      if (pageMessage) {
+        pageMessage.textContent = currentIsOwner
+          ? "Общий склад разъединён. Все партии остались у этой карточки; остальные карточки теперь независимы."
+          : `Карточка отвязана. Партии остались у «${ownerName}»; теперь её можно объединить с правильной карточкой.`;
+      }
+      document.querySelector("#refresh")?.click();
+    } catch (error) {
+      if (pageMessage) pageMessage.textContent = error instanceof Error ? error.message : "Не удалось разъединить общий склад.";
+    } finally {
+      button.disabled = false;
     }
   });
 

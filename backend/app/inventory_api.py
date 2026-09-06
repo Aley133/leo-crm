@@ -329,6 +329,70 @@ def merge_product_inventory(
     return _product_inventory(db, product_id)
 
 
+@router.delete("/{product_id}/inventory-owner", response_model=ProductInventoryRead)
+def detach_product_inventory(
+    product_id: int,
+    db: Session = Depends(get_db),
+) -> ProductInventoryRead:
+    """Detach a listing from shared physical inventory without guessing stock ownership.
+
+    All batches stay with the current canonical owner. Detaching a member makes
+    only that card independent; calling the endpoint for the owner breaks the
+    whole group while the owner's batches remain untouched.
+    """
+
+    product = db.scalar(
+        select(Product).where(Product.id == product_id).with_for_update()
+    )
+    if product is None:
+        raise HTTPException(status_code=404, detail="Product not found")
+
+    owner = inventory_owner_product(db, product)
+    group = inventory_group_products(db, owner)
+    if len(group) <= 1:
+        return _product_inventory(db, product_id)
+
+    group_ids = tuple(int(member.id) for member in group)
+    locked_members = {
+        int(member.id): member
+        for member in db.scalars(
+            select(Product)
+            .where(Product.id.in_(group_ids))
+            .with_for_update()
+        ).all()
+    }
+    db.scalars(
+        select(InventoryBatch)
+        .where(InventoryBatch.product_id == owner.id)
+        .with_for_update()
+    ).all()
+
+    owner_id = int(owner.id)
+    selected_id = int(product.id)
+    detached_ids = (
+        tuple(member_id for member_id in group_ids if member_id != owner_id)
+        if selected_id == owner_id
+        else (selected_id,)
+    )
+    for member_id in detached_ids:
+        member = locked_members.get(member_id)
+        if member is None:
+            raise HTTPException(
+                status_code=409,
+                detail="Не удалось заблокировать карточку общего склада",
+            )
+        member.inventory_owner_product_id = None
+
+    db.flush()
+    # First remove detached SKU orders from the old pool, then rebuild each
+    # independent card (normally with zero batches) and synchronize its XML.
+    rebuild_product_fifo(db, product_id=owner_id)
+    for detached_id in detached_ids:
+        rebuild_product_fifo(db, product_id=detached_id)
+    db.commit()
+    return _product_inventory(db, product_id)
+
+
 @router.post("/{product_id}/inventory/batches", response_model=InventoryBatchCreated)
 def add_product_inventory_batch(
     product_id: int,

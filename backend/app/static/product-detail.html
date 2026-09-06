@@ -37,7 +37,7 @@
       <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render.</p></div><form id="token-form"><input id="token" type="password" autocomplete="current-password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
       <div id="message" class="message" role="status" aria-live="polite"></div>
       <section id="detail" class="detail-page hidden" aria-busy="false">
-        <section class="product-overview panel wide"><div class="panel-title"><h2>Общее</h2><span id="product-updated-at"></span></div><div class="overview-grid"><div><span>Kaspi ID</span><strong id="kaspi-product-id">—</strong></div><div><span>SKU продавца</span><strong id="merchant-sku">—</strong></div><div><span>Бренд</span><strong id="product-brand">—</strong></div><div><span>Статус</span><strong id="product-status">—</strong></div><div><span>Общий склад</span><strong id="inventory-owner-name">Отдельный остаток</strong><small id="inventory-group-summary">Только эта Kaspi-карточка</small><button id="merge-inventory" class="button secondary" type="button">Объединить с другой карточкой</button></div></div></section>
+        <section class="product-overview panel wide"><div class="panel-title"><h2>Общее</h2><span id="product-updated-at"></span></div><div class="overview-grid"><div><span>Kaspi ID</span><strong id="kaspi-product-id">—</strong></div><div><span>SKU продавца</span><strong id="merchant-sku">—</strong></div><div><span>Бренд</span><strong id="product-brand">—</strong></div><div><span>Статус</span><strong id="product-status">—</strong></div><div><span>Общий склад</span><strong id="inventory-owner-name">Отдельный остаток</strong><small id="inventory-group-summary">Только эта Kaspi-карточка</small><button id="merge-inventory" class="button secondary" type="button">Объединить с другой карточкой</button><button id="unlink-inventory" class="button secondary hidden" type="button">Разъединить общий склад</button></div></div></section>
         <section class="panel wide price-alert-panel">
           <div class="panel-title"><h2>Сигналы о выгодной закупке</h2><span>Только для этой карточки товара</span></div>
           <div class="price-alert-setting">
@@ -75,7 +75,7 @@
   <script src="/static/product-image-resolver.js?v=20260819-2" defer></script>
   <script src="/static/product-detail.js?v=20260906-1" defer></script>
   <script src="/static/product-economics.js?v=20260723-5" defer></script>
-  <script src="/static/product-inventory.js?v=20260803-1" defer></script>
+  <script src="/static/product-inventory.js?v=20260906-2" defer></script>
   <script>
     document.addEventListener("DOMContentLoaded", () => {
       const button = document.querySelector("#back-to-orders");
