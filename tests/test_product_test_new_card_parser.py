@@ -1,4 +1,7 @@
 import json
+from urllib.parse import parse_qs, urlsplit
+
+import pytest
 
 from tools.product_test_new_card.parser import parse_ozon_response
 from tools.ozon_http.session_profile import CurlProfile
@@ -63,6 +66,77 @@ def test_curl_profile_preserves_exact_product_query_when_rewriting_page_url():
 
     assert "at%3Dselected-offer-token" in target
     assert "sh%3Dshare-token" in target
+
+
+def test_curl_profile_accepts_har_category_feed_and_builds_fresh_search():
+    raw = (
+        "curl 'https://www.ozon.kz/api/entrypoint-api.bx/page/json/v2?"
+        "url=%2Fcategory%2Fvitaminy-6164%2Fbrand-152369584%2F%3F"
+        "brand_was_predicted%3Dtrue%26category_was_predicted%3Dtrue%26"
+        "deny_category_prediction%3Dtrue%26from_global%3Dtrue%26"
+        "layout_page_index%3D2%26page%3D2%26paginator_token%3Dstale-page-token%26"
+        "search_page_state%3Dstale-search-state%26start_page_id%3Dstale-page-id%26text%3DGLS' "
+        "-H 'Referer: https://www.ozon.kz/category/vitaminy-6164/brand-152369584/?"
+        "brand_was_predicted=true&text=GLS' -H 'X-Page-Previous: stale-page'"
+    )
+
+    profile = CurlProfile.parse(raw)
+    target = profile.rewritten_search_url("Solgar Omega 3", 1)
+    outer_query = parse_qs(urlsplit(target).query)
+    inner = urlsplit(outer_query["url"][0])
+
+    assert inner.path == "/search/"
+    assert parse_qs(inner.query) == {
+        "text": ["Solgar Omega 3"],
+        "page": ["1"],
+        "from_global": ["true"],
+        "deny_category_prediction": ["true"],
+    }
+    assert "paginator_token" not in inner.query
+    assert "search_page_state" not in inner.query
+    assert "start_page_id" not in inner.query
+    assert "brand_was_predicted" not in inner.query
+
+    headers = profile.request_headers_for_search("Solgar Omega 3", 1)
+    referer = urlsplit(headers["Referer"])
+    assert referer.path == "/search/"
+    assert parse_qs(referer.query) == parse_qs(inner.query)
+    assert headers["X-Page-Previous"] == ""
+
+
+def test_curl_profile_drops_search_bound_state_from_search_seed():
+    raw = (
+        "curl 'https://www.ozon.kz/api/entrypoint-api.bx/page/json/v2?"
+        "url=%2Fsearch%2F%3Fbrand%3D73328733%26brand_was_predicted%3Dtrue%26"
+        "layout_page_index%3D2%26page%3D2%26paginator_token%3Dstale%26"
+        "search_page_state%3Dstale-state%26start_page_id%3Dstale-id%26text%3DOld'"
+    )
+
+    profile = CurlProfile.parse(raw)
+    inner = parse_qs(urlsplit(profile.rewritten_search_url("New", 3)).query)["url"][0]
+
+    assert parse_qs(urlsplit(inner).query) == {
+        "text": ["New"],
+        "page": ["3"],
+        "from_global": ["true"],
+        "deny_category_prediction": ["true"],
+    }
+
+
+def test_curl_profile_still_rejects_suggestions_and_plain_category_pages():
+    suggestions = (
+        "curl 'https://www.ozon.kz/api/entrypoint-api.bx/page/json/v2?"
+        "url=%2FsearchSuggestions%2Fsearch%2F%3Ftext%3DGLS'"
+    )
+    category_without_search_text = (
+        "curl 'https://www.ozon.kz/api/entrypoint-api.bx/page/json/v2?"
+        "url=%2Fcategory%2Fvitaminy-6164%2F'"
+    )
+
+    with pytest.raises(ValueError, match="searchSuggestions"):
+        CurlProfile.parse(suggestions)
+    with pytest.raises(ValueError, match="товарная выдача"):
+        CurlProfile.parse(category_without_search_text)
 
 
 def test_parser_filters_ozon_widget_metadata_cleans_title_and_deduplicates_gallery():

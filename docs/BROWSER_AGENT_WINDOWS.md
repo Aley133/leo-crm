@@ -6,7 +6,7 @@ The local agent keeps the existing CRM monitoring queue and lease protocol but e
 
 1. Install the current `LEO-Browser-Agent-Setup.exe` release.
 2. Enter `SERVICE_API_TOKEN` on first launch.
-3. If no compatible lab session is found, copy an Ozon search request from DevTools Network as **Copy as cURL (bash)** and paste it into the prompt once.
+3. If no compatible lab session is found, copy an item-bearing Ozon `page/json/v2` request from DevTools Network as **Copy as cURL (bash)** and paste it into the prompt once. Ozon may expose that feed as either `/search/` or an automatically predicted `/category/` route.
 
 The Ozon profile is stored under the current Windows user and encrypted with DPAPI. Cookies and request headers are never uploaded to CRM; only normalized price, availability, seller and delivery facts are returned.
 
@@ -14,8 +14,8 @@ The agent uses three bounded HTTP workers by default. Existing CRM monitor targe
 
 ## Session renewal
 
-When Ozon expires or blocks the session, Agent 0.3.6 pauses monitoring after the
-first affected worker result and asks for a fresh `/search/` cURL. The old
+When Ozon expires or blocks the session, Agent 0.3.7 pauses monitoring after the
+first affected worker result and asks for a fresh item-bearing cURL. The old
 session is replaced locally and monitoring resumes automatically. If a pasted
 cURL is invalid, the agent explains the problem and immediately opens the input
 again without requiring a restart. Do not share the session file or cURL text.

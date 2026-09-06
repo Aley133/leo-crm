@@ -119,4 +119,13 @@ class OzonSessionResolver:
             client.close()
         if not result.get("ok"):
             reason = result.get("reason") or "validation_failed"
-            raise OzonSessionUnavailableError(f"Ozon HTTP session validation failed: {reason}")
+            attempt = result.get("attempt") if isinstance(result.get("attempt"), dict) else {}
+            status = attempt.get("status_code") or "—"
+            item_count = len(result.get("items") or [])
+            if reason == "parser_drift_or_no_items":
+                detail = f"Ozon ответил HTTP {status}, но вернул {item_count} карточек"
+            elif reason == "blocked":
+                detail = f"Ozon отклонил запрос (HTTP {status})"
+            else:
+                detail = f"запрос к Ozon не выполнен (HTTP {status})"
+            raise OzonSessionUnavailableError(f"Ozon HTTP session validation failed: {detail}")

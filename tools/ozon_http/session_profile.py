@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import shlex
 from dataclasses import dataclass
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit, unquote
+from urllib.parse import SplitResult, parse_qsl, urlencode, urlsplit, urlunsplit, unquote
 
 # Consumer Ozon uses ozon.ru in Russia and ozon.kz in Kazakhstan.
 # The lab only permits HTTPS requests to these exact Ozon-owned domain families.
@@ -15,6 +15,45 @@ DROP_HEADERS = {
     "connection",
 }
 SENSITIVE_HEADERS = {"cookie", "authorization", "proxy-authorization", "x-api-key"}
+
+
+def _canonical_search_inner(query: str, page: int) -> str:
+    """Build a fresh search route without state tied to the copied result page."""
+    return "/search/?" + urlencode(
+        (
+            ("text", str(query or "").strip()),
+            ("page", str(max(1, int(page)))),
+            ("from_global", "true"),
+            ("deny_category_prediction", "true"),
+        )
+    )
+
+
+def _inner_route(parts: SplitResult) -> tuple[SplitResult, bool]:
+    """Return the route represented by a direct URL or nested page/json/v2 URL."""
+    for key, value in parse_qsl(parts.query, keep_blank_values=True):
+        if key.lower() == "url" and value:
+            return urlsplit(value), True
+    return parts, False
+
+
+def _is_search_seed(parts) -> tuple[bool, bool]:
+    """Return (is_item_feed, is_suggestions) for an imported Ozon request."""
+    route, nested = _inner_route(parts)
+    path = unquote(str(route.path or "")).lower()
+    if "searchsuggestions" in path:
+        return False, True
+    if path.rstrip("/") == "/search":
+        return True, False
+    # Ozon can redirect a search to a predicted brand/category route. Its XHR
+    # still contains the same item feed and is a valid seed for future searches.
+    route_query = dict(parse_qsl(route.query, keep_blank_values=True))
+    is_predicted_category = (
+        nested
+        and path.startswith("/category/")
+        and bool(str(route_query.get("text") or "").strip())
+    )
+    return is_predicted_category, False
 
 
 def _normalize_host(host: str | None) -> str:
@@ -138,11 +177,17 @@ class CurlProfile:
             )
         if method != "GET":
             raise ValueError(f"Для лаборатории нужен GET поисковой выдачи Ozon, а в cURL метод {method}")
-        decoded_url = unquote(url)
-        if "searchsuggestions" in decoded_url.lower():
-            raise ValueError("Это запрос подсказок searchSuggestions. Выбери v2-запрос с '/search/?', который грузит саму выдачу товаров")
-        if "/search/" not in decoded_url.lower():
-            raise ValueError("В запросе не найден /search/. Выбери Network-запрос, который загружает результаты поиска")
+        is_item_feed, is_suggestions = _is_search_seed(parts)
+        if is_suggestions:
+            raise ValueError(
+                "Это запрос подсказок searchSuggestions. Выбери v2-запрос, "
+                "который возвращает карточки товаров"
+            )
+        if not is_item_feed:
+            raise ValueError(
+                "В запросе не найдена товарная выдача. Выбери Network-запрос "
+                "page/json/v2 с маршрутом /search/ или /category/... и параметром text"
+            )
 
         return cls(url=url, headers=headers, cookie=cookie, method=method)
 
@@ -177,53 +222,25 @@ class CurlProfile:
             raise ValueError("Введи название товара")
         page = max(1, int(page))
 
+        canonical_inner = _canonical_search_inner(query, page)
         outer = urlsplit(self.url)
         outer_pairs = list(parse_qsl(outer.query, keep_blank_values=True))
         replaced_outer: list[tuple[str, str]] = []
         found_inner = False
         for key, value in outer_pairs:
-            if key == "url":
+            if key.lower() == "url":
                 found_inner = True
-                inner = urlsplit(value)
-                inner_pairs = list(parse_qsl(inner.query, keep_blank_values=True))
-                out_inner: list[tuple[str, str]] = []
-                seen_text = False
-                seen_page = False
-                for ikey, ivalue in inner_pairs:
-                    if ikey == "text":
-                        out_inner.append((ikey, query))
-                        seen_text = True
-                    elif ikey == "page":
-                        out_inner.append((ikey, str(page)))
-                        seen_page = True
-                    else:
-                        out_inner.append((ikey, ivalue))
-                if not seen_text:
-                    out_inner.append(("text", query))
-                if not seen_page:
-                    out_inner.append(("page", str(page)))
-                new_inner = urlunsplit((inner.scheme, inner.netloc, inner.path, urlencode(out_inner, doseq=True), inner.fragment))
-                replaced_outer.append((key, new_inner))
+                # Never carry query-bound state from the copied page into a new
+                # search. Tokens such as paginator_token, search_page_state,
+                # start_page_id and predicted brand/category filters make Ozon
+                # return HTTP 200 with zero products when only text/page change.
+                replaced_outer.append((key, canonical_inner))
             else:
                 replaced_outer.append((key, value))
 
         if not found_inner:
-            # Fallback for a direct /search endpoint.
-            direct_pairs = list(parse_qsl(outer.query, keep_blank_values=True))
-            out_direct: list[tuple[str, str]] = []
-            seen_text = seen_page = False
-            for key, value in direct_pairs:
-                if key == "text":
-                    out_direct.append((key, query)); seen_text = True
-                elif key == "page":
-                    out_direct.append((key, str(page))); seen_page = True
-                else:
-                    out_direct.append((key, value))
-            if not seen_text:
-                out_direct.append(("text", query))
-            if not seen_page:
-                out_direct.append(("page", str(page)))
-            return urlunsplit((outer.scheme, outer.netloc, outer.path, urlencode(out_direct, doseq=True), outer.fragment))
+            # Direct visible /search request: rebuild it for the same origin.
+            return self.origin + canonical_inner
 
         return urlunsplit((outer.scheme, outer.netloc, outer.path, urlencode(replaced_outer, doseq=True), outer.fragment))
 
@@ -332,31 +349,25 @@ class CurlProfile:
 
     def request_headers_for_search(self, query: str, page: int = 1) -> dict[str, str]:
         headers = self.request_headers()
-        # Browser changes Referer together with the visible search page. Keep every other
-        # copied header byte-for-byte and only rewrite text/page in a search referer.
+        canonical = urlsplit(_canonical_search_inner(query, page))
+        # The copied request may originate from an Ozon-predicted /category/
+        # page. Keep the browser identity headers, but make the navigation
+        # headers agree with the new canonical /search/ request.
         for key in list(headers.keys()):
-            if key.lower() != "referer":
+            low_key = key.lower()
+            if low_key == "x-page-previous":
+                headers[key] = ""
+                continue
+            if low_key != "referer":
                 continue
             ref = headers[key]
             try:
                 parts = urlsplit(ref)
-                if "/search/" not in parts.path.lower():
+                if parts.scheme.lower() != "https" or not _is_ozon_host(parts.hostname):
                     continue
-                pairs = list(parse_qsl(parts.query, keep_blank_values=True))
-                out: list[tuple[str, str]] = []
-                seen_text = seen_page = False
-                for rkey, value in pairs:
-                    if rkey == "text":
-                        out.append((rkey, query)); seen_text = True
-                    elif rkey == "page":
-                        out.append((rkey, str(max(1, int(page))))); seen_page = True
-                    else:
-                        out.append((rkey, value))
-                if not seen_text:
-                    out.append(("text", query))
-                if int(page) > 1 and not seen_page:
-                    out.append(("page", str(max(1, int(page)))))
-                headers[key] = urlunsplit((parts.scheme, parts.netloc, parts.path, urlencode(out, doseq=True), parts.fragment))
+                headers[key] = urlunsplit(
+                    (parts.scheme, parts.netloc, canonical.path, canonical.query, "")
+                )
             except Exception:
                 pass
         return headers

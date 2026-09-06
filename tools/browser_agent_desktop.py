@@ -18,7 +18,7 @@ from tools.ozon_http import OzonSessionResolver
 run_browser_agent = browser_agent_module.main
 
 API_URL = "https://leo-crm-api.onrender.com"
-APP_VERSION = "0.3.6"
+APP_VERSION = "0.3.7"
 APP_DIR = Path(os.environ.get("LOCALAPPDATA", Path.home())) / "LEO-CRM" / "browser-agent"
 TOKEN_FILE = APP_DIR / "agent-token.dat"
 LOG_FILE = APP_DIR / "agent.log"
@@ -140,7 +140,8 @@ def _ensure_ozon_session(*, force_replace: bool = False) -> None:
                 "LEO HTTP Agent",
                 reason
                 + "Откройте выдачу Ozon без CAPTCHA и вставьте Copy as cURL (bash) "
-                "GET Network-запроса с /search/. Cookies останутся зашифрованы "
+                "GET Network-запроса page/json/v2 с карточками товаров (/search/ или /category/). "
+                "Cookies останутся зашифрованы "
                 "на этом компьютере:",
                 parent=root,
             )
@@ -152,8 +153,10 @@ def _ensure_ozon_session(*, force_replace: bool = False) -> None:
                 print(f"Ozon HTTP session rejected: {type(exc).__name__}")
                 messagebox.showerror(
                     "LEO HTTP Agent",
-                    "HTTP-сеанс Ozon не принят. Проверьте, что скопирован именно "
-                    "GET-запрос /search/ со страницы без CAPTCHA, и вставьте его ещё раз.",
+                    "HTTP-сеанс Ozon не принят. Проверьте, что скопирован GET-запрос "
+                    "page/json/v2 с карточками товаров со страницы без CAPTCHA, "
+                    "и вставьте его ещё раз.\n\n"
+                    f"Причина: {exc}",
                     parent=root,
                 )
                 reason = "Предыдущий HTTP-сеанс не принят. "
