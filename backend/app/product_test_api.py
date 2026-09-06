@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import hashlib
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from threading import Lock
@@ -8,7 +9,9 @@ from typing import Literal
 from xml.etree import ElementTree
 from uuid import uuid4
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response, Request
+from fastapi.encoders import jsonable_encoder
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 from sqlalchemy import delete, or_, select, update
 from sqlalchemy.orm import Session
@@ -127,6 +130,7 @@ class ProductTestAgentResult(BaseModel):
     result: dict = Field(default_factory=dict)
     error_code: str | None = Field(default=None, max_length=128)
     error_message: str | None = Field(default=None, max_length=4000)
+    compact_response: bool = False
 
 
 class ProductTestAgentIdentity(FastAgentIdentity):
@@ -138,6 +142,8 @@ class ProductTestAgentIdentity(FastAgentIdentity):
 
 class ProductTestAgentHeartbeat(ProductTestAgentIdentity):
     status: str = Field(default="online", max_length=32)
+    job_id: int | None = Field(default=None, ge=1)
+    lease_token: str | None = Field(default=None, min_length=16, max_length=64)
 
 
 router = APIRouter(
@@ -644,6 +650,19 @@ def build_product_test_xml(source_xml: str, items: list[ProductTestItem]) -> byt
 
 
 @router.get("")
+def read_product_test_state_endpoint(request: Request, db: Session = Depends(get_db)) -> Response:
+    state = jsonable_encoder(read_product_test_state(db))
+    # checked_at changes on every read, even when all displayed data is equal.
+    fingerprint = {**state, "agent": {k: v for k, v in state["agent"].items() if k != "checked_at"}}
+    digest = hashlib.sha256(json.dumps(fingerprint, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    etag = f'W/"{digest}"'
+    headers = {"ETag": etag, "Cache-Control": "private, no-cache",
+               "Vary": "Authorization, X-Workspace-ID"}
+    if request.headers.get("if-none-match") == etag:
+        return Response(status_code=304, headers=headers)
+    return JSONResponse(state, headers=headers)
+
+
 def read_product_test_state(db: Session = Depends(get_db)) -> dict:
     workspace_id = current_workspace_id()
     all_items = list(db.scalars(
@@ -2172,7 +2191,21 @@ def heartbeat_product_test_agent(
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc
-    return _touch_product_test_agent(payload, status=payload.status)
+    record = _touch_product_test_agent(payload, status=payload.status)
+    if payload.job_id is not None and payload.lease_token:
+        # Renew only the exact lease held by this worker, never a reclaimed job.
+        renewed = db.execute(
+            update(ProductTestJob).where(
+                ProductTestJob.id == payload.job_id,
+                ProductTestJob.workspace_id == payload.workspace_id,
+                ProductTestJob.agent_id == payload.agent_id,
+                ProductTestJob.lease_token == payload.lease_token,
+                ProductTestJob.status == "leased",
+            ).values(lease_until=_now() + timedelta(seconds=7200))
+        )
+        record = {**record, "lease_renewed": renewed.rowcount == 1}
+        db.commit()
+    return record
 
 
 @agent_router.get("/agents/status")
@@ -2181,6 +2214,14 @@ def read_product_test_agent_status() -> dict:
 
 
 @agent_router.post("/jobs/{job_id}/complete")
+def complete_product_test_job_endpoint(job_id: int, payload: ProductTestAgentResult, db: Session = Depends(get_unscoped_db)) -> dict:
+    result = complete_product_test_job(job_id, payload, db)
+    if payload.compact_response:
+        job = result.get("job", result)
+        return {"job": {"id": job.get("id"), "status": job.get("status")}}
+    return result
+
+
 def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: Session = Depends(get_unscoped_db)) -> dict:
     with workspace_context(payload.workspace_id):
         job = db.scalar(
@@ -2191,13 +2232,18 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
         )
         if job is None:
             raise HTTPException(status_code=404, detail="Задание не найдено")
+        if (job.status in {"succeeded", "failed"}
+                and job.agent_id == payload.agent_id
+                and job.lease_token == payload.lease_token):
+            # A response can be lost after commit. Retrying must not repeat
+            # persistence or reject a result that was already accepted.
+            return _job_payload(job)
         if job.status != "leased" or job.agent_id != payload.agent_id or job.lease_token != payload.lease_token:
             raise HTTPException(status_code=409, detail="Задание уже завершено или аренда недействительна")
         job.result_json = payload.result
         job.error_code = payload.error_code
         job.error_message = payload.error_message
         job.completed_at = _now()
-        job.lease_token = None
         job.lease_until = None
         if payload.status == "failed":
             job.status = "failed"

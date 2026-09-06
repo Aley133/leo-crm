@@ -3,8 +3,8 @@ import asyncio
 from backend.app.main import APP_VERSION, DEPLOYMENT_MARKER, app, health
 
 
-EXPECTED_APP_VERSION = "0.26.16"
-EXPECTED_DEPLOYMENT_MARKER = "shared-inventory-detach-relink"
+EXPECTED_APP_VERSION = "0.26.17"
+EXPECTED_DEPLOYMENT_MARKER = "product-test-lease-bandwidth"
 
 
 def test_application_metadata_contract() -> None:

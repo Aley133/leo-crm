@@ -61,6 +61,70 @@ from tools.kaspi_fast_dumping_scanner import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_product_test_state_revalidation_keeps_changes(monkeypatch):
+    from starlette.requests import Request
+    state = {"items": [{"id": 1, "status": "ready"}], "agent": {"checked_at": "one", "online": True}}
+    monkeypatch.setattr(product_test_api, "read_product_test_state", lambda db: state)
+    def request(etag=None):
+        return Request({"type": "http", "headers": [] if etag is None else [(b"if-none-match", etag.encode())]})
+    first = product_test_api.read_product_test_state_endpoint(request(), None)
+    state["agent"]["checked_at"] = "two"
+    unchanged = product_test_api.read_product_test_state_endpoint(request(first.headers["etag"]), None)
+    assert unchanged.status_code == 304
+    assert unchanged.body == b""
+    state["items"][0]["status"] = "failed"
+    changed = product_test_api.read_product_test_state_endpoint(request(first.headers["etag"]), None)
+    assert changed.status_code == 200
+    assert changed.headers["etag"] != first.headers["etag"]
+    assert "X-Workspace-ID" in changed.headers["vary"]
+
+
+@pytest.mark.parametrize("compressed", [False, True])
+def test_product_test_agent_reads_compressed_and_plain_responses(monkeypatch, compressed):
+    import gzip
+    import io
+    from tools import product_test_agent
+    raw = b'{"job": null}'
+    response = io.BytesIO(gzip.compress(raw) if compressed else raw)
+    response.headers = {"Content-Encoding": "gzip"} if compressed else {}
+    def urlopen(request, **kwargs):
+        assert request.get_header("Accept-encoding") == "gzip"
+        return response
+    monkeypatch.setattr(product_test_agent, "urlopen", urlopen)
+    assert product_test_agent._post_json("https://crm.example/claim", "test", {}) == {"job": None}
+
+
+def test_running_product_test_job_renews_with_identity_and_stops_after_completion(monkeypatch):
+    from tools import product_test_agent as agent
+    calls = []
+    async def run():
+        renewed = asyncio.Event()
+        async def execute(*args, **kwargs):
+            await asyncio.wait_for(renewed.wait(), timeout=1)
+            return {"items": []}
+        async def post(url, token, payload, **kwargs):
+            calls.append((url, payload))
+            if url.endswith("heartbeat"):
+                ProductTestAgentHeartbeat(**payload)
+                renewed.set()
+                return {"lease_renewed": True}
+            assert payload["compact_response"] is True
+            return {"job": {"id": 1, "status": "succeeded"}}
+        monkeypatch.setattr(agent, "HEARTBEAT_SECONDS", 0.001)
+        monkeypatch.setattr(agent, "_run_job_with_retry", execute)
+        monkeypatch.setattr(agent, "_post_json_with_retry", post)
+        monkeypatch.setattr(agent, "_log", lambda *a, **kw: None)
+        await agent._process_job(api_url="https://crm.example", token="test",
+            job={"id": 1, "job_type": "discover_popular", "lease_token": "a" * 32},
+            agent_id="pc", workspace_id=1, merchant_session=None, store_id="s",
+            identity={"merchant_uid": "merchant-1"})
+        count = len(calls)
+        await asyncio.sleep(0.01)
+        assert len(calls) == count
+    asyncio.run(run())
+    assert any(url.endswith("heartbeat") for url, _ in calls)
+
+
 def _children(element):
     return [str(child.tag).rsplit("}", 1)[-1] for child in list(element)]
 
@@ -528,6 +592,43 @@ def test_product_test_agent_has_independent_presence(db_session) -> None:
     assert status["agents"][0]["version"] == "1.0.0"
 
 
+def test_product_test_heartbeat_renews_only_owned_lease(db_session):
+    _seed_agent_account(db_session)
+    identity = dict(agent_id="lease-pc", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1")
+    with workspace_context(1):
+        inspect_product(ProductTestInspectRequest(reference="123456789"), db_session)
+    claim = claim_product_test_job(ProductTestAgentIdentity(**identity), db_session)["job"]
+    row = db_session.get(ProductTestJob, claim["id"])
+    expired = product_test_api._now() - timedelta(seconds=1)
+    row.lease_until = expired
+    db_session.commit()
+    rejected = heartbeat_product_test_agent(ProductTestAgentHeartbeat(
+        **identity, job_id=row.id, lease_token="x" * 32), db_session)
+    assert rejected["lease_renewed"] is False
+    renewed = heartbeat_product_test_agent(ProductTestAgentHeartbeat(
+        **identity, job_id=row.id, lease_token=claim["lease_token"]), db_session)
+    assert renewed["lease_renewed"] is True
+    assert claim_product_test_job(ProductTestAgentIdentity(**identity), db_session)["job"] is None
+
+
+def test_product_test_completion_retry_is_idempotent(db_session):
+    _seed_agent_account(db_session)
+    identity = dict(agent_id="lease-pc", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1")
+    with workspace_context(1):
+        inspect_product(ProductTestInspectRequest(reference="123456789"), db_session)
+    claim = claim_product_test_job(ProductTestAgentIdentity(**identity), db_session)["job"]
+    payload = ProductTestAgentResult(agent_id="lease-pc", workspace_id=1,
+        lease_token=claim["lease_token"], status="failed", error_message="network",
+        compact_response=True)
+    first = product_test_api.complete_product_test_job_endpoint(claim["id"], payload, db_session)
+    second = product_test_api.complete_product_test_job_endpoint(claim["id"], payload, db_session)
+    assert first == second == {"job": {"id": claim["id"], "status": "failed"}}
+    payload.lease_token = "x" * 32
+    with pytest.raises(HTTPException) as exc:
+        complete_product_test_job(claim["id"], payload, db_session)
+    assert exc.value.status_code == 409
+
+
 def test_two_fast_agents_cannot_cross_workspace_product_test_jobs(db_session) -> None:
     _seed_agent_account(db_session, workspace_id=1, partner_id="merchant-1")
     _seed_agent_account(db_session, workspace_id=3, partner_id="merchant-3")
@@ -595,8 +696,8 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert '@router.get("/crm/add-product"' in ui
     assert 'data-product-test-page="product-test"' in test_html
     assert 'data-product-test-page="add-product"' in add_html
-    assert 'product-test.js?v=20260906-1' in test_html
-    assert 'product-test.js?v=20260906-1' in add_html
+    assert 'product-test.js?v=20260906-2' in test_html
+    assert 'product-test.js?v=20260906-2' in add_html
     assert ui.count('headers={"Cache-Control": "no-store"}') >= 3
     assert 'id="discover-form"' in test_html
     assert 'id="discover-mode"' in test_html
