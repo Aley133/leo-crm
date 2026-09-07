@@ -412,7 +412,9 @@ async def process_apply(
                 if live.stock_count is None:
                     error_code = "kaspi_offer_read_failed"
                     error_message = "Kaspi не вернул stockCount для точного SKU/store. Write заблокирован."
-                elif live.stock_count < crm_stock:
+                elif live.stock_count < crm_stock and not (
+                    isinstance(live.preorder_days, int) and live.preorder_days > 0
+                ):
                     error_code = "kaspi_zero_vs_crm_stock" if live.stock_count == 0 else "kaspi_stock_lower_than_crm"
                     error_message = (
                         f"Защитная блокировка: CRM FIFO={crm_stock}, Kaspi stock={live.stock_count}. "

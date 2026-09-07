@@ -607,6 +607,49 @@ def recover_expired_leases(
     return recovered
 
 
+def _schedule_inventory_transitions(db: Session, workspace_id: int, limit: int) -> int:
+    # Recover arrivals missed by an older deployment; do not wait for the
+    # regular price deadline, and never interrupt an in-flight SKU operation.
+    latest = select(FastDumpingJob.id).where(
+        FastDumpingJob.workspace_id == workspace_id,
+        FastDumpingJob.product_id == FastDumpingState.product_id,
+        FastDumpingJob.status == "applied",
+    ).order_by(FastDumpingJob.completed_at.desc(), FastDumpingJob.id.desc()).limit(1).correlate(FastDumpingState).scalar_subquery()
+    preorder = select(FastDumpingJob.id).where(
+        FastDumpingJob.id == latest,
+        FastDumpingJob.decision_json["fulfillment_mode"].as_string() == "preorder",
+    ).correlate(FastDumpingState).exists()
+    queued_scan = select(FastDumpingJob.id).where(
+        FastDumpingJob.id == FastDumpingState.active_job_id,
+        FastDumpingJob.status == "queued_scan",
+        or_(FastDumpingJob.reason.is_(None), ~FastDumpingJob.reason.startswith("inventory_priority:")),
+    ).correlate(FastDumpingState).exists()
+    states = db.scalars(select(FastDumpingState)
+        .join(FastDumpingPolicy, FastDumpingPolicy.id == FastDumpingState.policy_id)
+        .join(Product, Product.id == FastDumpingState.product_id)
+        .where(FastDumpingState.workspace_id == workspace_id,
+               FastDumpingPolicy.workspace_id == workspace_id, Product.workspace_id == workspace_id,
+               FastDumpingPolicy.enabled.is_(True), Product.sale_enabled.is_(True),
+               FastDumpingState.automatic_writes_paused.is_(False),
+               FastDumpingState.inventory_on_hand > 0, preorder,
+               or_(FastDumpingState.active_job_id.is_(None), queued_scan))
+        .order_by(FastDumpingState.id).limit(max(1, min(100, int(limit))))
+        .with_for_update(skip_locked=True)).all()
+    created_count = 0
+    for state in states:
+        if state.active_job_id is not None:
+            active = db.get(FastDumpingJob, state.active_job_id)
+            active.reason = "inventory_priority:recover_existing_fifo"
+            active.not_before_at = None
+        else:
+            policy = db.get(FastDumpingPolicy, state.policy_id)
+            _, created = queue_scan(db, policy=policy, workspace_id=workspace_id,
+                                    reason="inventory_priority:recover_existing_fifo")
+            created_count += int(created)
+        state.next_scan_at = utcnow()
+    return created_count
+
+
 def schedule_due_scans(
     db: Session,
     *,
@@ -615,6 +658,7 @@ def schedule_due_scans(
     now: datetime | None = None,
 ) -> int:
     checked_at = now or utcnow()
+    priority_queued = _schedule_inventory_transitions(db, workspace_id, limit)
     states = db.scalars(
         select(FastDumpingState)
         .join(
@@ -639,7 +683,7 @@ def schedule_due_scans(
         .limit(max(1, min(100, int(limit))))
         .with_for_update(skip_locked=True)
     ).all()
-    queued = 0
+    queued = priority_queued
     for state in states:
         policy = db.get(FastDumpingPolicy, state.policy_id)
         if policy is None or policy.workspace_id != workspace_id:
@@ -665,6 +709,7 @@ def claim_job(
     schedule_due_scans(db, workspace_id=workspace_id)
     now = utcnow()
     priority = case(
+        (FastDumpingJob.reason.startswith("inventory_priority:"), -1),
         (FastDumpingJob.status == "queued_apply", 0),
         (FastDumpingJob.status == "queued_verify", 1),
         else_=2,

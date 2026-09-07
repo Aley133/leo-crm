@@ -27,7 +27,7 @@ from tools.kaspi_fast_dumping_scanner import (
     scan_kaspi_competitors,
 )
 from tools.kaspi_fast_dumping_session import KaspiMerchantSession
-VERSION = "1.2.2"
+VERSION = "1.2.3"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60

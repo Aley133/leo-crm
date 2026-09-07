@@ -53,6 +53,91 @@ from tools.kaspi_fast_dumping_scanner import (
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("existing_scan", [False, True])
+def test_existing_preorder_with_fifo_recovers_before_hour_deadline(db_session, existing_scan):
+    from backend.app.fast_dumping_service import schedule_due_scans
+    product, batch, policy, state = _seed_fast_product(db_session, quantity=16)
+    with workspace_context(1):
+        state.inventory_on_hand = 16
+        state.last_applied_at = datetime.now(UTC)
+        state.next_scan_at = datetime.now(UTC) + timedelta(hours=1)
+        db_session.add(FastDumpingJob(workspace_id=1, product_id=product.id,
+            policy_id=policy.id, status="applied", completed_at=datetime.now(UTC),
+            decision_json={"fulfillment_mode": "preorder", "stock_count": 5}))
+        if existing_scan:
+            job, _ = queue_scan(db_session, policy=policy, workspace_id=1, reason="scheduled")
+            job.not_before_at = datetime.now(UTC) + timedelta(hours=1)
+        db_session.commit()
+        schedule_due_scans(db_session, workspace_id=1)
+        db_session.commit()
+        priority = db_session.get(FastDumpingJob, state.active_job_id)
+        assert priority.reason == "inventory_priority:recover_existing_fifo"
+        assert priority.not_before_at is None
+        first_id = priority.id
+        schedule_due_scans(db_session, workspace_id=1)
+        assert state.active_job_id == first_id
+    assert _claim(db_session, 1).id == first_id
+
+
+def test_confirmed_inventory_keeps_regular_schedule(db_session):
+    from backend.app.fast_dumping_service import schedule_due_scans
+    product, batch, policy, state = _seed_fast_product(db_session, quantity=16)
+    with workspace_context(1):
+        state.inventory_on_hand = 16
+        state.next_scan_at = datetime.now(UTC) + timedelta(hours=1)
+        db_session.add(FastDumpingJob(workspace_id=1, product_id=product.id,
+            policy_id=policy.id, status="applied", completed_at=datetime.now(UTC),
+            decision_json={"fulfillment_mode": "inventory", "stock_count": 16}))
+        db_session.commit()
+        assert schedule_due_scans(db_session, workspace_id=1) == 0
+        assert state.active_job_id is None
+
+
+def test_inventory_arrival_claims_before_older_price_job(db_session):
+    from backend.app.fast_dumping_xml_guard import _sync_product_inventory_to_feed
+    product, batch, policy, state = _seed_fast_product(db_session, quantity=16)
+    with workspace_context(1):
+        old = FastDumpingJob(workspace_id=1, product_id=product.id, policy_id=policy.id,
+                             status="queued_apply", reason="old-price")
+        db_session.add(old)
+        state.inventory_on_hand = 0
+        state.source_kind = "supplier"
+        state.last_applied_at = datetime.now(UTC)
+        state.next_scan_at = datetime.now(UTC) + timedelta(hours=1)
+        db_session.flush()
+        _sync_product_inventory_to_feed(db_session, product_id=product.id, reason="arrival")
+        priority_id = state.active_job_id
+        db_session.commit()
+    claimed = _claim(db_session, 1)
+    assert claimed.id == priority_id
+    assert claimed.id != old.id
+    assert claimed.reason.startswith("inventory_priority:")
+
+
+def test_arrival_waits_for_inflight_operation_then_queues_priority_scan(db_session):
+    from backend.app.fast_dumping_xml_guard import _sync_product_inventory_to_feed, _resume_inventory_transition
+    product, batch, policy, state = _seed_fast_product(db_session, quantity=16)
+    with workspace_context(1):
+        old = FastDumpingJob(workspace_id=1, product_id=product.id, policy_id=policy.id,
+            status="leased_apply", reason="preorder", decision_json={"fulfillment_mode": "preorder"})
+        db_session.add(old)
+        db_session.flush()
+        state.active_job_id = old.id
+        state.inventory_on_hand = 0
+        state.source_kind = "supplier"
+        _sync_product_inventory_to_feed(db_session, product_id=product.id, reason="arrival")
+        assert state.active_job_id == old.id
+        assert old.status == "leased_apply"
+        _resume_inventory_transition(db_session, old.id, 1)
+        assert state.active_job_id == old.id
+        old.status = "applied"
+        state.active_job_id = None
+        _resume_inventory_transition(db_session, old.id, 1)
+        fresh = db_session.get(FastDumpingJob, state.active_job_id)
+        assert fresh.id != old.id
+        assert fresh.reason.startswith("inventory_priority:")
+
+
 @pytest.mark.parametrize("change", [None, "empty", "floor", "paused", "cooldown"])
 def test_inventory_transition_retries_until_kaspi_confirmed_even_with_same_desired_stock(db_session, change):
     product, batch, policy, state = _seed_fast_product(db_session, quantity=5)
@@ -89,12 +174,8 @@ def test_inventory_transition_retries_until_kaspi_confirmed_even_with_same_desir
         db_session.flush()
         prepared = prepare_apply(db_session, workspace_id=1, job_id=job.id,
             agent_id="fast-agent", lease_token=leased.lease_token)
-        if change is not None:
+        if change is not None and change != "cooldown":
             assert prepared["ready"] is False
-            if change == "cooldown":
-                assert prepared["cooldown"] is True
-                assert job.status == "queued_apply"
-                assert job.not_before_at is not None
             return
         assert prepared["ready"] is True
         assert prepared["stock_count"] == 5

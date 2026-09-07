@@ -44,6 +44,7 @@ def _sync_product_inventory_to_feed(
 
     stock = physical_stock_count(db, product_id=product_id)
     state = svc.ensure_state(db, policy=policy, workspace_id=policy.workspace_id)
+    incoming = stock > 0 and (not state.inventory_on_hand or state.source_kind == "supplier")
     state.inventory_on_hand = stock
     state.next_scan_at = svc.utcnow()
 
@@ -68,12 +69,16 @@ def _sync_product_inventory_to_feed(
                 "заменено обязательным новым scan."
             ),
         )
+    if incoming and active is not None and active.status in {"queued_scan", "leased_scan", "leased_apply", "queued_verify", "leased_verify"}:
+        active.reason = f"inventory_priority:{reason}"[:128]
+        if active.status == "queued_scan":
+            active.not_before_at = None
     if state.active_job_id is None and not state.automatic_writes_paused:
         svc.queue_scan(
             db,
             policy=policy,
             workspace_id=policy.workspace_id,
-            reason=f"inventory_event:{reason}"[:128],
+            reason=f"{'inventory_priority' if incoming else 'inventory_event'}:{reason}"[:128],
         )
     return {
         "stock_count": stock,
@@ -180,6 +185,24 @@ def _mirror_verified_offer(db: Session, *, job: FastDumpingJob) -> bool:
         raise
 
 
+def _resume_inventory_transition(db: Session, job_id: int, workspace_id: int) -> None:
+    job = db.get(FastDumpingJob, job_id)
+    if job is None or job.workspace_id != workspace_id or not str(job.reason or "").startswith("inventory_priority:"):
+        return
+    if (job.decision_json or {}).get("fulfillment_mode") == "inventory":
+        return
+    state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
+    if state is None or state.active_job_id is not None or state.automatic_writes_paused:
+        return
+    if physical_stock_count(db, product_id=job.product_id) <= 0:
+        return
+    policy = _fast_policy(db, job.product_id)
+    if policy is not None:
+        state.next_scan_at = svc.utcnow()
+        svc.queue_scan(db, policy=policy, workspace_id=workspace_id,
+                       reason="inventory_priority:after_pending_operation")
+
+
 def _complete_apply(
     db: Session,
     *,
@@ -210,6 +233,7 @@ def _complete_apply(
                 state.status_reason = (
                     f"{state.status_reason or ''} XML safety mirror обновлён после realtime verify."
                 ).strip()
+    _resume_inventory_transition(db, job_id, workspace_id)
     return result
 
 
@@ -238,7 +262,7 @@ def _complete_verification(
     )
     if verification_succeeded:
         job = db.get(FastDumpingJob, job_id)
-        if job is not None and job.status == "succeeded" and _mirror_verified_offer(db, job=job):
+        if job is not None and job.status == "applied" and _mirror_verified_offer(db, job=job):
             state = db.scalar(
                 select(FastDumpingState).where(
                     FastDumpingState.workspace_id == workspace_id,
@@ -249,6 +273,7 @@ def _complete_verification(
                 state.status_reason = (
                     f"{state.status_reason or ''} XML safety mirror синхронизирован с подтверждённым Kaspi state."
                 ).strip()
+    _resume_inventory_transition(db, job_id, workspace_id)
     return result
 
 
