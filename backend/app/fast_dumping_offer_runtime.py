@@ -206,6 +206,22 @@ def _complete_scan_v2(
         state.inventory_on_hand = stock
         state.desired_stock_count = stock
         state.source_kind = "inventory"
+        confirmed = db.scalar(select(FastDumpingJob).where(
+            FastDumpingJob.workspace_id == workspace_id,
+            FastDumpingJob.product_id == product.id,
+            FastDumpingJob.status == "applied",
+        ).order_by(FastDumpingJob.completed_at.desc(), FastDumpingJob.id.desc()).limit(1))
+        was_preorder = confirmed is not None and (confirmed.decision_json or {}).get("fulfillment_mode") == "preorder"
+        if ((str(job.reason or "").startswith("inventory_priority:") or was_preorder)
+                and not state.automatic_writes_paused and state.market_context_ok
+                and state.own_price_kzt is not None):
+            decision = _inventory_decision(job, state, stock)
+            decision.update(inventory_sync_only=True, inventory_transition_priority=True,
+                            target_price_kzt=str(state.own_price_kzt))
+            job.reason = "inventory_priority:confirmed_preorder_to_fifo"
+            _reactivate_apply(state=state, job=job, decision=decision,
+                              reason="Приоритетный переход на физический остаток CRM, preOrder=0.")
+            return {"status": state.status, "queued_apply": True, "decision": decision}
         if result.get("queued_apply"):
             job.decision_json = _inventory_decision(job, state, stock)
             return result
@@ -293,7 +309,8 @@ def _prepare_apply_v2(
 ) -> dict[str, Any]:
     job = db.get(FastDumpingJob, job_id)
     mode = str((job.decision_json or {}).get("fulfillment_mode") or "inventory") if job else "inventory"
-    if mode == "inventory":
+    inventory_sync_only = bool(job and (job.decision_json or {}).get("inventory_sync_only"))
+    if mode == "inventory" and not inventory_sync_only:
         result = _ORIGINALS["prepare_apply"](
             db,
             workspace_id=workspace_id,
@@ -336,7 +353,33 @@ def _prepare_apply_v2(
     stock = physical_stock_count(db, product_id=product.id)
     source = resolve_cost_source(db, product_id=product.id, inventory_first=True)
     decision = dict(job.decision_json or {})
-    if mode == "preorder":
+    if mode == "inventory":
+        target = Decimal(str(decision.get("target_price_kzt") or 0))
+        if (stock <= 0 or stock != int(decision.get("stock_count") or 0)
+                or source is None or source.kind != "inventory"
+                or not state.market_context_ok or state.own_price_kzt != target):
+            return _stale_offer_job(state=state, job=job, reason="FIFO или подтверждённая цена изменились перед синхронизацией наличия.")
+        floor = calculate_safe_floor(unit_cost_kzt=source.unit_cost_kzt,
+            minimum_profit_kzt=Decimal(policy.minimum_profit_kzt))
+        if target < floor:
+            return _stale_offer_job(state=state, job=job, reason="Текущая цена ниже безопасного floor; синхронизация наличия отложена до пересчёта цены.")
+        cooldown = svc._next_write_allowed_at(state, policy)
+        if (cooldown is not None and svc.utcnow() < cooldown
+                and not decision.get("inventory_transition_priority")):
+            job.status = "queued_apply"
+            job.agent_id = None
+            job.lease_token = None
+            job.lease_until = None
+            job.not_before_at = cooldown
+            state.status = "queued_apply"
+            state.next_scan_at = cooldown
+            state.status_reason = "Синхронизация наличия ожидает окончания интервала записи."
+            return {"ready": False, "cooldown": True, "reason": state.status_reason}
+        preorder = 0
+        desired_stock = stock
+        state.safe_floor_kzt = floor
+        state.source_kind = "inventory"
+    elif mode == "preorder":
         if stock > 0 or source is None or source.kind != "supplier":
             return _stale_offer_job(
                 state=state,

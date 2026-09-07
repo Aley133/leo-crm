@@ -1,8 +1,50 @@
 from types import SimpleNamespace
 from decimal import Decimal
+import asyncio
+import pytest
 
 from backend.app.fast_dumping_offer_runtime import _clamp_preorder, _supplier_decision
 from tools.kaspi_fast_offer_runtime import _matches, _parse_offer
+
+
+@pytest.mark.parametrize("preorder,pending,write", [(8, False, True), (0, False, False), (None, False, False), (8, True, False)])
+def test_inventory_arrival_distinguishes_virtual_from_physical_stock(monkeypatch, preorder, pending, write):
+    from tools import kaspi_fast_offer_runtime as runtime
+    calls = []
+    payloads = []
+    live = SimpleNamespace(found=True, stock_count=5, preorder_days=preorder,
+        pending=pending, price_kzt=20000, nested_available="yes", row_available=True,
+        sku="sku", store_id="store", operation_type="IN_PROGRESS" if pending else None,
+        processed=not pending, applied_before=None, query_mode="active", raw_status=None)
+    async def post(url, token, payload, **kwargs):
+        if url.endswith("prepare-apply"):
+            return {"ready": True, "sku": "sku", "city_id": "city", "model": "model",
+                    "stock_count": 16, "preorder_days": 0, "fulfillment_mode": "inventory", "target_price_kzt": "20000"}
+        payloads.append(payload)
+        return {"status": "done"}
+    def write_offer(*args, **kwargs):
+        calls.append(kwargs)
+        live.stock_count = 16
+        live.preorder_days = 0
+        return {"accepted": True, "status_code": 200}
+    monkeypatch.setattr(runtime.base, "_post_json_with_retry", post)
+    monkeypatch.setattr(runtime.base, "_log", lambda *a, **kw: None)
+    monkeypatch.setattr(runtime.base, "_WRITE_LOCK", asyncio.Lock())
+    monkeypatch.setattr(runtime, "read_offer_state", lambda *a, **kw: live)
+    monkeypatch.setattr(runtime, "write_offer_state", write_offer)
+    asyncio.run(runtime.process_apply(api_url="https://crm.example", token="test",
+        job={"id": 1, "lease_token": "test"}, agent_id="agent", workspace_id=1,
+        merchant_uid="merchant", store_id="store",
+        merchant_session=SimpleNamespace(ensure_valid_sid=lambda: None)))
+    assert bool(calls) is write
+    if write:
+        assert calls[0]["preorder_days"] == 0
+        assert calls[0]["stock_count"] == 16
+        assert payloads[0]["verified"] is True
+    elif pending:
+        assert payloads[0]["error_code"] == "waiting_existing_operation"
+    else:
+        assert payloads[0]["error_code"] == "kaspi_stock_lower_than_crm"
 
 
 def test_merchant_bff_parser_uses_exact_sku_and_store():

@@ -204,7 +204,7 @@ def test_inventory_arrival_replaces_queued_preorder_apply_with_fresh_scan(
     assert replacement is not None
     assert replacement.id != old_job.id
     assert replacement.status == "queued_scan"
-    assert replacement.reason == "inventory_event:inventory_batch_created"
+    assert replacement.reason == "inventory_priority:inventory_batch_created"
     assert state.inventory_on_hand == 3
 
 
