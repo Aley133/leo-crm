@@ -89,20 +89,36 @@ def _complete_scan(
         return result
 
     stock = physical_stock_count(db, product_id=product.id)
-    if int(previous_desired_stock) == int(stock):
+    confirmed = db.scalar(select(FastDumpingJob).where(
+        FastDumpingJob.workspace_id == workspace_id,
+        FastDumpingJob.product_id == product.id,
+        FastDumpingJob.status == "applied",
+    ).order_by(FastDumpingJob.completed_at.desc(), FastDumpingJob.id.desc()).limit(1))
+    confirmed_decision = dict(confirmed.decision_json or {}) if confirmed is not None else None
+    needs_confirmation = confirmed_decision is not None and (
+        confirmed_decision.get("fulfillment_mode", "inventory") != "inventory"
+        or int(confirmed_decision.get("preorder_days") or 0) != 0
+        or int(confirmed_decision.get("stock_count") or 0) != stock
+    )
+    if int(previous_desired_stock) == int(stock) and not needs_confirmation:
         return result
     source = resolve_cost_source(db, product_id=product.id, inventory_first=True)
     if stock <= 0 or source is None or source.kind != "inventory" or state.own_price_kzt is None:
         return result
+    if not state.market_context_ok:
+        return result
 
     decision = offer_runtime._inventory_decision(job, state, stock)
+    # Fulfillment reconciliation never requires a price change. The prepare
+    # step rechecks FIFO, price, floor and policy before the Agent writes.
+    decision.update(inventory_sync_only=True, target_price_kzt=str(state.own_price_kzt))
     offer_runtime._reactivate_apply(
         state=state,
         job=job,
         decision=decision,
         reason=(
-            f"FIFO изменился с {int(previous_desired_stock)} до {stock}. "
-            "Fast Dumping синхронизирует только realtime stock/preOrder, не трогая XML."
+            f"FIFO: {stock} шт.; наличие на Kaspi ещё не подтверждено. "
+            "Fast Agent сверит остаток и сбросит preOrder в 0, сохранив цену."
         ),
     )
     return {"status": state.status, "queued_apply": True, "decision": decision}

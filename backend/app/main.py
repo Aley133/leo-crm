@@ -79,8 +79,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.18"
-DEPLOYMENT_MARKER = "ozon-manual-exact-offer-delivery"
+APP_VERSION = "0.26.19"
+DEPLOYMENT_MARKER = "fast-inventory-confirmed-transition"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

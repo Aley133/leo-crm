@@ -395,12 +395,20 @@ def prune_fast_dumping_history(
         )
         if cutoff_id is None:
             continue
+        # Keep one confirmed fulfillment snapshot, even after many no-write
+        # scans, so desired stock cannot be mistaken for applied Kaspi stock.
+        confirmed_id = db.scalar(select(FastDumpingJob.id).where(
+            FastDumpingJob.workspace_id == workspace_id,
+            FastDumpingJob.product_id == product_id,
+            FastDumpingJob.status == "applied",
+        ).order_by(FastDumpingJob.completed_at.desc(), FastDumpingJob.id.desc()).limit(1))
         result = db.execute(
             delete(FastDumpingJob).where(
                 FastDumpingJob.workspace_id == workspace_id,
                 FastDumpingJob.product_id == product_id,
                 FastDumpingJob.completed_at.is_not(None),
                 FastDumpingJob.id <= cutoff_id,
+                FastDumpingJob.id != confirmed_id if confirmed_id is not None else True,
             )
         )
         removed += int(result.rowcount or 0)
