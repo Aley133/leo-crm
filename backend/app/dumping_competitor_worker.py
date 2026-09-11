@@ -7,7 +7,7 @@ from typing import Any
 
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, aliased
 
 from .db import SessionLocal
 from .dumping_models import DumpingPolicy, DumpingRun
@@ -380,24 +380,33 @@ def build_failed_recovery_candidates_statement(
         raise ValueError("retry_seconds must be positive")
     if limit < 1 or limit > 1000:
         raise ValueError("limit must be between 1 and 1000")
-    reason = DumpingRun.explanation_json["reason"].as_string()
-    latest_recovery_ids = (
-        select(
-            DumpingRun.product_id.label("product_id"),
-            func.max(DumpingRun.id).label("run_id"),
+    # Recovery reason is stored in JSON and has no dedicated index. Start from
+    # the indexed failed status, then exclude only a newer recovery for the
+    # same product. This preserves "latest recovery attempt" semantics without
+    # grouping the entire, append-only dumping history on every scheduler tick.
+    failed_run = aliased(DumpingRun, name="failed_recovery")
+    newer_run = aliased(DumpingRun, name="newer_recovery")
+    failed_reason = failed_run.explanation_json["reason"].as_string()
+    newer_reason = newer_run.explanation_json["reason"].as_string()
+    newer_recovery_exists = (
+        select(newer_run.id)
+        .where(
+            newer_run.product_id == failed_run.product_id,
+            newer_run.id > failed_run.id,
+            newer_reason.in_(_RECOVERY_REASONS),
         )
-        .where(reason.in_(_RECOVERY_REASONS))
-        .group_by(DumpingRun.product_id)
-        .subquery()
+        .correlate(failed_run)
+        .exists()
     )
     return (
-        select(DumpingRun.id, DumpingRun.product_id)
-        .join(latest_recovery_ids, DumpingRun.id == latest_recovery_ids.c.run_id)
+        select(failed_run.id, failed_run.product_id)
         .where(
-            DumpingRun.status == "failed_local",
-            DumpingRun.created_at <= now - timedelta(seconds=retry_seconds),
+            failed_run.status == "failed_local",
+            failed_run.created_at <= now - timedelta(seconds=retry_seconds),
+            failed_reason.in_(_RECOVERY_REASONS),
+            ~newer_recovery_exists,
         )
-        .order_by(DumpingRun.id)
+        .order_by(failed_run.id)
         .limit(limit)
     )
 
