@@ -61,7 +61,8 @@ def _engine_options(database_url: str) -> dict[str, Any]:
     PostgreSQL uses a bounded pool sized for the API, two isolated local agents
     and background order synchronization. Overflow is disabled by default so a
     request burst cannot consume every Supabase session-pool slot. A short
-    timeout returns retryable overload instead of accumulating blocked threads.
+    timeout lets short agent bursts queue locally, then returns retryable
+    overload instead of accumulating blocked threads indefinitely.
     """
 
     url = make_url(database_url)
@@ -92,7 +93,7 @@ def _engine_options(database_url: str) -> dict[str, Any]:
             ),
             "pool_timeout": _bounded_int_setting(
                 "DB_POOL_TIMEOUT_SECONDS",
-                default=2,
+                default=5,
                 minimum=1,
                 maximum=10,
             ),
