@@ -5,6 +5,7 @@ import importlib.util
 import inspect
 from pathlib import Path
 import threading
+from types import SimpleNamespace
 
 from fastapi.middleware.gzip import GZipMiddleware
 import sqlalchemy as sa
@@ -176,6 +177,23 @@ def test_parallel_supplier_claim_is_throttled_before_database_access() -> None:
         "retry_after_seconds": browser_agent_api.BROWSER_AGENT_BUSY_RETRY_SECONDS,
         "throttled": True,
     }
+
+
+def test_legacy_null_browser_agent_counters_are_repaired_before_increment() -> None:
+    agent = SimpleNamespace(
+        leases_taken=None,
+        leases_succeeded=None,
+        leases_failed=None,
+    )
+
+    browser_agent_api._normalize_agent_counters(agent)
+    browser_agent_api._increment_agent_counter(agent, "leases_taken")
+    browser_agent_api._increment_agent_counter(agent, "leases_succeeded")
+    browser_agent_api._increment_agent_counter(agent, "leases_failed")
+
+    assert agent.leases_taken == 1
+    assert agent.leases_succeeded == 1
+    assert agent.leases_failed == 1
 
 
 def test_large_api_and_xml_responses_use_gzip_middleware() -> None:

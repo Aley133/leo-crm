@@ -26,7 +26,7 @@ def test_postgresql_uses_bounded_runtime_connection_pool(monkeypatch) -> None:
 
     assert options["pool_size"] == 5
     assert options["max_overflow"] == 0
-    assert options["pool_timeout"] == 2
+    assert options["pool_timeout"] == 5
     assert options["connect_args"] == {"connect_timeout": 8}
     assert options["pool_use_lifo"] is True
 
@@ -40,7 +40,7 @@ def test_postgresql_pool_settings_are_configurable_and_bounded(monkeypatch) -> N
 
     assert options["pool_size"] == 10
     assert options["max_overflow"] == 0
-    assert options["pool_timeout"] == 2
+    assert options["pool_timeout"] == 5
 
 
 def test_postgresql_pool_keeps_capacity_for_two_agents_and_order_polling(monkeypatch) -> None:

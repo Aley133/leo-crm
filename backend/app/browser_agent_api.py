@@ -89,6 +89,19 @@ _DISPATCH_LOCK = Lock()
 _CLAIM_LOCK = Lock()
 
 
+def _normalize_agent_counters(agent: BrowserAgent) -> BrowserAgent:
+    """Repair legacy nullable counters without a schema or data migration."""
+    agent.leases_taken = int(agent.leases_taken or 0)
+    agent.leases_succeeded = int(agent.leases_succeeded or 0)
+    agent.leases_failed = int(agent.leases_failed or 0)
+    return agent
+
+
+def _increment_agent_counter(agent: BrowserAgent, counter_name: str) -> None:
+    current_value = getattr(agent, counter_name)
+    setattr(agent, counter_name, int(current_value or 0) + 1)
+
+
 def _require_http_runtime(runtime_kind: str | None) -> None:
     if str(runtime_kind or "").strip().casefold() != REQUIRED_BROWSER_AGENT_RUNTIME:
         raise HTTPException(
@@ -281,6 +294,7 @@ def _upsert_agent(
             agent.platform = platform
         if version:
             agent.version = version
+    _normalize_agent_counters(agent)
     record_browser_agent_heartbeat(
         agent_id=agent_id,
         status=status_value,
@@ -436,7 +450,7 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
         job.lease_until = now + timedelta(seconds=payload.lease_seconds)
         agent.status = "running"
         agent.current_job_id = job.id
-        agent.leases_taken += 1
+        _increment_agent_counter(agent, "leases_taken")
         db.commit()
         record_browser_agent_heartbeat(
             agent_id=payload.agent_id,
@@ -526,9 +540,9 @@ def complete_browser_agent_job(job_id: int, payload: BrowserAgentResult, db: Ses
                 agent.current_job_id = None
                 agent.last_seen_at = now
                 if succeeded:
-                    agent.leases_succeeded += 1
+                    _increment_agent_counter(agent, "leases_succeeded")
                 else:
-                    agent.leases_failed += 1
+                    _increment_agent_counter(agent, "leases_failed")
         db.commit()
         if agent_id:
             record_browser_agent_heartbeat(agent_id=agent_id, status="idle")

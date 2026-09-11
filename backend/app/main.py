@@ -79,8 +79,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.21"
-DEPLOYMENT_MARKER = "supabase-transaction-pool-recovery"
+APP_VERSION = "0.26.22"
+DEPLOYMENT_MARKER = "browser-agent-null-counter-recovery"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

@@ -4,15 +4,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_postgres_pool_is_bounded_and_fails_fast_under_pressure() -> None:
+def test_postgres_pool_is_bounded_and_absorbs_short_pressure_bursts() -> None:
     source = (ROOT / "backend" / "app" / "db.py").read_text(encoding="utf-8")
 
     assert '"DB_POOL_SIZE"' in source
     assert "default=5" in source
     assert "minimum=3" in source
     assert '"DB_MAX_OVERFLOW"' in source
-    assert "default=2" in source
+    assert "default=0" in source
     assert '"DB_POOL_TIMEOUT_SECONDS"' in source
+    assert "default=5" in source
     assert '"pool_use_lifo": True' in source
     assert "finally:\n        db.close()" in source
 
