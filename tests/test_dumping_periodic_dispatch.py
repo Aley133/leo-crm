@@ -258,8 +258,11 @@ def test_failed_recovery_retry_uses_postgres_safe_two_phase_locking() -> None:
         )
     ).upper()
 
-    assert "GROUP BY" in candidate_sql
+    assert "GROUP BY" not in candidate_sql
     assert "FOR UPDATE" not in candidate_sql
+    assert "FAILED_RECOVERY.STATUS = 'FAILED_LOCAL'" in candidate_sql
+    assert "NOT (EXISTS" in candidate_sql
+    assert "NEWER_RECOVERY.ID > FAILED_RECOVERY.ID" in candidate_sql
     assert "GROUP BY" not in lock_sql
     assert "FOR UPDATE SKIP LOCKED" in lock_sql
 
