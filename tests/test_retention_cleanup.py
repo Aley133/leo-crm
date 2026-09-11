@@ -13,10 +13,19 @@ from backend.app.models import (
 )
 from backend.app.monitoring import MonitorAttempt
 from backend.app.retention_cleanup import (
+    cleanup_enabled,
     prune_browser_agent_history,
     prune_global_order_raw_payloads,
     prune_monitor_attempt_history,
 )
+
+
+def test_broad_retention_cleanup_is_opt_in(monkeypatch):
+    monkeypatch.delenv("DATA_RETENTION_ENABLED", raising=False)
+    assert cleanup_enabled() is False
+
+    monkeypatch.setenv("DATA_RETENTION_ENABLED", "true")
+    assert cleanup_enabled() is True
 
 
 def test_raw_payload_retention_keeps_order_and_latest_20(db_session):

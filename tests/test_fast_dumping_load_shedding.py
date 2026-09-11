@@ -51,6 +51,31 @@ def test_server_claim_gate_bounds_busy_and_idle_polling() -> None:
             agent_api._CLAIM_NOT_BEFORE.pop(workspace_id, None)
 
 
+def test_server_rejects_overlapping_claim_for_only_the_same_workspace() -> None:
+    workspace_id = 9013
+    other_workspace_id = 9014
+    with agent_api._AGENT_GUARD_LOCK:
+        agent_api._CLAIMS_IN_FLIGHT.discard(workspace_id)
+        agent_api._CLAIMS_IN_FLIGHT.discard(other_workspace_id)
+    try:
+        assert agent_api._acquire_claim_execution(workspace_id) is True
+        assert agent_api._acquire_claim_execution(workspace_id) is False
+        assert agent_api._acquire_claim_execution(other_workspace_id) is True
+    finally:
+        agent_api._release_claim_execution(workspace_id)
+        agent_api._release_claim_execution(other_workspace_id)
+
+
+def test_fast_claim_does_not_prune_completed_history_inline() -> None:
+    source = Path(agent_api.claim_job.__code__.co_filename).read_text(encoding="utf-8")
+    claim_source = source.split("def claim_job(", 1)[1].split(
+        "def serialize_claimed_job(", 1
+    )[0]
+
+    assert "_maybe_prune_fast_dumping_history" not in claim_source
+    assert "recover_inventory_transitions=_reserve_inventory_recovery" in claim_source
+
+
 def test_agent_uses_one_worker_by_default_and_bounds_override(monkeypatch) -> None:
     monkeypatch.delenv("KASPI_FAST_DUMPING_CONCURRENCY", raising=False)
     assert desktop_agent._configured_concurrency() == 1

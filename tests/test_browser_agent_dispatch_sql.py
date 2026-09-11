@@ -27,6 +27,35 @@ def test_due_browser_dispatch_compiles_for_postgresql_skip_locked() -> None:
     assert "SUPPLIERS.CODE = 'OZON'" in sql
 
 
+def test_browser_claim_uses_two_narrow_indexable_statements() -> None:
+    now = datetime.now(UTC)
+    queued_sql = str(
+        browser_agent_api._queued_browser_job_id_statement().compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).upper()
+    expired_sql = str(
+        browser_agent_api._expired_browser_job_id_statement(now=now).compile(
+            dialect=postgresql.dialect(),
+            compile_kwargs={"literal_binds": True},
+        )
+    ).upper()
+
+    assert queued_sql.startswith("SELECT BROWSER_AGENT_JOBS.ID")
+    assert "RESULT_PAYLOAD" not in queued_sql
+    assert "STATUS = 'QUEUED'" in queued_sql
+    assert " OR " not in queued_sql
+    assert "FOR UPDATE SKIP LOCKED" in queued_sql
+
+    assert expired_sql.startswith("SELECT BROWSER_AGENT_JOBS.ID")
+    assert "RESULT_PAYLOAD" not in expired_sql
+    assert "STATUS = 'LEASED'" in expired_sql
+    assert "LEASE_UNTIL <" in expired_sql
+    assert " OR " not in expired_sql
+    assert "FOR UPDATE SKIP LOCKED" in expired_sql
+
+
 def test_dispatch_recovers_target_left_in_legacy_long_backoff(db_session) -> None:
     now = datetime.now(UTC)
     product = Product(

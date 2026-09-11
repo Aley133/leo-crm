@@ -24,7 +24,7 @@ def test_postgresql_uses_bounded_runtime_connection_pool(monkeypatch) -> None:
     options = _engine_options("postgresql://user:pass@example.test:5432/leo")
 
     assert options["pool_size"] == 5
-    assert options["max_overflow"] == 2
+    assert options["max_overflow"] == 0
     assert options["pool_timeout"] == 2
     assert options["pool_use_lifo"] is True
 

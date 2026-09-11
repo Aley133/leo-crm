@@ -75,7 +75,15 @@ const loadDashboard = async () => {
       return;
     }
     if (response.status === 503) {
-      throw new Error("SERVICE_API_TOKEN не настроен на сервере Render.");
+      let payload = {};
+      try { payload = await response.json(); } catch {}
+      if (payload.error_code === "database_pool_busy") {
+        throw new Error("База CRM временно занята. Запрос будет доступен после разгрузки очереди.");
+      }
+      if (String(payload.detail || "").includes("SERVICE_API_TOKEN")) {
+        throw new Error("SERVICE_API_TOKEN не настроен на сервере Render.");
+      }
+      throw new Error(String(payload.detail || "CRM временно недоступна."));
     }
     if (!response.ok) {
       throw new Error(`API вернул ошибку ${response.status}`);
