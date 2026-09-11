@@ -101,6 +101,7 @@ _AGENT_GUARD_LOCK = Lock()
 _MIN_CLAIM_INTERVAL_SECONDS = 2.0
 _IDLE_CLAIM_INTERVAL_SECONDS = 60.0
 _CLAIM_NOT_BEFORE: dict[int, float] = {}
+_CLAIMS_IN_FLIGHT: set[int] = set()
 _PHOTO_LEASE_SECONDS = 30 * 60
 _PHOTO_CACHE_REUSE_LIMIT = 100
 _PHOTO_MAX_ATTEMPTS = 2
@@ -200,6 +201,21 @@ def _defer_claims(
             _CLAIM_NOT_BEFORE.get(workspace_id, 0.0),
             checked_at + max(_MIN_CLAIM_INTERVAL_SECONDS, seconds),
         )
+
+
+def _acquire_claim_execution(workspace_id: int) -> bool:
+    """Keep one database-backed claim in flight for each isolated shop."""
+
+    with _AGENT_GUARD_LOCK:
+        if workspace_id in _CLAIMS_IN_FLIGHT:
+            return False
+        _CLAIMS_IN_FLIGHT.add(workspace_id)
+        return True
+
+
+def _release_claim_execution(workspace_id: int) -> None:
+    with _AGENT_GUARD_LOCK:
+        _CLAIMS_IN_FLIGHT.discard(workspace_id)
 
 
 def _master_kaspi_product_id(value: str | None) -> str:
@@ -344,46 +360,55 @@ def claim(
             "retry_after_seconds": retry_after,
             "throttled": True,
         }
+    if not _acquire_claim_execution(payload.workspace_id):
+        return {
+            "job": None,
+            "retry_after_seconds": max(1, int(_MIN_CLAIM_INTERVAL_SECONDS)),
+            "throttled": True,
+        }
     try:
-        _validate_workspace_merchant(
-            db,
-            workspace_id=payload.workspace_id,
-            merchant_uid=payload.merchant_uid,
-        )
-    except ValueError as exc:
-        raise _conflict(exc) from exc
-    _touch_agent(payload)
-    try:
-        with workspace_context(payload.workspace_id):
-            job = claim_job(
+        try:
+            _validate_workspace_merchant(
                 db,
                 workspace_id=payload.workspace_id,
-                agent_id=payload.agent_id,
+                merchant_uid=payload.merchant_uid,
             )
-            result = (
-                None
-                if job is None
-                else serialize_claimed_job(
+        except ValueError as exc:
+            raise _conflict(exc) from exc
+        _touch_agent(payload)
+        try:
+            with workspace_context(payload.workspace_id):
+                job = claim_job(
                     db,
-                    job=job,
                     workspace_id=payload.workspace_id,
+                    agent_id=payload.agent_id,
                 )
+                result = (
+                    None
+                    if job is None
+                    else serialize_claimed_job(
+                        db,
+                        job=job,
+                        workspace_id=payload.workspace_id,
+                    )
+                )
+                db.commit()
+        except ValueError as exc:
+            db.rollback()
+            raise _conflict(exc) from exc
+        if result is None:
+            _defer_claims(
+                payload.workspace_id,
+                seconds=_IDLE_CLAIM_INTERVAL_SECONDS,
             )
-            db.commit()
-    except ValueError as exc:
-        db.rollback()
-        raise _conflict(exc) from exc
-    if result is None:
-        _defer_claims(
-            payload.workspace_id,
-            seconds=_IDLE_CLAIM_INTERVAL_SECONDS,
-        )
-    return {
-        "job": result,
-        "retry_after_seconds": (
-            int(_IDLE_CLAIM_INTERVAL_SECONDS) if result is None else 0
-        ),
-    }
+        return {
+            "job": result,
+            "retry_after_seconds": (
+                int(_IDLE_CLAIM_INTERVAL_SECONDS) if result is None else 0
+            ),
+        }
+    finally:
+        _release_claim_execution(payload.workspace_id)
 
 
 @router.post("/photo-claim")

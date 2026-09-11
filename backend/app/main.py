@@ -79,8 +79,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.19"
-DEPLOYMENT_MARKER = "fast-inventory-confirmed-transition"
+APP_VERSION = "0.26.20"
+DEPLOYMENT_MARKER = "database-pool-safe-agent-claims"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

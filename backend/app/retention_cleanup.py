@@ -52,11 +52,16 @@ def _env_int(name: str, default: int, *, minimum: int, maximum: int) -> int:
 
 
 def cleanup_enabled() -> bool:
-    return os.getenv("DATA_RETENTION_ENABLED", "true").strip().casefold() not in {
-        "0",
-        "false",
-        "no",
-        "off",
+    # Full-table legacy sweeps are opt-in. On a constrained Supabase instance
+    # they can exhaust the disk-I/O budget and hold an API connection until the
+    # server-side statement timeout. Per-order bounded retention still happens
+    # in the import path; this broad maintenance job is reserved for a
+    # controlled window after the database has been inspected.
+    return os.getenv("DATA_RETENTION_ENABLED", "").strip().casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
     }
 
 

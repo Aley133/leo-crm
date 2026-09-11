@@ -154,6 +154,30 @@ def test_idle_supplier_agent_claim_is_read_only(db_session, monkeypatch) -> None
     assert commits == 0
 
 
+def test_parallel_supplier_claim_is_throttled_before_database_access() -> None:
+    class DatabaseMustNotBeUsed:
+        def scalar(self, *_args, **_kwargs):
+            raise AssertionError("parallel claim acquired a database connection")
+
+    browser_agent_api._CLAIM_LOCK.acquire()
+    try:
+        response = browser_agent_api.claim_browser_agent_job(
+            browser_agent_api.BrowserAgentClaim(
+                agent_id="parallel-agent",
+                runtime_kind="ozon_http",
+            ),
+            DatabaseMustNotBeUsed(),
+        )
+    finally:
+        browser_agent_api._CLAIM_LOCK.release()
+
+    assert response == {
+        "job": None,
+        "retry_after_seconds": browser_agent_api.BROWSER_AGENT_BUSY_RETRY_SECONDS,
+        "throttled": True,
+    }
+
+
 def test_large_api_and_xml_responses_use_gzip_middleware() -> None:
     assert any(
         middleware.cls is GZipMiddleware

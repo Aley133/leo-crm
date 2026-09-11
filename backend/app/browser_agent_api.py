@@ -9,7 +9,7 @@ from threading import Lock
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
-from sqlalchemy import or_, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -82,9 +82,11 @@ def _dispatch_min_interval_seconds() -> float:
 
 DISPATCH_MIN_INTERVAL_SECONDS = _dispatch_min_interval_seconds()
 BROWSER_AGENT_IDLE_RETRY_SECONDS = 15
+BROWSER_AGENT_BUSY_RETRY_SECONDS = 5
 REQUIRED_BROWSER_AGENT_RUNTIME = "ozon_http"
 _DISPATCH_LAST_AT: dict[str, float] = {}
 _DISPATCH_LOCK = Lock()
+_CLAIM_LOCK = Lock()
 
 
 def _require_http_runtime(runtime_kind: str | None) -> None:
@@ -128,6 +130,44 @@ def _job_envelope(job: BrowserAgentJob):
         url=job.url,
         monitor_target_id=job.monitor_target_id,
     )
+
+
+def _queued_browser_job_id_statement():
+    return (
+        select(BrowserAgentJob.id)
+        .where(BrowserAgentJob.status == BrowserAgentJobStatus.QUEUED.value)
+        .order_by(BrowserAgentJob.id)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+
+
+def _expired_browser_job_id_statement(*, now):
+    return (
+        select(BrowserAgentJob.id)
+        .where(
+            BrowserAgentJob.status == BrowserAgentJobStatus.LEASED.value,
+            BrowserAgentJob.lease_until < now,
+        )
+        .order_by(BrowserAgentJob.id)
+        .with_for_update(skip_locked=True)
+        .limit(1)
+    )
+
+
+def _claimable_browser_job(db: Session, *, now) -> BrowserAgentJob | None:
+    """Lock one queued job without forcing PostgreSQL through a wide OR scan.
+
+    ``status, id`` is the established runtime index. Keeping the normal queue
+    and expired-lease recovery as two small statements lets PostgreSQL use it
+    directly, including when the queue is empty and completed history is large.
+    Only the winning row is then loaded with its JSON payload.
+    """
+
+    job_id = db.scalar(_queued_browser_job_id_statement())
+    if job_id is None:
+        job_id = db.scalar(_expired_browser_job_id_statement(now=now))
+    return None if job_id is None else db.get(BrowserAgentJob, job_id)
 
 
 def _normalize_known_business_outcome(
@@ -353,70 +393,71 @@ def create_browser_agent_job(payload: BrowserAgentJobCreate, db: Session = Depen
 @router.post("/claim")
 def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(get_unscoped_db)):
     _require_http_runtime(payload.runtime_kind)
-    now = utc_now()
-    job = db.scalar(
-        select(BrowserAgentJob)
-        .where(
-            or_(
-                BrowserAgentJob.status == BrowserAgentJobStatus.QUEUED.value,
-                (BrowserAgentJob.status == BrowserAgentJobStatus.LEASED.value)
-                & (BrowserAgentJob.lease_until < now),
-            )
-        )
-        .order_by(BrowserAgentJob.id)
-        .with_for_update(skip_locked=True)
-        .limit(1)
-    )
-    if job is None:
-        # Empty queue polling is intentionally read-only. The agent sends a
-        # separate bounded heartbeat, so idle workers no longer create a
-        # PostgreSQL transaction every few seconds.
-        record_browser_agent_heartbeat(
-            agent_id=payload.agent_id,
-            status="idle",
-            version=payload.version,
-        )
+    # Browser jobs share one global queue. More than one simultaneous empty
+    # queue scan adds no throughput, but can consume every database connection
+    # when PostgreSQL is under I/O pressure.
+    if not _CLAIM_LOCK.acquire(blocking=False):
         return {
             "job": None,
-            "retry_after_seconds": BROWSER_AGENT_IDLE_RETRY_SECONDS,
+            "retry_after_seconds": BROWSER_AGENT_BUSY_RETRY_SECONDS,
+            "throttled": True,
         }
 
-    agent = _upsert_agent(
-        db,
-        agent_id=payload.agent_id,
-        status_value="claiming",
-        hostname=payload.hostname,
-        platform=payload.platform,
-        version=payload.version,
-    )
+    try:
+        now = utc_now()
+        job = _claimable_browser_job(db, now=now)
+        if job is None:
+            # Empty queue polling is intentionally read-only. The agent sends a
+            # separate bounded heartbeat, so idle workers no longer create a
+            # PostgreSQL write transaction every few seconds.
+            record_browser_agent_heartbeat(
+                agent_id=payload.agent_id,
+                status="idle",
+                version=payload.version,
+            )
+            return {
+                "job": None,
+                "retry_after_seconds": BROWSER_AGENT_IDLE_RETRY_SECONDS,
+            }
 
-    token = secrets.token_hex(24)
-    job.status = BrowserAgentJobStatus.LEASED.value
-    job.lease_owner = payload.agent_id
-    job.lease_token = token
-    job.lease_until = now + timedelta(seconds=payload.lease_seconds)
-    agent.status = "running"
-    agent.current_job_id = job.id
-    agent.leases_taken += 1
-    db.commit()
-    record_browser_agent_heartbeat(
-        agent_id=payload.agent_id,
-        status="running",
-        version=agent.version,
-        current_job_id=job.id,
-    )
-    envelope = _job_envelope(job)
-    return {
-        "job": {
-            "id": job.id,
-            "monitor_target_id": job.monitor_target_id,
-            "supplier_product_id": job.supplier_product_id,
-            "url": job.url,
-            **serialize_claim_payload(envelope),
-            "lease_token": token,
-            "lease_until": job.lease_until,
+        agent = _upsert_agent(
+            db,
+            agent_id=payload.agent_id,
+            status_value="claiming",
+            hostname=payload.hostname,
+            platform=payload.platform,
+            version=payload.version,
+        )
+
+        token = secrets.token_hex(24)
+        job.status = BrowserAgentJobStatus.LEASED.value
+        job.lease_owner = payload.agent_id
+        job.lease_token = token
+        job.lease_until = now + timedelta(seconds=payload.lease_seconds)
+        agent.status = "running"
+        agent.current_job_id = job.id
+        agent.leases_taken += 1
+        db.commit()
+        record_browser_agent_heartbeat(
+            agent_id=payload.agent_id,
+            status="running",
+            version=agent.version,
+            current_job_id=job.id,
+        )
+        envelope = _job_envelope(job)
+        return {
+            "job": {
+                "id": job.id,
+                "monitor_target_id": job.monitor_target_id,
+                "supplier_product_id": job.supplier_product_id,
+                "url": job.url,
+                **serialize_claim_payload(envelope),
+                "lease_token": token,
+                "lease_until": job.lease_until,
+            }
         }
-    }
+    finally:
+        _CLAIM_LOCK.release()
 
 
 @router.post("/jobs/{job_id}/complete")

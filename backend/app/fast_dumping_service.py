@@ -49,8 +49,11 @@ MIN_SCAN_INTERVAL_SECONDS = 300
 DEFAULT_SCAN_INTERVAL_SECONDS = 600
 HISTORY_RETENTION_PER_PRODUCT = 100
 HISTORY_PRUNE_INTERVAL_SECONDS = 3600
+INVENTORY_RECOVERY_INTERVAL_SECONDS = 300
 _HISTORY_PRUNE_LOCK = Lock()
 _HISTORY_PRUNE_NOT_BEFORE: dict[int, float] = {}
+_INVENTORY_RECOVERY_LOCK = Lock()
+_INVENTORY_RECOVERY_NOT_BEFORE: dict[int, float] = {}
 
 
 def utcnow() -> datetime:
@@ -431,6 +434,23 @@ def _maybe_prune_fast_dumping_history(
     return prune_fast_dumping_history(db, workspace_id=workspace_id)
 
 
+def _reserve_inventory_recovery(
+    workspace_id: int,
+    *,
+    now: float | None = None,
+) -> bool:
+    """Rate-limit the legacy recovery sweep without delaying live FIFO events."""
+
+    checked_at = monotonic() if now is None else now
+    with _INVENTORY_RECOVERY_LOCK:
+        if _INVENTORY_RECOVERY_NOT_BEFORE.get(workspace_id, 0.0) > checked_at:
+            return False
+        _INVENTORY_RECOVERY_NOT_BEFORE[workspace_id] = (
+            checked_at + INVENTORY_RECOVERY_INTERVAL_SECONDS
+        )
+    return True
+
+
 def queue_scan(
     db: Session,
     *,
@@ -610,41 +630,62 @@ def recover_expired_leases(
 def _schedule_inventory_transitions(db: Session, workspace_id: int, limit: int) -> int:
     # Recover arrivals missed by an older deployment; do not wait for the
     # regular price deadline, and never interrupt an in-flight SKU operation.
-    latest = select(FastDumpingJob.id).where(
-        FastDumpingJob.workspace_id == workspace_id,
-        FastDumpingJob.product_id == FastDumpingState.product_id,
-        FastDumpingJob.status == "applied",
-    ).order_by(FastDumpingJob.completed_at.desc(), FastDumpingJob.id.desc()).limit(1).correlate(FastDumpingState).scalar_subquery()
-    preorder = select(FastDumpingJob.id).where(
-        FastDumpingJob.id == latest,
-        FastDumpingJob.decision_json["fulfillment_mode"].as_string() == "preorder",
-    ).correlate(FastDumpingState).exists()
-    queued_scan = select(FastDumpingJob.id).where(
-        FastDumpingJob.id == FastDumpingState.active_job_id,
-        FastDumpingJob.status == "queued_scan",
-        or_(FastDumpingJob.reason.is_(None), ~FastDumpingJob.reason.startswith("inventory_priority:")),
-    ).correlate(FastDumpingState).exists()
-    states = db.scalars(select(FastDumpingState)
+    # First select the small durable state table, then use the established
+    # product/status/id job index for each candidate. This avoids a correlated
+    # JSON/history scan over every row in fast_dumping_jobs on every claim.
+    states = db.scalars(
+        select(FastDumpingState)
         .join(FastDumpingPolicy, FastDumpingPolicy.id == FastDumpingState.policy_id)
         .join(Product, Product.id == FastDumpingState.product_id)
-        .where(FastDumpingState.workspace_id == workspace_id,
-               FastDumpingPolicy.workspace_id == workspace_id, Product.workspace_id == workspace_id,
-               FastDumpingPolicy.enabled.is_(True), Product.sale_enabled.is_(True),
-               FastDumpingState.automatic_writes_paused.is_(False),
-               FastDumpingState.inventory_on_hand > 0, preorder,
-               or_(FastDumpingState.active_job_id.is_(None), queued_scan))
-        .order_by(FastDumpingState.id).limit(max(1, min(100, int(limit))))
-        .with_for_update(skip_locked=True)).all()
+        .where(
+            FastDumpingState.workspace_id == workspace_id,
+            FastDumpingPolicy.workspace_id == workspace_id,
+            Product.workspace_id == workspace_id,
+            FastDumpingPolicy.enabled.is_(True),
+            Product.sale_enabled.is_(True),
+            FastDumpingState.automatic_writes_paused.is_(False),
+            FastDumpingState.inventory_on_hand > 0,
+        )
+        .order_by(FastDumpingState.id)
+        .limit(max(1, min(100, int(limit))))
+        .with_for_update(skip_locked=True)
+    ).all()
     created_count = 0
     for state in states:
-        if state.active_job_id is not None:
-            active = db.get(FastDumpingJob, state.active_job_id)
+        last_applied_mode = db.scalar(
+            select(FastDumpingJob.decision_json["fulfillment_mode"].as_string())
+            .where(
+                FastDumpingJob.workspace_id == workspace_id,
+                FastDumpingJob.product_id == state.product_id,
+                FastDumpingJob.status == "applied",
+            )
+            .order_by(FastDumpingJob.id.desc())
+            .limit(1)
+        )
+        if last_applied_mode != "preorder":
+            continue
+
+        active = (
+            db.get(FastDumpingJob, state.active_job_id)
+            if state.active_job_id is not None
+            else None
+        )
+        if active is not None and active.status in ACTIVE_JOB_STATUSES:
+            if active.status != "queued_scan":
+                continue
             active.reason = "inventory_priority:recover_existing_fifo"
             active.not_before_at = None
         else:
+            state.active_job_id = None
             policy = db.get(FastDumpingPolicy, state.policy_id)
-            _, created = queue_scan(db, policy=policy, workspace_id=workspace_id,
-                                    reason="inventory_priority:recover_existing_fifo")
+            if policy is None or policy.workspace_id != workspace_id:
+                continue
+            _, created = queue_scan(
+                db,
+                policy=policy,
+                workspace_id=workspace_id,
+                reason="inventory_priority:recover_existing_fifo",
+            )
             created_count += int(created)
         state.next_scan_at = utcnow()
     return created_count
@@ -656,9 +697,14 @@ def schedule_due_scans(
     workspace_id: int,
     limit: int = 20,
     now: datetime | None = None,
+    recover_inventory_transitions: bool = True,
 ) -> int:
     checked_at = now or utcnow()
-    priority_queued = _schedule_inventory_transitions(db, workspace_id, limit)
+    priority_queued = (
+        _schedule_inventory_transitions(db, workspace_id, limit)
+        if recover_inventory_transitions
+        else 0
+    )
     states = db.scalars(
         select(FastDumpingState)
         .join(
@@ -705,8 +751,14 @@ def claim_job(
     agent_id: str,
 ) -> FastDumpingJob | None:
     recover_expired_leases(db, workspace_id=workspace_id)
-    _maybe_prune_fast_dumping_history(db, workspace_id=workspace_id)
-    schedule_due_scans(db, workspace_id=workspace_id)
+    # Retention over completed JSON history must never run inside the agent's
+    # latency-sensitive claim transaction. The callable is kept for controlled
+    # maintenance, but live workers only touch active queue/state rows.
+    schedule_due_scans(
+        db,
+        workspace_id=workspace_id,
+        recover_inventory_transitions=_reserve_inventory_recovery(workspace_id),
+    )
     now = utcnow()
     priority = case(
         (FastDumpingJob.reason.startswith("inventory_priority:"), -1),

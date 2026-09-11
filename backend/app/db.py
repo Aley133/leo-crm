@@ -36,10 +36,10 @@ def _database_url() -> str:
 def _engine_options(database_url: str) -> dict[str, Any]:
     """Return safe engine settings for the selected database dialect.
 
-    PostgreSQL uses a bounded pool sized for the API, two local agents and one
-    background order synchronizer. A short timeout prevents a traffic burst
-    from retaining dozens of blocked request threads until Render exhausts its
-    memory limit.
+    PostgreSQL uses a bounded pool sized for the API, two isolated local agents
+    and background order synchronization. Overflow is disabled by default so a
+    request burst cannot consume every Supabase session-pool slot. A short
+    timeout returns retryable overload instead of accumulating blocked threads.
     """
 
     url = make_url(database_url)
@@ -64,7 +64,7 @@ def _engine_options(database_url: str) -> dict[str, Any]:
             ),
             "max_overflow": _bounded_int_setting(
                 "DB_MAX_OVERFLOW",
-                default=2,
+                default=0,
                 minimum=0,
                 maximum=5,
             ),
