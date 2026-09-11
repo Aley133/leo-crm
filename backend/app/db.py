@@ -30,6 +30,28 @@ def _database_url() -> str:
     if value.startswith("postgres://"):
         value = value.replace("postgres://", "postgresql://", 1)
 
+    url = make_url(value)
+    transaction_pooler_enabled = os.getenv(
+        "SUPABASE_TRANSACTION_POOLER_ENABLED",
+        "true",
+    ).strip().casefold() not in {"0", "false", "no", "off"}
+    is_supabase_session_pooler = (
+        url.get_backend_name() == "postgresql"
+        and str(url.host or "").casefold().endswith(".pooler.supabase.com")
+        and url.port == 5432
+    )
+    if transaction_pooler_enabled and is_supabase_session_pooler:
+        # Session mode dedicates one scarce Postgres backend to every long-lived
+        # Render connection. Transaction mode shares those backends and remains
+        # compatible with this application: all ORM state is transaction-local
+        # and psycopg2 does not auto-prepare statements. Require encrypted
+        # transport and disable GSS negotiation explicitly for Supavisor.
+        query = dict(url.query)
+        query.setdefault("sslmode", "require")
+        query.setdefault("gssencmode", "disable")
+        url = url.set(port=6543).set(query=query)
+        return url.render_as_string(hide_password=False)
+
     return value
 
 
@@ -74,6 +96,14 @@ def _engine_options(database_url: str) -> dict[str, Any]:
                 minimum=1,
                 maximum=10,
             ),
+            "connect_args": {
+                "connect_timeout": _bounded_int_setting(
+                    "DB_CONNECT_TIMEOUT_SECONDS",
+                    default=8,
+                    minimum=3,
+                    maximum=30,
+                )
+            },
             "pool_use_lifo": True,
         }
     )
