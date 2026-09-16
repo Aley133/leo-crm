@@ -26,11 +26,11 @@ from tools.kaspi_fast_dumping_scanner import (
     KaspiCompetitorSnapshot,
     scan_kaspi_competitors,
 )
-from tools.kaspi_fast_dumping_browser_auth import (
-    TrustedBrowserKaspiMerchantSession as KaspiMerchantSession,
+from tools.kaspi_fast_dumping_http_auth import (
+    HttpOtpKaspiMerchantSession as KaspiMerchantSession,
 )
 
-VERSION = "1.2.4"
+VERSION = "1.2.5"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -65,6 +65,7 @@ CRM_BACKOFF_MAX_SECONDS = 60.0
 _WRITE_LOCK = asyncio.Lock()
 _CRM_REQUEST_LOCK = asyncio.Lock()
 _RUNTIME_SID: dict[int, str] = {}
+_RUNTIME_HTTP_COOKIE_STATE: dict[int, str] = {}
 _CRM_GATE_LOCK = Lock()
 _CRM_FAILURE_COUNT = 0
 _CRM_RETRY_NOT_BEFORE = 0.0
@@ -273,6 +274,7 @@ def _save_config(config: dict, workspace_id: int) -> None:
         "service_token_dpapi",
         "password_dpapi",
         "mc_sid_dpapi",
+        "kaspi_http_cookies_dpapi",
     }
     payload = {key: value for key, value in config.items() if key in allowed}
     _config_path(workspace_id).write_text(
@@ -439,6 +441,33 @@ def _save_sid(config: dict, workspace_id: int, sid: str) -> None:
         _save_config(config, workspace_id)
     else:
         _RUNTIME_SID[workspace_id] = sid
+
+
+def _load_http_cookie_state(config: dict, workspace_id: int) -> str | None:
+    if os.name == "nt" and config.get("kaspi_http_cookies_dpapi"):
+        try:
+            return _unprotect_secret(str(config["kaspi_http_cookies_dpapi"]))
+        except Exception:
+            return None
+    return _RUNTIME_HTTP_COOKIE_STATE.get(workspace_id)
+
+
+def _save_http_cookie_state(config: dict, workspace_id: int, state: str) -> None:
+    if os.name == "nt":
+        config["kaspi_http_cookies_dpapi"] = _protect_secret(state)
+        _save_config(config, workspace_id)
+    else:
+        _RUNTIME_HTTP_COOKIE_STATE[workspace_id] = state
+
+
+def _prompt_kaspi_otp(recipient: str) -> str:
+    return _prompt_text(
+        "LEO Fast Dumping Agent — код Kaspi",
+        (
+            "Kaspi отправил 6-значный код на почту "
+            f"{recipient}.\nВведите код; он не сохраняется в настройках"
+        ),
+    )
 
 
 def _post_json(url: str, token: str, payload: dict) -> dict:
@@ -934,6 +963,7 @@ async def main(
         reconfigure=reconfigure,
     )
     previous_merchant_uid = str(config.get("merchant_uid") or "").strip()
+    previous_email = str(config.get("email") or "").strip()
     merchant_uid = _plain_setting(
         config,
         key="merchant_uid",
@@ -945,7 +975,9 @@ async def main(
         previous_merchant_uid and previous_merchant_uid != merchant_uid
     ):
         config.pop("mc_sid_dpapi", None)
+        config.pop("kaspi_http_cookies_dpapi", None)
         _RUNTIME_SID.pop(selected_workspace, None)
+        _RUNTIME_HTTP_COOKIE_STATE.pop(selected_workspace, None)
     store_id = _plain_setting(
         config,
         key="store_id",
@@ -960,6 +992,11 @@ async def main(
         prompt="Email Merchant Cabinet",
         reconfigure=reconfigure,
     )
+    if previous_email and previous_email != email:
+        config.pop("mc_sid_dpapi", None)
+        config.pop("kaspi_http_cookies_dpapi", None)
+        _RUNTIME_SID.pop(selected_workspace, None)
+        _RUNTIME_HTTP_COOKIE_STATE.pop(selected_workspace, None)
     password = _secret_setting(
         config,
         key="password",
@@ -989,6 +1026,16 @@ async def main(
         password=password,
         load_sid=lambda: _load_sid(config, selected_workspace),
         save_sid=lambda sid: _save_sid(config, selected_workspace, sid),
+        load_cookie_state=lambda: _load_http_cookie_state(
+            config,
+            selected_workspace,
+        ),
+        save_cookie_state=lambda state: _save_http_cookie_state(
+            config,
+            selected_workspace,
+            state,
+        ),
+        prompt_otp=_prompt_kaspi_otp,
         log=lambda message: _log(message, workspace_id=selected_workspace),
     )
     base_identity = _agent_payload(
@@ -1035,7 +1082,7 @@ async def main(
         workspace_id=selected_workspace,
     )
     _log(
-        "При истечении mc-sid Agent откроет постоянный Chromium; код из письма вводится локально.",
+        "Вход Kaspi работает по чистому HTTP; при необходимости код из почты вводится локально.",
         workspace_id=selected_workspace,
     )
     if os.name == "nt" and not once:

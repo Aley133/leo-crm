@@ -87,6 +87,10 @@ def _new_full_client(session: KaspiMerchantSession) -> httpx.Client:
 
 
 def _client(session: KaspiMerchantSession, *, force_refresh: bool = False) -> httpx.Client:
+    authenticated_client = getattr(session, "authenticated_client", None)
+    if callable(authenticated_client):
+        return authenticated_client(force_refresh=force_refresh)
+
     key = id(session)
     with _AUTH_LOCK:
         if force_refresh:
@@ -198,8 +202,8 @@ def read_offer_state(
 ) -> OfferState:
     last_error: Exception | None = None
     for refresh in (False, True):
-        client = _client(session, force_refresh=refresh)
         try:
+            client = _client(session, force_refresh=refresh)
             for mode, active in (("active", True), ("inactive", False), ("all", None)):
                 params: dict[str, Any] = {
                     "m": merchant_uid,
@@ -276,8 +280,8 @@ def write_offer_state(
     }
     started = time.perf_counter()
     for refresh in (False, True):
-        client = _client(session, force_refresh=refresh)
         try:
+            client = _client(session, force_refresh=refresh)
             response = client.post(
                 PROCESS_URL,
                 json=payload,
@@ -533,15 +537,16 @@ async def process_verify(
     observed = None
     status = "succeeded"
     try:
-        await asyncio.to_thread(merchant_session.ensure_valid_sid)
-        live = await asyncio.to_thread(
-            read_offer_state,
-            merchant_session,
-            merchant_uid=merchant_uid,
-            sku=sku,
-            store_id=store_id,
-            city_id=city_id,
-        )
+        async with base._WRITE_LOCK:
+            await asyncio.to_thread(merchant_session.ensure_valid_sid)
+            live = await asyncio.to_thread(
+                read_offer_state,
+                merchant_session,
+                merchant_uid=merchant_uid,
+                sku=sku,
+                store_id=store_id,
+                city_id=city_id,
+            )
         if _matches(live, mode=mode, stock=stock, preorder=preorder, price=target):
             observed = live.price_kzt if live.price_kzt is not None else target
         elif live.pending:
