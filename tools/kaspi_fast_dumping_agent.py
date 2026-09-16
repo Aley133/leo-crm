@@ -26,8 +26,11 @@ from tools.kaspi_fast_dumping_scanner import (
     KaspiCompetitorSnapshot,
     scan_kaspi_competitors,
 )
-from tools.kaspi_fast_dumping_session import KaspiMerchantSession
-VERSION = "1.2.3"
+from tools.kaspi_fast_dumping_browser_auth import (
+    TrustedBrowserKaspiMerchantSession as KaspiMerchantSession,
+)
+
+VERSION = "1.2.4"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -980,11 +983,13 @@ async def main(
     )
     _save_config(config, selected_workspace)
     merchant_session = KaspiMerchantSession(
+        workspace_id=selected_workspace,
         merchant_uid=merchant_uid,
         email=email,
         password=password,
         load_sid=lambda: _load_sid(config, selected_workspace),
         save_sid=lambda sid: _save_sid(config, selected_workspace, sid),
+        log=lambda message: _log(message, workspace_id=selected_workspace),
     )
     base_identity = _agent_payload(
         agent_id,
@@ -1027,6 +1032,10 @@ async def main(
     )
     _log(
         "Очереди: быстрый демпинг → фото. Тест товаров обслуживает отдельный Product Test Agent.",
+        workspace_id=selected_workspace,
+    )
+    _log(
+        "При истечении mc-sid Agent откроет постоянный Chromium; код из письма вводится локально.",
         workspace_id=selected_workspace,
     )
     if os.name == "nt" and not once:
