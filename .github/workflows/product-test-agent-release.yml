@@ -6,8 +6,10 @@ on:
       - main
     paths:
       - "tools/product_test_agent.py"
+      - "tools/kaspi_fast_dumping_http_auth.py"
       - "tools/kaspi_fast_dumping_scanner.py"
       - "tools/kaspi_fast_dumping_session.py"
+      - "tools/kaspi_fast_http_runtime.py"
       - "tools/product_discovery/**"
       - "tools/product_test_new_card/**"
       - "tools/ozon_http/**"
@@ -38,18 +40,22 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install httpx curl_cffi Pillow pyinstaller tzdata
+          pip install httpx certifi curl_cffi Pillow pyinstaller tzdata
 
       - name: Verify isolated imports
         shell: pwsh
         run: |
-          python -c "import tools.product_test_agent; import tools.product_discovery.runtime; import tools.product_test_new_card; import tools.ozon_http"
+          python -c "import tools.product_test_agent; import tools.kaspi_fast_dumping_http_auth; import tools.kaspi_fast_http_runtime; import tools.product_discovery.runtime; import tools.product_test_new_card; import tools.ozon_http"
           @'
           import ast
           from pathlib import Path
 
           forbidden_roots = {"backend", "sqlalchemy", "playwright"}
-          paths = [Path("tools/product_test_agent.py")]
+          paths = [
+              Path("tools/product_test_agent.py"),
+              Path("tools/kaspi_fast_dumping_http_auth.py"),
+              Path("tools/kaspi_fast_http_runtime.py"),
+          ]
           paths.extend(Path("tools/product_discovery").glob("*.py"))
           paths.extend(Path("tools/product_test_new_card").glob("*.py"))
           paths.extend(
@@ -79,8 +85,10 @@ jobs:
             --name LEO-Product-Test-Agent `
             --paths . `
             --hidden-import tools.product_test_agent `
+            --hidden-import tools.kaspi_fast_dumping_http_auth `
             --hidden-import tools.kaspi_fast_dumping_scanner `
             --hidden-import tools.kaspi_fast_dumping_session `
+            --hidden-import tools.kaspi_fast_http_runtime `
             --collect-submodules tools.product_discovery `
             --collect-submodules tools.product_test_new_card `
             --hidden-import tools.ozon_http.resolver `
@@ -90,6 +98,7 @@ jobs:
             --collect-submodules curl_cffi `
             --collect-submodules PIL `
             --collect-submodules httpx `
+            --collect-all certifi `
             --collect-all tzdata `
             tools/product_test_agent.py
 
@@ -122,7 +131,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.13: ручная проверка Ozon дополнительно получает доставку из предложения с тем же SKU и ценой, используя HTTP-источник мониторинга. Сохранены оптимизация трафика и продление аренды заданий."
+          $notes = "LEO Product Test Agent 1.1.14: восстановление mc-sid использует тот же чистый HTTP-вход, что и Fast Dumping. При необходимости Agent показывает локальное окно для кода из письма, включает remember-device и сохраняет доверительные cookie отдельно для каждого workspace через Windows DPAPI. Chromium и Playwright не используются."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

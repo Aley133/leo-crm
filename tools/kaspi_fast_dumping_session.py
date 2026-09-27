@@ -6,6 +6,8 @@ from typing import Any
 
 import httpx
 
+from tools.kaspi_fast_http_runtime import httpx_runtime_options
+
 
 DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
@@ -60,19 +62,22 @@ class KaspiMerchantSession:
         )
         started = time.perf_counter()
         try:
-            response = httpx.post(
-                url,
-                headers={
-                    "Accept": "application/json, text/plain, */*",
-                    "Content-Type": "application/json",
-                    "Cookie": f"mc-sid={mc_sid}",
-                    "X-Auth-Version": "3",
-                    "Origin": "https://kaspi.kz",
-                    "Referer": "https://kaspi.kz/",
-                    "User-Agent": self.user_agent,
-                },
+            with httpx.Client(
                 timeout=self.timeout_seconds,
-            )
+                **httpx_runtime_options(),
+            ) as client:
+                response = client.post(
+                    url,
+                    headers={
+                        "Accept": "application/json, text/plain, */*",
+                        "Content-Type": "application/json",
+                        "Cookie": f"mc-sid={mc_sid}",
+                        "X-Auth-Version": "3",
+                        "Origin": "https://kaspi.kz",
+                        "Referer": "https://kaspi.kz/",
+                        "User-Agent": self.user_agent,
+                    },
+                )
             return {
                 "ok": response.status_code == 200
                 and response.headers.get("X-Principal-Type") == "2",
@@ -87,6 +92,7 @@ class KaspiMerchantSession:
             headers=self._headers(),
             follow_redirects=True,
             timeout=self.timeout_seconds,
+            **httpx_runtime_options(),
         ) as client:
             client.get(MC_ROOT_URL, follow_redirects=False)
             client.get(MC_OAUTH_ENTRY_URL, follow_redirects=False)
@@ -152,20 +158,23 @@ class KaspiMerchantSession:
         }
         started = time.perf_counter()
         try:
-            response = httpx.post(
-                PROCESS_URL,
-                headers={
-                    "Accept": "application/json, text/plain, */*",
-                    "Content-Type": "application/json",
-                    "Cookie": f"mc-sid={mc_sid}",
-                    "X-Auth-Version": "3",
-                    "Origin": "https://kaspi.kz",
-                    "Referer": "https://kaspi.kz/",
-                    "User-Agent": self.user_agent,
-                },
-                json=payload,
+            with httpx.Client(
                 timeout=self.timeout_seconds,
-            )
+                **httpx_runtime_options(),
+            ) as client:
+                response = client.post(
+                    PROCESS_URL,
+                    headers={
+                        "Accept": "application/json, text/plain, */*",
+                        "Content-Type": "application/json",
+                        "Cookie": f"mc-sid={mc_sid}",
+                        "X-Auth-Version": "3",
+                        "Origin": "https://kaspi.kz",
+                        "Referer": "https://kaspi.kz/",
+                        "User-Agent": self.user_agent,
+                    },
+                    json=payload,
+                )
             try:
                 body = response.json()
             except ValueError:

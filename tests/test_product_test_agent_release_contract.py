@@ -6,8 +6,11 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_product_test_agent_is_a_standalone_dedicated_runtime() -> None:
     source = (ROOT / "tools/product_test_agent.py").read_text(encoding="utf-8")
-    assert 'VERSION = "1.1.13"' in source
+    assert 'VERSION = "1.1.14"' in source
     assert 'AGENT_KIND = "product_test"' in source
+    assert "HttpOtpKaspiMerchantSession as KaspiMerchantSession" in source
+    assert '"kaspi_http_cookies_dpapi"' in source
+    assert "prompt_otp=_prompt_kaspi_otp" in source
     assert "/api/product-test-agent/heartbeat" in source
     assert "/api/product-test-agent/claim" in source
     assert "discover_products" in source
@@ -32,7 +35,23 @@ def test_product_test_agent_has_an_independent_windows_release() -> None:
     assert "tools/product_test_agent.py" in workflow
     assert "tools/product_test_new_card/**" in workflow
     assert "--collect-submodules tools.product_test_new_card" in workflow
+    assert "tools/kaspi_fast_dumping_http_auth.py" in workflow
+    assert "--hidden-import tools.kaspi_fast_dumping_http_auth" in workflow
     assert "pyinstaller --noconfirm --clean --onefile --console" in workflow
+
+
+def test_product_test_cookie_state_is_isolated_by_workspace() -> None:
+    from tools import product_test_agent as agent
+
+    agent._RUNTIME_HTTP_COOKIE_STATE.clear()
+    try:
+        agent._save_http_cookie_state({}, 1, "barwork-cookie")
+        agent._save_http_cookie_state({}, 3, "leoxpress-cookie")
+
+        assert agent._load_http_cookie_state({}, 1) == "barwork-cookie"
+        assert agent._load_http_cookie_state({}, 3) == "leoxpress-cookie"
+    finally:
+        agent._RUNTIME_HTTP_COOKIE_STATE.clear()
 
 
 def test_fast_agent_release_no_longer_owns_product_discovery_dependencies() -> None:
@@ -40,7 +59,7 @@ def test_fast_agent_release_no_longer_owns_product_discovery_dependencies() -> N
         ROOT / ".github/workflows/kaspi-fast-dumping-agent-release.yml"
     ).read_text(encoding="utf-8")
     source = (ROOT / "tools/kaspi_fast_dumping_agent.py").read_text(encoding="utf-8")
-    assert 'VERSION = "1.2.5"' in source
+    assert 'VERSION = "1.2.6"' in source
     assert "tools/product_discovery/**" not in workflow
     assert "tools/ozon_http/**" not in workflow
     assert "/api/product-test-agent/claim" not in source

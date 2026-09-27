@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 
 from tools import kaspi_fast_dumping_agent as base
+from tools.kaspi_fast_http_runtime import httpx_runtime_options
 from tools.kaspi_fast_dumping_session import (
     IDMC_LOGIN_PAGE,
     IDMC_LOGIN_URL,
@@ -66,6 +67,7 @@ def _new_full_client(session: KaspiMerchantSession) -> httpx.Client:
         },
         follow_redirects=True,
         timeout=session.timeout_seconds,
+        **httpx_runtime_options(),
     )
     client.get(MC_ROOT_URL, follow_redirects=False)
     client.get(MC_OAUTH_ENTRY_URL, follow_redirects=False)

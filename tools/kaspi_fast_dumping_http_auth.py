@@ -16,6 +16,7 @@ from tools.kaspi_fast_dumping_session import (
     MC_ROOT_URL,
     KaspiMerchantSession,
 )
+from tools.kaspi_fast_http_runtime import httpx_runtime_options
 
 
 CookieStateLoader = Callable[[], str | None]
@@ -159,6 +160,7 @@ class HttpOtpKaspiMerchantSession(KaspiMerchantSession):
             headers=self._headers(),
             follow_redirects=True,
             timeout=self.timeout_seconds,
+            **httpx_runtime_options(),
         )
         _restore_cookie_state(client, self.load_cookie_state())
         return client
@@ -270,7 +272,7 @@ class HttpOtpKaspiMerchantSession(KaspiMerchantSession):
                     "Kaspi login/OAuth completed but mc-sid was not obtained"
                 )
             self._save_trusted_cookies(client)
-            self._emit("Новый mc-sid получен; Fast Dumping продолжает очередь автоматически.")
+            self._emit("Новый mc-sid получен; Agent продолжает очередь автоматически.")
             return sid
 
     def authenticated_client(self, *, force_refresh: bool = False) -> httpx.Client:

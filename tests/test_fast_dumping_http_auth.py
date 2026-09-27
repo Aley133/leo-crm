@@ -218,10 +218,12 @@ def test_fast_agent_release_is_http_only() -> None:
         encoding="utf-8"
     )
 
-    assert 'VERSION = "1.2.5"' in agent
+    assert 'VERSION = "1.2.6"' in agent
     assert "HttpOtpKaspiMerchantSession" in agent
     assert "kaspi_http_cookies_dpapi" in agent
     assert "tools/kaspi_fast_dumping_http_auth.py" in workflow
+    assert "tools/kaspi_fast_http_runtime.py" in workflow
+    assert "--collect-all certifi" in workflow
     assert '"playwright>=1.48,<2"' not in workflow
     assert "python -m playwright install" not in workflow
     assert "--collect-all playwright" not in workflow
