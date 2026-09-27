@@ -30,7 +30,7 @@ from tools.kaspi_fast_dumping_http_auth import (
     HttpOtpKaspiMerchantSession as KaspiMerchantSession,
 )
 
-VERSION = "1.2.5"
+VERSION = "1.2.6"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -602,6 +602,36 @@ async def _post_json_with_retry(
     raise RuntimeError(f"{operation}: retry loop finished unexpectedly")
 
 
+async def _connect_to_crm(
+    url: str,
+    token: str,
+    payload: dict,
+    *,
+    wait_until_available: bool,
+    workspace_id: int,
+) -> dict:
+    """Keep the desktop Agent alive through a transient startup outage."""
+
+    while True:
+        try:
+            return await _post_json_with_retry(
+                url,
+                token,
+                payload,
+                operation="Подключение к CRM",
+            )
+        except CRMRequestError as exc:
+            if not exc.retryable or not wait_until_available:
+                raise
+            delay = max(0.5, _crm_gate_delay())
+            _log(
+                "Подключение к CRM: сеть или DNS пока недоступны; "
+                f"Agent остаётся запущен, следующая попытка через {delay:.1f} с",
+                workspace_id=workspace_id,
+            )
+            await _wait_for_crm_gate()
+
+
 def _agent_payload(
     agent_id: str,
     workspace_id: int,
@@ -707,6 +737,10 @@ async def _process_scan(
             "market": _market_payload(market),
         }
     except Exception as exc:
+        _log(
+            f"Сканирование #{job['id']}: {type(exc).__name__}: {exc}",
+            workspace_id=workspace_id,
+        )
         payload = {
             "agent_id": agent_id,
             "workspace_id": workspace_id,
@@ -1046,11 +1080,12 @@ async def main(
     )
 
     try:
-        await _post_json_with_retry(
+        await _connect_to_crm(
             f"{api_url}/api/fast-dumping-agent/heartbeat",
             token,
             {**base_identity, "status": "online"},
-            operation="Подключение к CRM",
+            wait_until_available=not once,
+            workspace_id=selected_workspace,
         )
     except CRMRequestError as exc:
         if (

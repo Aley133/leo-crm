@@ -8,6 +8,7 @@ on:
       - "tools/kaspi_fast_dumping_agent.py"
       - "tools/kaspi_fast_dumping_agent_v2.py"
       - "tools/kaspi_fast_dumping_http_auth.py"
+      - "tools/kaspi_fast_http_runtime.py"
       - "tools/kaspi_fast_offer_runtime.py"
       - "tools/kaspi_fast_dumping_scanner.py"
       - "tools/kaspi_fast_dumping_session.py"
@@ -38,12 +39,12 @@ jobs:
         shell: pwsh
         run: |
           python -m pip install --upgrade pip
-          pip install httpx curl_cffi Pillow pyinstaller tzdata
+          pip install httpx certifi curl_cffi Pillow pyinstaller tzdata
 
       - name: Verify isolated imports
         shell: pwsh
         run: |
-          python -c "import tools.kaspi_fast_dumping_agent; import tools.kaspi_fast_dumping_agent_v2; import tools.kaspi_fast_dumping_http_auth; import tools.kaspi_fast_offer_runtime; import tools.kaspi_fast_dumping_scanner; import tools.kaspi_fast_dumping_session"
+          python -c "import tools.kaspi_fast_dumping_agent; import tools.kaspi_fast_dumping_agent_v2; import tools.kaspi_fast_dumping_http_auth; import tools.kaspi_fast_http_runtime; import tools.kaspi_fast_offer_runtime; import tools.kaspi_fast_dumping_scanner; import tools.kaspi_fast_dumping_session"
           @'
           import ast
           from pathlib import Path
@@ -53,6 +54,7 @@ jobs:
               Path("tools/kaspi_fast_dumping_agent.py"),
               Path("tools/kaspi_fast_dumping_agent_v2.py"),
               Path("tools/kaspi_fast_dumping_http_auth.py"),
+              Path("tools/kaspi_fast_http_runtime.py"),
               Path("tools/kaspi_fast_offer_runtime.py"),
               Path("tools/kaspi_fast_dumping_scanner.py"),
               Path("tools/kaspi_fast_dumping_session.py"),
@@ -81,12 +83,14 @@ jobs:
             --hidden-import tools.kaspi_fast_dumping_agent `
             --hidden-import tools.kaspi_fast_dumping_agent_v2 `
             --hidden-import tools.kaspi_fast_dumping_http_auth `
+            --hidden-import tools.kaspi_fast_http_runtime `
             --hidden-import tools.kaspi_fast_offer_runtime `
             --hidden-import tools.kaspi_fast_dumping_scanner `
             --hidden-import tools.kaspi_fast_dumping_session `
             --collect-submodules curl_cffi `
             --collect-submodules PIL `
             --collect-submodules httpx `
+            --collect-all certifi `
             --collect-all tzdata `
             tools/kaspi_fast_dumping_agent_v2.py
 
@@ -119,7 +123,7 @@ jobs:
           git tag -f kaspi-fast-dumping-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/kaspi-fast-dumping-agent-latest --force
           gh release view kaspi-fast-dumping-agent-latest *> $null
-          $notes = "LEO Agent 1.2.5: восстановление mc-sid снова работает по чистому HTTP без Chromium и Playwright. При необходимости Agent просит код из письма в локальном окне, отправляет remember-device и сохраняет доверительные cookie через Windows DPAPI. Offer-state использует ту же авторизованную HTTP-сессию без повторного входа."
+          $notes = "LEO Agent 1.2.6: сканер заранее загружает TLS-сертификаты в память и больше не ломается после очистки временной папки PyInstaller. Краткий сбой DNS или сети при запуске не закрывает Agent: подключение к CRM продолжается с безопасным backoff. HTTP-вход с кодом из письма и remember-device сохранён; Chromium и Playwright не используются."
           if ($LASTEXITCODE -ne 0) {
             gh release create kaspi-fast-dumping-agent-latest `
               --target "$env:GITHUB_SHA" `

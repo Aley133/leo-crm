@@ -121,12 +121,57 @@ def test_agent_serializes_crm_requests_behind_shared_circuit() -> None:
     assert "await _wait_for_crm_gate()" in source
     assert "_acquire_single_instance(selected_workspace)" in source
     assert "ERROR_ALREADY_EXISTS" in source
-    assert 'VERSION = "1.2.5"' in source
+    assert 'VERSION = "1.2.6"' in source
     assert "/api/product-test-agent/claim" not in source
     assert "IDLE_POLL_MAX_SECONDS = 60" in source
     assert "VERIFY_POLL_SECONDS" not in source
     assert "_verify_price" not in source
     assert "separate verification after" in source
+
+
+def test_agent_waits_through_transient_crm_outage_at_startup(monkeypatch) -> None:
+    calls = 0
+    waits = 0
+    messages: list[str] = []
+
+    async def post(_url, _token, _payload, *, operation):
+        nonlocal calls
+        calls += 1
+        assert operation == "Подключение к CRM"
+        if calls == 1:
+            raise desktop_agent.CRMRequestError(
+                "temporary DNS failure",
+                retryable=True,
+            )
+        return {"status": "online"}
+
+    async def wait_for_gate():
+        nonlocal waits
+        waits += 1
+
+    monkeypatch.setattr(desktop_agent, "_post_json_with_retry", post)
+    monkeypatch.setattr(desktop_agent, "_wait_for_crm_gate", wait_for_gate)
+    monkeypatch.setattr(desktop_agent, "_crm_gate_delay", lambda: 4.0)
+    monkeypatch.setattr(
+        desktop_agent,
+        "_log",
+        lambda message, **_kwargs: messages.append(message),
+    )
+
+    result = asyncio.run(
+        desktop_agent._connect_to_crm(
+            "https://crm.example/heartbeat",
+            "token",
+            {"status": "online"},
+            wait_until_available=True,
+            workspace_id=3,
+        )
+    )
+
+    assert result == {"status": "online"}
+    assert calls == 2
+    assert waits == 1
+    assert any("Agent остаётся запущен" in message for message in messages)
 
 
 def test_agent_keeps_workspace_processes_and_secrets_isolated(

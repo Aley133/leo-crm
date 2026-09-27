@@ -15,6 +15,8 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import httpx
 
+from tools.kaspi_fast_http_runtime import httpx_runtime_options
+
 HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/151.0.0.0 Safari/537.36",
     "Accept": "application/json, text/plain, */*",
@@ -873,7 +875,11 @@ async def inspect_kaspi_product(
         raise ValueError("Не удалось определить Kaspi master ID")
 
     timeout = httpx.Timeout(25.0, connect=15.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        **httpx_runtime_options(),
+    ) as client:
         if direct_url:
             page = await _request_with_retry(
                 client,
@@ -985,7 +991,11 @@ async def scan_kaspi_competitors(
     if not master_id:
         raise ValueError("SKU/master product id is empty")
     timeout = httpx.Timeout(25.0, connect=15.0)
-    async with httpx.AsyncClient(timeout=timeout, follow_redirects=True) as client:
+    async with httpx.AsyncClient(
+        timeout=timeout,
+        follow_redirects=True,
+        **httpx_runtime_options(),
+    ) as client:
         page, promo, product_url = await _open_product_page(
             client,
             master_id=master_id,

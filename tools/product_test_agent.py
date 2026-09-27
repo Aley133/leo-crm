@@ -21,7 +21,9 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
-from tools.kaspi_fast_dumping_session import KaspiMerchantSession
+from tools.kaspi_fast_dumping_http_auth import (
+    HttpOtpKaspiMerchantSession as KaspiMerchantSession,
+)
 from tools.ozon_http import OzonSessionResolver
 from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
 from tools.product_discovery.runtime import (
@@ -36,7 +38,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.13"
+VERSION = "1.1.14"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -70,6 +72,7 @@ _CRM_GATE_LOCK = Lock()
 _CRM_FAILURE_COUNT = 0
 _CRM_RETRY_NOT_BEFORE = 0.0
 _RUNTIME_SID: dict[int, str] = {}
+_RUNTIME_HTTP_COOKIE_STATE: dict[int, str] = {}
 _INSTANCE_MUTEX_HANDLE: int | None = None
 
 
@@ -153,6 +156,7 @@ def _save_config(config: dict, workspace_id: int) -> None:
         "service_token_dpapi",
         "password_dpapi",
         "mc_sid_dpapi",
+        "kaspi_http_cookies_dpapi",
         "kaspi_api_token_dpapi",
     }
     payload = {key: value for key, value in config.items() if key in allowed}
@@ -330,6 +334,30 @@ def _save_sid(config: dict, workspace_id: int, sid: str) -> None:
         _save_config(config, workspace_id)
     else:
         _RUNTIME_SID[workspace_id] = sid
+
+
+def _load_http_cookie_state(config: dict, workspace_id: int) -> str | None:
+    if os.name == "nt" and config.get("kaspi_http_cookies_dpapi"):
+        try:
+            return _unprotect_secret(str(config["kaspi_http_cookies_dpapi"]))
+        except Exception:
+            return None
+    return _RUNTIME_HTTP_COOKIE_STATE.get(workspace_id)
+
+
+def _save_http_cookie_state(config: dict, workspace_id: int, state: str) -> None:
+    if os.name == "nt":
+        config["kaspi_http_cookies_dpapi"] = _protect_secret(state)
+        _save_config(config, workspace_id)
+    else:
+        _RUNTIME_HTTP_COOKIE_STATE[workspace_id] = state
+
+
+def _prompt_kaspi_otp(recipient: str) -> str:
+    return _prompt_text(
+        "Kaspi отправил 6-значный код на почту "
+        f"{recipient}.\nВведите код; он не сохраняется в настройках"
+    )
 
 
 def _kaspi_api_token(config: dict, workspace_id: int) -> str:
@@ -844,6 +872,8 @@ async def main(
         prompt="SERVICE_API_TOKEN из Render",
         reconfigure=reconfigure,
     )
+    previous_merchant_uid = str(config.get("merchant_uid") or "").strip()
+    previous_email = str(config.get("email") or "").strip()
     merchant_uid = _plain_setting(
         config,
         key="merchant_uid",
@@ -851,6 +881,13 @@ async def main(
         prompt="Kaspi Merchant UID",
         reconfigure=reconfigure,
     )
+    if reconfigure or (
+        previous_merchant_uid and previous_merchant_uid != merchant_uid
+    ):
+        config.pop("mc_sid_dpapi", None)
+        config.pop("kaspi_http_cookies_dpapi", None)
+        _RUNTIME_SID.pop(selected_workspace, None)
+        _RUNTIME_HTTP_COOKIE_STATE.pop(selected_workspace, None)
     store_id = _plain_setting(
         config,
         key="store_id",
@@ -865,6 +902,11 @@ async def main(
         prompt="Email Merchant Cabinet",
         reconfigure=reconfigure,
     )
+    if previous_email and previous_email != email:
+        config.pop("mc_sid_dpapi", None)
+        config.pop("kaspi_http_cookies_dpapi", None)
+        _RUNTIME_SID.pop(selected_workspace, None)
+        _RUNTIME_HTTP_COOKIE_STATE.pop(selected_workspace, None)
     password = _secret_setting(
         config,
         key="password",
@@ -891,11 +933,23 @@ async def main(
     _ensure_ozon_session()
 
     merchant_session = KaspiMerchantSession(
+        workspace_id=selected_workspace,
         merchant_uid=merchant_uid,
         email=email,
         password=password,
         load_sid=lambda: _load_sid(config, selected_workspace),
         save_sid=lambda sid: _save_sid(config, selected_workspace, sid),
+        load_cookie_state=lambda: _load_http_cookie_state(
+            config,
+            selected_workspace,
+        ),
+        save_cookie_state=lambda state: _save_http_cookie_state(
+            config,
+            selected_workspace,
+            state,
+        ),
+        prompt_otp=_prompt_kaspi_otp,
+        log=lambda message: _log(message, workspace_id=selected_workspace),
     )
     identity = _agent_payload(agent_id, selected_workspace, merchant_uid)
     try:
@@ -926,6 +980,10 @@ async def main(
     )
     _log(
         "Единая очередь: существующая или новая карточка Kaspi → CRM → существующий Fast Dumping.",
+        workspace_id=selected_workspace,
+    )
+    _log(
+        "Вход Kaspi работает по чистому HTTP; при необходимости код из почты вводится локально.",
         workspace_id=selected_workspace,
     )
     if os.name == "nt" and not once:
