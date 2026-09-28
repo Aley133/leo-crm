@@ -8,14 +8,21 @@ from zipfile import ZipFile
 from io import BytesIO
 
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
 
 from backend.app.accounting_exports import build_inventory_xlsx, build_inventory_xml
-from backend.app.accounting_service import build_accounting_report, build_inventory_snapshot
+from backend.app.accounting_models import AccountingCapitalSnapshot
+from backend.app.accounting_service import (
+    build_accounting_report,
+    build_inventory_snapshot,
+    record_capital_snapshot,
+)
 from backend.app.db import get_db
 from backend.app.inventory_models import InventoryAllocation, InventoryBatch
 from backend.app.main import app
 from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderLine, Product
 from backend.app.workspace_context import workspace_context
+from backend.app.workspace_models import Workspace
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -170,12 +177,92 @@ def test_accounting_report_calculates_profit_losses_and_abc(db_session) -> None:
     assert summary["cost_coverage_pct"] == Decimal("100.00")
 
     assert report["inventory"]["inventory_value"] == Decimal("28000.00")
+    assert report["capital"]["warehouse_at_cost"] == Decimal("28000.00")
+    assert report["capital"]["cash_balance"] is None
+    assert report["capital"]["total_capital"] is None
     assert report["comparison"]["delivered_revenue_change_pct"] == Decimal("100.00")
     product_row = next(row for row in report["products"] if row["product_id"] == product.id)
     assert product_row["abc_class"] == "A"
     assert product_row["known_net_profit"] == Decimal("2993.00")
     assert product_row["on_hand_units"] == 7
     assert product_row["weighted_purchase_price"] == Decimal("4000.00")
+
+
+def test_capital_position_separates_cash_stock_transit_without_double_counting_free(
+    db_session,
+) -> None:
+    now, product, _batch = _seed_accounting(db_session)
+    db_session.add(Workspace(id=1, name="BARWORK", slug="barwork", is_active=True))
+    db_session.add(
+        InventoryBatch(
+            workspace_id=1,
+            product_id=product.id,
+            received_at=now + timedelta(days=7),
+            quantity_received=3,
+            quantity_remaining=3,
+            unit_cost=Decimal("2500"),
+            is_received=False,
+            batch_type="purchase",
+            source_name="Белый ввоз",
+        )
+    )
+    record_capital_snapshot(
+        db_session,
+        workspace_id=1,
+        cash_balance_kzt=Decimal("2000000"),
+        free_capital_kzt=Decimal("500000"),
+        note="Резерв на закупки",
+    )
+    db_session.commit()
+
+    report = build_accounting_report(db_session, workspace_id=1, days=30, as_of=now)
+    capital = report["capital"]
+
+    assert capital["workspace_name"] == "BARWORK"
+    assert capital["cash_balance"] == Decimal("2000000.00")
+    assert capital["warehouse_at_cost"] == Decimal("28000.00")
+    assert capital["goods_in_transit"] == Decimal("7500.00")
+    assert capital["free_capital"] == Decimal("500000.00")
+    assert capital["total_capital"] == Decimal("2035500.00")
+    assert capital["known_total_capital"] == Decimal("2035500.00")
+    assert capital["free_capital_is_part_of_cash"] is True
+    assert capital["formula"] == "cash_balance + warehouse_at_cost + goods_in_transit"
+
+
+def test_capital_snapshots_are_append_only_and_workspace_isolated(db_session) -> None:
+    db_session.add_all(
+        [
+            Workspace(id=1, name="BARWORK", slug="barwork", is_active=True),
+            Workspace(id=2, name="LeoXpress", slug="leoxpress", is_active=True),
+        ]
+    )
+    record_capital_snapshot(
+        db_session,
+        workspace_id=1,
+        cash_balance_kzt=Decimal("100000"),
+        free_capital_kzt=Decimal("25000"),
+    )
+    record_capital_snapshot(
+        db_session,
+        workspace_id=1,
+        cash_balance_kzt=Decimal("120000"),
+        free_capital_kzt=Decimal("30000"),
+    )
+    with workspace_context(2):
+        record_capital_snapshot(
+            db_session,
+            workspace_id=2,
+            cash_balance_kzt=Decimal("900000"),
+            free_capital_kzt=Decimal("400000"),
+        )
+    db_session.commit()
+
+    assert db_session.scalar(select(func.count(AccountingCapitalSnapshot.id))) == 2
+    with workspace_context(2):
+        assert db_session.scalar(select(func.count(AccountingCapitalSnapshot.id))) == 1
+        report = build_accounting_report(db_session, workspace_id=2, days=30)
+    assert report["capital"]["workspace_name"] == "LeoXpress"
+    assert report["capital"]["cash_balance"] == Decimal("900000.00")
 
 
 def test_inventory_exports_are_valid_xml_and_xlsx(db_session) -> None:
@@ -381,7 +468,55 @@ def test_accounting_http_report_and_downloads(db_session, monkeypatch) -> None:
     )
 
 
-def test_accounting_ui_and_api_are_read_only_contracts() -> None:
+def test_accounting_capital_http_snapshot_is_append_only(db_session, monkeypatch) -> None:
+    _seed_accounting(db_session)
+    monkeypatch.setenv("SERVICE_API_TOKEN", "test-service-token")
+
+    def override_db():
+        yield db_session
+
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        headers = {"Authorization": "Bearer test-service-token"}
+        first = client.post(
+            "/api/accounting/capital-snapshot",
+            headers=headers,
+            json={
+                "cash_balance_kzt": "2000000.00",
+                "free_capital_kzt": "500000.00",
+                "note": "Резерв",
+            },
+        )
+        second = client.post(
+            "/api/accounting/capital-snapshot",
+            headers=headers,
+            json={
+                "cash_balance_kzt": "2100000.00",
+                "free_capital_kzt": "600000.00",
+            },
+        )
+        invalid = client.post(
+            "/api/accounting/capital-snapshot",
+            headers=headers,
+            json={
+                "cash_balance_kzt": "100000.00",
+                "free_capital_kzt": "100001.00",
+            },
+        )
+    finally:
+        app.dependency_overrides.pop(get_db, None)
+
+    assert first.status_code == 201
+    assert first.json()["total_capital"] == "2028000.00"
+    assert second.status_code == 201
+    assert second.json()["cash_balance"] == "2100000.00"
+    assert second.json()["free_capital"] == "600000.00"
+    assert invalid.status_code == 422
+    assert db_session.scalar(select(func.count(AccountingCapitalSnapshot.id))) == 2
+
+
+def test_accounting_ui_and_api_preserve_business_data_contracts() -> None:
     main = (ROOT / "backend/app/main.py").read_text(encoding="utf-8")
     ui = (ROOT / "backend/app/ui.py").read_text(encoding="utf-8")
     api = (ROOT / "backend/app/accounting_api.py").read_text(encoding="utf-8")
@@ -392,13 +527,20 @@ def test_accounting_ui_and_api_are_read_only_contracts() -> None:
     assert '@router.get("/crm/accounting"' in ui
     assert '@router.get("/report")' in api
     assert '@router.get("/inventory/export")' in api
-    assert "@router.post" not in api
+    assert '@router.post("/capital-snapshot"' in api
     assert "@router.put" not in api
     assert "@router.delete" not in api
+    assert "record_capital_snapshot(" in api
     assert 'id="summary-result"' in html
+    assert 'id="capital-cash"' in html
+    assert 'id="capital-warehouse"' in html
+    assert 'id="capital-transit"' in html
+    assert 'id="capital-free"' in html
+    assert 'id="capital-total"' in html
     assert 'data-format="xml"' in html
     assert 'data-format="xlsx"' in html
     assert "/api/accounting/report" in script
+    assert "/api/accounting/capital-snapshot" in script
     assert "/api/accounting/inventory/export" in script
 
 

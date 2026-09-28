@@ -80,8 +80,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.27.0"
-DEPLOYMENT_MARKER = "accounting-dashboard-and-inventory-exports"
+APP_VERSION = "0.27.1"
+DEPLOYMENT_MARKER = "accounting-capital-breakdown"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(

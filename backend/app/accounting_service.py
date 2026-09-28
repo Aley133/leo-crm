@@ -15,8 +15,10 @@ from .commerce.profit_calculator import (
     allocate_order_logistics,
     kaspi_logistics_per_unit,
 )
+from .accounting_models import AccountingCapitalSnapshot
 from .inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
 from .models import MarketplaceOrder, MarketplaceOrderLine, Product
+from .workspace_models import Workspace
 
 
 MONEY = Decimal("0.01")
@@ -289,6 +291,88 @@ def build_inventory_snapshot(
         "items": rows,
         "owner_by_product": owner_by_product,
         "products_by_id": products_by_id,
+    }
+
+
+def record_capital_snapshot(
+    db: Session,
+    *,
+    workspace_id: int,
+    cash_balance_kzt: Decimal,
+    free_capital_kzt: Decimal,
+    note: str | None = None,
+) -> AccountingCapitalSnapshot:
+    """Append a manual cash position without modifying earlier snapshots."""
+
+    cash = _money(cash_balance_kzt)
+    free = _money(free_capital_kzt)
+    if cash < 0 or free < 0:
+        raise ValueError("capital values must be non-negative")
+    if free > cash:
+        raise ValueError("free capital cannot exceed cash balance")
+    snapshot = AccountingCapitalSnapshot(
+        workspace_id=workspace_id,
+        cash_balance_kzt=cash,
+        free_capital_kzt=free,
+        note=(note or "").strip() or None,
+    )
+    db.add(snapshot)
+    db.flush()
+    return snapshot
+
+
+def build_capital_position(
+    db: Session,
+    *,
+    workspace_id: int,
+    inventory: dict[str, Any],
+) -> dict[str, Any]:
+    """Combine manual cash with automatically valued stock without double counting."""
+
+    latest = db.scalar(
+        select(AccountingCapitalSnapshot)
+        .where(AccountingCapitalSnapshot.workspace_id == workspace_id)
+        .order_by(
+            AccountingCapitalSnapshot.created_at.desc(),
+            AccountingCapitalSnapshot.id.desc(),
+        )
+        .limit(1)
+    )
+    workspace_name = db.scalar(
+        select(Workspace.name).where(Workspace.id == workspace_id)
+    ) or f"Workspace {workspace_id}"
+    warehouse_value = _money(Decimal(inventory.get("inventory_value") or 0))
+    incoming_value = _money(Decimal(inventory.get("incoming_value") or 0))
+    cash_balance = None if latest is None else _money(Decimal(latest.cash_balance_kzt))
+    free_capital = None if latest is None else _money(Decimal(latest.free_capital_kzt))
+    unpriced_warehouse_units = int(inventory.get("unpriced_units") or 0)
+    unpriced_incoming_units = int(inventory.get("incoming_unpriced_units") or 0)
+    valuation_is_complete = (
+        unpriced_warehouse_units == 0 and unpriced_incoming_units == 0
+    )
+    known_total = _money(
+        warehouse_value + incoming_value + Decimal(cash_balance or 0)
+    )
+    total_capital = known_total if latest is not None and valuation_is_complete else None
+    return {
+        "workspace_id": workspace_id,
+        "workspace_name": workspace_name,
+        "currency": "KZT",
+        "cash_is_configured": latest is not None,
+        "cash_balance": cash_balance,
+        "warehouse_at_cost": warehouse_value,
+        "goods_in_transit": incoming_value,
+        "free_capital": free_capital,
+        "known_total_capital": known_total,
+        "total_capital": total_capital,
+        "valuation_is_complete": valuation_is_complete,
+        "unpriced_warehouse_units": unpriced_warehouse_units,
+        "unpriced_incoming_units": unpriced_incoming_units,
+        "snapshot_id": None if latest is None else int(latest.id),
+        "snapshot_created_at": None if latest is None else _aware(latest.created_at),
+        "snapshot_note": None if latest is None else latest.note,
+        "formula": "cash_balance + warehouse_at_cost + goods_in_transit",
+        "free_capital_is_part_of_cash": True,
     }
 
 
@@ -759,6 +843,11 @@ def build_accounting_report(
     )
     owner_by_product: dict[int, int] = inventory.pop("owner_by_product")
     products_by_id: dict[int, Product] = inventory.pop("products_by_id")
+    capital = build_capital_position(
+        db,
+        workspace_id=workspace_id,
+        inventory=inventory,
+    )
     inventory_by_owner = {
         int(row["product_id"]): row for row in inventory["items"]
     }
@@ -854,6 +943,7 @@ def build_accounting_report(
             "read_only": True,
         },
         "summary": current_summary,
+        "capital": capital,
         "comparison": comparison,
         "inventory": inventory,
         "abc": abc,
