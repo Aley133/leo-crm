@@ -11,9 +11,13 @@ const productsEmpty = document.querySelector("#products-empty");
 const productSearch = document.querySelector("#product-search");
 const abcFilter = document.querySelector("#abc-filter");
 const signalFilter = document.querySelector("#signal-filter");
+const capitalEditButton = document.querySelector("#capital-edit");
+const capitalForm = document.querySelector("#capital-form");
+const capitalCancelButton = document.querySelector("#capital-cancel");
 
 let selectedDays = 30;
 let productCache = [];
+let capitalCache = null;
 
 const headers = () => ({Authorization: `Bearer ${localStorage.getItem(storageKey) || ""}`});
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[character]));
@@ -25,6 +29,7 @@ const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU", {day
 const signedMoney = (value) => `${Number(value || 0) < 0 ? "−" : Number(value || 0) > 0 ? "+" : ""}${money(Math.abs(Number(value || 0)))}`;
 const resultClass = (value) => Number(value || 0) > 0 ? "money-positive" : Number(value || 0) < 0 ? "money-negative" : "";
 const trendClass = (value) => Number(value || 0) > 0 ? "trend-positive" : Number(value || 0) < 0 ? "trend-negative" : "";
+const moneyOrDash = (value) => value == null ? "—" : money(value);
 
 const responseError = async (response) => {
   let detail = `HTTP ${response.status}`;
@@ -38,6 +43,46 @@ const responseError = async (response) => {
 const setText = (selector, value) => {
   const node = document.querySelector(selector);
   if (node) node.textContent = value;
+};
+
+const renderCapital = (capital) => {
+  capitalCache = capital;
+  setText("#capital-cash", moneyOrDash(capital.cash_balance));
+  setText("#capital-warehouse", money(capital.warehouse_at_cost));
+  setText("#capital-transit", money(capital.goods_in_transit));
+  setText("#capital-free", moneyOrDash(capital.free_capital));
+  setText("#capital-total-label", `Общий капитал ${capital.workspace_name || ""}`.trim());
+
+  const totalNode = document.querySelector("#capital-total");
+  const totalCard = totalNode.closest(".capital-total");
+  const unpricedUnits = Number(capital.unpriced_warehouse_units || 0) + Number(capital.unpriced_incoming_units || 0);
+  if (!capital.cash_is_configured) {
+    totalNode.textContent = "—";
+    setText("#capital-total-note", "Укажите текущие деньги для полного расчёта");
+  } else if (!capital.valuation_is_complete) {
+    totalNode.textContent = `≥ ${money(capital.known_total_capital)}`;
+    setText("#capital-total-note", `Минимально подтверждённая сумма · ${number(unpricedUnits)} ед. без закупочной цены`);
+  } else {
+    totalNode.textContent = money(capital.total_capital);
+    const updated = capital.snapshot_created_at ? new Date(capital.snapshot_created_at).toLocaleString("ru-RU") : "";
+    setText("#capital-total-note", updated ? `Деньги обновлены ${updated}` : "Деньги + склад + товар в пути");
+  }
+  totalCard.classList.toggle("incomplete", !capital.cash_is_configured || !capital.valuation_is_complete);
+  capitalEditButton.textContent = capital.cash_is_configured ? "Изменить деньги" : "Указать деньги";
+
+  capitalForm.elements.cash_balance_kzt.value = capital.cash_balance ?? "";
+  capitalForm.elements.free_capital_kzt.value = capital.free_capital ?? "";
+  capitalForm.elements.note.value = capital.snapshot_note ?? "";
+};
+
+const showCapitalForm = () => {
+  if (capitalCache) {
+    capitalForm.elements.cash_balance_kzt.value = capitalCache.cash_balance ?? "";
+    capitalForm.elements.free_capital_kzt.value = capitalCache.free_capital ?? "";
+    capitalForm.elements.note.value = capitalCache.snapshot_note ?? "";
+  }
+  capitalForm.classList.remove("hidden");
+  capitalForm.elements.cash_balance_kzt.focus();
 };
 
 const renderSummary = (payload) => {
@@ -160,6 +205,7 @@ const loadReport = async () => {
     if (!response.ok) throw await responseError(response);
     const payload = await response.json();
     renderSummary(payload);
+    renderCapital(payload.capital);
     renderAbc(payload);
     renderSignals(payload);
     productCache = payload.products || [];
@@ -217,5 +263,39 @@ periodSwitch.addEventListener("click", async (event) => {
 });
 for (const control of [productSearch, abcFilter, signalFilter]) control.addEventListener("input", renderProducts);
 document.querySelectorAll(".export-button").forEach((button) => button.addEventListener("click", () => downloadExport(button.dataset.format, button)));
+capitalEditButton.addEventListener("click", showCapitalForm);
+capitalCancelButton.addEventListener("click", () => capitalForm.classList.add("hidden"));
+capitalForm.addEventListener("submit", async (event) => {
+  event.preventDefault();
+  const submitButton = capitalForm.querySelector('button[type="submit"]');
+  const cashBalance = Number(capitalForm.elements.cash_balance_kzt.value);
+  const freeCapital = Number(capitalForm.elements.free_capital_kzt.value);
+  if (freeCapital > cashBalance) {
+    message.textContent = "Свободный капитал не может быть больше общей суммы денег.";
+    capitalForm.elements.free_capital_kzt.focus();
+    return;
+  }
+  submitButton.disabled = true;
+  message.textContent = "Сохраняю новый снимок капитала…";
+  try {
+    const response = await fetch("/api/accounting/capital-snapshot", {
+      method: "POST",
+      headers: {...headers(), "Content-Type":"application/json"},
+      body: JSON.stringify({
+        cash_balance_kzt: capitalForm.elements.cash_balance_kzt.value,
+        free_capital_kzt: capitalForm.elements.free_capital_kzt.value,
+        note: capitalForm.elements.note.value.trim() || null,
+      }),
+    });
+    if (!response.ok) throw await responseError(response);
+    renderCapital(await response.json());
+    capitalForm.classList.add("hidden");
+    message.textContent = "Снимок капитала сохранён. Заказы, партии, FIFO и выручка не изменялись.";
+  } catch (error) {
+    message.textContent = error instanceof Error ? error.message : "Не удалось сохранить снимок капитала.";
+  } finally {
+    submitButton.disabled = false;
+  }
+});
 
 if (localStorage.getItem(storageKey)) loadReport();

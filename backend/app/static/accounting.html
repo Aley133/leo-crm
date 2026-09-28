@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Бух учёт</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260928-1">
-  <link rel="stylesheet" href="/static/accounting.css?v=20260928-1">
+  <link rel="stylesheet" href="/static/accounting.css?v=20260928-2">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
   <script src="/static/theme.js?v=20260803-2"></script>
@@ -42,6 +42,33 @@
           <article class="metric"><span>Деньги в остатках</span><strong id="summary-inventory">0 ₸</strong><small id="summary-inventory-note">0 ед. · 0 SKU</small></article>
           <article class="metric danger-metric"><span>Отменённый спрос</span><strong id="summary-cancelled">0 ₸</strong><small id="summary-cancelled-note">0 отмен</small></article>
           <article class="metric warning-metric"><span>Возвраты</span><strong id="summary-returned">0 ₸</strong><small id="summary-returned-note">0 возвратов</small></article>
+        </section>
+
+        <section class="accounting-card capital-card">
+          <div class="card-heading capital-heading">
+            <div><span class="section-kicker">КАПИТАЛ</span><h2>Где сейчас находятся деньги</h2></div>
+            <button id="capital-edit" class="button secondary" type="button">Указать деньги</button>
+          </div>
+          <div class="capital-layout">
+            <div class="capital-lines">
+              <div><span>Деньги <small>вводятся вручную</small></span><strong id="capital-cash">—</strong></div>
+              <div><span>Склад по закупке <small>фактический FIFO</small></span><strong id="capital-warehouse">0 ₸</strong></div>
+              <div><span>Товар в пути <small>незавершённые партии</small></span><strong id="capital-transit">0 ₸</strong></div>
+              <div class="capital-free"><span>Свободный капитал <small>часть строки «Деньги»</small></span><strong id="capital-free">—</strong></div>
+            </div>
+            <div class="capital-total">
+              <span id="capital-total-label">Общий капитал</span>
+              <strong id="capital-total">—</strong>
+              <small id="capital-total-note">Укажите текущие деньги для полного расчёта</small>
+            </div>
+          </div>
+          <form id="capital-form" class="capital-form hidden">
+            <label><span>Деньги сейчас, ₸</span><input name="cash_balance_kzt" type="number" min="0" max="9999999999999999.99" step="0.01" inputmode="decimal" required></label>
+            <label><span>Из них свободно, ₸</span><input name="free_capital_kzt" type="number" min="0" max="9999999999999999.99" step="0.01" inputmode="decimal" required></label>
+            <label class="capital-note-field"><span>Комментарий <small>необязательно</small></span><input name="note" maxlength="500" placeholder="Например: резерв на белый ввоз"></label>
+            <div class="capital-form-actions"><button class="button" type="submit">Сохранить снимок</button><button id="capital-cancel" class="button secondary" type="button">Отмена</button></div>
+          </form>
+          <p class="card-note capital-explanation">Общий капитал = Деньги + Склад по закупке + Товар в пути. Свободный капитал уже входит в «Деньги» и второй раз к итогу не прибавляется. Каждое сохранение создаёт новый снимок; предыдущие значения не удаляются.</p>
         </section>
 
         <section class="accounting-grid">
@@ -97,6 +124,6 @@
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/accounting.js?v=20260928-1" defer></script>
+  <script src="/static/accounting.js?v=20260928-2" defer></script>
 </body>
 </html>
