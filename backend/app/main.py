@@ -14,6 +14,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
 from . import legacy_workspace_scope as _legacy_workspace_scope  # noqa: F401
+from .accounting_api import router as accounting_router
 from .action_api import router as action_router
 from .browser_agent_api import router as browser_agent_router
 from .browser_agent_monitoring_api import router as browser_agent_monitoring_router
@@ -79,8 +80,8 @@ from .workspace_context import (
 )
 from .workspace_kaspi import bootstrap_legacy_workspace_connection
 
-APP_VERSION = "0.26.23"
-DEPLOYMENT_MARKER = "bounded-dumping-recovery-query"
+APP_VERSION = "0.27.0"
+DEPLOYMENT_MARKER = "accounting-dashboard-and-inventory-exports"
 STATIC_DIR = Path(__file__).resolve().parent / "static"
 
 app = FastAPI(
@@ -114,6 +115,7 @@ async def select_workspace(request: Request, call_next):
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
+app.include_router(accounting_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
 app.include_router(product_economics_router)
@@ -299,6 +301,7 @@ async def root() -> dict[str, object]:
         "deployment_marker": DEPLOYMENT_MARKER,
         "docs": "/docs",
         "crm": "/crm",
+        "accounting": "/crm/accounting",
         "kaspi_feed": "/feeds/kaspi/catalog.xml",
         "kaspi_polling": dict(KASPI_POLL_STATUS),
         "kaspi_order_enrichment": dict(KASPI_ENRICHMENT_STATUS),

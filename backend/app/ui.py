@@ -34,6 +34,14 @@ def crm_revenue() -> FileResponse:
     return FileResponse(STATIC_DIR / "revenue.html")
 
 
+@router.get("/crm/accounting", response_class=FileResponse)
+def crm_accounting() -> FileResponse:
+    return FileResponse(
+        STATIC_DIR / "accounting.html",
+        headers={"Cache-Control": "no-store"},
+    )
+
+
 @router.get("/crm/dumping", response_class=FileResponse)
 def crm_dumping() -> FileResponse:
     return FileResponse(STATIC_DIR / "dumping.html")

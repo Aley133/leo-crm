@@ -329,6 +329,7 @@ def test_existing_pages_share_one_account_context_script() -> None:
         "product-detail.html",
         "orders.html",
         "revenue.html",
+        "accounting.html",
         "dumping.html",
         "suppliers.html",
         "monitoring.html",

@@ -8,6 +8,7 @@ CRM_PAGES = (
     "product-detail.html",
     "orders.html",
     "revenue.html",
+    "accounting.html",
     "dumping.html",
     "suppliers.html",
     "monitoring.html",
