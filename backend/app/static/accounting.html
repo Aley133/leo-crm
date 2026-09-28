@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Бух учёт</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260928-1">
+  <link rel="stylesheet" href="/static/accounting.css?v=20260928-1">
+  <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
+  <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
+  <script src="/static/theme.js?v=20260803-2"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/product-test">Тест товара</a><a href="/crm/add-product">Добавить товар</a><a href="/crm/orders">Заказы</a><a href="/crm/revenue">Аналитика</a><a class="active" href="/crm/accounting">Бух учёт</a><a href="/crm/dumping">Демпинг</a><a href="/crm/fast-dumping">Быстрый демпинг</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Read-only finance</span></div>
+    </aside>
+    <main>
+      <header class="topbar accounting-topbar">
+        <div><p class="eyebrow">УПРАВЛЕНЧЕСКИЙ УЧЁТ</p><h1>Бух учёт</h1><p class="subtitle">Плюс/минус, остатки, закупочные цены, ABC и точки потери оборота.</p></div>
+        <div class="accounting-actions"><button id="refresh" class="button secondary" type="button">Обновить</button><button class="button export-button" data-format="xml" type="button">Скачать XML</button><button class="button export-button" data-format="xlsx" type="button">Скачать Excel</button></div>
+      </header>
+
+      <section id="auth-panel" class="auth-panel"><div><h2>Подключение к LEO CRM</h2><p>Введите SERVICE_API_TOKEN из Render. Он хранится только в этом браузере.</p></div><form id="token-form"><input id="token" type="password" autocomplete="current-password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form></section>
+      <div id="message" class="message" role="status" aria-live="polite"></div>
+
+      <section id="accounting-page" class="hidden accounting-page" aria-busy="false">
+        <div class="accounting-toolbar">
+          <div class="period-switch" id="period-switch" aria-label="Период отчёта"><button data-days="7" type="button">7Д</button><button data-days="30" class="active" type="button">30Д</button><button data-days="90" type="button">90Д</button><button data-days="365" type="button">1Г</button><button data-days="0" type="button">ВСЁ</button></div>
+          <label class="export-option"><input id="include-zero" type="checkbox" checked> Включать нулевые остатки в выгрузку</label>
+          <span id="period-caption" class="period-caption"></span>
+        </div>
+
+        <section class="metrics accounting-metrics">
+          <article id="result-card" class="metric result-metric"><span>Плюс / минус</span><strong id="summary-result">0 ₸</strong><small id="summary-result-note">управленческий результат</small></article>
+          <article class="metric"><span>Выданный оборот</span><strong id="summary-revenue">0 ₸</strong><small id="summary-revenue-note">0 завершённых заказов</small></article>
+          <article class="metric"><span>Закупочная стоимость</span><strong id="summary-procurement">0 ₸</strong><small id="summary-cost-coverage">цены заполнены на 100%</small></article>
+          <article class="metric"><span>Деньги в остатках</span><strong id="summary-inventory">0 ₸</strong><small id="summary-inventory-note">0 ед. · 0 SKU</small></article>
+          <article class="metric danger-metric"><span>Отменённый спрос</span><strong id="summary-cancelled">0 ₸</strong><small id="summary-cancelled-note">0 отмен</small></article>
+          <article class="metric warning-metric"><span>Возвраты</span><strong id="summary-returned">0 ₸</strong><small id="summary-returned-note">0 возвратов</small></article>
+        </section>
+
+        <section class="accounting-grid">
+          <article class="accounting-card pnl-card">
+            <div class="card-heading"><div><span class="section-kicker">P&amp;L</span><h2>Из чего сложился плюс/минус</h2></div><span id="pnl-status" class="quality-badge">—</span></div>
+            <div class="pnl-list">
+              <div><span>Выданный оборот</span><strong id="pnl-revenue">0 ₸</strong></div>
+              <div class="expense"><span>Закупочная стоимость</span><strong id="pnl-procurement">−0 ₸</strong></div>
+              <div class="expense"><span>Комиссия Kaspi <small id="commission-rate"></small></span><strong id="pnl-commission">−0 ₸</strong></div>
+              <div class="expense"><span>Налог <small id="tax-rate"></small></span><strong id="pnl-tax">−0 ₸</strong></div>
+              <div class="expense"><span>Логистика</span><strong id="pnl-logistics">−0 ₸</strong></div>
+              <div class="pnl-total"><span>Итого</span><strong id="pnl-result">0 ₸</strong></div>
+            </div>
+            <p id="pnl-note" class="card-note"></p>
+          </article>
+
+          <article class="accounting-card">
+            <div class="card-heading"><div><span class="section-kicker">ЗАКАЗЫ</span><h2>Качество потока</h2></div></div>
+            <div class="fact-grid accounting-facts">
+              <div><span>Всего заказов</span><strong id="orders-total">0</strong></div><div><span>Выдано</span><strong id="orders-delivered">0</strong></div>
+              <div><span>Средний заказ</span><strong id="average-order">0 ₸</strong></div><div><span>Медианный заказ</span><strong id="median-order">0 ₸</strong></div>
+              <div><span>Единиц / заказ</span><strong id="units-per-order">0</strong></div><div><span>Заказов с 2+ ед.</span><strong id="multi-unit-share">0%</strong></div>
+              <div><span>Заказов с 2+ строками</span><strong id="multi-line-share">0%</strong></div><div><span>Отмены / возвраты</span><strong id="loss-rates">0% / 0%</strong></div>
+            </div>
+          </article>
+        </section>
+
+        <section class="accounting-grid lower-grid">
+          <article class="accounting-card">
+            <div class="card-heading"><div><span class="section-kicker">ABC</span><h2>Концентрация оборота</h2></div></div>
+            <div id="abc-groups" class="abc-groups"></div>
+            <p class="card-note">A — ядро до 80% оборота, B — следующие 15%, C — оставшийся ассортимент.</p>
+          </article>
+          <article class="accounting-card">
+            <div class="card-heading"><div><span class="section-kicker">КОНЦЕНТРАЦИЯ</span><h2>Бренды в обороте</h2></div></div>
+            <div id="brand-list" class="brand-list"></div>
+          </article>
+        </section>
+
+        <section class="accounting-card signals-card">
+          <div class="card-heading"><div><span class="section-kicker">СИГНАЛЫ</span><h2>Где теряются или ускоряются деньги</h2></div></div>
+          <div id="signals" class="signals-grid"></div>
+          <div id="signals-empty" class="empty hidden">За выбранный период критичных сигналов нет.</div>
+        </section>
+
+        <section class="accounting-card products-accounting-card">
+          <div class="card-heading product-heading"><div><span class="section-kicker">ТОВАРЫ</span><h2>Расширенная экономика по SKU</h2></div><span id="product-count" class="period-caption"></span></div>
+          <div class="accounting-filters"><label><span>Поиск</span><input id="product-search" type="search" placeholder="Название, SKU или Kaspi ID"></label><label><span>ABC</span><select id="abc-filter"><option value="">Все</option><option value="A">A</option><option value="B">B</option><option value="C">C</option></select></label><label><span>Сигнал</span><select id="signal-filter"><option value="">Все</option><option value="lost_sales">Пропал из продаж</option><option value="out_of_stock">Нет остатка</option><option value="low_stock">Мало остатка</option><option value="frozen_capital">Заморожены деньги</option><option value="accelerating">Разгоняется</option><option value="new_demand">Новый спрос</option></select></label></div>
+          <div class="accounting-table-wrap"><table><thead><tr><th>Товар</th><th>ABC</th><th>Продажи</th><th>Оборот</th><th>Плюс/минус</th><th>Динамика</th><th>Остаток</th><th>Цена закупки</th><th>Капитал</th><th>Запас</th><th>Последняя продажа</th><th>Сигнал</th></tr></thead><tbody id="products-body"></tbody></table></div>
+          <div id="products-empty" class="empty hidden">Товары по выбранному фильтру не найдены.</div>
+        </section>
+      </section>
+    </main>
+  </div>
+  <script src="/static/workspace-context.js?v=20260731-1"></script>
+  <script src="/static/accounting.js?v=20260928-1" defer></script>
+</body>
+</html>
