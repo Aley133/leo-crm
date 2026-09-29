@@ -792,7 +792,16 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                         sku = str(offer.get("offer_sku") or "").strip()
                         linked_id = _product_id_from_ozon_url(str(offer.get("product_url") or ""))
                         days = offer.get("delivery_days")
-                        if (sku == product_id and (not linked_id or linked_id == product_id)
+                        # Ozon now commonly scopes seller rows by an internal
+                        # offer SKU that differs from the public product id.
+                        # An exact public productLink is authoritative; only
+                        # fall back to the seller SKU when no link id exists.
+                        same_exact_card = (
+                            linked_id == product_id
+                            if linked_id
+                            else sku == product_id
+                        )
+                        if (same_exact_card
                                 and offer.get("currency_code") == "KZT"
                                 and offer.get("price_kzt") == page_detail.get("price_kzt")
                                 and isinstance(days, int) and not isinstance(days, bool)

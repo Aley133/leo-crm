@@ -1112,7 +1112,9 @@ def test_manual_ozon_url_uses_exact_product_page_price_and_delivery(monkeypatch)
 
 @pytest.mark.parametrize("change,accepted", [
     ({}, True),
-    ({"offer_sku": "999999999"}, False),
+    # Seller modal SKU can be an internal offer id; the exact public
+    # productLink remains the authoritative card identity.
+    ({"offer_sku": "999999999"}, True),
     ({"product_url": "https://ozon.kz/product/other-999999999/"}, False),
     ({"price_kzt": 2200}, False),
     ({"currency_code": "RUB"}, False),
