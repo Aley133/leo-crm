@@ -75,11 +75,15 @@ def test_product_test_agent_replaces_blocked_ozon_session_and_retries_job(monkey
     assert refreshes == [True]
 
 
-def test_product_test_agent_does_not_loop_on_second_ozon_rejection(monkeypatch) -> None:
+def test_product_test_agent_reprompts_until_exact_ozon_job_succeeds(monkeypatch) -> None:
+    calls: list[str] = []
     refreshes: list[bool] = []
 
     async def execute(*_args, **_kwargs):
-        raise product_test_agent.OzonSessionRefreshRequiredError("HTTP 403")
+        calls.append("execute")
+        if len(calls) <= 3:
+            raise product_test_agent.OzonSessionRefreshRequiredError("HTTP 403")
+        return {"validated": True, "supplier_delivery_days": 2}
 
     monkeypatch.setattr(product_test_agent, "_execute_job", execute)
     monkeypatch.setattr(
@@ -89,7 +93,33 @@ def test_product_test_agent_does_not_loop_on_second_ozon_rejection(monkeypatch) 
     )
     monkeypatch.setattr(product_test_agent, "_log", lambda *_args, **_kwargs: None)
 
-    with pytest.raises(product_test_agent.OzonSessionRefreshRequiredError):
+    result = asyncio.run(
+        product_test_agent._run_job_with_retry(
+            {"job_type": "validate_supplier"},
+            merchant_session=object(),
+            store_id="store-1",
+            workspace_id=1,
+        )
+    )
+
+    assert result == {"validated": True, "supplier_delivery_days": 2}
+    assert calls == ["execute", "execute", "execute", "execute"]
+    assert refreshes == [True, True, True]
+
+
+def test_product_test_agent_stops_when_operator_cancels_ozon_refresh(monkeypatch) -> None:
+    async def execute(*_args, **_kwargs):
+        raise product_test_agent.OzonSessionRefreshRequiredError("HTTP 403")
+
+    def cancel_refresh(*, force_replace=False):
+        assert force_replace is True
+        raise RuntimeError("Ozon HTTP session не настроена")
+
+    monkeypatch.setattr(product_test_agent, "_execute_job", execute)
+    monkeypatch.setattr(product_test_agent, "_ensure_ozon_session", cancel_refresh)
+    monkeypatch.setattr(product_test_agent, "_log", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(RuntimeError, match="не настроена"):
         asyncio.run(
             product_test_agent._run_job_with_retry(
                 {"job_type": "validate_supplier"},
@@ -98,8 +128,6 @@ def test_product_test_agent_does_not_loop_on_second_ozon_rejection(monkeypatch) 
                 workspace_id=1,
             )
         )
-
-    assert refreshes == [True]
 
 
 def test_product_test_agent_dispatches_popular_discovery_without_ozon(monkeypatch) -> None:
