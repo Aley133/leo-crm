@@ -203,6 +203,21 @@ def parse_other_seller_offers(payload: Any, base: str = "https://ozon.kz", expec
             if delivery_text:
                 break
         delivery_date, delivery_days = _delivery_date_from_text(delivery_text or "")
+        if delivery_days is None:
+            # Ozon also renders the promise outside ``advantages`` (for
+            # example under a nested ``delivery`` object).  Keep the narrow
+            # field above as the first choice, then use the same bounded
+            # delivery parser as product/search cards for this one seller.
+            fallback_delivery = _delivery(seller)
+            fallback_days = fallback_delivery.get("days")
+            if (
+                isinstance(fallback_days, int)
+                and not isinstance(fallback_days, bool)
+                and 0 <= fallback_days <= MAX_CONFIRMED_DELIVERY_DAYS
+            ):
+                delivery_text = fallback_delivery.get("text")
+                delivery_date = fallback_delivery.get("date")
+                delivery_days = fallback_days
 
         rating_obj = seller.get("rating") if isinstance(seller.get("rating"), dict) else {}
         product_link = str(seller.get("productLink") or "").strip()

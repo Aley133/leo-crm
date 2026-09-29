@@ -131,7 +131,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.16: если вставленная Ozon-сессия проходит базовую проверку, но точная карточка снова получает 403, Agent повторно запрашивает Copy as cURL столько раз, сколько нужно до успешного выполнения задания. Отменить цикл можно закрытием окна; неподтверждённые данные не сохраняются."
+          $notes = "LEO Product Test Agent 1.1.17: точная Ozon-карточка корректно подтверждается, даже если Ozon отдаёт для продавца внутренний SKU вместо ID из публичной ссылки. Срок доставки читается из нового вложенного формата. Цена, KZT, точная публичная ссылка и срок 0–60 дней всё ещё обязаны совпасть; неподтверждённые данные не сохраняются."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `
