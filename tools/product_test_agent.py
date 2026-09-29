@@ -24,7 +24,7 @@ from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
 from tools.kaspi_fast_dumping_http_auth import (
     HttpOtpKaspiMerchantSession as KaspiMerchantSession,
 )
-from tools.ozon_http import OzonSessionResolver
+from tools.ozon_http import OzonSessionRefreshRequiredError, OzonSessionResolver
 from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
 from tools.product_discovery.runtime import (
     discover_popular_products,
@@ -38,7 +38,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.14"
+VERSION = "1.1.15"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -406,14 +406,19 @@ def _acquire_single_instance(workspace_id: int) -> None:
     _INSTANCE_MUTEX_HANDLE = int(handle)
 
 
-def _ensure_ozon_session() -> None:
+def _ensure_ozon_session(*, force_replace: bool = False) -> None:
     resolver = OzonSessionResolver()
-    try:
-        resolver.resolve(validate=True)
-        return
-    except Exception:
-        pass
-    reason = "Ozon HTTP-сессия не найдена. "
+    if not force_replace:
+        try:
+            resolver.resolve(validate=True)
+            return
+        except Exception:
+            pass
+    reason = (
+        "Ozon отклонил текущую HTTP-сессию. "
+        if force_replace
+        else "Ozon HTTP-сессия не найдена или больше не действует. "
+    )
     while True:
         curl_text = _prompt_text(
             reason
@@ -717,6 +722,7 @@ async def _run_job_with_retry(
     merchant_session: KaspiMerchantSession,
     store_id: str,
     kaspi_api_token_provider=None,
+    workspace_id: int | None = None,
 ) -> dict:
     job_type = str(job.get("job_type") or "inspect")
     timeout_seconds = (
@@ -727,20 +733,36 @@ async def _run_job_with_retry(
         else SCAN_TIMEOUT_SECONDS
     )
     attempts = 3 if job_type in {"discover", "discover_popular", "inspect"} else 1
-    async with asyncio.timeout(timeout_seconds):
-        for attempt in range(attempts):
-            try:
-                return await _execute_job(
-                    job,
-                    merchant_session=merchant_session,
-                    store_id=store_id,
-                    kaspi_api_token_provider=kaspi_api_token_provider,
-                )
-            except Exception as exc:
-                if attempt + 1 >= attempts or not _is_rate_limited(exc):
-                    raise
-                delay = min(15.0, 2.5 * (2 ** attempt))
-                await asyncio.sleep(delay + random.uniform(0.2, 0.8))
+    for session_attempt in range(2):
+        try:
+            async with asyncio.timeout(timeout_seconds):
+                for attempt in range(attempts):
+                    try:
+                        return await _execute_job(
+                            job,
+                            merchant_session=merchant_session,
+                            store_id=store_id,
+                            kaspi_api_token_provider=kaspi_api_token_provider,
+                        )
+                    except Exception as exc:
+                        if isinstance(exc, OzonSessionRefreshRequiredError):
+                            raise
+                        if attempt + 1 >= attempts or not _is_rate_limited(exc):
+                            raise
+                        delay = min(15.0, 2.5 * (2 ** attempt))
+                        await asyncio.sleep(delay + random.uniform(0.2, 0.8))
+        except OzonSessionRefreshRequiredError:
+            if session_attempt:
+                raise
+            _log(
+                "Ozon отклонил сохранённую сессию: ожидаю новый Copy as cURL и затем повторю задание",
+                workspace_id=workspace_id,
+            )
+            # The operator may need more than the job timeout to open Ozon and
+            # copy the accepted request. Lease renewal remains active while the
+            # local dialog is open, so the prompt deliberately lives outside
+            # asyncio.timeout above.
+            await asyncio.to_thread(_ensure_ozon_session, force_replace=True)
     raise RuntimeError("Product Test job ended without a result")
 
 
@@ -783,6 +805,7 @@ async def _process_job(
             merchant_session=merchant_session,
             store_id=store_id,
             kaspi_api_token_provider=kaspi_api_token_provider,
+            workspace_id=workspace_id,
         )
         payload = {
             "agent_id": agent_id,

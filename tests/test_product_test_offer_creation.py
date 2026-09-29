@@ -43,6 +43,65 @@ def test_product_test_agent_reprompts_after_invalid_ozon_session(monkeypatch) ->
     assert "вставьте его ещё раз" in messages[0]
 
 
+def test_product_test_agent_replaces_blocked_ozon_session_and_retries_job(monkeypatch) -> None:
+    calls: list[str] = []
+    refreshes: list[bool] = []
+
+    async def execute(*_args, **_kwargs):
+        calls.append("execute")
+        if len(calls) == 1:
+            raise product_test_agent.OzonSessionRefreshRequiredError("HTTP 403")
+        return {"validated": True, "supplier_price_kzt": 2250}
+
+    monkeypatch.setattr(product_test_agent, "_execute_job", execute)
+    monkeypatch.setattr(
+        product_test_agent,
+        "_ensure_ozon_session",
+        lambda *, force_replace=False: refreshes.append(force_replace),
+    )
+    monkeypatch.setattr(product_test_agent, "_log", lambda *_args, **_kwargs: None)
+
+    result = asyncio.run(
+        product_test_agent._run_job_with_retry(
+            {"job_type": "validate_supplier"},
+            merchant_session=object(),
+            store_id="store-1",
+            workspace_id=1,
+        )
+    )
+
+    assert result == {"validated": True, "supplier_price_kzt": 2250}
+    assert calls == ["execute", "execute"]
+    assert refreshes == [True]
+
+
+def test_product_test_agent_does_not_loop_on_second_ozon_rejection(monkeypatch) -> None:
+    refreshes: list[bool] = []
+
+    async def execute(*_args, **_kwargs):
+        raise product_test_agent.OzonSessionRefreshRequiredError("HTTP 403")
+
+    monkeypatch.setattr(product_test_agent, "_execute_job", execute)
+    monkeypatch.setattr(
+        product_test_agent,
+        "_ensure_ozon_session",
+        lambda *, force_replace=False: refreshes.append(force_replace),
+    )
+    monkeypatch.setattr(product_test_agent, "_log", lambda *_args, **_kwargs: None)
+
+    with pytest.raises(product_test_agent.OzonSessionRefreshRequiredError):
+        asyncio.run(
+            product_test_agent._run_job_with_retry(
+                {"job_type": "validate_supplier"},
+                merchant_session=object(),
+                store_id="store-1",
+                workspace_id=1,
+            )
+        )
+
+    assert refreshes == [True]
+
+
 def test_product_test_agent_dispatches_popular_discovery_without_ozon(monkeypatch) -> None:
     merchant_catalog = object()
     captured: dict = {}

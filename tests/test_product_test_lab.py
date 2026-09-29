@@ -1224,6 +1224,53 @@ def test_manual_ozon_url_backfills_media_and_delivery_from_same_search_card(monk
     }]
 
 
+def test_manual_ozon_url_requests_session_refresh_after_search_and_offer_403(monkeypatch) -> None:
+    url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def product_page_price(self, product_url: str, product_id: str) -> dict:
+            return {
+                "attempt": {"status_code": 200, "blocked": False},
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice",
+                "delivery_days": None,
+                "card": {"image_url": "https://ir.ozone.ru/correct.jpg"},
+            }
+
+        def search(self, query: str, page: int = 1) -> dict:
+            return {
+                "attempt": {"status_code": 403, "blocked": True},
+                "items": [],
+            }
+
+        def other_seller_offers(self, product_url: str, product_id: str) -> dict:
+            return {
+                "ok": False,
+                "attempt": {"status_code": 403, "blocked": True},
+                "offers": [],
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+
+    with pytest.raises(
+        product_discovery_runtime.OzonSessionRefreshRequiredError,
+        match="подтверждённая доставка.*HTTP 403",
+    ):
+        product_discovery_runtime.validate_supplier_url(url)
+
+
 def test_manual_ozon_url_never_backfills_from_a_different_search_card(monkeypatch) -> None:
     url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
 

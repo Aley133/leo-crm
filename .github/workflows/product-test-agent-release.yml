@@ -131,7 +131,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.14: восстановление mc-sid использует тот же чистый HTTP-вход, что и Fast Dumping. При необходимости Agent показывает локальное окно для кода из письма, включает remember-device и сохраняет доверительные cookie отдельно для каждого workspace через Windows DPAPI. Chromium и Playwright не используются."
+          $notes = "LEO Product Test Agent 1.1.15: если Ozon отклоняет сохранённую HTTP-сессию во время поиска или чтения точной карточки, Agent запрашивает новый Copy as cURL и один раз безопасно повторяет то же задание. Точная ссылка, цена и доставка не подменяются; неподтверждённые данные не сохраняются."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `
