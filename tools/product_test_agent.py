@@ -38,7 +38,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.15"
+VERSION = "1.1.16"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -733,7 +733,8 @@ async def _run_job_with_retry(
         else SCAN_TIMEOUT_SECONDS
     )
     attempts = 3 if job_type in {"discover", "discover_popular", "inspect"} else 1
-    for session_attempt in range(2):
+    session_refresh_attempt = 0
+    while True:
         try:
             async with asyncio.timeout(timeout_seconds):
                 for attempt in range(attempts):
@@ -752,10 +753,10 @@ async def _run_job_with_retry(
                         delay = min(15.0, 2.5 * (2 ** attempt))
                         await asyncio.sleep(delay + random.uniform(0.2, 0.8))
         except OzonSessionRefreshRequiredError:
-            if session_attempt:
-                raise
+            session_refresh_attempt += 1
             _log(
-                "Ozon отклонил сохранённую сессию: ожидаю новый Copy as cURL и затем повторю задание",
+                "Ozon отклонил сохранённую сессию: ожидаю новый Copy as cURL "
+                f"(попытка {session_refresh_attempt}) и затем повторю задание",
                 workspace_id=workspace_id,
             )
             # The operator may need more than the job timeout to open Ozon and
@@ -763,7 +764,6 @@ async def _run_job_with_retry(
             # local dialog is open, so the prompt deliberately lives outside
             # asyncio.timeout above.
             await asyncio.to_thread(_ensure_ozon_session, force_replace=True)
-    raise RuntimeError("Product Test job ended without a result")
 
 
 async def _process_job(
