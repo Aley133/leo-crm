@@ -10,7 +10,10 @@ from urllib.parse import unquote, urlsplit
 from tools.kaspi_fast_dumping_scanner import inspect_kaspi_product
 from tools.ozon_http.image_verify import ImageVerifier
 from tools.ozon_http.matcher import build_search_queries, rank_product
-from tools.ozon_http.resolver import OzonSessionResolver
+from tools.ozon_http.resolver import (
+    OzonSessionRefreshRequiredError,
+    OzonSessionResolver,
+)
 from tools.ozon_http.session_client import OzonSessionHttpClient
 
 from .kaspi_search import KaspiProductSearch
@@ -20,6 +23,39 @@ if TYPE_CHECKING:
 
 
 SellerCountResolver = Callable[[dict[str, Any], str, str, int], tuple[int | None, dict[str, Any]]]
+OZON_SESSION_REJECTION_STATUSES = frozenset({401, 403, 451})
+
+
+def _ozon_session_rejected(attempt: dict[str, Any] | None) -> bool:
+    if not isinstance(attempt, dict):
+        return False
+    try:
+        status = int(attempt.get("http_status") or attempt.get("status_code") or 0)
+    except (TypeError, ValueError):
+        status = 0
+    if status in OZON_SESSION_REJECTION_STATUSES:
+        return True
+    # CAPTCHA/anti-bot pages can be returned with HTTP 200. A genuine rate
+    # limit is transient and must not force the operator to replace cookies.
+    return bool(attempt.get("blocked")) and status != 429
+
+
+def _raise_ozon_session_refresh_required(
+    attempts: list[dict[str, Any]],
+    *,
+    operation: str,
+) -> None:
+    rejected = [attempt for attempt in attempts if _ozon_session_rejected(attempt)]
+    if not rejected:
+        return
+    statuses = sorted({
+        str(attempt.get("http_status") or attempt.get("status_code") or "anti-bot")
+        for attempt in rejected
+    })
+    raise OzonSessionRefreshRequiredError(
+        "Ozon отклонил сохранённую HTTP-сессию при "
+        f"{operation} (HTTP {', '.join(statuses)}). Требуется обновить Ozon-сессию."
+    )
 
 
 def _count(value: Any) -> int | None:
@@ -373,6 +409,11 @@ def discover_products(
                 blocked_in_a_row += 1
             else:
                 blocked_in_a_row = 0
+            if blocked_in_a_row >= 2:
+                _raise_ozon_session_refresh_required(
+                    attempts,
+                    operation="поиске карточек",
+                )
             row = {
                 "kaspi_product_id": str(product.get("master_sku") or ""),
                 "merchant_sku": str(product.get("master_sku") or ""),
@@ -701,6 +742,11 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
     exact_offer: dict[str, Any] | None = None
     try:
         page_detail = client.product_page_price(url, product_id)
+        page_attempt = page_detail.get("attempt") or {}
+        _raise_ozon_session_refresh_required(
+            [page_attempt],
+            operation="чтении точной карточки",
+        )
         page_card = page_detail.get("card") if isinstance(page_detail.get("card"), dict) else {}
         page_delivery_days = page_detail.get("delivery_days")
         page_delivery_valid = (
@@ -803,6 +849,10 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
         or isinstance(delivery_days, bool)
         or not 0 <= delivery_days <= 60
     ):
+        _raise_ozon_session_refresh_required(
+            search_attempts,
+            operation="проверке поля «подтверждённая доставка»",
+        )
         page_status = (page_detail.get("attempt") or {}).get("status_code") or "неизвестно"
         diagnostics = "; ".join(
             f"{row.get('source') or 'поиск'}: HTTP {row.get('http_status') or 'неизвестно'}, "

@@ -7,7 +7,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from tools.ozon_http.config import Config as OzonConfig
-from tools.ozon_http.resolver import OzonSessionResolver
+from tools.ozon_http.resolver import (
+    OzonSessionRefreshRequiredError,
+    OzonSessionResolver,
+)
 from tools.ozon_http.session_profile import CurlProfile
 
 from .mapper import build_payload, map_characteristics, validate_payload
@@ -270,6 +273,13 @@ def prepare_new_card(api_token: str, product_url: str) -> dict[str, Any]:
         card = client.fetch(product_url)
     finally:
         client.close()
+    attempt = card.get("attempt") if isinstance(card.get("attempt"), dict) else {}
+    status = int(attempt.get("status_code") or 0)
+    if status in {401, 403, 451} or (attempt.get("blocked") and status != 429):
+        raise OzonSessionRefreshRequiredError(
+            "Ozon отклонил сохранённую HTTP-сессию при чтении новой карточки "
+            f"(HTTP {status or 'anti-bot'}). Требуется обновить Ozon-сессию."
+        )
     if not card.get("ok") or not _text(card.get("title")) or not list(card.get("images") or []):
         raise ValueError(_text(card.get("error")) or "Ozon не вернул данные для новой карточки")
 

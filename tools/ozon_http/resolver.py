@@ -13,6 +13,10 @@ class OzonSessionUnavailableError(RuntimeError):
     """The local agent has no usable Ozon HTTP session yet."""
 
 
+class OzonSessionRefreshRequiredError(OzonSessionUnavailableError):
+    """Ozon rejected the saved browser session and the operator must replace it."""
+
+
 class OzonSessionResolver:
     """Resolve and validate the encrypted HTTP session used by the local agent.
 

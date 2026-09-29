@@ -4,7 +4,7 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from .adapter import OzonSessionHttpAdapter
-    from .resolver import OzonSessionResolver
+    from .resolver import OzonSessionRefreshRequiredError, OzonSessionResolver
 
 
 def __getattr__(name: str):
@@ -18,6 +18,14 @@ def __getattr__(name: str):
         from .resolver import OzonSessionResolver
 
         return OzonSessionResolver
+    if name == "OzonSessionRefreshRequiredError":
+        from .resolver import OzonSessionRefreshRequiredError
+
+        return OzonSessionRefreshRequiredError
     raise AttributeError(name)
 
-__all__ = ["OzonSessionHttpAdapter", "OzonSessionResolver"]
+__all__ = [
+    "OzonSessionHttpAdapter",
+    "OzonSessionRefreshRequiredError",
+    "OzonSessionResolver",
+]
