@@ -1110,23 +1110,25 @@ def test_manual_ozon_url_uses_exact_product_page_price_and_delivery(monkeypatch)
     assert result["validated"] is True
 
 
-@pytest.mark.parametrize("change,accepted", [
-    ({}, True),
+@pytest.mark.parametrize("change,accepted,expected_price", [
+    ({}, True, 2250),
     # Ozon can use seller-specific internal ids in either field. The modal is
     # already scoped by the exact public product id from the pasted URL.
-    ({"offer_sku": "999999999"}, True),
-    ({"product_url": "https://ozon.kz/product/other-999999999/"}, True),
-    ({"offer_sku": "999999999", "product_url": "https://ozon.kz/product/other-999999999/"}, True),
-    ({"modal_product_id": "999999999"}, False),
-    ({"price_kzt": 2200}, False),
-    ({"currency_code": "RUB"}, False),
-    ({"delivery_days": 365}, False),
-    ({"delivery_days": None}, False),
-    ({"delivery_days": True}, False),
-    ({"blocked": True}, False),
-    ({"http_status": 403}, False),
+    ({"offer_sku": "999999999"}, True, 2250),
+    ({"product_url": "https://ozon.kz/product/other-999999999/"}, True, 2250),
+    ({"offer_sku": "999999999", "product_url": "https://ozon.kz/product/other-999999999/"}, True, 2250),
+    ({"modal_product_id": "999999999"}, False, None),
+    ({"price_kzt": 2200}, True, 2200),
+    ({"currency_code": "RUB"}, False, None),
+    ({"delivery_days": 365}, False, None),
+    ({"delivery_days": None}, False, None),
+    ({"delivery_days": True}, False, None),
+    ({"blocked": True}, False, None),
+    ({"http_status": 403}, False, None),
 ])
-def test_manual_delivery_uses_only_exact_scoped_seller_offer(monkeypatch, change, accepted):
+def test_manual_delivery_uses_only_exact_scoped_seller_offer(
+    monkeypatch, change, accepted, expected_price
+):
     from types import SimpleNamespace
     url = "https://ozon.kz/product/example-555555555/"
     closed = []
@@ -1148,7 +1150,7 @@ def test_manual_delivery_uses_only_exact_scoped_seller_offer(monkeypatch, change
                     "blocked": change.get("blocked", False)},
                     "product_id": change.get("modal_product_id", product_id),
                     "offers": [{"offer_sku": "999999999", "price_kzt": 1000,
-                                "currency_code": "KZT", "delivery_days": 0}, offer]}
+                                "currency_code": "KZT", "delivery_days": None}, offer]}
         def close(self):
             closed.append(True)
     monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", lambda: SimpleNamespace(resolve=lambda: object()))
@@ -1157,13 +1159,78 @@ def test_manual_delivery_uses_only_exact_scoped_seller_offer(monkeypatch, change
         result = product_discovery_runtime.validate_supplier_url(url)
         assert result["supplier_delivery_source"] == "exact_seller_offer"
         assert result["supplier_delivery_days"] == 2
-        assert result["supplier_price_kzt"] == 2250
+        assert result["supplier_price_kzt"] == expected_price
+        assert result["supplier_price_source"] == (
+            "manual_product_page.webPrice"
+            if expected_price == 2250
+            else "exact_seller_offer.webSellerList.price"
+        )
         assert result["supplier_url"] == url
         assert result["supplier_image_url"] == "https://ir.ozone.ru/correct.jpg"
     else:
         with pytest.raises(RuntimeError, match="подтверждённая доставка"):
             product_discovery_runtime.validate_supplier_url(url)
     assert closed == [True]
+
+
+def test_manual_delivery_uses_cheapest_complete_modal_pair_when_page_price_is_promo(
+    monkeypatch,
+) -> None:
+    from types import SimpleNamespace
+
+    url = "https://ozon.kz/product/example-555555555/"
+
+    class Client:
+        def __init__(self, profile):
+            pass
+
+        def product_page_price(self, product_url, product_id):
+            return {
+                "product_id": product_id,
+                "price_kzt": 1999,
+                "price_source": "webPrice.finalPrice",
+                "delivery_days": None,
+                "card": {"image_url": "https://ir.ozone.ru/correct.jpg"},
+            }
+
+        def search(self, *args, **kwargs):
+            return {"items": [], "attempt": {"status_code": 200}}
+
+        def other_seller_offers(self, product_url, product_id):
+            return {
+                "ok": True,
+                "attempt": {"status_code": 200, "blocked": False},
+                "product_id": product_id,
+                "offers": [
+                    {"offer_sku": "internal-3", "currency_code": "KZT",
+                     "price_kzt": 2400, "delivery_days": 1, "seller_name": "Seller C"},
+                    {"offer_sku": "internal-1", "currency_code": "KZT",
+                     "price_kzt": 2250, "delivery_days": 3, "delivery_text": "Через 3 дня",
+                     "seller_name": "Seller A"},
+                    {"offer_sku": "internal-2", "currency_code": "KZT",
+                     "price_kzt": 2300, "delivery_days": 2, "seller_name": "Seller B"},
+                ],
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(
+        product_discovery_runtime,
+        "OzonSessionResolver",
+        lambda: SimpleNamespace(resolve=lambda: object()),
+    )
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", Client)
+
+    result = product_discovery_runtime.validate_supplier_url(url)
+
+    assert result["supplier_url"] == url
+    assert result["supplier_price_kzt"] == 2250
+    assert result["supplier_price_source"] == "exact_seller_offer.webSellerList.price"
+    assert result["supplier_delivery_days"] == 3
+    assert result["supplier_delivery_text"] == "Через 3 дня"
+    assert result["supplier_delivery_source"] == "exact_seller_offer"
+    assert result["supplier_seller_name"] == "Seller A"
 
 
 def test_manual_ozon_url_backfills_media_and_delivery_from_same_search_card(monkeypatch) -> None:
