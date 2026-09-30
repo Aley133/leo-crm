@@ -775,39 +775,61 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
             isinstance(search_days, int) and not isinstance(search_days, bool)
             and 0 <= search_days <= 60
         )
-        # Monitoring reads this seller endpoint. Only the very same SKU and
-        # displayed KZT price may fill the selected card's missing promise.
+        # Monitoring reads this exact-product seller endpoint. Ozon can use a
+        # seller-specific internal SKU both in ``sku`` and ``productLink``, so
+        # neither value is guaranteed to equal the public id from the pasted
+        # URL. The endpoint scope plus the exact displayed KZT price are the
+        # stable identity checks; only the missing delivery promise is copied.
         reader = getattr(client, "other_seller_offers", None)
         if product_id and not page_delivery_valid and not search_delivery_valid and callable(reader):
             try:
                 modal = reader(url, product_id=product_id)
                 attempt = modal.get("attempt") or {}
+                modal_product_id = str(modal.get("product_id") or "").strip()
+                exact_modal_scope = modal_product_id == product_id
+                modal_offers = [
+                    offer
+                    for offer in (modal.get("offers") or [])
+                    if isinstance(offer, dict)
+                ]
+                page_price = page_detail.get("price_kzt")
+                price_matches = [
+                    offer
+                    for offer in modal_offers
+                    if offer.get("currency_code") == "KZT"
+                    and offer.get("price_kzt") == page_price
+                ]
+                delivery_matches = [
+                    offer
+                    for offer in modal_offers
+                    if isinstance(offer.get("delivery_days"), int)
+                    and not isinstance(offer.get("delivery_days"), bool)
+                    and 0 <= offer["delivery_days"] <= 60
+                ]
+                confirmed_matches = [
+                    offer
+                    for offer in price_matches
+                    if isinstance(offer.get("delivery_days"), int)
+                    and not isinstance(offer.get("delivery_days"), bool)
+                    and 0 <= offer["delivery_days"] <= 60
+                ]
                 search_attempts.append({
                     "source": "exact_seller_offer", "http_status": attempt.get("status_code"),
                     "blocked": bool(attempt.get("blocked")),
-                    "items": len(modal.get("offers") or []),
+                    "items": len(modal_offers),
+                    "exact_scope": exact_modal_scope,
+                    "price_matches": len(price_matches),
+                    "delivery_matches": len(delivery_matches),
+                    "confirmed_matches": len(confirmed_matches),
                 })
-                if modal.get("ok") and attempt.get("status_code") == 200 and not attempt.get("blocked"):
-                    for offer in modal.get("offers") or []:
-                        sku = str(offer.get("offer_sku") or "").strip()
-                        linked_id = _product_id_from_ozon_url(str(offer.get("product_url") or ""))
-                        days = offer.get("delivery_days")
-                        # Ozon now commonly scopes seller rows by an internal
-                        # offer SKU that differs from the public product id.
-                        # An exact public productLink is authoritative; only
-                        # fall back to the seller SKU when no link id exists.
-                        same_exact_card = (
-                            linked_id == product_id
-                            if linked_id
-                            else sku == product_id
-                        )
-                        if (same_exact_card
-                                and offer.get("currency_code") == "KZT"
-                                and offer.get("price_kzt") == page_detail.get("price_kzt")
-                                and isinstance(days, int) and not isinstance(days, bool)
-                                and 0 <= days <= 60):
-                            exact_offer = offer
-                            break
+                if (
+                    modal.get("ok")
+                    and attempt.get("status_code") == 200
+                    and not attempt.get("blocked")
+                    and exact_modal_scope
+                    and confirmed_matches
+                ):
+                    exact_offer = confirmed_matches[0]
             except Exception as exc:
                 search_attempts.append({"source": "exact_seller_offer", "error": type(exc).__name__})
     finally:
@@ -863,12 +885,24 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
             operation="проверке поля «подтверждённая доставка»",
         )
         page_status = (page_detail.get("attempt") or {}).get("status_code") or "неизвестно"
-        diagnostics = "; ".join(
-            f"{row.get('source') or 'поиск'}: HTTP {row.get('http_status') or 'неизвестно'}, "
-            f"карточек {row.get('items', 0)}"
-            + (f", {row['error']}" if row.get("error") else "")
-            for row in search_attempts
-        )
+        diagnostic_rows: list[str] = []
+        for row in search_attempts:
+            diagnostic = (
+                f"{row.get('source') or 'поиск'}: "
+                f"HTTP {row.get('http_status') or 'неизвестно'}, "
+                f"карточек {row.get('items', 0)}"
+            )
+            if "exact_scope" in row:
+                diagnostic += (
+                    f", точная выдача {'да' if row.get('exact_scope') else 'нет'}"
+                    f", цена {row.get('price_matches', 0)}"
+                    f", доставка {row.get('delivery_matches', 0)}"
+                    f", подтверждено {row.get('confirmed_matches', 0)}"
+                )
+            if row.get("error"):
+                diagnostic += f", {row['error']}"
+            diagnostic_rows.append(diagnostic)
+        diagnostics = "; ".join(diagnostic_rows)
         raise RuntimeError(
             "По точной ссылке Ozon не найдена подтверждённая доставка. "
             f"Страница: HTTP {page_status}; {diagnostics or 'дополнительных данных нет'}. "
