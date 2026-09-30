@@ -79,5 +79,51 @@ def test_official_import_never_accepts_failed_detailed_result(monkeypatch) -> No
 
     monkeypatch.setattr(runtime, "OfficialProductsApi", FakeApi)
 
-    with pytest.raises(runtime.NewCardImportRejected, match="detailed validation"):
+    with pytest.raises(runtime.NewCardImportRejected, match="detailed validation") as caught:
         runtime.create_new_card("secret-token", _draft(), attempts=1)
+
+    assert "required attribute" in str(caught.value)
+    assert "SKU 900000001" in str(caught.value)
+    assert "import import-2" in str(caught.value)
+
+
+def test_detailed_result_surfaces_nested_attribute_errors() -> None:
+    ok, error_count, failed = runtime._detailed_outcome(
+        {
+            "errors": 1,
+            "warnings": 0,
+            "result": {
+                "4671307561": {
+                    "state": "ERRORS",
+                    "errors": [
+                        {
+                            "attributeCode": "Dietary supplements*Main component",
+                            "message": "Значение характеристики не найдено в справочнике",
+                        },
+                        {"images": ["Не удалось скачать изображение"]},
+                    ],
+                }
+            },
+        }
+    )
+
+    assert ok is False
+    assert error_count == 1
+    assert any(
+        "SKU 4671307561: Dietary supplements*Main component: Значение характеристики"
+        in row
+        for row in failed
+    )
+    assert any("SKU 4671307561: images: Не удалось скачать изображение" in row for row in failed)
+
+
+def test_detailed_result_explains_when_kaspi_only_returns_errors_state() -> None:
+    ok, error_count, failed = runtime._detailed_outcome(
+        {"errors": 1, "result": {"4671307561": {"state": "ERRORS"}}}
+    )
+
+    assert ok is False
+    assert error_count == 1
+    assert failed == [
+        "SKU 4671307561: ERRORS; Kaspi не вернул текст причины в detailed result"
+    ]

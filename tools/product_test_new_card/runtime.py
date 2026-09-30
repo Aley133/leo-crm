@@ -370,6 +370,80 @@ def _import_finished(value: Any) -> bool:
 def _detailed_outcome(value: Any) -> tuple[bool, int, list[str]]:
     errors = 0
     failed: list[str] = []
+    seen_failed: set[str] = set()
+
+    def add_failure(message: str) -> None:
+        clean = re.sub(r"\s+", " ", _text(message))[:500]
+        if clean and clean not in seen_failed:
+            seen_failed.add(clean)
+            failed.append(clean)
+
+    def error_details(node: Any) -> list[str]:
+        """Flatten Kaspi's undocumented nested error variants safely.
+
+        The documented successful response only contains ``state``. In error
+        responses production has returned lists, dictionaries keyed by an
+        attribute code, and message/code objects. Keep the extractor tolerant
+        so the operator sees the actual rejected field instead of just ERRORS.
+        """
+        details: list[str] = []
+        seen: set[str] = set()
+        message_keys = ("message", "detail", "description", "reason", "error", "text")
+        identity_keys = ("attributeCode", "attribute", "field", "path", "property", "code", "name")
+        ignored_keys = {"state", "status", "errors", "warnings", "skipped", "total"}
+
+        def add(value: Any) -> None:
+            clean = re.sub(r"\s+", " ", _text(value))[:420]
+            if not clean or clean.upper() in {"ERROR", "ERRORS", "FAILED", "REJECTED"}:
+                return
+            if clean not in seen:
+                seen.add(clean)
+                details.append(clean)
+
+        def walk(current: Any, label: str = "") -> None:
+            if isinstance(current, dict):
+                message = next(
+                    (_text(current.get(key)) for key in message_keys if not isinstance(current.get(key), (dict, list)) and _text(current.get(key))),
+                    "",
+                )
+                identity = next(
+                    (_text(current.get(key)) for key in identity_keys if not isinstance(current.get(key), (dict, list)) and _text(current.get(key))),
+                    "",
+                )
+                if not message:
+                    title = current.get("title")
+                    if not isinstance(title, (dict, list)):
+                        message = _text(title)
+                if message:
+                    prefix = identity or label
+                    add(f"{prefix}: {message}" if prefix and prefix != message else message)
+
+                for key, child in current.items():
+                    key_text = _text(key)
+                    if key_text in ignored_keys and key_text != "errors":
+                        continue
+                    if isinstance(child, (dict, list)):
+                        walk(child, key_text or label)
+                    elif not message and key_text not in ignored_keys:
+                        value_text = _text(child)
+                        if value_text and not value_text.isdigit():
+                            add(f"{key_text}: {value_text}" if key_text else value_text)
+            elif isinstance(current, list):
+                for child in current:
+                    walk(child, label)
+            else:
+                value_text = _text(current)
+                if value_text and not value_text.isdigit():
+                    add(f"{label}: {value_text}" if label else value_text)
+
+        walk(node)
+        return details[:20]
+
+    def failure_subject(path: str) -> str:
+        marker = "result.result."
+        if path.startswith(marker):
+            return f"SKU {path[len(marker):]}"
+        return path
 
     def walk(node: Any, path: str = "result") -> None:
         nonlocal errors
@@ -379,10 +453,21 @@ def _detailed_outcome(value: Any) -> tuple[bool, int, list[str]]:
                 errors = max(errors, int(raw_errors))
             elif isinstance(raw_errors, str) and raw_errors.strip().isdigit():
                 errors = max(errors, int(raw_errors.strip()))
+            elif isinstance(raw_errors, list):
+                errors = max(errors, int(bool(raw_errors)))
+            elif isinstance(raw_errors, dict) and raw_errors:
+                errors = max(errors, 1)
             state = _text(node.get("state") or node.get("status")).upper()
             if state in {"ERRORS", "ERROR", "REJECTED", "FAILED"}:
-                message = _text(node.get("message") or node.get("error") or state)
-                failed.append(f"{path}: {message}"[:500])
+                subject = failure_subject(path)
+                details = error_details(node)
+                if details:
+                    for detail in details:
+                        add_failure(f"{subject}: {detail}")
+                else:
+                    add_failure(
+                        f"{subject}: {state}; Kaspi не вернул текст причины в detailed result"
+                    )
             for key, child in node.items():
                 walk(child, f"{path}.{key}")
         elif isinstance(node, list):
@@ -441,7 +526,10 @@ def create_new_card(
     ok, error_count, failed_rows = _detailed_outcome(detailed)
     if not ok:
         detail = "; ".join(failed_rows) or f"errors={error_count}"
-        raise NewCardImportRejected(f"Карточка не прошла detailed validation Kaspi: {detail}")
+        raise NewCardImportRejected(
+            "Карточка не прошла detailed validation Kaspi "
+            f"(SKU {product['sku']}, import {code}, errors={error_count}): {detail}"
+        )
     return {
         "result": "NEW_CARD_ACCEPTED_FOR_MODERATION",
         "import_code": code,

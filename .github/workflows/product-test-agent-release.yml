@@ -131,7 +131,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.19: Ozon-страница может показывать промо-цену, которой нет ни у одного продавца в exact-product seller-modal. В этом случае Agent, как и мониторинг, берёт цельную пару «цена + доставка» самого дешёвого подтверждённого KZT-оффера. Modal всё ещё запрашивается по точному ID вставленной ссылки, срок ограничен 0–60 днями, RUB и неполные пары отклоняются."
+          $notes = "LEO Product Test Agent 1.1.20: Product Import нормализует характеристики и фото по официальной JSON-схеме Kaspi перед отправкой: строки до 256 символов, не более 32 уникальных значений, без дублирующихся изображений. При отказе detailed result показывает вложенное поле и сообщение Kaspi, а также SKU и import code; повторная отправка остаётся только ручной и не создаёт дубли вслепую."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

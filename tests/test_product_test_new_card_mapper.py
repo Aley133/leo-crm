@@ -55,6 +55,45 @@ def test_multivalued_and_typed_values_are_emitted_correctly():
     assert values["A*flag"] is True
 
 
+def test_payload_is_normalized_to_official_kaspi_schema_limits():
+    long_value = "состав " * 80
+    multi_values = "; ".join(["red", "red", *[f"value-{index}" for index in range(40)]])
+    attrs = [
+        {
+            "code": "A*description",
+            "title": "Description",
+            "required": False,
+            "type": "string",
+            "value": long_value,
+        },
+        {
+            "code": "A*colors",
+            "title": "Colors",
+            "required": False,
+            "type": "enum",
+            "multi_valued": True,
+            "value": multi_values,
+        },
+    ]
+    image = "https://ir.ozone.ru/s3/multimedia/test.webp"
+    payload = build_payload(
+        sku="S1",
+        title="T",
+        brand="B",
+        category="Master - Test",
+        description="D",
+        attributes=attrs,
+        images=[image, image],
+    )
+
+    values = {row["code"]: row["value"] for row in payload["attributes"]}
+    assert len(values["A*description"]) <= 256
+    assert len(values["A*colors"]) == 32
+    assert len(values["A*colors"]) == len(set(values["A*colors"]))
+    assert payload["images"] == [{"url": image}]
+    assert validate_payload(payload, attrs) == []
+
+
 def test_low_confidence_enum_is_left_empty_instead_of_sending_invalid_value():
     source = [{"name": "Форма выпуска", "value": "совсем другое значение"}]
     attrs = [{"code": "A*form", "title": "Форма выпуска", "required": True, "type": "enum"}]
