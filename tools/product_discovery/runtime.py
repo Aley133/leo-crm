@@ -726,12 +726,13 @@ def discover_popular_products(
 def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) -> dict[str, Any]:
     """Validate an operator-selected Ozon card without changing its identity.
 
-    A pasted URL is an explicit operator decision.  Its displayed product-page
-    price is authoritative; search results and the other-sellers modal must
-    never replace it with another card or offer.  Ozon does not always include
-    delivery or gallery widgets in the product-page composer response, so the
-    exact same public product ID may safely backfill those missing fields from
-    the search card.
+    A pasted URL is an explicit operator decision, so its public product ID is
+    authoritative and can never be replaced by a search result.  Prefer the
+    displayed page price; when that promo/selected price has no seller row,
+    the exact-product seller modal may instead supply one complete KZT
+    ``price + delivery`` pair.  Ozon does not always include delivery or
+    gallery widgets in the product-page composer response, so the exact same
+    public product ID may also backfill those missing fields from search.
     """
 
     profile = OzonSessionResolver().resolve()
@@ -740,6 +741,7 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
     search_candidate: dict[str, Any] | None = None
     search_attempts: list[dict[str, Any]] = []
     exact_offer: dict[str, Any] | None = None
+    exact_offer_replaces_page_price = False
     try:
         page_detail = client.product_page_price(url, product_id)
         page_attempt = page_detail.get("attempt") or {}
@@ -778,8 +780,11 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
         # Monitoring reads this exact-product seller endpoint. Ozon can use a
         # seller-specific internal SKU both in ``sku`` and ``productLink``, so
         # neither value is guaranteed to equal the public id from the pasted
-        # URL. The endpoint scope plus the exact displayed KZT price are the
-        # stable identity checks; only the missing delivery promise is copied.
+        # URL. The endpoint scope is the stable product identity check. Prefer
+        # the seller whose price equals the page, but when Ozon exposes a promo
+        # page price that is absent from the modal, take price and delivery
+        # together from one modal seller exactly as monitoring does. Never mix
+        # the page price with another seller's delivery promise.
         reader = getattr(client, "other_seller_offers", None)
         if product_id and not page_delivery_valid and not search_delivery_valid and callable(reader):
             try:
@@ -813,6 +818,19 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                     and not isinstance(offer.get("delivery_days"), bool)
                     and 0 <= offer["delivery_days"] <= 60
                 ]
+                paired_offers = [
+                    offer
+                    for offer in delivery_matches
+                    if offer.get("currency_code") == "KZT"
+                    and isinstance(offer.get("price_kzt"), int)
+                    and not isinstance(offer.get("price_kzt"), bool)
+                    and offer["price_kzt"] > 0
+                ]
+                paired_offers.sort(key=lambda offer: (
+                    offer["price_kzt"],
+                    offer["delivery_days"],
+                    -(float(offer.get("seller_rating") or 0)),
+                ))
                 search_attempts.append({
                     "source": "exact_seller_offer", "http_status": attempt.get("status_code"),
                     "blocked": bool(attempt.get("blocked")),
@@ -821,21 +839,29 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                     "price_matches": len(price_matches),
                     "delivery_matches": len(delivery_matches),
                     "confirmed_matches": len(confirmed_matches),
+                    "paired_offers": len(paired_offers),
                 })
                 if (
                     modal.get("ok")
                     and attempt.get("status_code") == 200
                     and not attempt.get("blocked")
                     and exact_modal_scope
-                    and confirmed_matches
                 ):
-                    exact_offer = confirmed_matches[0]
+                    if confirmed_matches:
+                        exact_offer = confirmed_matches[0]
+                    elif paired_offers:
+                        exact_offer = paired_offers[0]
+                        exact_offer_replaces_page_price = True
             except Exception as exc:
                 search_attempts.append({"source": "exact_seller_offer", "error": type(exc).__name__})
     finally:
         client.close()
 
     price = page_detail.get("price_kzt")
+    price_source = f"manual_product_page.{page_detail.get('price_source') or 'webPrice'}"
+    if exact_offer_replaces_page_price and exact_offer is not None:
+        price = exact_offer.get("price_kzt")
+        price_source = "exact_seller_offer.webSellerList.price"
     if not isinstance(price, int) or isinstance(price, bool) or price <= 0:
         raise RuntimeError("По ссылке Ozon не найдена подтверждённая цена в KZT")
     card = dict(page_detail.get("card")) if isinstance(page_detail.get("card"), dict) else {}
@@ -898,6 +924,7 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                     f", цена {row.get('price_matches', 0)}"
                     f", доставка {row.get('delivery_matches', 0)}"
                     f", подтверждено {row.get('confirmed_matches', 0)}"
+                    f", цельных пар {row.get('paired_offers', 0)}"
                 )
             if row.get("error"):
                 diagnostic += f", {row['error']}"
@@ -912,15 +939,15 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
     return {
         "supplier_url": url,
         "supplier_price_kzt": price,
-        "supplier_price_source": f"manual_product_page.{page_detail.get('price_source') or 'webPrice'}",
+        "supplier_price_source": price_source,
         "supplier_delivery_days": delivery_days,
         "supplier_delivery_text": delivery_text,
         "supplier_delivery_date": delivery_date,
         "supplier_delivery_source": delivery_source,
         "supplier_offer_sku": exact_product_id,
-        "supplier_seller_name": "Ozon",
-        "supplier_seller_rating": None,
-        "supplier_seller_reviews": None,
+        "supplier_seller_name": str((exact_offer or {}).get("seller_name") or "Ozon"),
+        "supplier_seller_rating": (exact_offer or {}).get("seller_rating"),
+        "supplier_seller_reviews": (exact_offer or {}).get("seller_reviews"),
         "supplier_offer_count": 1,
         "supplier_product_title": card.get("title"),
         "supplier_image_url": card.get("image_url"),
