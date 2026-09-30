@@ -556,11 +556,33 @@ def build_payload(
     images: list[str],
     weight: str | None = None,
 ) -> dict[str, Any]:
+    def clipped_text(value: Any, limit: int) -> str:
+        text = str(value or "").strip()
+        if len(text) <= limit:
+            return text
+        clipped = text[:limit].rstrip()
+        # Prefer a clean word boundary for prose values without ever exceeding
+        # Kaspi's JSON-schema limit.  Compact identifiers are cut exactly.
+        if " " in clipped:
+            clean = clipped.rsplit(" ", 1)[0].rstrip(" ,;:")
+            if clean:
+                clipped = clean
+        return clipped
+
     def attribute_value(row: dict[str, Any]) -> Any:
         raw = row.get("value")
         text = str(raw or "").strip()
         if row.get("multi_valued"):
-            parts = [part.strip() for part in re.split(r"[;\n]+", text) if part.strip()]
+            parts: list[str] = []
+            seen: set[str] = set()
+            for raw_part in re.split(r"[;\n]+", text):
+                part = clipped_text(raw_part, 256)
+                if not part or part in seen:
+                    continue
+                seen.add(part)
+                parts.append(part)
+                if len(parts) >= 32:
+                    break
             return parts
         kind = str(row.get("type") or "").casefold()
         if kind == "boolean":
@@ -580,7 +602,12 @@ def build_payload(
                     return int(number) if number.is_integer() else number
                 except ValueError:
                     pass
-        return text
+        # Kaspi's official import schema limits every scalar attribute string
+        # (including free-text characteristics) to 256 characters. Ozon often
+        # exposes long composition/recommendation paragraphs, so normalize the
+        # value before Product Import instead of letting remote detailed
+        # validation reject the whole card with a bare ERRORS state.
+        return clipped_text(text, 256)
 
     final_description = ensure_kaspi_description(
         str(description or ""),
@@ -589,22 +616,40 @@ def build_payload(
         attributes=attributes,
     )
 
+    payload_attributes: list[dict[str, Any]] = []
+    seen_codes: set[str] = set()
+    for row in attributes:
+        code = str(row.get("code") or "").strip()
+        raw_value = str(row.get("value") or "").strip()
+        if not code or not raw_value or code in seen_codes or len(code) > 256:
+            continue
+        value = attribute_value(row)
+        if value == "" or value == []:
+            continue
+        seen_codes.add(code)
+        payload_attributes.append({"code": code, "value": value})
+        if len(payload_attributes) >= 256:
+            break
+
+    image_rows: list[dict[str, str]] = []
+    seen_images: set[str] = set()
+    for raw_url in images:
+        url = str(raw_url or "").strip()
+        if not url.startswith("https://") or len(url) > 1024 or url in seen_images:
+            continue
+        seen_images.add(url)
+        image_rows.append({"url": url})
+        if len(image_rows) >= 20:
+            break
+
     product: dict[str, Any] = {
         "sku": str(sku).strip(),
         "title": str(title).strip(),
         "brand": str(brand).strip(),
         "category": str(category).strip(),
         "description": final_description,
-        "attributes": [
-            {"code": str(row.get("code") or "").strip(), "value": attribute_value(row)}
-            for row in attributes
-            if str(row.get("code") or "").strip() and str(row.get("value") or "").strip()
-        ],
-        "images": [
-            {"url": str(url).strip()}
-            for url in images
-            if str(url).strip().startswith("https://")
-        ][:20],
+        "attributes": payload_attributes,
+        "images": image_rows,
     }
     if weight is not None and str(weight).strip():
         product["weight"] = str(weight).strip()
@@ -618,6 +663,12 @@ def validate_payload(product: dict[str, Any], mapped_attributes: list[dict[str, 
             errors.append(f"Missing required field: {key}")
     if len(str(product.get("sku") or "")) > 64:
         errors.append("SKU is longer than 64 characters")
+    if len(str(product.get("title") or "")) > 1024:
+        errors.append("Title is longer than 1024 characters")
+    if len(str(product.get("brand") or "")) > 256:
+        errors.append("Brand is longer than 256 characters")
+    if len(str(product.get("category") or "")) > 512:
+        errors.append("Category is longer than 512 characters")
     description_len = len(str(product.get("description") or ""))
     if 0 < description_len < 100:
         errors.append("Description must be at least 100 characters for Kaspi import")
@@ -625,6 +676,26 @@ def validate_payload(product: dict[str, Any], mapped_attributes: list[dict[str, 
         errors.append("Description is longer than 1024 characters")
     if not product.get("images"):
         errors.append("At least one image URL is required for this lab workflow")
+    if not product.get("attributes"):
+        errors.append("At least one Kaspi attribute is required")
+    if len(product.get("attributes") or []) > 256:
+        errors.append("More than 256 Kaspi attributes were supplied")
+    for row in product.get("attributes") or []:
+        code = str(row.get("code") or "")
+        value = row.get("value")
+        if len(code) > 256:
+            errors.append(f"Kaspi attribute code is longer than 256 characters: {code[:80]}")
+        values = value if isinstance(value, list) else [value]
+        if isinstance(value, list) and len(value) > 32:
+            errors.append(f"Kaspi attribute has more than 32 values: {code}")
+        for entry in values:
+            if isinstance(entry, str) and len(entry) > 256:
+                errors.append(f"Kaspi attribute value is longer than 256 characters: {code}")
+                break
+    for row in product.get("images") or []:
+        url = str(row.get("url") or "") if isinstance(row, dict) else ""
+        if len(url) > 1024:
+            errors.append("Kaspi image URL is longer than 1024 characters")
     filled_codes = {str(row.get("code") or "") for row in product.get("attributes") or []}
     for row in mapped_attributes:
         if row.get("required") and str(row.get("code") or "") not in filled_codes:
