@@ -131,7 +131,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.17: точная Ozon-карточка корректно подтверждается, даже если Ozon отдаёт для продавца внутренний SKU вместо ID из публичной ссылки. Срок доставки читается из нового вложенного формата. Цена, KZT, точная публичная ссылка и срок 0–60 дней всё ещё обязаны совпасть; неподтверждённые данные не сохраняются."
+          $notes = "LEO Product Test Agent 1.1.18: проверка новой Ozon-карточки теперь использует тот же точный seller-modal, что и мониторинг. Ozon может отдавать внутренние ID одновременно в seller-SKU и productLink; они больше не сравниваются с публичным ID. Безопасность сохранена: modal запрашивается по точному ID из вставленной ссылки, а цена, KZT и срок 0–60 дней должны совпасть; неподтверждённые данные не сохраняются."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

@@ -1112,10 +1112,12 @@ def test_manual_ozon_url_uses_exact_product_page_price_and_delivery(monkeypatch)
 
 @pytest.mark.parametrize("change,accepted", [
     ({}, True),
-    # Seller modal SKU can be an internal offer id; the exact public
-    # productLink remains the authoritative card identity.
+    # Ozon can use seller-specific internal ids in either field. The modal is
+    # already scoped by the exact public product id from the pasted URL.
     ({"offer_sku": "999999999"}, True),
-    ({"product_url": "https://ozon.kz/product/other-999999999/"}, False),
+    ({"product_url": "https://ozon.kz/product/other-999999999/"}, True),
+    ({"offer_sku": "999999999", "product_url": "https://ozon.kz/product/other-999999999/"}, True),
+    ({"modal_product_id": "999999999"}, False),
     ({"price_kzt": 2200}, False),
     ({"currency_code": "RUB"}, False),
     ({"delivery_days": 365}, False),
@@ -1124,7 +1126,7 @@ def test_manual_ozon_url_uses_exact_product_page_price_and_delivery(monkeypatch)
     ({"blocked": True}, False),
     ({"http_status": 403}, False),
 ])
-def test_manual_delivery_uses_only_same_seller_offer(monkeypatch, change, accepted):
+def test_manual_delivery_uses_only_exact_scoped_seller_offer(monkeypatch, change, accepted):
     from types import SimpleNamespace
     url = "https://ozon.kz/product/example-555555555/"
     closed = []
@@ -1139,10 +1141,12 @@ def test_manual_delivery_uses_only_same_seller_offer(monkeypatch, change, accept
         def other_seller_offers(self, product_url, product_id):
             assert product_url == url
             assert product_id == "555555555"
+            offer_change = {key: value for key, value in change.items() if key != "modal_product_id"}
             offer = {"offer_sku": product_id, "product_url": url, "currency_code": "KZT",
-                     "price_kzt": 2250, "delivery_days": 2, "delivery_text": "Послезавтра", **change}
+                     "price_kzt": 2250, "delivery_days": 2, "delivery_text": "Послезавтра", **offer_change}
             return {"ok": True, "attempt": {"status_code": change.get("http_status", 200),
                     "blocked": change.get("blocked", False)},
+                    "product_id": change.get("modal_product_id", product_id),
                     "offers": [{"offer_sku": "999999999", "price_kzt": 1000,
                                 "currency_code": "KZT", "delivery_days": 0}, offer]}
         def close(self):
