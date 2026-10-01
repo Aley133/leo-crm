@@ -66,7 +66,11 @@ def _to_int(value: Any) -> int | None:
         return None
 
 
-def _pick_matching_row(rows: list[dict[str, Any]], reference: str, store_id: str) -> tuple[dict[str, Any], dict[str, Any]] | None:
+def _pick_matching_row(
+    rows: list[dict[str, Any]],
+    reference: str,
+    store_id: str,
+) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
     """Match either a real merchant SKU or a Kaspi masterSku.
 
     Manual add-product does NOT use masterSku as merchant SKU. Kaspi generates a
@@ -85,19 +89,25 @@ def _pick_matching_row(rows: list[dict[str, Any]], reference: str, store_id: str
         if reference not in (sku, master_sku):
             continue
         availabilities = row.get("availabilities")
-        if not isinstance(availabilities, list):
-            continue
-        availability = next(
-            (
-                item
-                for item in availabilities
-                if isinstance(item, dict)
-                and str(item.get("storeId") or "").strip() == store_id
-            ),
-            None,
+        availability = (
+            next(
+                (
+                    item
+                    for item in availabilities
+                    if isinstance(item, dict)
+                    and str(item.get("storeId") or "").strip() == store_id
+                ),
+                None,
+            )
+            if isinstance(availabilities, list)
+            else None
         )
-        if availability is not None:
-            return row, availability
+        # Product Import exposes an approved row in Merchant Cabinet before
+        # the first price/stock write.  Such a row has no availability for the
+        # store yet, but it is still the exact merchant offer we must repair.
+        # Dropping it here makes confirmation wait forever for the values that
+        # confirmation itself is responsible for creating.
+        return row, availability
     return None
 
 
@@ -174,6 +184,7 @@ class MerchantOfferApi:
             if picked is None:
                 continue
             row, availability = picked
+            availability = availability or {}
             city_price = None
             city_prices = row.get("cityPrices")
             if isinstance(city_prices, list):

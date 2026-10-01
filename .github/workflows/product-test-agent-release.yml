@@ -131,7 +131,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.20: Product Import нормализует характеристики и фото по официальной JSON-схеме Kaspi перед отправкой: строки до 256 символов, не более 32 уникальных значений, без дублирующихся изображений. При отказе detailed result показывает вложенное поле и сообщение Kaspi, а также SKU и import code; повторная отправка остаётся только ручной и не создаёт дубли вслепую."
+          $notes = "LEO Product Test Agent 1.1.21: после модерации Product Import распознаёт карточку Kaspi даже до появления цены и остатка, заполняет существующий пустой оффер и подключает его к CRM, Мониторингу и Fast Dumping без создания дубля."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

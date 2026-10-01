@@ -6,7 +6,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def test_product_test_agent_is_a_standalone_dedicated_runtime() -> None:
     source = (ROOT / "tools/product_test_agent.py").read_text(encoding="utf-8")
-    assert 'VERSION = "1.1.20"' in source
+    assert 'VERSION = "1.1.21"' in source
     assert 'AGENT_KIND = "product_test"' in source
     assert "HttpOtpKaspiMerchantSession as KaspiMerchantSession" in source
     assert '"kaspi_http_cookies_dpapi"' in source
