@@ -209,6 +209,97 @@ def test_initial_creation_process_includes_minimum_preorder(monkeypatch) -> None
     assert initial["json"]["availabilities"][0]["preOrder"] == 1
 
 
+def test_read_offer_detects_approved_product_import_row_without_availability(monkeypatch) -> None:
+    api = object.__new__(MerchantOfferApi)
+    api.store_id = "11843018_041600"
+    api.city_id = "196220100"
+    api.merchant_uid = "merchant-1"
+    response = SimpleNamespace(
+        raise_for_status=lambda: None,
+        json=lambda: {
+            "data": {
+                "content": [
+                    {
+                        "sku": "4671307561",
+                        "masterSku": "1671307561",
+                        "availabilities": [],
+                        "cityPrices": [],
+                        "available": False,
+                        "processed": True,
+                        "status": "INACTIVE",
+                    }
+                ]
+            }
+        },
+    )
+    monkeypatch.setattr(api, "_request_json", lambda *_args, **_kwargs: response)
+
+    state = api.read_offer("4671307561")
+
+    assert state.found is True
+    assert state.sku == "4671307561"
+    assert state.master_sku == "1671307561"
+    assert state.price_kzt is None
+    assert state.stock_count is None
+    assert state.preorder_days is None
+
+
+def test_approved_product_import_row_is_filled_without_creating_duplicate(monkeypatch) -> None:
+    api = object.__new__(MerchantOfferApi)
+    states = iter(
+        [
+            OfferState(
+                found=True,
+                sku="4671307561",
+                master_sku="1671307561",
+                stock_count=None,
+                preorder_days=None,
+                price_kzt=None,
+            ),
+            OfferState(
+                found=True,
+                sku="4671307561",
+                master_sku="1671307561",
+                stock_count=5,
+                preorder_days=3,
+                price_kzt=12990,
+            ),
+        ]
+    )
+    writes: list[dict] = []
+    monkeypatch.setattr(api, "read_offer", lambda _reference: next(states))
+    monkeypatch.setattr(
+        api,
+        "process_offer",
+        lambda **kwargs: writes.append(kwargs) or {"accepted": True, "status_code": 200},
+    )
+
+    result = api.create_linked_offer(
+        master_sku="1671307561",
+        model="Фертилипан 30 саше",
+        price=12990,
+        stock=5,
+        preorder=3,
+        live=True,
+        attempts=1,
+        poll_seconds=0.5,
+    )
+
+    assert result["result"] == "ALREADY_EXISTS"
+    assert result["merchant_sku"] == "4671307561"
+    assert result["after"]["price_kzt"] == 12990
+    assert writes == [
+        {
+            "sku": "4671307561",
+            "model": "Фертилипан 30 саше",
+            "price": 12990,
+            "stock": 5,
+            "preorder": 3,
+            "live": True,
+        }
+    ]
+
+
 def test_existing_zero_day_offer_is_repaired_without_creating_a_duplicate(monkeypatch) -> None:
     api = object.__new__(MerchantOfferApi)
     states = iter([
