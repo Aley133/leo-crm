@@ -445,6 +445,11 @@ MONTHS_RU = {
     "июля": 7, "августа": 8, "сентября": 9, "октября": 10, "ноября": 11, "декабря": 12,
 }
 DATE_RU_RE = re.compile(r"\b(\d{1,2})\s+(января|февраля|марта|апреля|мая|июня|июля|августа|сентября|октября|ноября|декабря)\b", re.I)
+# Ozon increasingly serializes the promise as an ISO date/datetime inside
+# current-product widgets (for example ``2026-10-03T00:00:00+05:00``).  This
+# must be checked before the legacy DD-MM[-YYYY] expression below; otherwise
+# its trailing ``10-03`` is misread as 10 March and rejected as a 160-day ETA.
+ISO_DATE_RE = re.compile(r"(?<!\d)(\d{4})-(\d{2})-(\d{2})(?!\d)")
 NUMERIC_DATE_RE = re.compile(r"\b(\d{1,2})[./-](\d{1,2})(?:[./-](\d{2,4}))?\b")
 DELIVERY_DAY_RANGE_RE = re.compile(
     r"(?<!\d)(\d{1,2})\s*[-–—]\s*(\d{1,2})\s*(?:дн(?:я|ей)?|день|дней|days?)\.?\b",
@@ -492,6 +497,17 @@ MAX_CONFIRMED_DELIVERY_DAYS = 60
 def _delivery_date_from_text(text: str, today: date | None = None) -> tuple[str | None, int | None]:
     today = today or date.today()
     low = str(text or "").lower().replace("ё", "е")
+    iso_match = ISO_DATE_RE.search(low)
+    if iso_match:
+        try:
+            target = date(
+                int(iso_match.group(1)),
+                int(iso_match.group(2)),
+                int(iso_match.group(3)),
+            )
+        except ValueError:
+            return None, None
+        return target.isoformat(), (target - today).days
     # An explicit calendar promise is stronger than neighbouring relative
     # payment labels (for example ``0 ₸ сегодня`` in the same Ozon widget).
     m = DATE_RU_RE.search(low)
@@ -617,7 +633,8 @@ def _delivery(
             continue
         low = raw.lower().replace("ё", "е")
         has_date = (
-            bool(DATE_RU_RE.search(low))
+            bool(ISO_DATE_RE.search(low))
+            or bool(DATE_RU_RE.search(low))
             or bool(NUMERIC_DATE_RE.search(low))
             or bool(DELIVERY_DAY_COUNT_RE.search(low))
             or any(x in low for x in ("сегодня", "завтра", "послезавтра"))
