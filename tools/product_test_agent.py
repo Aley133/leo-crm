@@ -38,7 +38,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.21"
+VERSION = "1.1.22"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20

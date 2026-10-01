@@ -238,17 +238,50 @@ def _product_id_from_ozon_url(url: str) -> str | None:
     return values[-1] if values else None
 
 
+def _exact_page_product_ids(
+    requested_product_id: str | None,
+    page_detail: dict[str, Any],
+) -> list[str]:
+    """Return only product ids proven by the exact page itself.
+
+    Ozon may redirect an old/variant URL while rendering the selected offer
+    under a different id in the exact page's ``webPrice`` widget.  Search and
+    the seller modal then use that rendered id and return zero rows for the id
+    left in the browser URL.  The widget is part of the exact page payload, so
+    accepting its id does not substitute a similarly named search product.
+    """
+
+    values: list[str] = []
+
+    def add(value: object) -> None:
+        clean = str(value or "").strip()
+        if clean.isdigit() and len(clean) >= 6 and clean not in values:
+            values.append(clean)
+
+    add(requested_product_id)
+    card = page_detail.get("card") if isinstance(page_detail.get("card"), dict) else {}
+    for source in (card.get("widget_key"), page_detail.get("price_source")):
+        match = re.search(r"webprice-(\d{6,})(?:-|\.|$)", str(source or ""), re.I)
+        if match:
+            add(match.group(1))
+    return values
+
+
 def _manual_url_candidate(
     client: OzonSessionHttpClient,
     url: str,
     *,
-    product_id: str | None,
+    product_ids: list[str],
 ) -> tuple[dict[str, Any] | None, list[dict[str, Any]]]:
     """Resolve the exact Ozon card so a manual URL still has a comparison photo."""
 
     slug = unquote(urlsplit(url).path.rstrip("/").split("/")[-1])
     slug = re.sub(r"-\d{6,}$", "", slug).replace("-", " ").strip()
-    queries = [value for value in (product_id, slug) if value]
+    exact_ids = list(dict.fromkeys(
+        str(value).strip() for value in product_ids if str(value).strip()
+    ))
+    exact_id_set = set(exact_ids)
+    queries = [*exact_ids, *([slug] if slug else [])]
     attempts: list[dict[str, Any]] = []
     seen_queries: set[str] = set()
     for query in queries:
@@ -268,7 +301,7 @@ def _manual_url_candidate(
         for candidate in items:
             candidate_id = str(candidate.get("sku") or "").strip()
             candidate_url_id = _product_id_from_ozon_url(str(candidate.get("ozon_url") or ""))
-            if product_id and product_id in {candidate_id, candidate_url_id}:
+            if exact_id_set.intersection({candidate_id, candidate_url_id}):
                 return dict(candidate), attempts
         if attempt.get("blocked"):
             break
@@ -750,6 +783,7 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
             operation="чтении точной карточки",
         )
         page_card = page_detail.get("card") if isinstance(page_detail.get("card"), dict) else {}
+        exact_product_ids = _exact_page_product_ids(product_id, page_detail)
         page_delivery_days = page_detail.get("delivery_days")
         page_delivery_valid = (
             isinstance(page_delivery_days, int)
@@ -764,7 +798,7 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                 search_candidate, search_attempts = _manual_url_candidate(
                     client,
                     url,
-                    product_id=product_id,
+                    product_ids=exact_product_ids,
                 )
             except Exception as exc:
                 search_attempts = [{
@@ -786,12 +820,20 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
         # together from one modal seller exactly as monitoring does. Never mix
         # the page price with another seller's delivery promise.
         reader = getattr(client, "other_seller_offers", None)
-        if product_id and not page_delivery_valid and not search_delivery_valid and callable(reader):
-            try:
-                modal = reader(url, product_id=product_id)
+        if exact_product_ids and not page_delivery_valid and not search_delivery_valid and callable(reader):
+            for modal_query_id in exact_product_ids:
+                try:
+                    modal = reader(url, product_id=modal_query_id)
+                except Exception as exc:
+                    search_attempts.append({
+                        "source": "exact_seller_offer",
+                        "product_id": modal_query_id,
+                        "error": type(exc).__name__,
+                    })
+                    continue
                 attempt = modal.get("attempt") or {}
                 modal_product_id = str(modal.get("product_id") or "").strip()
-                exact_modal_scope = modal_product_id == product_id
+                exact_modal_scope = modal_product_id == modal_query_id
                 modal_offers = [
                     offer
                     for offer in (modal.get("offers") or [])
@@ -833,6 +875,7 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                 ))
                 search_attempts.append({
                     "source": "exact_seller_offer", "http_status": attempt.get("status_code"),
+                    "product_id": modal_query_id,
                     "blocked": bool(attempt.get("blocked")),
                     "items": len(modal_offers),
                     "exact_scope": exact_modal_scope,
@@ -852,8 +895,8 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                     elif paired_offers:
                         exact_offer = paired_offers[0]
                         exact_offer_replaces_page_price = True
-            except Exception as exc:
-                search_attempts.append({"source": "exact_seller_offer", "error": type(exc).__name__})
+                if exact_offer is not None:
+                    break
     finally:
         client.close()
 
@@ -918,6 +961,8 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
                 f"HTTP {row.get('http_status') or 'неизвестно'}, "
                 f"карточек {row.get('items', 0)}"
             )
+            if row.get("product_id"):
+                diagnostic += f", ID {row['product_id']}"
             if "exact_scope" in row:
                 diagnostic += (
                     f", точная выдача {'да' if row.get('exact_scope') else 'нет'}"
