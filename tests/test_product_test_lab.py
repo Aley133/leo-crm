@@ -1,4 +1,5 @@
 import asyncio
+import json
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -2019,6 +2020,39 @@ def test_exact_product_delivery_accepts_numeric_calendar_date() -> None:
     assert parsed["delivery_text"] == "09.09.2026"
     assert parsed["delivery_date"] == "2026-09-09"
     assert parsed["delivery_days"] == 6
+
+
+@pytest.mark.parametrize(
+    "delivery_value",
+    [
+        "2026-10-03",
+        "2026-10-03T00:00:00+05:00",
+        "2026-10-03T00:00:00Z",
+    ],
+)
+def test_exact_product_delivery_accepts_iso_date_from_current_sale_block(
+    delivery_value: str,
+) -> None:
+    payload = {
+        "widgetStates": {
+            "webPrice-3121879-default-1": '{"finalPrice":"2 250 ₸"}',
+            "webSaleBlock-3121879-default-1": json.dumps(
+                {"deliveryDate": delivery_value},
+                ensure_ascii=False,
+            ),
+        }
+    }
+
+    parsed = parse_product_page(
+        payload,
+        expected_currency="KZT",
+        expected_product_id="1959796046",
+        today=date(2026, 10, 1),
+    )
+
+    assert parsed["delivery_text"] == delivery_value
+    assert parsed["delivery_date"] == "2026-10-03"
+    assert parsed["delivery_days"] == 2
 
 
 def test_exact_product_delivery_rejects_structured_365_day_false_positive() -> None:
