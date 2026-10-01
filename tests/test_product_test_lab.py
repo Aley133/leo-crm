@@ -1297,6 +1297,131 @@ def test_manual_ozon_url_backfills_media_and_delivery_from_same_search_card(monk
     }]
 
 
+def test_manual_ozon_url_uses_page_rendered_id_for_exact_search_delivery(monkeypatch) -> None:
+    url = "https://www.ozon.kz/product/old-variant-555555555/"
+    queries: list[str] = []
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def product_page_price(self, product_url: str, product_id: str) -> dict:
+            assert product_url == url
+            assert product_id == "555555555"
+            return {
+                "ok": True,
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice-777777777-default-1.finalPrice",
+                "delivery_days": None,
+                "card": {
+                    "widget_key": "webPrice-777777777-default-1",
+                    "image_url": "https://ir.ozone.ru/s3/multimedia/exact.jpg",
+                },
+            }
+
+        def search(self, query: str, page: int = 1) -> dict:
+            assert page == 1
+            queries.append(query)
+            items = []
+            if query == "777777777":
+                items = [{
+                    "sku": "777777777",
+                    "ozon_url": "https://www.ozon.kz/product/current-variant-777777777/",
+                    "delivery_days": 2,
+                    "delivery_text": "Доставим через 2 дня",
+                    "image_url": "https://ir.ozone.ru/s3/multimedia/exact.jpg",
+                }]
+            return {
+                "attempt": {"status_code": 200, "blocked": False},
+                "items": items,
+            }
+
+        def other_seller_offers(self, product_url: str, product_id: str) -> dict:
+            raise AssertionError(f"search already confirmed delivery: {product_url} {product_id}")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+
+    result = product_discovery_runtime.validate_supplier_url(url)
+
+    assert queries == ["555555555", "777777777"]
+    assert result["supplier_url"] == url
+    assert result["supplier_price_kzt"] == 2250
+    assert result["supplier_delivery_days"] == 2
+    assert result["supplier_delivery_source"] == "exact_search_card"
+
+
+def test_manual_ozon_url_retries_seller_modal_with_page_rendered_id(monkeypatch) -> None:
+    url = "https://www.ozon.kz/product/old-variant-555555555/"
+    modal_ids: list[str] = []
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def product_page_price(self, product_url: str, product_id: str) -> dict:
+            return {
+                "ok": True,
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice-777777777-default-1.finalPrice",
+                "delivery_days": None,
+                "card": {
+                    "widget_key": "webPrice-777777777-default-1",
+                    "image_url": "https://ir.ozone.ru/s3/multimedia/exact.jpg",
+                },
+            }
+
+        def search(self, query: str, page: int = 1) -> dict:
+            return {
+                "attempt": {"status_code": 200, "blocked": False},
+                "items": [],
+            }
+
+        def other_seller_offers(self, product_url: str, product_id: str) -> dict:
+            modal_ids.append(product_id)
+            offers = []
+            if product_id == "777777777":
+                offers = [{
+                    "offer_sku": "seller-offer-1",
+                    "currency_code": "KZT",
+                    "price_kzt": 2250,
+                    "delivery_days": 3,
+                    "delivery_text": "Доставим через 3 дня",
+                }]
+            return {
+                "ok": True,
+                "attempt": {"status_code": 200, "blocked": False},
+                "product_id": product_id,
+                "offers": offers,
+            }
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+
+    result = product_discovery_runtime.validate_supplier_url(url)
+
+    assert modal_ids == ["555555555", "777777777"]
+    assert result["supplier_price_kzt"] == 2250
+    assert result["supplier_delivery_days"] == 3
+    assert result["supplier_delivery_source"] == "exact_seller_offer"
+
+
 def test_manual_ozon_url_requests_session_refresh_after_search_and_offer_403(monkeypatch) -> None:
     url = "https://www.ozon.kz/product/solgar-magnesium-555555555/"
 
