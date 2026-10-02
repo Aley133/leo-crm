@@ -790,6 +790,42 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
             and not isinstance(page_delivery_days, bool)
             and 0 <= page_delivery_days <= 60
         )
+        html_delivery_reader = getattr(client, "product_page_delivery_html", None)
+        if not page_delivery_valid and callable(html_delivery_reader):
+            try:
+                html_delivery = html_delivery_reader(url)
+            except Exception as exc:
+                search_attempts.append({
+                    "source": "exact_product_html",
+                    "error": type(exc).__name__,
+                    "items": 0,
+                })
+            else:
+                html_attempt = html_delivery.get("attempt") or {}
+                html_days = html_delivery.get("delivery_days")
+                html_delivery_valid = (
+                    html_delivery.get("ok")
+                    and isinstance(html_days, int)
+                    and not isinstance(html_days, bool)
+                    and 0 <= html_days <= 60
+                )
+                search_attempts.append({
+                    "source": "exact_product_html",
+                    "http_status": html_attempt.get("status_code"),
+                    "blocked": bool(html_attempt.get("blocked")),
+                    "items": 1 if html_delivery_valid else 0,
+                })
+                _raise_ozon_session_refresh_required(
+                    [html_attempt],
+                    operation="чтении видимого срока точной карточки",
+                )
+                if html_delivery_valid:
+                    page_detail["delivery_days"] = html_days
+                    page_detail["delivery_text"] = html_delivery.get("delivery_text")
+                    page_detail["delivery_date"] = html_delivery.get("delivery_date")
+                    page_detail["delivery_source"] = "product_page_html"
+                    page_delivery_days = html_days
+                    page_delivery_valid = True
         page_has_image = bool(
             page_card.get("image_url") or page_card.get("image_urls")
         )
@@ -920,7 +956,7 @@ def validate_supplier_url(url: str, *, product: dict[str, Any] | None = None) ->
     delivery_days = page_detail.get("delivery_days")
     delivery_text = page_detail.get("delivery_text")
     delivery_date = page_detail.get("delivery_date")
-    delivery_source = "product_page"
+    delivery_source = str(page_detail.get("delivery_source") or "product_page")
     if (
         (
             not isinstance(delivery_days, int)
