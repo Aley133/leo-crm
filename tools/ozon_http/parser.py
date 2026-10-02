@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import re
 from datetime import date, timedelta
+from html.parser import HTMLParser
 from typing import Any, Iterable
 from urllib.parse import urljoin
 
@@ -492,6 +493,85 @@ PAYMENT_TIMING_MARKERS = (
     "permonth",
 )
 MAX_CONFIRMED_DELIVERY_DAYS = 60
+
+
+class _CurrentProductDeliveryHtmlParser(HTMLParser):
+    """Collect visible text only from the current PDP add-to-cart widget."""
+
+    _VOID_TAGS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input",
+        "link", "meta", "param", "source", "track", "wbr",
+    }
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.depth = 0
+        self.ignored_depth = 0
+        self.parts: list[str] = []
+        self.widgets: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = {str(key).casefold(): str(value or "") for key, value in attrs}
+        if self.depth == 0:
+            if attributes.get("data-widget", "").casefold() != "webaddtocart":
+                return
+            self.depth = 1
+            self.parts = []
+            return
+        if tag.casefold() not in self._VOID_TAGS:
+            self.depth += 1
+        if tag.casefold() in {"script", "style", "noscript"}:
+            self.ignored_depth += 1
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del tag, attrs
+
+    def handle_endtag(self, tag: str) -> None:
+        if self.depth == 0:
+            return
+        if self.ignored_depth and tag.casefold() in {"script", "style", "noscript"}:
+            self.ignored_depth -= 1
+        self.depth -= 1
+        if self.depth == 0:
+            text = " ".join(" ".join(self.parts).split())
+            if text:
+                self.widgets.append(text)
+            self.parts = []
+            self.ignored_depth = 0
+
+    def handle_data(self, data: str) -> None:
+        if self.depth and not self.ignored_depth and str(data or "").strip():
+            self.parts.append(str(data).strip())
+
+
+def parse_product_html_delivery(html: str, *, today: date | None = None) -> dict[str, Any]:
+    """Read delivery from Ozon's exact visible ``webAddToCart`` widget.
+
+    The direct product HTML is a fallback for sessions where ``page/json/v2``
+    omits the hydrated purchase promise. Recommendation tiles use other
+    widgets, so their dates never enter this parser.
+    """
+
+    parser = _CurrentProductDeliveryHtmlParser()
+    try:
+        parser.feed(str(html or ""))
+        parser.close()
+    except Exception:
+        return {"text": None, "date": None, "days": None, "source": None}
+    for text in parser.widgets:
+        delivery_date, delivery_days = _delivery_date_from_text(text, today=today)
+        if (
+            isinstance(delivery_days, int)
+            and not isinstance(delivery_days, bool)
+            and 0 <= delivery_days <= MAX_CONFIRMED_DELIVERY_DAYS
+        ):
+            return {
+                "text": text,
+                "date": delivery_date,
+                "days": delivery_days,
+                "source": "webAddToCart.html",
+            }
+    return {"text": None, "date": None, "days": None, "source": None}
 
 
 def _delivery_date_from_text(text: str, today: date | None = None) -> tuple[str | None, int | None]:
