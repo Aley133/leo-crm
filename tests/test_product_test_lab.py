@@ -51,7 +51,7 @@ from backend.app.workspace_models import KaspiAccountCredential, Workspace
 from backend.app.workspace_context import workspace_context
 from tools import kaspi_fast_dumping_scanner
 from tools.product_discovery import kaspi_search, runtime as product_discovery_runtime
-from tools.ozon_http.parser import parse_product_page
+from tools.ozon_http.parser import parse_product_html_delivery, parse_product_page
 from tools.kaspi_fast_dumping_scanner import (
     _meta_content,
     _open_product_page,
@@ -1111,6 +1111,64 @@ def test_manual_ozon_url_uses_exact_product_page_price_and_delivery(monkeypatch)
     assert result["validated"] is True
 
 
+def test_manual_ozon_url_reads_visible_delivery_from_exact_product_html(monkeypatch) -> None:
+    url = "https://www.ozon.kz/product/furatsilin-1959796046/"
+
+    class FakeResolver:
+        def resolve(self):
+            return object()
+
+    class FakeClient:
+        def __init__(self, profile):
+            self.profile = profile
+
+        def product_page_price(self, product_url: str, product_id: str) -> dict:
+            assert product_url == url
+            assert product_id == "1959796046"
+            return {
+                "ok": True,
+                "product_id": product_id,
+                "price_kzt": 2250,
+                "price_source": "webPrice-3121879.finalPrice",
+                "delivery_days": None,
+                "card": {
+                    "title": "Фурацилин порошок",
+                    "image_url": "https://ir.ozone.ru/s3/multimedia/furatsilin.jpg",
+                },
+            }
+
+        def product_page_delivery_html(self, product_url: str) -> dict:
+            assert product_url == url
+            return {
+                "ok": True,
+                "attempt": {"status_code": 200, "blocked": False},
+                "delivery_text": "В корзину Доставим 5 октября",
+                "delivery_date": "2026-10-05",
+                "delivery_days": 3,
+                "delivery_source": "webAddToCart.html",
+            }
+
+        def search(self, query: str, page: int = 1) -> dict:
+            raise AssertionError(f"exact HTML delivery must not start search: {query} {page}")
+
+        def product_price_hints(self, product_url: str) -> dict:
+            raise AssertionError(f"exact HTML delivery must not inspect sellers: {product_url}")
+
+        def close(self):
+            return None
+
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionResolver", FakeResolver)
+    monkeypatch.setattr(product_discovery_runtime, "OzonSessionHttpClient", FakeClient)
+
+    result = product_discovery_runtime.validate_supplier_url(url)
+
+    assert result["supplier_price_kzt"] == 2250
+    assert result["supplier_delivery_days"] == 3
+    assert result["supplier_delivery_text"] == "В корзину Доставим 5 октября"
+    assert result["supplier_delivery_source"] == "product_page_html"
+    assert result["validated"] is True
+
+
 @pytest.mark.parametrize("change,accepted,expected_price", [
     ({}, True, 2250),
     # Ozon can use seller-specific internal ids in either field. The modal is
@@ -2053,6 +2111,28 @@ def test_exact_product_delivery_accepts_iso_date_from_current_sale_block(
     assert parsed["delivery_text"] == delivery_value
     assert parsed["delivery_date"] == "2026-10-03"
     assert parsed["delivery_days"] == 2
+
+
+def test_exact_product_html_delivery_reads_only_current_add_to_cart_widget() -> None:
+    parsed = parse_product_html_delivery(
+        """
+        <div data-widget="webHorizontalCarousel">
+          <button>Доставим завтра</button>
+        </div>
+        <div data-widget="webAddToCart">
+          <button><span>В корзину</span><br><span>Доставим 5 октября</span></button>
+        </div>
+        <div data-widget="webHorizontalCarousel">
+          <button>Доставим 3 октября</button>
+        </div>
+        """,
+        today=date(2026, 10, 2),
+    )
+
+    assert parsed["text"] == "В корзину Доставим 5 октября"
+    assert parsed["date"] == "2026-10-05"
+    assert parsed["days"] == 3
+    assert parsed["source"] == "webAddToCart.html"
 
 
 def test_exact_product_delivery_rejects_structured_365_day_false_positive() -> None:
