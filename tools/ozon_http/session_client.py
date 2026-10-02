@@ -5,7 +5,13 @@ import time
 from typing import Any
 
 from .config import Config, ROOT
-from .parser import parse_search, cheaper_price_hint, parse_other_seller_offers, parse_product_page
+from .parser import (
+    cheaper_price_hint,
+    parse_other_seller_offers,
+    parse_product_html_delivery,
+    parse_product_page,
+    parse_search,
+)
 from .session_profile import CurlProfile
 
 
@@ -203,6 +209,62 @@ class OzonSessionHttpClient:
             "delivery_text": card.get("delivery_text"),
             "delivery_date": card.get("delivery_date"),
             "delivery_days": card.get("delivery_days"),
+            "read_only": True,
+        }
+
+    def product_page_delivery_html(self, product_url: str) -> dict[str, Any]:
+        """Read the hydrated current-card delivery from direct product HTML.
+
+        Some accepted Ozon sessions render ``webAddToCart`` in the normal PDP
+        response while omitting it from the rewritten ``page/json/v2`` payload.
+        This remains a pure read-only HTTP request using the imported session.
+        """
+
+        started = time.perf_counter()
+        response = self.session.get(
+            product_url,
+            headers=self.profile.request_headers_for_page(product_url),
+            timeout=self.config.timeout,
+            allow_redirects=True,
+        )
+        elapsed = round((time.perf_counter() - started) * 1000, 1)
+        text = response.text or ""
+        cookie_updates: dict[str, str] = {}
+        for jar in (getattr(response, "cookies", None), getattr(self.session, "cookies", None)):
+            if jar is None:
+                continue
+            try:
+                values = jar.get_dict()
+            except Exception:
+                values = {}
+            if isinstance(values, dict):
+                cookie_updates.update({str(key): str(value) for key, value in values.items()})
+        changed_cookies = self.profile.merge_cookie_values(cookie_updates)
+        attempt = {
+            "status_code": response.status_code,
+            "elapsed_ms": elapsed,
+            "content_type": (response.headers.get("content-type") or "").lower(),
+            "bytes": len(response.content or b""),
+            "final_url": str(response.url),
+            "blocked": self._blocked(response, text[:600]),
+            "cookie_updates_seen": len(cookie_updates),
+            "cookie_values_changed": changed_cookies,
+        }
+        parsed = parse_product_html_delivery(text) if response.status_code == 200 else {}
+        days = parsed.get("days")
+        return {
+            "ok": bool(
+                response.status_code == 200
+                and not attempt["blocked"]
+                and isinstance(days, int)
+                and not isinstance(days, bool)
+                and 0 <= days <= 60
+            ),
+            "attempt": attempt,
+            "delivery_text": parsed.get("text"),
+            "delivery_date": parsed.get("date"),
+            "delivery_days": days,
+            "delivery_source": parsed.get("source"),
             "read_only": True,
         }
 
