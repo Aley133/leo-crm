@@ -15,6 +15,7 @@ from starlette.concurrency import run_in_threadpool
 from .auth import require_service_token
 from .db import SessionLocal
 from .dumping_models import DumpingPolicy, KaspiXmlFeed
+from .fast_dumping_models import FastDumpingPolicy
 from .dumping_service import (
     sync_product_inventory_to_feed,
     workspace_feed_url,
@@ -227,6 +228,45 @@ def _existing_products(db: Session, ids: list[str]) -> dict[str, Product]:
     return result
 
 
+def _locked_import_feed(db: Session) -> KaspiXmlFeed | None:
+    # All XML writers must acquire the feed before modifying products/policies.
+    # Reversing this order deadlocks a concurrent inventory or Fast mirror write.
+    return db.scalar(
+        select(KaspiXmlFeed)
+        .order_by(KaspiXmlFeed.id.desc())
+        .with_for_update()
+        .execution_options(populate_existing=True)
+        .limit(1)
+    )
+
+
+def _merge_generated_xml(
+    previous_xml: str,
+    incoming_xml: str,
+    *,
+    fast_skus: set[str],
+) -> str:
+    """Merge once, retaining verified realtime fields on Fast-owned offers."""
+    merged_root = ElementTree.fromstring(_merge_catalog_xml(previous_xml, incoming_xml))
+    previous_root = ElementTree.fromstring(previous_xml)
+    previous_offers = {
+        _offer_identity(offer): offer for offer in _catalog_offers(previous_root)
+    }
+    controlled_fields = {"price", "cityprices", "availability", "availabilities"}
+    for offer in _catalog_offers(merged_root):
+        identity = _offer_identity(offer)
+        previous = previous_offers.get(identity)
+        if identity not in fast_skus or previous is None:
+            continue
+        for child in list(offer):
+            if _local_name(child.tag) in controlled_fields:
+                offer.remove(child)
+        for child in previous:
+            if _local_name(child.tag) in controlled_fields:
+                offer.append(deepcopy(child))
+    return ElementTree.tostring(merged_root, encoding="unicode", xml_declaration=True)
+
+
 def _store_feed_source(
     db: Session,
     *,
@@ -237,12 +277,7 @@ def _store_feed_source(
 ) -> KaspiXmlFeed:
     incoming_xml = body.decode("utf-8-sig")
     incoming_merchant_id = _merchant_id(body)
-    feed = db.scalar(
-        select(KaspiXmlFeed)
-        .order_by(KaspiXmlFeed.id.desc())
-        .with_for_update()
-        .limit(1)
-    )
+    feed = _locked_import_feed(db)
     if feed is None:
         feed = KaspiXmlFeed(
             merchant_id=incoming_merchant_id,
@@ -356,11 +391,25 @@ def _commit_xml_import(
     db: Session,
 ) -> dict:
     products, warnings = _parse_products(body)
+    locked_feed = _locked_import_feed(db)
+    previous_generated_xml = (
+        locked_feed.generated_xml or locked_feed.source_xml if locked_feed else None
+    )
     ids = list(dict.fromkeys(item.kaspi_product_id for item in products))
     existing = _existing_products(db, ids)
     active_managed_product_ids: set[int] = set()
+    fast_product_ids: set[int] = set()
+    fast_skus: set[str] = set()
     existing_database_ids = [int(product.id) for product in existing.values()]
     for batch in _chunks(existing_database_ids):
+        fast_product_ids.update(
+            int(value) for value in db.scalars(
+                select(FastDumpingPolicy.product_id).where(
+                    FastDumpingPolicy.product_id.in_(batch),
+                    FastDumpingPolicy.enabled.is_(True),
+                )
+            ).all()
+        )
         active_managed_product_ids.update(
             int(value)
             for value in db.scalars(
@@ -371,6 +420,10 @@ def _commit_xml_import(
                 )
             ).all()
         )
+
+    for product in existing.values():
+        if int(product.id) in fast_product_ids:
+            fast_skus.update(filter(None, (product.merchant_sku, product.kaspi_product_id)))
 
     created = 0
     updated = 0
@@ -409,6 +462,7 @@ def _commit_xml_import(
                     item.available is not None
                     and not product.sale_state_overridden
                     and int(product.id) not in active_managed_product_ids
+                    and int(product.id) not in fast_product_ids
                     and bool(product.sale_enabled) is not item.available
                 ):
                     product.sale_enabled = item.available
@@ -433,23 +487,21 @@ def _commit_xml_import(
             cumulative=True,
         )
         feed.active = True
-        managed_product_ids: set[int] = set()
-        managed_product_ids.update(
-            int(value)
-            for value in db.scalars(
-                select(DumpingPolicy.product_id).where(
-                    DumpingPolicy.enabled.is_(True),
-                    DumpingPolicy.auto_publish_xml.is_(True),
-                )
-            ).all()
-        )
+        if previous_generated_xml:
+            feed.generated_xml = _merge_generated_xml(
+                previous_generated_xml,
+                body.decode("utf-8-sig"),
+                fast_skus=fast_skus,
+            )
+        # Reimport is not an inventory event. Unaffected offers already contain
+        # their authoritative overlay; Fast-owned offers keep their verified
+        # mirror without cancelling applies or enqueueing scans for the catalog.
         manually_overridden_ids = {
-            int(value)
-            for value in db.scalars(
-                select(Product.id).where(Product.sale_state_overridden.is_(True))
-            ).all()
+            int(product.id) for product in stored_products if product.sale_state_overridden
         }
-        for product_id in sorted(managed_product_ids | manually_overridden_ids):
+        for product_id in sorted(
+            (active_managed_product_ids | manually_overridden_ids) - fast_product_ids
+        ):
             sync_product_inventory_to_feed(
                 db,
                 product_id=product_id,
@@ -460,16 +512,17 @@ def _commit_xml_import(
         db.rollback()
         raise
 
+    catalog_total = int(db.scalar(select(func.count(Product.id))) or 0)
     return {
         "total": len(products),
         "created_count": created,
         "updated_count": updated,
         "unchanged_count": unchanged,
         "retained_count": max(
-            int(db.scalar(select(func.count(Product.id))) or 0) - len(products),
+            catalog_total - len(products),
             0,
         ),
-        "catalog_total": int(db.scalar(select(func.count(Product.id))) or 0),
+        "catalog_total": catalog_total,
         "linked_order_lines": linked_order_lines,
         "warning_count": len(warnings),
         "warnings": warnings,

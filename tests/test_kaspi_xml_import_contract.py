@@ -8,6 +8,7 @@ from xml.etree import ElementTree
 import pytest
 
 from backend.app.dumping_models import DumpingPolicy, KaspiXmlFeed
+from backend.app.fast_dumping_models import FastDumpingPolicy
 from backend.app.dumping_service import set_product_sale_enabled
 from backend.app.inventory_models import InventoryBatch
 from backend.app.kaspi_xml_import import parse_kaspi_products
@@ -17,6 +18,65 @@ from backend.app import product_xml_import_api
 
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+@pytest.mark.parametrize("import_size", [3, 459])
+def test_import_does_not_rescan_catalog_or_reset_fast_mirror(db_session, monkeypatch, import_size):
+    from sqlalchemy import event
+
+    offers = "".join(
+        f"<offer sku='FAST-{i}'><model>Fast {i}</model><cityprices>"
+        "<cityprice cityId='750000000'>6000</cityprice></cityprices>"
+        "<availability available='yes' preOrder='5' stockCount='5'/></offer>"
+        for i in range(459)
+    )
+    catalog = f"<kaspi_catalog><offers>{offers}</offers></kaspi_catalog>"
+    _commit_xml_import(catalog.encode(), source_filename="initial.xml", db=db_session)
+    products = db_session.query(Product).order_by(Product.id).all()
+    db_session.add_all([FastDumpingPolicy(product_id=p.id) for p in products])
+    # An unrelated manual stop also needs to survive a tiny incremental import.
+    products[-1].sale_enabled = False
+    products[-1].sale_state_overridden = True
+    feed = db_session.query(KaspiXmlFeed).one()
+    from backend.app.dumping_service import set_feed_offer_availability
+    feed.generated_xml = set_feed_offer_availability(
+        feed.generated_xml, sku_candidates={"FAST-458"}, available=False, stock_count=0,
+    )
+    db_session.commit()
+    previous_states = {i: _offer_state(feed.generated_xml, f"FAST-{i}") for i in (0, 458)}
+
+    def unexpected_sync(*args, **kwargs):
+        pytest.fail("XML import must not emit inventory events for Fast or unrelated products")
+
+    monkeypatch.setattr(product_xml_import_api, "sync_product_inventory_to_feed", unexpected_sync)
+    incoming_offers = "".join(
+        f"<offer sku='FAST-{i}'><model>Updated {i}</model><cityprices>"
+        "<cityprice cityId='750000000'>1</cityprice></cityprices>"
+        "<availability available='no' preOrder='0' stockCount='0'/></offer>"
+        for i in range(import_size)
+    )
+    incoming_offers += "<offer sku='NEW'><model>New product</model></offer>"
+    statements = []
+
+    def capture(conn, cursor, statement, parameters, context, executemany):
+        statements.append(statement)
+
+    event.listen(db_session.bind, "before_cursor_execute", capture)
+    try:
+        result = _commit_xml_import(
+            f"<kaspi_catalog><offers>{incoming_offers}</offers></kaspi_catalog>".encode(),
+            source_filename="archive.xml", db=db_session,
+        )
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", capture)
+    assert result["created_count"] == 1
+    assert result["catalog_total"] == 460
+    assert len(statements) < 35, len(statements)
+    assert _offer_state(feed.generated_xml, "FAST-0") == previous_states[0]
+    assert _offer_state(feed.generated_xml, "FAST-458") == previous_states[458]
+    assert _offer_state(feed.source_xml, "FAST-0")["price"] == "1"
+    assert products[0].sale_enabled is True
+    assert products[0].name == "Updated 0"
 
 
 class _XmlRequest:

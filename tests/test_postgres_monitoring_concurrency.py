@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import os
 import time
+from threading import Event
 from concurrent.futures import ThreadPoolExecutor
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 
 import pytest
-from sqlalchemy import create_engine, func, select, text
+from sqlalchemy import create_engine, event, func, select, text
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.db import Base
@@ -98,6 +99,67 @@ def _offer(supplier_product_id: int, *, price: str, observed_at: datetime) -> No
         adapter_schema_version="pg-v1",
         observed_at=observed_at,
     )
+
+
+def test_xml_import_waits_for_feed_before_updating_products(postgres_factory):
+    from backend.app.dumping_models import KaspiXmlFeed
+    from backend.app.fast_dumping_models import FastDumpingPolicy
+    from backend.app.product_xml_import_api import _commit_xml_import
+
+    xml = b"""<kaspi_catalog><offers><offer sku='LOCK-TEST'>
+    <model>Before</model><price>6000</price>
+    <availability available='yes' stockCount='5' preOrder='5'/>
+    </offer></offers></kaspi_catalog>"""
+    with postgres_factory() as seed:
+        _commit_xml_import(xml, source_filename="initial.xml", db=seed)
+        product = seed.scalar(select(Product).where(Product.kaspi_product_id == "LOCK-TEST"))
+        product_id = product.id
+        seed.add(FastDumpingPolicy(product_id=product_id))
+        seed.commit()
+
+    with postgres_factory() as mirror:
+        mirror.execute(text("SET LOCAL lock_timeout = '2s'"))
+        feed = mirror.scalar(select(KaspiXmlFeed).with_for_update())
+        waiting_for_feed = Event()
+
+        def import_archive():
+            with postgres_factory() as importer:
+                importer.execute(text("SET LOCAL lock_timeout = '5s'"))
+
+                def before_sql(conn, cursor, statement, parameters, context, executemany):
+                    if "kaspi_xml_feeds" in statement and "FOR UPDATE" in statement:
+                        waiting_for_feed.set()
+
+                event.listen(importer.connection(), "before_cursor_execute", before_sql)
+                return _commit_xml_import(
+                    xml.replace(b"Before", b"After").replace(b"6000", b"1"),
+                    source_filename="archive.xml", db=importer,
+                )
+
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(import_archive)
+            try:
+                assert waiting_for_feed.wait(timeout=3)
+                assert not future.done()
+                # A product-first importer would already hold this row while
+                # waiting for our feed, creating the production deadlock.
+                product = mirror.scalar(
+                    select(Product).where(Product.id == product_id).with_for_update()
+                )
+                product.brand = "Concurrent update"
+                feed.generated_xml = feed.generated_xml.replace("6000", "7000")
+                mirror.commit()
+            finally:
+                mirror.rollback()
+            assert future.result(timeout=5)["updated_count"] == 1
+
+    with postgres_factory() as check:
+        feed = check.scalar(select(KaspiXmlFeed))
+        assert ">7000<" in feed.generated_xml
+        assert ">1<" in feed.source_xml
+        product = check.get(Product, product_id)
+        assert product.name == "After"
+        assert product.brand == "Concurrent update"
 
 
 def test_skip_locked_returns_immediately_for_row_locked_by_another_session(postgres_factory) -> None:
