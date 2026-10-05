@@ -33,6 +33,38 @@ def _reset_public_schema() -> None:
         engine.dispose()
 
 
+def test_product_identity_migration_preserves_existing_data_and_imports_long_skus():
+    from sqlalchemy.orm import Session
+    from backend.app.product_xml_import_api import _commit_xml_import
+    from backend.app.models import Product
+
+    _reset_public_schema()
+    config = _alembic_config()
+    engine = create_engine(_database_url())
+    try:
+        command.upgrade(config, "20260928_0047")
+        with engine.begin() as connection:
+            connection.execute(text(
+                "INSERT INTO products (kaspi_product_id, name, status) "
+                "VALUES ('EXISTING', 'Existing product', 'active')"
+            ))
+        command.upgrade(config, "head")
+        column = next(c for c in inspect(engine).get_columns("products") if c["name"] == "kaspi_product_id")
+        assert column["type"].length == 128
+        identities = ["K" * 64 + "A", "K" * 64 + "B" * 64]
+        offers = "".join(f"<offer sku='{value}'><model>Long SKU</model></offer>" for value in identities)
+        xml = f"<kaspi_catalog><offers>{offers}</offers></kaspi_catalog>".encode()
+        with Session(engine, expire_on_commit=False) as session:
+            result = _commit_xml_import(xml, source_filename="archive.xml", db=session)
+            assert result["created_count"] == 2
+            assert result["catalog_total"] == 3
+            assert {p.kaspi_product_id for p in session.query(Product)} == {"EXISTING", *identities}
+            assert _commit_xml_import(xml, source_filename="archive.xml", db=session)["created_count"] == 0
+    finally:
+        engine.dispose()
+        _reset_public_schema()
+
+
 def test_upgrade_0005_to_0006_backfills_existing_source_health_and_round_trips() -> None:
     _reset_public_schema()
     config = _alembic_config()
