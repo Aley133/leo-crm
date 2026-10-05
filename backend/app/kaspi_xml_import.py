@@ -7,6 +7,7 @@ from .product_images import normalize_product_image_url
 
 
 MAX_XML_BYTES = 25 * 1024 * 1024
+MAX_PRODUCT_ID_LENGTH = 128
 
 
 @dataclass(frozen=True, slots=True)
@@ -49,6 +50,12 @@ def _attribute(element: ElementTree.Element, *names: str, limit: int) -> str | N
         if value:
             return value
     return None
+
+
+def _validated_identity(value: str | None) -> str | None:
+    if value and len(value) > MAX_PRODUCT_ID_LENGTH:
+        raise ValueError("Kaspi ID/SKU превышает допустимую длину 128 символов")
+    return value
 
 
 def _offer_availability(element: ElementTree.Element) -> bool | None:
@@ -95,10 +102,12 @@ def parse_kaspi_products(xml_bytes: bytes) -> tuple[list[KaspiXmlProduct], list[
         if _local_name(element.tag) not in {"offer", "product", "item"}:
             continue
         offer_number += 1
-        attribute_sku = _attribute(element, "sku", limit=128)
+        # Read one character past the DB limit so oversized identities are
+        # rejected, never silently truncated into another product's identity.
+        attribute_sku = _validated_identity(_attribute(element, "sku", limit=129))
         kaspi_id = (
-            _attribute(element, "kaspi_product_id", "kaspiid", "productid", "code", "id", limit=64)
-            or _child_text(element, "kaspi_product_id", "kaspiid", "productid", "code", "id", "sku", limit=64)
+            _validated_identity(_attribute(element, "kaspi_product_id", "kaspiid", "productid", "code", "id", limit=129))
+            or _validated_identity(_child_text(element, "kaspi_product_id", "kaspiid", "productid", "code", "id", "sku", limit=129))
             or attribute_sku
         )
         if not kaspi_id:
@@ -121,7 +130,9 @@ def parse_kaspi_products(xml_bytes: bytes) -> tuple[list[KaspiXmlProduct], list[
                 limit=2048,
             )
         )
-        merchant_sku = _child_text(element, "merchantsku", "merchant_sku", limit=128) or attribute_sku
+        merchant_sku = _validated_identity(
+            _child_text(element, "merchantsku", "merchant_sku", limit=129)
+        ) or attribute_sku
         products_by_id[kaspi_id] = KaspiXmlProduct(
             kaspi_product_id=kaspi_id,
             merchant_sku=merchant_sku,

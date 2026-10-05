@@ -67,7 +67,7 @@ class Product(Base):
         server_default=str(LEGACY_WORKSPACE_ID),
         index=True,
     )
-    kaspi_product_id: Mapped[str] = mapped_column(String(64), index=True)
+    kaspi_product_id: Mapped[str] = mapped_column(String(128), index=True)
     merchant_sku: Mapped[str | None] = mapped_column(String(128), index=True, nullable=True)
     inventory_owner_product_id: Mapped[int | None] = mapped_column(
         Integer,

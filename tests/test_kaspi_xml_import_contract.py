@@ -20,6 +20,40 @@ from backend.app import product_xml_import_api
 ROOT = Path(__file__).resolve().parents[1]
 
 
+@pytest.mark.parametrize("identity_field", ["sku", "kaspi_product_id"])
+def test_import_preserves_long_distinct_identities(db_session, identity_field):
+    prefix = "K" * 64
+    identities = [prefix + "A", prefix + "B" * 64]
+    offers = "".join(
+        f"<offer {identity_field}='{identity}'><model>Long identity</model></offer>"
+        for identity in identities
+    )
+    xml = f"<kaspi_catalog><offers>{offers}</offers></kaspi_catalog>".encode()
+    parsed, _ = parse_kaspi_products(xml)
+    assert [item.kaspi_product_id for item in parsed] == identities
+    result = _commit_xml_import(xml, source_filename="long.xml", db=db_session)
+    assert result["created_count"] == 2
+    assert _commit_xml_import(xml, source_filename="long.xml", db=db_session)["created_count"] == 0
+    assert {p.kaspi_product_id for p in db_session.query(Product)} == set(identities)
+
+
+@pytest.mark.parametrize("identity_field", ["sku", "kaspi_product_id", "merchant_sku"])
+def test_import_rejects_oversized_identity_before_database_write(db_session, identity_field):
+    from fastapi import HTTPException
+
+    long_identity = "K" * 129
+    if identity_field == "merchant_sku":
+        offer = f"<offer sku='VALID'><merchant_sku>{long_identity}</merchant_sku></offer>"
+    else:
+        offer = f"<offer {identity_field}='{long_identity}'/>"
+    xml = f"<kaspi_catalog><offers>{offer}</offers></kaspi_catalog>".encode()
+    with pytest.raises(HTTPException) as error:
+        _commit_xml_import(xml, source_filename="oversized.xml", db=db_session)
+    assert error.value.status_code == 422
+    assert "128" in error.value.detail
+    assert db_session.query(Product).count() == 0
+
+
 @pytest.mark.parametrize("import_size", [3, 459])
 def test_import_does_not_rescan_catalog_or_reset_fast_mirror(db_session, monkeypatch, import_size):
     from sqlalchemy import event
