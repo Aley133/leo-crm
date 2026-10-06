@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Полная автоматизация</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
+  <link rel="stylesheet" href="/static/fast-dumping.css?v=20261006-1">
+  <link rel="stylesheet" href="/static/product-images.css?v=20260819-2">
+  <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
+  <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
+  <script src="/static/theme.js?v=20260803-2"></script>
+  <style>[hidden]{display:none!important} #cards{display:grid;gap:18px} #results .product-result{width:100%;text-align:left} #settings{margin-top:20px} .fast-section h2{margin-top:0} #cards .metric strong{font-size:24px} #search{width:100%;padding:12px} @media(max-width:640px){#cards .metrics{grid-template-columns:1fr} .fast-policy-form{grid-template-columns:1fr} .fast-policy-form .wide{grid-column:auto}}</style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/product-test">Тест товара</a><a href="/crm/add-product">Добавить товар</a><a href="/crm/orders">Заказы</a><a href="/crm/revenue">Выручка</a><a href="/crm/accounting">Бух учёт</a><a href="/crm/dumping">Демпинг</a><a href="/crm/fast-dumping">Полная автоматизация</a><a class="active" href="/crm/full-automation">🚀 Полная автоматизация</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Realtime Pricing</span></div>
+    </aside>
+    <main>
+      <header class="topbar">
+        <div>
+          <p class="eyebrow">REALTIME PRICING</p>
+          <h1>Полная автоматизация</h1>
+          <p class="subtitle">Приоритет прибыли · TOP-3 · доставка · безопасный порог</p>
+        </div>
+        <button id="refresh" class="button" type="button">Обновить</button>
+      </header>
+
+      <section id="auth-panel" class="auth-panel"><form id="token-form"><label>Токен CRM <input id="token" type="password" required autocomplete="current-password"></label><button class="button">Подключить</button></form></section>
+      <div id="message" class="message" role="status" aria-live="polite"></div>
+      <section id="page" hidden>
+        <section class="fast-safety-note"><h2>🚀 Полная автоматизация <span id="count">0 / 8</span></h2><p>Один владелец цены на SKU. Старые правила отключаются на время автоматизации и восстанавливаются при её выключении. Агент 1.2.8 обязателен для полного списка продавцов.</p><p>Проверки имеют приоритет в общей очереди; каждый пятый слот остаётся обычному демпингу. Скорость зависит от агента и Kaspi. Минимальный интервал записи цены — 5 минут.</p><p id="agent-info" role="status">Проверяем подключение агента…</p><a class="button secondary" href="https://github.com/Aley133/leo-crm/releases/download/kaspi-fast-dumping-agent-latest/LEO-Kaspi-Fast-Dumping-Agent.exe">Скачать Fast Agent</a></section>
+        <section class="fast-section"><h2>Подключить товар</h2><input id="search" type="search" placeholder="Название, SKU или Kaspi ID" aria-label="Поиск товара"><div id="results"></div>
+          <form id="settings" class="fast-policy-form" hidden>
+            <h3 id="selected" class="wide"></h3>
+            <label>Минимальная прибыль, ₸<input id="minimum_profit_kzt" type="number" min="0" max="100000000" value="1000" required></label>
+            <label>Проверка рынка<select id="monitor_seconds"><option value="60">1 минута</option><option value="120" selected>2 минуты</option><option value="180">3 минуты</option><option value="300">5 минут</option></select></label>
+            <label>Надбавка за день преимущества, ₸<input id="premium_per_day_kzt" type="number" min="0" max="10000" value="500" required></label>
+            <label>Максимальная надбавка, ₸<input id="premium_cap_kzt" type="number" min="0" max="100000" value="2000" required></label>
+            <label>Минимальное преимущество доставки, дней<input id="delivery_advantage_days" type="number" min="1" max="30" value="4" required></label>
+            <label>Наблюдать цену без заказов, часов<input id="observation_hours" type="number" min="1" max="72" value="12" required></label>
+            <label>Максимальная цена, ₸ (необязательно)<input id="maximum_price_kzt" type="number" min="1" max="100000000"></label>
+            <label><input id="enabled" type="checkbox" checked> Автоматизация включена</label>
+            <p class="wide">При отсутствии заказов за выбранный период пробуем TOP-2, затем TOP-1 в пределах порога. Новые заказы возвращают приоритет более высокой прибыли. Это ценовой эксперимент: отсутствие заказов не объясняет причину без данных о просмотрах.</p>
+            <button id="save" class="button" type="submit">Включить автоматизацию</button>
+          </form>
+        </section>
+        <div id="cards"></div>
+      </section>
+    </main>
+  </div>
+  <script src="/static/workspace-context.js?v=20260731-1"></script>
+  <script src="/static/full-automation.js?v=20261006-1" defer></script>
+</body></html>

@@ -155,3 +155,64 @@ def test_upgrade_0005_to_0006_backfills_existing_source_health_and_round_trips()
             engine.dispose()
     finally:
         _reset_public_schema()
+
+
+def test_full_automation_migration_preserves_manual_rules_and_round_trips():
+    _reset_public_schema()
+    config = _alembic_config()
+    engine = create_engine(_database_url())
+    try:
+        command.upgrade(config, "20261005_0048")
+        with engine.begin() as connection:
+            product_id = connection.scalar(
+                text(
+                    "INSERT INTO products (kaspi_product_id,name,status) VALUES ('AUTO-MIGRATION','Auto migration','active') RETURNING id"
+                )
+            )
+            policy_id = connection.scalar(
+                text(
+                    "INSERT INTO fast_dumping_policies (workspace_id,product_id,minimum_profit_kzt,scan_interval_seconds) VALUES (1,:product,1234,900) RETURNING id"
+                ),
+                {"product": product_id},
+            )
+            connection.execute(
+                text(
+                    "INSERT INTO fast_dumping_states (workspace_id,policy_id,product_id) VALUES (1,:policy,:product)"
+                ),
+                {"policy": policy_id, "product": product_id},
+            )
+        command.upgrade(config, "head")
+        with engine.begin() as connection:
+            row = connection.execute(
+                text(
+                    "SELECT pricing_mode,minimum_profit_kzt,scan_interval_seconds FROM fast_dumping_policies WHERE id=:id"
+                ),
+                {"id": policy_id},
+            ).one()
+            assert row[0] == "manual" and row[1] == 1234 and row[2] == 900
+            connection.execute(
+                text(
+                    "UPDATE fast_dumping_policies SET pricing_mode='automation',automation_config='{}' WHERE id=:id"
+                ),
+                {"id": policy_id},
+            )
+            connection.execute(
+                text(
+                    "UPDATE fast_dumping_states SET automation_json='{}' WHERE policy_id=:id"
+                ),
+                {"id": policy_id},
+            )
+        command.downgrade(config, "20261005_0048")
+        with engine.connect() as connection:
+            assert (
+                connection.scalar(
+                    text(
+                        "SELECT minimum_profit_kzt FROM fast_dumping_policies WHERE id=:id"
+                    ),
+                    {"id": policy_id},
+                )
+                == 1234
+            )
+    finally:
+        engine.dispose()
+        _reset_public_schema()

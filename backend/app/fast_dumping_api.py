@@ -66,6 +66,8 @@ ATTENTION_STATUSES = {
     "error",
     "apply_failed",
     "merchant_write_failed",
+    "automation_market_incomplete",
+    "automation_market_stale",
 }
 WORKING_STATUSES = {
     "queued",
@@ -82,6 +84,7 @@ def _policy_payload(policy: FastDumpingPolicy) -> dict:
         "id": policy.id,
         "product_id": policy.product_id,
         "enabled": policy.enabled,
+        "pricing_mode": policy.pricing_mode,
         "minimum_profit_kzt": policy.minimum_profit_kzt,
         "undercut_step_kzt": policy.undercut_step_kzt,
         "allow_price_raise": policy.allow_price_raise,
@@ -270,6 +273,8 @@ def upsert_fast_dumping_policy(
         )
         db.add(policy)
         db.flush()
+    if policy.pricing_mode == "automation":
+        raise HTTPException(409, "Товар управляется в разделе «Полная автоматизация»")
     state = ensure_state(db, policy=policy, workspace_id=workspace_id)
     active = db.get(FastDumpingJob, state.active_job_id) if state.active_job_id else None
     if active is not None and active.status in {"leased_apply", "leased_verify"}:
@@ -335,6 +340,8 @@ def remove_fast_dumping_product(
     if policy is None:
         raise HTTPException(status_code=404, detail="Товар не подключён к Fast Dumping")
 
+    if policy.pricing_mode == "automation":
+        raise HTTPException(409, "Сначала выключите полную автоматизацию")
     state = db.scalar(
         select(FastDumpingState)
         .where(

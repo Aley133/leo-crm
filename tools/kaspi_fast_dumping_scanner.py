@@ -104,6 +104,7 @@ class KaspiCompetitorSnapshot:
     delivery_filtered_count: int = 0
     delivery_selection_reason: str | None = None
     image_url: str | None = None
+    offers_complete: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -1083,6 +1084,7 @@ async def scan_kaspi_competitors(
         }
         rows: list[dict[str, Any]] = []
         seen: set[str] = set()
+        offers_complete = False
         for page_no in range(max_pages):
             body = dict(body_base)
             body["page"] = page_no
@@ -1096,7 +1098,10 @@ async def scan_kaspi_competitors(
                 seen.add(identity)
                 rows.append(offer)
                 added += 1
-            if not page_rows or added == 0 or len(page_rows) < 5:
+            if not page_rows or len(page_rows) < 5:
+                offers_complete = True
+                break
+            if added == 0:
                 break
 
     rows.sort(key=lambda row: (_offer_price(row) if _offer_price(row) is not None else Decimal("999999999"), str(row.get("merchantName") or "")))
@@ -1228,6 +1233,7 @@ async def scan_kaspi_competitors(
         competitor_name=None if competitor is None else str(competitor.get("merchantName") or "") or None,
         own_position=None if own_index is None else own_index + 1,
         seller_count=len(rows),
+        offers_complete=offers_complete,
         product_url=product_url,
         own_delivery=_delivery_summary(own),
         competitor_delivery=_delivery_summary(competitor),

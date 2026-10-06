@@ -28,7 +28,7 @@ let searchController = null;
 let loading = false;
 const offersCache = new Map();
 
-const attentionStatuses = new Set(["floor_limited","price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error","apply_failed","merchant_write_failed"]);
+const attentionStatuses = new Set(["floor_limited","price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error","apply_failed","merchant_write_failed","automation_market_incomplete","automation_market_stale"]);
 const workingStatuses = new Set(["queued","scanning","queued_apply","preparing_apply","applying","verifying"]);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
@@ -101,7 +101,7 @@ const renderFloor = () => {
     <div class="floor-value"><span>Конкурент</span><strong>${money(row.state?.competitor_price_kzt)}</strong></div>
     <div class="floor-value"><span>Текущий floor</span><strong>${money(row.current_safe_floor_kzt ?? row.state?.safe_floor_kzt)}</strong></div>
     <div class="floor-value"><span>Мин. прибыль</span><strong>${money(row.policy.minimum_profit_kzt)}</strong></div>
-    <div class="floor-action"><button class="button edit-policy" type="button">Изменить порог</button></div>
+    <div class="floor-action">${row.policy.pricing_mode === "automation" ? '<a class="button secondary" href="/crm/full-automation">🚀 Автоматизация</a>' : '<button class="button edit-policy" type="button">Изменить порог</button>'}</div>
   </article>`).join("") || '<p class="fast-card-reason">Товаров на пороге нет.</p>';
 };
 
@@ -111,7 +111,7 @@ const renderAttention = () => {
   document.querySelector("#attention-count").textContent = needingAttention.length;
   attentionList.innerHTML = needingAttention.map((row) => `<article class="attention-item" data-product-id="${row.product_id}">
     <div><span class="fast-status ${statusView(row).kind}">${escapeHtml(statusView(row).label)}</span><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")}</small><p>${escapeHtml(row.state?.last_error_message || row.state?.status_reason || "Проверьте настройки товара")}</p></div>
-    <div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button>${row.state?.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : ""}</div>
+    <div class="floor-action">${row.policy.pricing_mode === "automation" ? '<a class="button secondary" href="/crm/full-automation">🚀 Автоматизация</a>' : '<button class="button secondary edit-policy" type="button">Настроить</button>'}${row.state?.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : ""}</div>
   </article>`).join("") || '<p class="fast-card-reason">Товаров, требующих внимания, нет.</p>';
 };
 
@@ -137,7 +137,7 @@ const card = (row) => {
   return `<article class="fast-card ${view.kind}" data-product-id="${row.product_id}">
     <div class="fast-card-head">
       <div class="fast-card-title"><span class="fast-status ${view.kind}">${escapeHtml(view.label)}</span>${productPhoto(row)}<div><h3>${escapeHtml(row.name)}</h3><p>Kaspi ${escapeHtml(row.kaspi_product_id)} · SKU ${escapeHtml(row.merchant_sku || "—")}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</p></div></div>
-      <div class="fast-card-actions"><button class="button secondary edit-policy" type="button">Настроить</button>${state.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : `<button class="button run-now" type="button" ${canRun ? "" : "disabled"}>Проверить сейчас</button>`}</div>
+      <div class="fast-card-actions">${row.policy.pricing_mode === "automation" ? '<a class="button secondary" href="/crm/full-automation">🚀 Автоматизация</a>' : '<button class="button secondary edit-policy" type="button">Настроить</button>'}${state.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : `<button class="button run-now" type="button" ${canRun ? "" : "disabled"}>Проверить сейчас</button>`}</div>
     </div>
     <div class="fast-card-grid">
       <div><span>FIFO-остаток</span><strong>${Number(row.current_inventory_on_hand || 0).toLocaleString("ru-RU")} шт.</strong><small>повторно читается перед write</small></div>

@@ -75,3 +75,45 @@ def test_route_cache_is_bounded_and_separates_cities():
     assert ("0", "city") not in scanner._PRODUCT_URLS
     scanner._remember_product_url(("1099", "other-city"), "https://kaspi.kz/shop/p/1099/?c=other-city")
     assert scanner._PRODUCT_URLS[("1099", "city")] != scanner._PRODUCT_URLS[("1099", "other-city")]
+
+
+@pytest.mark.parametrize("page_size,complete", [(4, True), (5, False)])
+def test_market_coverage_is_false_when_page_limit_is_exhausted(
+    monkeypatch, page_size, complete
+):
+    def handler(request):
+        if request.method == "POST":
+            return httpx.Response(
+                200,
+                json={
+                    "offers": [
+                        {
+                            "merchantId": "own" if i == 0 else f"seller-{i}",
+                            "merchantName": f"Seller {i}",
+                            "price": 100 + i,
+                        }
+                        for i in range(page_size)
+                    ]
+                },
+            )
+        return httpx.Response(
+            200,
+            text='<script>{"promoConditions":{"categoryCodes":[]}}</script><span class="item__price-once">100 ₸</span>',
+        )
+
+    real_client = httpx.AsyncClient
+    monkeypatch.setattr(
+        scanner.httpx,
+        "AsyncClient",
+        lambda **kwargs: real_client(**kwargs, transport=httpx.MockTransport(handler)),
+    )
+    snapshot = asyncio.run(
+        scanner.scan_kaspi_competitors(
+            kaspi_product_id="123456",
+            own_merchant_id="own",
+            city_id="city",
+            zone_id="zone",
+            max_pages=1,
+        )
+    )
+    assert snapshot.offers_complete is complete
