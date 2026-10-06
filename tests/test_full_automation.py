@@ -395,3 +395,27 @@ def test_auto_stable_price_does_not_create_merchant_retry_loop(db_session):
         assert state.status == "watching" and state.active_job_id is None
         assert state.next_scan_at > datetime.now(UTC) + timedelta(seconds=60)
         assert job.status == "watching"
+
+
+def test_no_competitor_still_protects_floor_and_never_raises_without_limit():
+    d = decide_automated_price(
+        own_price_kzt=14000,
+        safe_floor_kzt=15000,
+        unit_cost_kzt=10000,
+        market_offers=[{"is_own": True, "price_kzt": "14000"}],
+        offers_complete=True,
+    )
+    assert d.target_price_kzt == 15000 and d.write_allowed
+    d = decide_automated_price(
+        own_price_kzt=14000,
+        safe_floor_kzt=13000,
+        unit_cost_kzt=9000,
+        market_offers=[{"is_own": True, "price_kzt": "14000"}],
+        offers_complete=True,
+    )
+    assert d.target_price_kzt == 14000 and not d.write_allowed
+
+
+def test_conflicting_maximum_price_and_floor_block_write():
+    d = decide(config={"maximum_price_kzt": 12000})
+    assert not d.write_allowed and d.status == "floor_limited"

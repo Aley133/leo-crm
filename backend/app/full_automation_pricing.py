@@ -38,6 +38,15 @@ def decide_automated_price(
             "automation_market_incomplete",
             "Нужны наша строка и полный рынок: обновите Fast Agent до 1.2.8.",
         )
+    if (
+        config.get("maximum_price_kzt")
+        and Decimal(str(config["maximum_price_kzt"])) < floor
+    ):
+        return result(
+            max(own, floor),
+            "floor_limited",
+            "Максимальная цена ниже безопасного порога; нужно изменить ограничения цены.",
+        )
     rivals = sorted(
         (
             r
@@ -48,10 +57,14 @@ def decide_automated_price(
     )
     external = [r for r in rivals if not r.get("is_owned_group")]
     if not external:
+        target = max(own, floor)
+        if config.get("maximum_price_kzt"):
+            target = min(target, Decimal(str(config["maximum_price_kzt"])))
         return result(
-            own,
-            "no_competitor",
-            "Внешних продавцов нет; повышение без рыночного ориентира не выполняется.",
+            target,
+            "floor_only" if own < floor else "no_competitor",
+            "Без внешних продавцов соблюдаем порог и установленный потолок; произвольного повышения нет.",
+            target != own,
         )
     own_rows = [r for r in market_offers if r.get("is_own")]
     own_days = own_rows[0].get("delivery_days") if own_rows else None
