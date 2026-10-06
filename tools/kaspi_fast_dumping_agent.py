@@ -31,7 +31,7 @@ from tools.kaspi_fast_dumping_http_auth import (
     HttpOtpKaspiMerchantSession as KaspiMerchantSession,
 )
 
-VERSION = "1.2.7"
+VERSION = "1.2.8"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -682,6 +682,7 @@ def _market_payload(market: KaspiCompetitorSnapshot) -> dict:
         "offers": list(market.offers),
         "page_visible_price_kzt": money(market.page_visible_price_kzt),
         "market_context_ok": market.market_context_ok,
+        "offers_complete": market.offers_complete,
         "market_context_reason": market.market_context_reason,
     }
 
@@ -693,6 +694,7 @@ async def _scan(job: dict, merchant_uid: str) -> KaspiCompetitorSnapshot:
     async with asyncio.timeout(SCAN_TIMEOUT_SECONDS):
         return await scan_kaspi_competitors(
             kaspi_product_id=kaspi_product_id,
+            max_pages=40 if job.get("pricing_mode") == "automation" else 20,
             own_merchant_id=merchant_uid,
             own_merchant_sku=(
                 str(job.get("merchant_sku") or "").strip() or None

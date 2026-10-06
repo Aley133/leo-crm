@@ -218,7 +218,7 @@ def test_fast_agent_release_is_http_only() -> None:
         encoding="utf-8"
     )
 
-    assert 'VERSION = "1.2.7"' in agent
+    assert 'VERSION = "1.2.8"' in agent
     assert "HttpOtpKaspiMerchantSession" in agent
     assert "kaspi_http_cookies_dpapi" in agent
     assert "tools/kaspi_fast_dumping_http_auth.py" in workflow

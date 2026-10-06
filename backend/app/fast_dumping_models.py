@@ -47,6 +47,8 @@ class FastDumpingPolicy(WorkspaceOwned, Base):
         default=True,
         server_default="true",
     )
+    pricing_mode: Mapped[str] = mapped_column(String(32), nullable=False, default="manual", server_default="manual")
+    automation_config: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     minimum_profit_kzt: Mapped[Decimal] = mapped_column(
         Numeric(18, 2),
         nullable=False,
@@ -150,6 +152,7 @@ class FastDumpingState(WorkspaceOwned, Base):
         ),
     )
 
+    automation_json: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     policy_id: Mapped[int] = mapped_column(
         Integer,

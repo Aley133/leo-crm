@@ -339,8 +339,14 @@ def recover_legacy_auto_disabled_policies(
         build_legacy_recovery_lock_statement(policy_ids=policy_ids)
     ).all()
 
+    from .fast_dumping_models import FastDumpingPolicy
+    automated = set(db.scalars(select(FastDumpingPolicy.product_id).where(
+        FastDumpingPolicy.pricing_mode == "automation", FastDumpingPolicy.enabled.is_(True),
+        FastDumpingPolicy.product_id.in_([p.product_id for p in policies]))).all())
     jobs: list[DumpingRun] = []
     for policy in policies:
+        if policy.product_id in automated:
+            continue
         source = resolve_cost_source(
             db,
             product_id=policy.product_id,

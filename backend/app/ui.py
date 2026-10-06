@@ -79,3 +79,8 @@ def crm_suppliers() -> FileResponse:
 @router.get("/crm/monitoring", response_class=FileResponse)
 def crm_monitoring() -> FileResponse:
     return FileResponse(STATIC_DIR / "monitoring.html")
+
+
+@router.get("/crm/full-automation", response_class=FileResponse)
+def full_automation_page():
+    return FileResponse(STATIC_DIR / "full-automation.html", headers={"Cache-Control":"no-store"})

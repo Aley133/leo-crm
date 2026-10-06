@@ -240,7 +240,15 @@ def _complete_scan_v2(
         return result
 
     if source is not None and source.kind == "supplier":
+        if policy.pricing_mode == "automation" and (state.automatic_writes_paused or not state.market_context_ok or state.own_price_kzt is None):
+            return result
+        if policy.pricing_mode == "automation":
+            from .full_automation_service import observe_sales
+            observe_sales(db, policy=policy, state=state)
         decision = _supplier_decision(state=state, policy=policy, source=source)
+        if policy.pricing_mode == "automation" and decision["status"] == "automation_market_incomplete":
+            state.status = decision["status"]; state.status_reason = decision["reason"]
+            return {"status":state.status, "queued_apply":False}
         state.inventory_on_hand = 0
         state.desired_stock_count = int(SUPPLIER_PREORDER_STOCK_COUNT)
         state.source_kind = "supplier"
@@ -249,6 +257,22 @@ def _complete_scan_v2(
         state.safe_floor_kzt = Decimal(str(decision["safe_floor_kzt"]))
         state.target_price_kzt = Decimal(str(decision["target_price_kzt"]))
         state.decision_status = "preorder_ready"
+        if policy.pricing_mode == "automation":
+            confirmed = db.scalar(select(FastDumpingJob).where(FastDumpingJob.workspace_id == workspace_id,
+                FastDumpingJob.product_id == product.id, FastDumpingJob.status == "applied")
+                .order_by(FastDumpingJob.completed_at.desc(), FastDumpingJob.id.desc()).limit(1))
+            previous = (confirmed.decision_json or {}) if confirmed is not None else {}
+            if (confirmed is not None and svc._aware(confirmed.completed_at) is not None
+                    and svc.utcnow() - svc._aware(confirmed.completed_at) < timedelta(seconds=300)
+                    and previous.get("fulfillment_mode") == "preorder"
+                    and previous.get("preorder_days") == decision["preorder_days"]
+                    and Decimal(str(previous.get("target_price_kzt") or 0)) == Decimal(str(decision["target_price_kzt"]))):
+                state.status = "watching"; state.status_reason = decision["reason"]
+                return {"status":state.status,"queued_apply":False}
+            cooldown = svc._next_write_allowed_at(state, policy)
+            if cooldown is not None and svc.utcnow() < cooldown:
+                state.status = "cooldown"; state.status_reason = decision["reason"]
+                return {"status":state.status,"queued_apply":False}
         _reactivate_apply(
             state=state,
             job=job,
@@ -396,6 +420,18 @@ def _prepare_apply_v2(
                     f"сейчас {preorder}. Выполняется новый scan."
                 ),
             )
+        if policy.pricing_mode == "automation":
+            if svc._aware(state.last_scanned_at) is None or svc.utcnow() - svc._aware(state.last_scanned_at) > timedelta(seconds=300):
+                return _stale_offer_job(state=state, job=job, reason="Рынок устарел; нужна новая проверка автоматизации.")
+            current = _supplier_decision(state=state, policy=policy, source=source)
+            if (not state.market_context_ok or current["status"] == "automation_market_incomplete"
+                    or Decimal(str(current.get("target_price_kzt") or 0)) != Decimal(str(decision.get("target_price_kzt") or 0))
+                    or Decimal(str(decision.get("target_price_kzt") or 0)) < Decimal(str(current["safe_floor_kzt"]))):
+                return _stale_offer_job(state=state, job=job, reason="Экономика или рынок автоматизации изменились; нужна новая проверка.")
+            cooldown = svc._next_write_allowed_at(state, policy)
+            if cooldown is not None and svc.utcnow() < cooldown:
+                svc._finish_without_write(state=state, job=job, policy=policy, status="cooldown", reason="Ожидается интервал записи цены.", now=svc.utcnow())
+                return {"ready":False,"cooldown":True}
         desired_stock = int(SUPPLIER_PREORDER_STOCK_COUNT)
         state.source_kind = "supplier"
         state.source_name = source.name

@@ -16,6 +16,19 @@ def _supplier_decision(*, state: Any, policy: Any, source: Any) -> dict[str, Any
         unit_cost_kzt=source.unit_cost_kzt,
         minimum_profit_kzt=Decimal(policy.minimum_profit_kzt),
     )
+    if getattr(policy, "pricing_mode", "manual") == "automation":
+        from .full_automation_pricing import decide_automated_price
+        decision = decide_automated_price(own_price_kzt=state.own_price_kzt, safe_floor_kzt=floor,
+            market_offers=state.offers_json or [], unit_cost_kzt=source.unit_cost_kzt,
+            config=policy.automation_config, offers_complete=(state.automation_json or {}).get("offers_complete", False),
+            target_position=(state.automation_json or {}).get("target_position", 3))
+        state.automation_json = {**(state.automation_json or {}), "plan_reason":decision.reason,
+                                 "planned_price_kzt":str(decision.target_price_kzt), "plan_status":decision.status}
+        return {"safe_floor_kzt":str(floor), "own_price_kzt":offer_runtime._money(state.own_price_kzt),
+                "target_price_kzt":offer_runtime._money(decision.target_price_kzt), "status":decision.status,
+                "reason":decision.reason, "write_allowed":decision.write_allowed,
+                "stock_count":int(SUPPLIER_PREORDER_STOCK_COUNT), "preorder_days":max(1,offer_runtime._clamp_preorder(source.delivery_days)),
+                "fulfillment_mode":"preorder", "source_kind":"supplier", "source_name":source.name}
     own = state.own_price_kzt or floor
     position = decide_preorder_position(
         own_price_kzt=own,

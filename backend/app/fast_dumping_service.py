@@ -44,13 +44,15 @@ SCAN_LEASE_SECONDS = 180
 APPLY_LEASE_SECONDS = 300
 VERIFY_LEASE_SECONDS = 180
 MAX_SCAN_ATTEMPTS = 3
-MAX_MARKET_OFFERS = 100
+MAX_MARKET_OFFERS = 200
 MIN_SCAN_INTERVAL_SECONDS = 300
 DEFAULT_SCAN_INTERVAL_SECONDS = 600
 HISTORY_RETENTION_PER_PRODUCT = 100
 HISTORY_PRUNE_INTERVAL_SECONDS = 3600
 INVENTORY_RECOVERY_INTERVAL_SECONDS = 300
 _HISTORY_PRUNE_LOCK = Lock()
+_AUTO_SCAN_STREAK: dict[int, int] = {}
+_AUTO_QUEUE_LOCK = Lock()
 _HISTORY_PRUNE_NOT_BEFORE: dict[int, float] = {}
 _INVENTORY_RECOVERY_LOCK = Lock()
 _INVENTORY_RECOVERY_NOT_BEFORE: dict[int, float] = {}
@@ -250,6 +252,7 @@ def normalize_market_snapshot(
     own_position = payload.get("own_position")
     seller_count = payload.get("seller_count")
     return {
+        "offers_complete": payload.get("offers_complete") is True and isinstance(raw_offers, list) and len(raw_offers) <= MAX_MARKET_OFFERS,
         "product_name": _text(payload.get("product_name"), limit=500),
         "product_brand": _text(payload.get("product_brand"), limit=255),
         "image_url": normalize_product_image_url(_text(payload.get("image_url"), limit=2048)),
@@ -352,6 +355,8 @@ def _policy_interval_seconds(policy: FastDumpingPolicy) -> int:
         configured = int(policy.scan_interval_seconds)
     except (TypeError, ValueError):
         configured = DEFAULT_SCAN_INTERVAL_SECONDS
+    if getattr(policy, "pricing_mode", "manual") == "automation":
+        return max(60, min(300, int((policy.automation_config or {}).get("monitor_seconds", 120))))
     return max(MIN_SCAN_INTERVAL_SECONDS, configured)
 
 
@@ -366,7 +371,7 @@ def _next_write_allowed_at(
     applied_at = _aware(state.last_applied_at)
     if applied_at is None:
         return None
-    return applied_at + timedelta(seconds=_policy_interval_seconds(policy))
+    return applied_at + timedelta(seconds=max(300, _policy_interval_seconds(policy)))
 
 
 def prune_fast_dumping_history(
@@ -725,7 +730,7 @@ def schedule_due_scans(
                 FastDumpingState.next_scan_at <= checked_at,
             ),
         )
-        .order_by(FastDumpingState.next_scan_at, FastDumpingState.id)
+        .order_by(case((FastDumpingPolicy.pricing_mode == "automation", 0), else_=1), FastDumpingState.next_scan_at, FastDumpingState.id)
         .limit(max(1, min(100, int(limit))))
         .with_for_update(skip_locked=True)
     ).all()
@@ -760,16 +765,21 @@ def claim_job(
         recover_inventory_transitions=_reserve_inventory_recovery(workspace_id),
     )
     now = utcnow()
+    with _AUTO_QUEUE_LOCK:
+        prefer_auto = _AUTO_SCAN_STREAK.get(workspace_id, 0) % 5 != 4
     priority = case(
         (FastDumpingJob.reason.startswith("inventory_priority:"), -1),
         (FastDumpingJob.status == "queued_apply", 0),
         (FastDumpingJob.status == "queued_verify", 1),
-        else_=2,
+        (FastDumpingPolicy.pricing_mode == "automation", 2 if prefer_auto else 3),
+        else_=3 if prefer_auto else 2,
     )
     job = db.scalar(
         select(FastDumpingJob)
+        .join(FastDumpingPolicy, FastDumpingPolicy.id == FastDumpingJob.policy_id)
         .where(
             FastDumpingJob.workspace_id == workspace_id,
+            FastDumpingPolicy.workspace_id == workspace_id,
             FastDumpingJob.status.in_(QUEUED_JOB_STATUSES),
             or_(
                 FastDumpingJob.not_before_at.is_(None),
@@ -792,6 +802,8 @@ def claim_job(
     job.lease_token = uuid4().hex
     job.not_before_at = None
     if job.status == "queued_scan":
+        with _AUTO_QUEUE_LOCK:
+            _AUTO_SCAN_STREAK[workspace_id] = _AUTO_SCAN_STREAK.get(workspace_id, 0) + 1
         job.status = "leased_scan"
         job.scan_attempts += 1
         job.lease_until = now + timedelta(seconds=SCAN_LEASE_SECONDS)
@@ -852,6 +864,7 @@ def serialize_claimed_job(
         "city_id": policy.city_id,
         "zone_id": policy.zone_id,
         "scan_interval_seconds": _policy_interval_seconds(policy),
+        "pricing_mode": policy.pricing_mode,
         "delivery_price_premium_kzt": policy.delivery_price_premium_kzt,
         "delivery_advantage_days": policy.delivery_advantage_days,
         "owned_price_band_kzt": policy.owned_price_band_kzt,
@@ -979,6 +992,7 @@ def complete_scan(
     state.market_context_ok = bool(market.get("market_context_ok"))
     state.market_context_reason = market.get("market_context_reason")
     state.offers_json = market.get("offers") or []
+    state.automation_json = {**(state.automation_json or {}), "offers_complete": market.get("offers_complete", False)}
     state.offers_count = len(state.offers_json)
     _refresh_owned_cycle_anchor(state)
     state.last_error_code = None
@@ -1080,7 +1094,7 @@ def complete_scan(
         state.next_scan_at = None
         return {"status": state.status, "queued_apply": False}
 
-    decision = decide_fast_price(
+    decision = _decide_policy_price(db=db, policy=policy, state=state, source=source,
         own_price_kzt=state.own_price_kzt,
         competitor_price_kzt=state.competitor_price_kzt,
         safe_floor_kzt=floor,
@@ -1147,7 +1161,7 @@ def complete_scan(
             ),
             now=now,
         )
-        state.next_scan_at = write_allowed_at
+        state.next_scan_at = min(write_allowed_at, _next_scan(policy, now=now)) if policy.pricing_mode == "automation" else write_allowed_at
         return {
             "status": state.status,
             "queued_apply": False,
@@ -1239,7 +1253,7 @@ def prepare_apply(
         state.status_reason = (
             "Повторная запись цены отложена до окончания выбранного интервала."
         )
-        state.next_scan_at = cooldown_until
+        state.next_scan_at = min(cooldown_until, _next_scan(policy, now=now)) if policy.pricing_mode == "automation" else cooldown_until
         return {
             "ready": False,
             "cooldown": True,
@@ -1258,7 +1272,7 @@ def prepare_apply(
             minimum_profit_kzt=Decimal(policy.minimum_profit_kzt),
         )
         market = job.market_json or {}
-        decision = decide_fast_price(
+        decision = _decide_policy_price(db=db, policy=policy, state=state, source=source,
             own_price_kzt=_decimal(
                 market.get("own_price_kzt"), field="own_price_kzt"
             ),
@@ -1545,3 +1559,23 @@ def resume_automatic_writes(
     state.status_reason = "Защитная пауза снята вручную; ожидается новая проверка."
     state.next_scan_at = utcnow()
     return state
+
+
+def _decide_policy_price(*, db, policy, state, source, **kwargs):
+    if getattr(policy, "pricing_mode", "manual") != "automation":
+        return decide_fast_price(**kwargs)
+    from .full_automation_service import observe_sales
+    from .full_automation_pricing import decide_automated_price
+    if _aware(state.last_scanned_at) is None or utcnow() - _aware(state.last_scanned_at) > timedelta(seconds=300):
+        return FastPriceDecision(Decimal(kwargs["safe_floor_kzt"]), None, state.own_price_kzt, state.own_price_kzt,
+                                 Decimal(1), "automation_market_stale", "Рынок устарел; нужна новая проверка перед записью.", False)
+    experiment = observe_sales(db, policy=policy, state=state)
+    decision = decide_automated_price(
+        own_price_kzt=kwargs["own_price_kzt"], safe_floor_kzt=kwargs["safe_floor_kzt"],
+        market_offers=kwargs["market_offers"], unit_cost_kzt=source.unit_cost_kzt,
+        config=policy.automation_config, offers_complete=(getattr(state, "automation_json", None) or {}).get("offers_complete", False),
+        target_position=experiment["target_position"],
+    )
+    state.automation_json = {**(state.automation_json or {}), "plan_reason":decision.reason,
+                             "planned_price_kzt":str(decision.target_price_kzt), "plan_status":decision.status}
+    return decision

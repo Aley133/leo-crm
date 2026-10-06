@@ -499,9 +499,13 @@ def upsert_dumping_policy(
     payload: DumpingPolicyUpsert,
     db: Session = Depends(get_db),
 ) -> dict:
-    product = db.get(Product, product_id)
+    product = db.scalar(select(Product).where(Product.id == product_id).with_for_update())
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    from .fast_dumping_models import FastDumpingPolicy
+    auto = db.scalar(select(FastDumpingPolicy).where(FastDumpingPolicy.product_id == product_id, FastDumpingPolicy.pricing_mode == "automation"))
+    if auto is not None:
+        raise HTTPException(409, "Товар управляется в разделе «Полная автоматизация»")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     existing_policy = policy is not None
     if policy is None:
