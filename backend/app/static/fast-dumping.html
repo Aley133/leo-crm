@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Быстрый демпинг</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
-  <link rel="stylesheet" href="/static/fast-dumping.css?v=20261006-1">
+  <link rel="stylesheet" href="/static/fast-dumping.css?v=20261006-3">
   <link rel="stylesheet" href="/static/product-images.css?v=20260819-2">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
@@ -16,7 +16,7 @@
     <aside class="sidebar">
       <div class="brand"><span>LEO</span><small>CRM</small></div>
       <nav aria-label="Основная навигация">
-        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/product-test">Тест товара</a><a href="/crm/add-product">Добавить товар</a><a href="/crm/orders">Заказы</a><a href="/crm/revenue">Выручка</a><a href="/crm/accounting">Бух учёт</a><a href="/crm/dumping">Демпинг</a><a class="active" href="/crm/fast-dumping">Быстрый демпинг</a><a href="/crm/full-automation">🚀 Полная автоматизация</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/product-test">Тест товара</a><a href="/crm/add-product">Добавить товар</a><a href="/crm/orders">Заказы</a><a href="/crm/revenue">Выручка</a><a href="/crm/accounting">Бух учёт</a><a class="active" href="/crm/fast-dumping">Быстрый демпинг</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
       </nav>
       <div class="runtime-status"><span class="dot"></span><span>Realtime Pricing</span></div>
     </aside>
@@ -91,6 +91,7 @@
               </div>
               <small id="selected-product">Товар не выбран</small>
             </label>
+            <div class="wide automation-control"><button id="automation-toggle" class="button secondary" type="button" aria-pressed="false">🚀 Полная автоматизация</button><small id="automation-note">Выключена. Применятся обычные настройки демпинга.</small></div>
             <label><span>Минимальная прибыль, ₸</span><input id="minimum-profit" type="number" min="0" step="1" value="1000" required><small>Из неё CRM рассчитывает hard floor</small></label>
             <label><span>Шаг ниже конкурента, ₸</span><input id="undercut-step" type="number" min="1" max="10000" step="1" value="1" required></label>
             <label><span>Интервал проверки и записи</span><select id="scan-interval" required><option value="300">5 минут</option><option value="600" selected>10 минут (рекомендуется)</option><option value="900">15 минут</option><option value="1800">30 минут</option><option value="2100">35 минут</option><option value="3600">1 час</option></select><small>Цена меняется не чаще выбранного интервала</small></label>
@@ -125,7 +126,8 @@
       <p id="edit-economics" class="fast-dialog-note"></p>
       <input id="edit-product-id" type="hidden">
       <div class="fast-dialog-grid">
-        <label><span>Минимальная прибыль, ₸</span><input id="edit-minimum-profit" type="number" min="0" step="1" required></label>
+        <div class="wide automation-control"><button id="edit-automation-toggle" class="button secondary" type="button" aria-pressed="false">🚀 Полная автоматизация</button><small id="edit-automation-note">Выключена. Применятся обычные настройки демпинга.</small></div>
+            <label><span>Минимальная прибыль, ₸</span><input id="edit-minimum-profit" type="number" min="0" step="1" required></label>
         <label><span>Шаг ниже конкурента, ₸</span><input id="edit-undercut-step" type="number" min="1" max="10000" step="1" required></label>
         <label><span>Интервал проверки и записи</span><select id="edit-scan-interval" required><option value="300">5 минут</option><option value="600">10 минут (рекомендуется)</option><option value="900">15 минут</option><option value="1800">30 минут</option><option value="2100">35 минут</option><option value="3600">1 час</option></select><small>Один запрос рынка и максимум одна запись за интервал</small></label>
         <label><span>Место в предзаказе</span><input id="edit-preorder-position" type="number" min="1" max="50" step="1" required><small>Действует только при supplier preorder; default №4</small></label>
@@ -144,7 +146,7 @@
 
   <script src="/static/workspace-context.js?v=20260731-1"></script>
   <script src="/static/product-image-resolver.js?v=20260819-2" defer></script>
-  <script src="/static/fast-dumping.js?v=20261006-2" defer></script>
+  <script src="/static/fast-dumping.js?v=20261006-3" defer></script>
   <script src="/static/fast-dumping-remove.js?v=20260824-1" defer></script>
 </body>
 </html>

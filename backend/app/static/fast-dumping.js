@@ -101,7 +101,7 @@ const renderFloor = () => {
     <div class="floor-value"><span>Конкурент</span><strong>${money(row.state?.competitor_price_kzt)}</strong></div>
     <div class="floor-value"><span>Текущий floor</span><strong>${money(row.current_safe_floor_kzt ?? row.state?.safe_floor_kzt)}</strong></div>
     <div class="floor-value"><span>Мин. прибыль</span><strong>${money(row.policy.minimum_profit_kzt)}</strong></div>
-    <div class="floor-action">${row.policy.pricing_mode === "automation" ? '<a class="button secondary" href="/crm/full-automation">🚀 Автоматизация</a>' : '<button class="button edit-policy" type="button">Изменить порог</button>'}</div>
+    <div class="floor-action"><button class="button edit-policy" type="button">Изменить порог</button></div>
   </article>`).join("") || '<p class="fast-card-reason">Товаров на пороге нет.</p>';
 };
 
@@ -111,7 +111,7 @@ const renderAttention = () => {
   document.querySelector("#attention-count").textContent = needingAttention.length;
   attentionList.innerHTML = needingAttention.map((row) => `<article class="attention-item" data-product-id="${row.product_id}">
     <div><span class="fast-status ${statusView(row).kind}">${escapeHtml(statusView(row).label)}</span><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")}</small><p>${escapeHtml(row.state?.last_error_message || row.state?.status_reason || "Проверьте настройки товара")}</p></div>
-    <div class="floor-action">${row.policy.pricing_mode === "automation" ? '<a class="button secondary" href="/crm/full-automation">🚀 Автоматизация</a>' : '<button class="button secondary edit-policy" type="button">Настроить</button>'}${row.state?.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : ""}</div>
+    <div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button>${row.state?.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : ""}</div>
   </article>`).join("") || '<p class="fast-card-reason">Товаров, требующих внимания, нет.</p>';
 };
 
@@ -137,7 +137,7 @@ const card = (row) => {
   return `<article class="fast-card ${view.kind}" data-product-id="${row.product_id}">
     <div class="fast-card-head">
       <div class="fast-card-title"><span class="fast-status ${view.kind}">${escapeHtml(view.label)}</span>${productPhoto(row)}<div><h3>${escapeHtml(row.name)}</h3><p>Kaspi ${escapeHtml(row.kaspi_product_id)} · SKU ${escapeHtml(row.merchant_sku || "—")}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</p></div></div>
-      <div class="fast-card-actions">${row.policy.pricing_mode === "automation" ? '<a class="button secondary" href="/crm/full-automation">🚀 Автоматизация</a>' : '<button class="button secondary edit-policy" type="button">Настроить</button>'}${state.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : `<button class="button run-now" type="button" ${canRun ? "" : "disabled"}>Проверить сейчас</button>`}</div>
+      <div class="fast-card-actions"><button class="button secondary edit-policy" type="button">Настроить</button>${state.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : `<button class="button run-now" type="button" ${canRun ? "" : "disabled"}>Проверить сейчас</button>`}</div>
     </div>
     <div class="fast-card-grid">
       <div><span>FIFO-остаток</span><strong>${Number(row.current_inventory_on_hand || 0).toLocaleString("ru-RU")} шт.</strong><small>повторно читается перед write</small></div>
@@ -145,12 +145,12 @@ const card = (row) => {
       <div><span>Безопасный floor</span><strong>${money(row.current_safe_floor_kzt ?? state.safe_floor_kzt)}</strong><small>мин. прибыль ${money(row.policy.minimum_profit_kzt)}</small></div>
       <div><span>Наша цена</span><strong>${money(state.own_price_kzt)}</strong><small>${state.own_position ? `позиция №${state.own_position} из ${state.seller_count || "—"}` : "позиция —"}</small></div>
       <div><span>Лучший конкурент</span><strong>${money(state.competitor_price_kzt)}</strong><small>${escapeHtml(state.competitor_name || "—")}</small></div>
-      <div><span>Целевая цена</span><strong>${money(state.target_price_kzt)}</strong><small>шаг ${money(row.policy.undercut_step_kzt)}</small></div>
+      <div><span>Целевая цена</span><strong>${money(state.target_price_kzt)}</strong><small>${row.policy.pricing_mode === "automation" ? "🚀 Полная автоматизация" : `шаг ${money(row.policy.undercut_step_kzt)}`}</small></div>
       <div><span>Место в предзаказе</span><strong>№${Number(row.policy.preorder_target_position || 4)}</strong><small>${positionMode ? "стратегия активна" : "включится при FIFO=0 + supplier"}</small></div>
       <div><span>Цена карточки</span><strong>${money(state.page_visible_price_kzt)}</strong><small>${state.market_context_ok ? "контекст подтверждён" : "ожидает подтверждения"}</small></div>
       <div><span>Последний scan</span><strong>${dateTime(state.last_scanned_at)}</strong><small>следующий ${dateTime(state.next_scan_at)}</small></div>
       <div><span>Последний apply</span><strong>${dateTime(state.last_applied_at)}</strong><small>${state.last_operation_id ? `operation ${escapeHtml(state.last_operation_id)}` : "операций ещё нет"}</small></div>
-      <div><span>Интервал</span><strong>${Number(row.policy.scan_interval_seconds) / 60} мин.</strong><small>проверка и максимум один write · аномалия ${Number(row.policy.max_undercut_gap_percent)}%</small></div>
+      <div><span>Интервал</span><strong>${Number(row.policy.pricing_mode === "automation" ? row.policy.automation_config?.monitor_seconds || 120 : row.policy.scan_interval_seconds) / 60} мин.</strong><small>проверка и максимум один write · аномалия ${Number(row.policy.max_undercut_gap_percent)}%</small></div>
       <div><span>Преимущество доставки</span><strong>до ${money(row.policy.delivery_price_premium_kzt)}</strong><small>для физического FIFO</small></div>
       <div><span>Цикл BARWORK ↔ LeoXpress</span><strong>${money(row.policy.owned_price_band_kzt)}</strong><small>якорь ${money(state.owned_cycle_anchor_price_kzt)}</small></div>
       <div><span>Agent / версия решения</span><strong>${escapeHtml(state.last_agent_id || "—")}</strong><small>state v${Number(state.state_version || 0)}</small></div>
@@ -284,7 +284,46 @@ const policyPayload = (prefix="") => ({
 
 const savePolicy = async (productId, payload) => request(`/api/fast-dumping/products/${productId}`, {method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(payload)});
 
+let editingRow = null;
+const manualControls = ["undercut-step", "scan-interval", "preorder-position", "delivery-premium", "delivery-days", "owned-price-band", "max-gap", "allow-raise", "enabled"];
+const setAutomation = (prefix, active) => {
+  document.querySelector(`#${prefix}automation-toggle`).setAttribute("aria-pressed", String(active));
+  document.querySelector(`#${prefix}automation-note`).textContent = active
+    ? "Включена: приоритет прибыли и TOP-3 с учётом доставки. Применится после сохранения."
+    : "Выключена. Применятся обычные настройки демпинга.";
+  for (const name of manualControls) {
+    const input = document.querySelector(`#${prefix}${name}`);
+    input.disabled = active;
+    input.closest("label").classList.toggle("hidden", active);
+  }
+};
+for (const prefix of ["", "edit-"]) {
+  document.querySelector(`#${prefix}automation-toggle`).addEventListener("click", () => {
+    const active = document.querySelector(`#${prefix}automation-toggle`).getAttribute("aria-pressed") !== "true";
+    if (prefix && editingRow?.policy.pricing_mode === "automation") {
+      const previous = editingRow.policy.automation_config?.previous || {};
+      document.querySelector("#edit-minimum-profit").value = active
+        ? editingRow.policy.minimum_profit_kzt : previous.minimum_profit_kzt ?? editingRow.policy.minimum_profit_kzt;
+      document.querySelector("#edit-enabled").checked = active || Boolean(previous.enabled);
+    }
+    setAutomation(prefix, active);
+  });
+}
+const saveSettings = async (productId, prefix = "") => {
+  const payload = policyPayload(prefix);
+  const active = document.querySelector(`#${prefix}automation-toggle`).getAttribute("aria-pressed") === "true";
+  const original = prefix ? editingRow?.policy : null;
+  if (!active && original?.pricing_mode !== "automation") return savePolicy(productId, payload);
+  const config = original?.automation_config || {};
+  const settings = {enabled:active, minimum_profit_kzt:payload.minimum_profit_kzt, manual_policy:payload};
+  for (const key of ["monitor_seconds", "premium_per_day_kzt", "premium_cap_kzt", "delivery_advantage_days", "maximum_price_kzt", "observation_hours"]) {
+    if (config[key] !== undefined) settings[key] = config[key];
+  }
+  return request(`/api/full-automation/products/${productId}`, {method:"PUT", headers:{"Content-Type":"application/json"}, body:JSON.stringify(settings)});
+};
+
 const openEdit = (row) => {
+  editingRow = row;
   const policy = row.policy;
   document.querySelector("#edit-product-id").value = row.product_id;
   document.querySelector("#edit-title").textContent = row.name;
@@ -301,6 +340,8 @@ const openEdit = (row) => {
   document.querySelector("#edit-zone-id").value = policy.zone_id;
   document.querySelector("#edit-allow-raise").checked = policy.allow_price_raise;
   document.querySelector("#edit-enabled").checked = policy.enabled;
+  setAutomation("edit-", policy.pricing_mode === "automation");
+  editRemove.classList.toggle("hidden", policy.pricing_mode === "automation");
   editDialog.showModal();
 };
 
@@ -310,7 +351,8 @@ policyForm.addEventListener("submit", async (event) => {
   if (!productId) { message.textContent = "Сначала выберите товар из результатов поиска."; return; }
   const button = document.querySelector("#save-policy"); setBusy(button, true, "Сохраняю…");
   try {
-    await savePolicy(productId, policyPayload());
+    await saveSettings(productId);
+    setAutomation("", false);
     message.textContent = "Товар подключён. Первая проверка поставлена в отдельную realtime-очередь.";
     clearSelection();
     await loadPage();
@@ -323,7 +365,7 @@ editForm.addEventListener("submit", async (event) => {
   const productId = Number(document.querySelector("#edit-product-id").value);
   const button = document.querySelector("#edit-save"); setBusy(button, true, "Сохраняю…");
   try {
-    await savePolicy(productId, policyPayload("edit-"));
+    await saveSettings(productId, "edit-");
     editDialog.close();
     message.textContent = "Настройки сохранены. Fast пересчитает цену и место по свежему рынку.";
     await loadPage();

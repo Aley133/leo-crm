@@ -21,3 +21,5 @@
 @media(prefers-reduced-motion:reduce){.fast-collapse,.metric-chevron,.metric-toggle{transition:none}}
 
 .fast-metrics .metric .metric-chevron{display:inline-block;color:inherit}
+
+.automation-control{grid-column:1/-1;display:flex;flex-wrap:wrap;align-items:center;gap:12px}.automation-control small{color:var(--muted,#64748b)}.automation-control button[aria-pressed="true"]{background:#175cd3;color:#fff;border-color:#175cd3}.automation-control button{transition:background .2s,color .2s,border-color .2s}
