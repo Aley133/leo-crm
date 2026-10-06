@@ -25,12 +25,13 @@ from urllib.request import Request, urlopen
 from tools.kaspi_fast_dumping_scanner import (
     KaspiCompetitorSnapshot,
     scan_kaspi_competitors,
+    scanner_session,
 )
 from tools.kaspi_fast_dumping_http_auth import (
     HttpOtpKaspiMerchantSession as KaspiMerchantSession,
 )
 
-VERSION = "1.2.6"
+VERSION = "1.2.7"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -1139,7 +1140,7 @@ async def main(
             except Exception as exc:
                 _log(f"Heartbeat: {exc}", workspace_id=selected_workspace)
 
-    async def worker(number: int) -> None:
+    async def worker_loop(number: int) -> None:
         idle_seconds = 2.0
         worker_id = f"{agent_id}-w{number}"
         price_claim_not_before = 0.0
@@ -1252,6 +1253,10 @@ async def main(
                 if once:
                     return
                 await asyncio.sleep(3)
+
+    async def worker(number: int) -> None:
+        async with scanner_session():
+            await worker_loop(number)
 
     if once:
         await worker(1)

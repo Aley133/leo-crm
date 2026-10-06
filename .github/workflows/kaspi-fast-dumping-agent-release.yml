@@ -123,7 +123,7 @@ jobs:
           git tag -f kaspi-fast-dumping-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/kaspi-fast-dumping-agent-latest --force
           gh release view kaspi-fast-dumping-agent-latest *> $null
-          $notes = "LEO Agent 1.2.6: сканер заранее загружает TLS-сертификаты в память и больше не ломается после очистки временной папки PyInstaller. Краткий сбой DNS или сети при запуске не закрывает Agent: подключение к CRM продолжается с безопасным backoff. HTTP-вход с кодом из письма и remember-device сохранён; Chromium и Playwright не используются."
+          $notes = "LEO Agent 1.2.7: сканер повторно использует соединения внутри потока и запоминает адреса карточек Kaspi. Цены и офферы каждый раз читаются заново. Исправления CRM убирают немедленные повторные циклы после подтверждения и защитных отказов; FIFO, floor и single-flight сохранены."
           if ($LASTEXITCODE -ne 0) {
             gh release create kaspi-fast-dumping-agent-latest `
               --target "$env:GITHUB_SHA" `

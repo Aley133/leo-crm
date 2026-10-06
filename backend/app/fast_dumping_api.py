@@ -64,6 +64,8 @@ ATTENTION_STATUSES = {
     "apply_unconfirmed",
     "verification_retry",
     "error",
+    "apply_failed",
+    "merchant_write_failed",
 }
 WORKING_STATUSES = {
     "queued",
