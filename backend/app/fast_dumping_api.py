@@ -85,6 +85,7 @@ def _policy_payload(policy: FastDumpingPolicy) -> dict:
         "product_id": policy.product_id,
         "enabled": policy.enabled,
         "pricing_mode": policy.pricing_mode,
+        "automation_config": policy.automation_config or {},
         "minimum_profit_kzt": policy.minimum_profit_kzt,
         "undercut_step_kzt": policy.undercut_step_kzt,
         "allow_price_raise": policy.allow_price_raise,
@@ -274,7 +275,7 @@ def upsert_fast_dumping_policy(
         db.add(policy)
         db.flush()
     if policy.pricing_mode == "automation":
-        raise HTTPException(409, "Товар управляется в разделе «Полная автоматизация»")
+        raise HTTPException(409, "Отключите полную автоматизацию в настройках товара")
     state = ensure_state(db, policy=policy, workspace_id=workspace_id)
     active = db.get(FastDumpingJob, state.active_job_id) if state.active_job_id else None
     if active is not None and active.status in {"leased_apply", "leased_verify"}:

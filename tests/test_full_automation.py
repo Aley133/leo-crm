@@ -419,3 +419,39 @@ def test_no_competitor_still_protects_floor_and_never_raises_without_limit():
 def test_conflicting_maximum_price_and_floor_block_write():
     d = decide(config={"maximum_price_kzt": 12000})
     assert not d.write_allowed and d.status == "floor_limited"
+
+
+def test_inline_settings_save_context_and_restore_manual_rules_atomically(db_session):
+    product, _, policy, _ = _seed_fast_product(db_session)
+    manual = FastDumpingPolicyUpsert(
+        undercut_step_kzt=17, minimum_profit_kzt=1300,
+        scan_interval_seconds=900, city_id="750000000", zone_id="ZONE2",
+    )
+    with workspace_context(1):
+        save_automation(product.id, AutomationSettings(
+            minimum_profit_kzt=2500, manual_policy=manual,
+        ), db_session)
+        assert policy.pricing_mode == "automation"
+        assert policy.minimum_profit_kzt == 2500
+        assert policy.city_id == "750000000" and policy.zone_id == "ZONE2"
+        assert policy.automation_config["previous"]["undercut_step_kzt"] == 17
+        assert "manual_policy" not in policy.automation_config
+        save_automation(product.id, AutomationSettings(enabled=False), db_session)
+        assert policy.minimum_profit_kzt == 1300
+        assert policy.undercut_step_kzt == 17 and policy.scan_interval_seconds == 900
+        save_automation(product.id, AutomationSettings(), db_session)
+        save_automation(product.id, AutomationSettings(
+            enabled=False, manual_policy=FastDumpingPolicyUpsert(
+                minimum_profit_kzt=1700, undercut_step_kzt=23, enabled=False,
+            ),
+        ), db_session)
+        assert policy.pricing_mode == "manual" and not policy.enabled
+        assert policy.minimum_profit_kzt == 1700 and policy.undercut_step_kzt == 23
+
+
+def test_removed_pages_redirect_to_fast_settings():
+    from backend.app.ui import crm_dumping, full_automation_page
+    for view in (crm_dumping, full_automation_page):
+        response = view()
+        assert response.status_code == 307
+        assert response.headers["location"] == "/crm/fast-dumping"

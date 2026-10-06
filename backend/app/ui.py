@@ -1,7 +1,7 @@
 from pathlib import Path
 
 from fastapi import APIRouter
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, RedirectResponse
 
 
 STATIC_DIR = Path(__file__).resolve().parent / "static"
@@ -42,9 +42,9 @@ def crm_accounting() -> FileResponse:
     )
 
 
-@router.get("/crm/dumping", response_class=FileResponse)
-def crm_dumping() -> FileResponse:
-    return FileResponse(STATIC_DIR / "dumping.html")
+@router.get("/crm/dumping", response_class=RedirectResponse)
+def crm_dumping() -> RedirectResponse:
+    return RedirectResponse("/crm/fast-dumping", status_code=307)
 
 
 @router.get("/crm/fast-dumping", response_class=FileResponse)
@@ -81,6 +81,6 @@ def crm_monitoring() -> FileResponse:
     return FileResponse(STATIC_DIR / "monitoring.html")
 
 
-@router.get("/crm/full-automation", response_class=FileResponse)
+@router.get("/crm/full-automation", response_class=RedirectResponse)
 def full_automation_page():
-    return FileResponse(STATIC_DIR / "full-automation.html", headers={"Cache-Control":"no-store"})
+    return RedirectResponse("/crm/fast-dumping", status_code=307)

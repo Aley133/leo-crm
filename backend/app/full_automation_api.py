@@ -10,7 +10,7 @@ from .models import Product
 from .dumping_models import DumpingPolicy
 from .fast_dumping_models import FastDumpingPolicy, FastDumpingJob, FastDumpingState
 from .fast_dumping_service import ensure_state, cancel_active_job, queue_scan, utcnow
-from .fast_dumping_api import list_fast_dumping_products
+from .fast_dumping_api import list_fast_dumping_products, FastDumpingPolicyUpsert
 from .workspace_context import current_workspace_id
 
 router = APIRouter(
@@ -34,6 +34,7 @@ SNAPSHOT_FIELDS = (
 
 
 class AutomationSettings(BaseModel):
+    manual_policy: FastDumpingPolicyUpsert | None = None
     enabled: bool = True
     minimum_profit_kzt: Decimal = Field(default=1000, ge=0, le=100000000)
     monitor_seconds: Literal[60, 120, 180, 300] = 120
@@ -142,6 +143,12 @@ def save_automation(
     )
     cancel_active_job(db, state=state, reason="Изменён режим полной автоматизации")
     config = dict(policy.automation_config or {})
+    if payload.manual_policy is not None:
+        policy.city_id = payload.manual_policy.city_id
+        policy.zone_id = payload.manual_policy.zone_id
+        if payload.enabled and policy.pricing_mode != "automation":
+            for key, value in payload.manual_policy.model_dump().items():
+                setattr(policy, key, value)
     if payload.enabled:
         if policy.pricing_mode != "automation":
             config["previous"] = {
@@ -157,7 +164,7 @@ def save_automation(
             config["classic_enabled"] = bool(classic and classic.enabled)
         if classic:
             classic.enabled = False
-        config.update(payload.model_dump(mode="json", exclude={"enabled"}))
+        config.update(payload.model_dump(mode="json", exclude={"enabled", "manual_policy"}))
         policy.pricing_mode = "automation"
         policy.enabled = True
         policy.minimum_profit_kzt = payload.minimum_profit_kzt
@@ -178,6 +185,9 @@ def save_automation(
         policy.automation_config = None
         if classic:
             classic.enabled = bool(config.get("classic_enabled", False))
+    if not payload.enabled and payload.manual_policy is not None:
+        for key, value in payload.manual_policy.model_dump().items():
+            setattr(policy, key, value)
     state.state_version += 1
     state.next_scan_at = utcnow() if policy.enabled else None
     if policy.enabled and not state.automatic_writes_paused:

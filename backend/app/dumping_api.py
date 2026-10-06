@@ -505,7 +505,7 @@ def upsert_dumping_policy(
     from .fast_dumping_models import FastDumpingPolicy
     auto = db.scalar(select(FastDumpingPolicy).where(FastDumpingPolicy.product_id == product_id, FastDumpingPolicy.pricing_mode == "automation"))
     if auto is not None:
-        raise HTTPException(409, "Товар управляется в разделе «Полная автоматизация»")
+        raise HTTPException(409, "Отключите полную автоматизацию в настройках товара")
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     existing_policy = policy is not None
     if policy is None:
