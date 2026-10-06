@@ -216,3 +216,37 @@ def test_full_automation_migration_preserves_manual_rules_and_round_trips():
     finally:
         engine.dispose()
         _reset_public_schema()
+
+
+def test_full_automation_migration_retries_while_agent_holds_state_lock():
+    from threading import Event, Thread
+    _reset_public_schema()
+    config = _alembic_config()
+    engine = create_engine(_database_url())
+    locked = Event()
+    errors = []
+    def worker():
+        try:
+            with engine.begin() as connection:
+                connection.execute(text('LOCK TABLE fast_dumping_states IN ROW SHARE MODE'))
+                locked.set()
+                # Simulate a short in-flight claim/complete transaction.
+                Event().wait(1)
+                connection.execute(text('LOCK TABLE fast_dumping_policies IN ACCESS SHARE MODE'))
+        except Exception as error:
+            errors.append(error)
+    thread = None
+    try:
+        command.upgrade(config,'20261005_0048')
+        thread = Thread(target=worker)
+        thread.start()
+        assert locked.wait(5)
+        command.upgrade(config,'head')
+        thread.join(5)
+        assert not thread.is_alive() and not errors
+        assert 'automation_json' in {c['name'] for c in inspect(engine).get_columns('fast_dumping_states')}
+    finally:
+        if thread is not None:
+            thread.join(5)
+        engine.dispose()
+        _reset_public_schema()
