@@ -16,6 +16,8 @@ const statusFilter = document.querySelector("#status-filter");
 const list = document.querySelector("#fast-list");
 const floorList = document.querySelector("#floor-list");
 const floorSection = document.querySelector("#floor-section");
+const attentionList = document.querySelector("#attention-list");
+const attentionSection = document.querySelector("#attention-section");
 const empty = document.querySelector("#empty");
 const editDialog = document.querySelector("#edit-dialog");
 const editForm = document.querySelector("#edit-form");
@@ -26,7 +28,7 @@ let searchController = null;
 let loading = false;
 const offersCache = new Map();
 
-const attentionStatuses = new Set(["floor_limited","price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error"]);
+const attentionStatuses = new Set(["floor_limited","price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error","apply_failed","merchant_write_failed"]);
 const workingStatuses = new Set(["queued","scanning","queued_apply","preparing_apply","applying","verifying"]);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
@@ -91,7 +93,7 @@ const offersTable = (offers) => {
 
 const renderFloor = () => {
   const limited = rows.filter(isFloor);
-  floorSection.classList.toggle("hidden", limited.length === 0);
+  if (!floorSection.classList.contains("is-open")) return;
   document.querySelector("#floor-count").textContent = limited.length;
   floorList.innerHTML = limited.map((row) => `<article class="floor-item" data-product-id="${row.product_id}">
     <div><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")} · ${escapeHtml(row.state?.status_reason || "Конкурент ниже безопасного floor")}</small></div>
@@ -100,7 +102,17 @@ const renderFloor = () => {
     <div class="floor-value"><span>Текущий floor</span><strong>${money(row.current_safe_floor_kzt ?? row.state?.safe_floor_kzt)}</strong></div>
     <div class="floor-value"><span>Мин. прибыль</span><strong>${money(row.policy.minimum_profit_kzt)}</strong></div>
     <div class="floor-action"><button class="button edit-policy" type="button">Изменить порог</button></div>
-  </article>`).join("");
+  </article>`).join("") || '<p class="fast-card-reason">Товаров на пороге нет.</p>';
+};
+
+const renderAttention = () => {
+  if (!attentionSection.classList.contains("is-open")) return;
+  const needingAttention = rows.filter((row) => attentionStatuses.has(statusOf(row)));
+  document.querySelector("#attention-count").textContent = needingAttention.length;
+  attentionList.innerHTML = needingAttention.map((row) => `<article class="attention-item" data-product-id="${row.product_id}">
+    <div><span class="fast-status ${statusView(row).kind}">${escapeHtml(statusView(row).label)}</span><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")}</small><p>${escapeHtml(row.state?.last_error_message || row.state?.status_reason || "Проверьте настройки товара")}</p></div>
+    <div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button>${row.state?.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : ""}</div>
+  </article>`).join("") || '<p class="fast-card-reason">Товаров, требующих внимания, нет.</p>';
 };
 
 const rowMatches = (row) => {
@@ -158,6 +170,7 @@ const render = (payload) => {
   document.querySelector("#summary-working").textContent = summary.working || 0;
   document.querySelector("#summary-attention").textContent = summary.attention || 0;
   renderFloor();
+  renderAttention();
   const visible = rows.filter(rowMatches);
   list.innerHTML = visible.map(card).join("");
   empty.classList.toggle("hidden", rows.length > 0);
@@ -381,6 +394,17 @@ list.addEventListener("toggle", async (event) => {
   }
 }, true);
 floorList.addEventListener("click", actionClick);
+attentionList.addEventListener("click", actionClick);
+for (const [name, section, renderContent] of [["floor", floorSection, renderFloor], ["attention", attentionSection, renderAttention]]) {
+  const toggle = document.querySelector(`#${name}-toggle`);
+  toggle.addEventListener("click", () => {
+    const open = section.classList.toggle("is-open");
+    toggle.setAttribute("aria-expanded", String(open));
+    section.setAttribute("aria-hidden", String(!open));
+    section.inert = !open;
+    if (open) renderContent();
+  });
+}
 statusFilter.addEventListener("change", () => render({items:rows, summary:{total:rows.length,enabled:rows.filter((r)=>r.policy.enabled).length,floor_limited:rows.filter(isFloor).length,attention:rows.filter((r)=>attentionStatuses.has(statusOf(r))).length,working:rows.filter((r)=>workingStatuses.has(statusOf(r))).length}, checked_at:new Date().toISOString()}));
 productSearch.addEventListener("input", () => { clearTimeout(searchTimer); searchTimer = setTimeout(searchProducts, 250); });
 document.addEventListener("click", (event) => { if (!event.target.closest("#product-picker")) closeProductResults(); });

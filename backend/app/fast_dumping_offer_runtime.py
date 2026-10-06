@@ -481,7 +481,9 @@ def _complete_apply_v2(
         state.status_reason = str(write_payload.get("error_message") or "Расхождение offer-state Kaspi и CRM")
         state.last_error_code = str(write_payload.get("error_code"))
         state.last_error_message = state.status_reason
-        state.next_scan_at = svc.utcnow()
+        policy = db.get(FastDumpingPolicy, job.policy_id)
+        retry_seconds = max(60, svc._policy_interval_seconds(policy)) if policy else 300
+        state.next_scan_at = svc.utcnow() + timedelta(seconds=retry_seconds)
     return result
 
 
@@ -577,13 +579,14 @@ def _complete_verification_v2(
             )
         )
         if state is not None:
-            state.next_scan_at = svc.utcnow()
+            # Preserve the normal interval after success; persistent mismatches
+            # must not immediately reclaim the worker ahead of other products.
             if not verification_succeeded:
                 state.last_error_code = error_code or "offer_state_mismatch"
                 state.last_error_message = error_message
                 state.status_reason = (
                     "Kaspi offer-state не совпал с желаемым после завершения mutation. "
-                    "CRM поставила немедленный новый scan; детали показаны в Fast Dumping."
+                    "CRM повторит scan по выбранному интервалу; детали показаны в Fast Dumping."
                 )
     return result
 

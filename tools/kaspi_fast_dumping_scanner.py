@@ -6,6 +6,9 @@ import json
 import random
 import re
 import uuid
+from collections import OrderedDict
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
@@ -25,6 +28,44 @@ HEADERS = {
     "Origin": "https://kaspi.kz",
     "Referer": "https://kaspi.kz/shop/",
 }
+
+
+_SCANNER_CLIENT: ContextVar[httpx.AsyncClient | None] = ContextVar("kaspi_scanner_client", default=None)
+_PRODUCT_URLS: OrderedDict[tuple[str, str], str] = OrderedDict()
+_PRODUCT_URL_CACHE_LIMIT = 1024
+
+
+@asynccontextmanager
+async def scanner_session():
+    """Reuse connections within one worker; never share city cookies across workers."""
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(25.0, connect=15.0),
+        follow_redirects=True,
+        **httpx_runtime_options(),
+    ) as client:
+        token = _SCANNER_CLIENT.set(client)
+        try:
+            yield client
+        finally:
+            _SCANNER_CLIENT.reset(token)
+
+
+@asynccontextmanager
+async def _scanner_client():
+    client = _SCANNER_CLIENT.get()
+    if client is not None:
+        yield client
+    else:
+        async with scanner_session() as client:
+            yield client
+
+
+def _remember_product_url(key: tuple[str, str], url: str) -> None:
+    # Cache only the route. Headline price, offers and delivery remain fresh.
+    _PRODUCT_URLS[key] = url
+    _PRODUCT_URLS.move_to_end(key)
+    while len(_PRODUCT_URLS) > _PRODUCT_URL_CACHE_LIMIT:
+        _PRODUCT_URLS.popitem(last=False)
 
 
 def _kaspi_timezone():
@@ -777,7 +818,9 @@ async def _open_product_page(
     product_name_hint: str | None,
     require_promo: bool = True,
 ) -> tuple[httpx.Response, dict[str, Any], str]:
-    candidates: list[str] = []
+    cache_key = (master_id, city_id)
+    cached_url = _PRODUCT_URLS.get(cache_key)
+    candidates: list[str] = [cached_url] if cached_url else []
     if product_name_hint:
         candidates.append(f"https://kaspi.kz/shop/p/{_slugify(product_name_hint)}-{master_id}/?c={city_id}")
     candidates.extend([
@@ -796,6 +839,8 @@ async def _open_product_page(
                 "Accept-Language": HEADERS["Accept-Language"],
             })
         except httpx.HTTPError:
+            if url == cached_url:
+                _PRODUCT_URLS.pop(cache_key, None)
             continue
         promo = _promo_conditions(page.text)
         resolved_id = _product_id_from_url(str(page.url))
@@ -805,8 +850,15 @@ async def _open_product_page(
         # accept an exact master-id match, just like the standalone lab. Fast
         # Dumping keeps require_promo=True because its offers request needs the
         # category context from promoConditions.
+        if url == cached_url and resolved_id != master_id:
+            _PRODUCT_URLS.pop(cache_key, None)
+            continue
         if promo is not None or (not require_promo and resolved_id == master_id):
+            if resolved_id == master_id:
+                _remember_product_url(cache_key, str(page.url))
             return page, promo or {}, str(page.url)
+        if url == cached_url:
+            _PRODUCT_URLS.pop(cache_key, None)
     # Some Kaspi variants do not resolve id-only paths. Search only as a
     # fallback, then open the exact card link carrying the requested master ID.
     for search_url in (
@@ -837,6 +889,8 @@ async def _open_product_page(
         promo = _promo_conditions(page.text)
         resolved_id = _product_id_from_url(str(page.url)) or _product_id_from_url(card_url)
         if promo is not None or (not require_promo and resolved_id == master_id):
+            if resolved_id == master_id:
+                _remember_product_url(cache_key, str(page.url))
             return page, promo or {}, str(page.url)
     raise ValueError(
         "Kaspi product page was not resolved from SKU. Set KASPI_PRODUCT_NAME in .env once for this test SKU and retry."
@@ -990,12 +1044,7 @@ async def scan_kaspi_competitors(
     master_id = kaspi_product_id.split("_", 1)[0].strip()
     if not master_id:
         raise ValueError("SKU/master product id is empty")
-    timeout = httpx.Timeout(25.0, connect=15.0)
-    async with httpx.AsyncClient(
-        timeout=timeout,
-        follow_redirects=True,
-        **httpx_runtime_options(),
-    ) as client:
+    async with _scanner_client() as client:
         page, promo, product_url = await _open_product_page(
             client,
             master_id=master_id,

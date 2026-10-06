@@ -1521,3 +1521,66 @@ def test_fast_dumping_ui_and_agent_are_separate_from_ordinary_dumping() -> None:
     assert 'document.querySelector("#city-id").value = ordinary.policy.city_id' not in javascript
     assert "password_dpapi" in agent and "mc_sid_dpapi" in agent
     assert "fast_dumping" not in ordinary
+
+
+@pytest.mark.parametrize("error_code", ["kaspi_stock_lower_than_crm", "kaspi_zero_vs_crm_stock", "kaspi_offer_read_failed"])
+def test_offer_guard_failure_does_not_immediately_requeue(db_session, error_code):
+    from backend.app import fast_dumping_offer_runtime as runtime
+    from backend.app.fast_dumping_service import schedule_due_scans
+    _product, _batch, policy, state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        job, _ = queue_scan(db_session, policy=policy, workspace_id=1, reason="test")
+        db_session.commit()
+    scan = _claim(db_session, 1)
+    with workspace_context(1):
+        complete_scan(db_session, workspace_id=1, job_id=job.id, agent_id="fast-agent",
+                      lease_token=scan.lease_token, succeeded=True,
+                      market_payload=_market(own="20000", competitor="19800"))
+        db_session.commit()
+    apply = _claim(db_session, 1)
+    with workspace_context(1):
+        runtime._complete_apply_v2(db_session, workspace_id=1, job_id=job.id,
+            agent_id="fast-agent", lease_token=apply.lease_token,
+            write_payload={"accepted":False,"verified":False,"error_code":error_code,
+                           "error_message":"Offer-state guard refused the write"})
+        db_session.commit()
+        assert state.status == "verification_retry"
+        assert state.last_error_code == error_code
+        assert state.active_job_id is None
+        assert state.next_scan_at.replace(tzinfo=UTC) >= datetime.now(UTC) + timedelta(seconds=590)
+        assert schedule_due_scans(db_session, workspace_id=1, recover_inventory_transitions=False) == 0
+
+
+@pytest.mark.parametrize("succeeded", [True, False])
+def test_offer_verification_completion_preserves_scan_interval(db_session, succeeded):
+    from backend.app import fast_dumping_offer_runtime as runtime
+    from backend.app.fast_dumping_service import schedule_due_scans
+    _product, _batch, policy, state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        job, _ = queue_scan(db_session, policy=policy, workspace_id=1, reason="test")
+        db_session.commit()
+    scan = _claim(db_session, 1)
+    with workspace_context(1):
+        complete_scan(db_session, workspace_id=1, job_id=job.id, agent_id="fast-agent",
+                      lease_token=scan.lease_token, succeeded=True,
+                      market_payload=_market(own="20000", competitor="19800"))
+        db_session.commit()
+    apply = _claim(db_session, 1)
+    with workspace_context(1):
+        runtime._complete_apply_v2(db_session, workspace_id=1, job_id=job.id,
+            agent_id="fast-agent", lease_token=apply.lease_token,
+            write_payload={"accepted":True,"verified":False,"status_code":200})
+        db_session.commit()
+        job.not_before_at = datetime.now(UTC) - timedelta(seconds=1)
+        db_session.commit()
+    verify = _claim(db_session, 1)
+    with workspace_context(1):
+        result = runtime._complete_verification_v2(db_session, workspace_id=1, job_id=job.id,
+            agent_id="fast-agent", lease_token=verify.lease_token,
+            observed_own_price_kzt=job.decision_json["target_price_kzt"] if succeeded else None,
+            verification_succeeded=succeeded, error_code=None if succeeded else "offer_state_mismatch")
+        db_session.commit()
+        assert result["verified"] is succeeded
+        assert state.active_job_id is None
+        assert state.next_scan_at.replace(tzinfo=UTC) >= datetime.now(UTC) + timedelta(seconds=590)
+        assert schedule_due_scans(db_session, workspace_id=1, recover_inventory_transitions=False) == 0
