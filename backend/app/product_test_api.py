@@ -712,6 +712,9 @@ def read_product_test_state(db: Session = Depends(get_db)) -> dict:
 
 
 def _persist_product_inspection(db: Session, *, job: ProductTestJob, result: dict) -> dict:
+    if (job.options_json or {}).get("manual_preorder"):
+        from .preorder_api import persist_preorder_inspection
+        return persist_preorder_inspection(db, job=job, result=result)
     kaspi_id = str(result.get("kaspi_product_id") or "").strip()[:64]
     merchant_sku = str(result.get("merchant_sku") or kaspi_id).strip()[:128]
     name = str(result.get("product_name") or kaspi_id).strip()[:500]
@@ -1357,6 +1360,9 @@ def _persist_supplier_validation(db: Session, *, job: ProductTestJob, result: di
 
 
 def _enroll_created_product(db: Session, *, job: ProductTestJob, result: dict) -> dict:
+    if (job.options_json or {}).get("manual_preorder"):
+        from .preorder_api import enroll_preorder
+        return enroll_preorder(db, job=job, result=result)
     item = db.scalar(
         select(ProductTestItem).where(
             ProductTestItem.id == job.item_id,
@@ -1961,6 +1967,8 @@ def update_product_test_item(item_id: int, payload: ProductTestUpdate, db: Sessi
     item = db.get(ProductTestItem, item_id)
     if item is None:
         raise HTTPException(status_code=404, detail="Тестовый товар не найден")
+    if item.input_reference.startswith("manual-preorder:"):
+        raise HTTPException(409, "Изменяйте предзаказ через вкладку «Предзаказ» после завершения операции")
     for key, value in payload.model_dump(exclude_unset=True).items():
         if isinstance(value, str):
             value = value.strip() or None
@@ -2148,6 +2156,21 @@ def claim_product_test_job(
             if job is None:
                 db.commit()
                 return {"job": None, "retry_after_seconds": 5}
+            if job.job_type == "create_offer" and (job.options_json or {}).get("manual_preorder"):
+                from .preorder_api import _check_existing
+                try:
+                    _check_existing(db, workspace=payload.workspace_id, kaspi_id=str(job.options_json["master_sku"]))
+                except HTTPException as exc:
+                    job.status = "failed"
+                    job.completed_at = now
+                    job.error_code = "preorder_conflict"
+                    job.error_message = str(exc.detail)
+                    item = db.get(ProductTestItem, job.item_id)
+                    if item is not None:
+                        item.status = "error"
+                        item.last_error = str(exc.detail)
+                    db.commit()
+                    return {"job": None, "retry_after_seconds": 5}
             job.status = "leased"
             job.agent_id = payload.agent_id
             job.lease_token = uuid4().hex

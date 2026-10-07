@@ -92,6 +92,8 @@ def save_automation(
     )
     if product is None:
         raise HTTPException(404, "Товар не найден")
+    from .preorder_api import assert_no_preorder_write
+    assert_no_preorder_write(db, product=product)
     if not product.merchant_sku:
         raise HTTPException(409, "Для автоматизации нужен Merchant SKU")
     policy = db.scalar(

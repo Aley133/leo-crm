@@ -252,10 +252,12 @@ def upsert_fast_dumping_policy(
         select(Product).where(
             Product.id == product_id,
             Product.workspace_id == workspace_id,
-        )
+        ).with_for_update()
     )
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
+    from .preorder_api import assert_no_preorder_write
+    assert_no_preorder_write(db, product=product)
     if not product.merchant_sku:
         raise HTTPException(
             status_code=409,
