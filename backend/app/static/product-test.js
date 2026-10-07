@@ -8,6 +8,12 @@ const pageMode = document.body.dataset.productTestPage || "product-test";
 const isAddProductPage = pageMode === "add-product";
 let refreshTimer = null;
 let currentNewCards = new Map();
+const rocketChoices = new Map();
+document.addEventListener("change", event => {
+  if (!event.target.matches(".rocket, .new-card-rocket")) return;
+  const card = event.target.closest("[data-id]");
+  if (card) rocketChoices.set(Number(card.dataset.id), event.target.checked);
+});
 const localNewCardDrafts = new Map();
 const newCardSaveTimers = new Map();
 const newCardSaveVersions = new Map();
@@ -83,7 +89,7 @@ const itemRow = (item, index) => {
     <div class="table-value" data-label="ДОСТАВКА"><strong>${escapeHtml(deliveryText)}</strong>${supplier.supplier_delivery_days != null ? `<small>${supplier.supplier_delivery_days} дн.</small>` : ""}</div>
     <div class="table-value kaspi-plan" data-label="СТАРТ KASPI"><strong>${money(item.test_price_kzt)}</strong><small>preOrder ${Math.max(1, Number(item.preorder_days || 1))} дн.</small></div>
     <div class="match-cell" data-label="MATCH"><strong>${score == null ? "—" : `${score}%`}</strong><span>${escapeHtml(visualText)}</span><small>${escapeHtml(supplier.match_status || "NO_RESULT")}</small></div>
-    <div class="result-actions" data-label="СТАТУС / ДЕЙСТВИЯ"><span class="result-status ${matchClass}">${escapeHtml(statusText(item))}</span><label><span>Правильная ссылка Ozon</span><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="https://www.ozon.kz/product/…" ${locked ? "disabled" : ""}></label><button class="button validate" type="button" ${locked ? "disabled" : ""}>Проверить / заменить</button><button class="button add" type="button" ${canAdd ? "" : "disabled"}>Выгрузить на Kaspi</button>${item.product_id ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div>` : ""}</div>
+    <div class="result-actions" data-label="СТАТУС / ДЕЙСТВИЯ"><span class="result-status ${matchClass}">${escapeHtml(statusText(item))}</span><label><span>Правильная ссылка Ozon</span><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="https://www.ozon.kz/product/…" ${locked ? "disabled" : ""}></label><button class="button validate" type="button" ${locked ? "disabled" : ""}>Проверить / заменить</button><label><span>🚀 Полная автоматизация</span><input class="rocket" type="checkbox" ${rocketChoices.get(Number(item.id)) ?? item.offers?.rocket_enabled ? "checked" : ""} ${locked ? "disabled" : ""}></label><button class="button add" type="button" ${canAdd ? "" : "disabled"}>Выгрузить на Kaspi</button>${item.product_id ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div>` : ""}</div>
   </article>`;
 };
 
@@ -206,7 +212,7 @@ const newCardRow = (item, activeJobTypes = new Set()) => {
     <details class="new-card-attributes" open><summary><strong>Поля Kaspi (${attributes.length})</strong></summary><div class="new-card-attributes-scroll"><table><thead><tr><th>Поле</th><th>Значение</th><th>Источник Ozon</th></tr></thead><tbody>${attrRows}</tbody></table></div></details>
     <div class="new-card-errors ${errors.length ? "" : "ok"}">${errors.length ? errors.map((value) => `<span>${escapeHtml(value)}</span>`).join("") : "Все обязательные поля заполнены"}</div>
     <div class="new-card-action-message ${mappingBusy ? "pending" : ""}">${mappingBusy ? "Поля категории загружаются. После завершения кнопка создания включится автоматически." : ""}</div>
-    <div class="new-card-actions"><button class="button new-card-save" type="button" ${editingLocked ? "disabled" : ""}>Сохранить черновик</button><button class="button new-card-remap" type="button" ${editingLocked ? "disabled" : ""}>Загрузить поля категории</button><button class="button new-card-create" type="button" ${editingLocked || errors.length ? "disabled" : ""}>${mappingBusy ? "Ожидаем поля категории…" : "Создать новую карточку Kaspi"}</button></div>
+    <div class="new-card-actions"><label><span>🚀 Полная автоматизация</span><input class="new-card-rocket" type="checkbox" ${rocketChoices.get(Number(item.id)) ?? item.offers?.rocket_enabled ? "checked" : ""} ${editingLocked ? "disabled" : ""}></label><button class="button new-card-save" type="button" ${editingLocked ? "disabled" : ""}>Сохранить черновик</button><button class="button new-card-remap" type="button" ${editingLocked ? "disabled" : ""}>Загрузить поля категории</button><button class="button new-card-create" type="button" ${editingLocked || errors.length ? "disabled" : ""}>${mappingBusy ? "Ожидаем поля категории…" : "Создать новую карточку Kaspi"}</button></div>
   </article>`;
 };
 
@@ -495,7 +501,7 @@ document.querySelector("#items")?.addEventListener("click", async (event) => {
     } else if (button.classList.contains("add")) {
       const currentUrl = card.querySelector(".supplier").value.trim();
       if (currentUrl !== (card.dataset.supplierUrl || "")) throw new Error("Ссылка Ozon изменена. Сначала нажмите «Проверить / заменить ссылку».");
-      await request(`/api/product-test/items/${card.dataset.id}/add`, {method:"POST"});
+      await request(`/api/product-test/items/${card.dataset.id}/add`, {method:"POST", body:JSON.stringify({rocket_enabled:card.querySelector(".rocket")?.checked || false})});
       notify("Выгрузка запущена. После подтверждения Kaspi обычная карточка появится в «Товарах» и подключится к существующему Мониторингу и Быстрому демпингу.", "success");
     }
     await load();
@@ -550,7 +556,7 @@ document.querySelector("#new-cards")?.addEventListener("click", async (event) =>
       await request(`/api/product-test/new-cards/${card.dataset.id}/map-category`, {method:"POST", body:JSON.stringify({category:payload.category})});
       notify("Product Test Agent загружает реальные поля и enum-значения выбранной категории Kaspi.", "success");
     } else if (button.classList.contains("new-card-create")) {
-      await request(`/api/product-test/new-cards/${card.dataset.id}/create`, {method:"POST"});
+      await request(`/api/product-test/new-cards/${card.dataset.id}/create`, {method:"POST", body:JSON.stringify({rocket_enabled:card.querySelector(".new-card-rocket")?.checked || false})});
       notify("Новая карточка передана Product Import. После detailed result агент сам дождётся masterSku, создаст оффер и подключит существующие Мониторинг и Fast Dumping.", "success");
       notifyInline("Создание запущено. Карточка перенесена в список ожидания Kaspi.", "success");
     } else {

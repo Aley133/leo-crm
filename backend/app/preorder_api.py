@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, or_, update
 from sqlalchemy.orm import Session
 
@@ -34,7 +34,26 @@ def supports_archive_preorder(version: str | None) -> bool:
                 and tuple(map(int, version.split("."))) >= (1, 1, 25))
 
 
-class PreorderRequest(BaseModel):
+class PreorderPricing(BaseModel):
+    dump_enabled: bool = False
+    ozon_url: str | None = Field(default=None, max_length=2000)
+    rocket_enabled: bool = False
+    minimum_profit_kzt: int = Field(default=1000, ge=0, le=100000000)
+
+    @model_validator(mode="after")
+    def validate_pricing(self):
+        if self.rocket_enabled and not self.dump_enabled:
+            raise ValueError("Включите демпинг перед полной автоматизацией")
+        if self.dump_enabled:
+            from .supplier_identity import parse_supplier_url
+            parts = urlsplit(self.ozon_url or "")
+            if (parts.scheme != "https" or parts.username or parts.password
+                    or parse_supplier_url(self.ozon_url or "").supplier_code != "ozon"):
+                raise ValueError("Для демпинга укажите ссылку https на товар Ozon")
+        return self
+
+
+class PreorderRequest(PreorderPricing):
     reference: str = Field(min_length=1, max_length=2000)
     price_kzt: int = Field(gt=0, le=100000000)
     preorder_days: int = Field(ge=1, le=365)
@@ -43,7 +62,7 @@ class PreorderRequest(BaseModel):
     zone_id: str = Field(default="Magnum_ZONE1", min_length=1, max_length=64)
 
 
-class PreorderEdit(BaseModel):
+class PreorderEdit(PreorderPricing):
     price_kzt: int = Field(gt=0, le=100000000)
     preorder_days: int = Field(ge=1, le=365)
     stock_count: int | None = Field(default=None, ge=1, le=1000000)
@@ -112,7 +131,13 @@ def card_id(reference: str) -> str:
     return match.group(1)
 
 
-def assert_no_preorder_write(db: Session, *, product: Product) -> None:
+def assert_no_preorder_write(db: Session, *, product: Product, classic: bool = False) -> None:
+    from .preorder_modes import pricing_locked, preorder_item
+    item = preorder_item(db, product) if classic else None
+    if item is not None and not (item.offers_json or {}).get("stock_mode"):
+        raise HTTPException(409, "Предзаказ использует только мониторинг Ozon и Fast Dumping. Измените режим в предзаказе.")
+    if pricing_locked(db, product):
+        raise HTTPException(409, "Управление ценой заблокировано предзаказом. Включите «Демпить этот товар» в предзаказе.")
     pending = db.scalar(
         select(ProductTestJob.id)
         .join(ProductTestItem, ProductTestItem.id == ProductTestJob.item_id)
@@ -206,8 +231,11 @@ def read_preorders(db: Session = Depends(get_db)):
         .order_by(ProductTestItem.updated_at.desc(), ProductTestItem.id.desc())
         .limit(100)
     ).all()
+    from .dumping_service import physical_stock_counts
+    counts = physical_stock_counts(db, product_ids={i.product_id for i in items if i.product_id})
     return {
-        "items": [_item_payload(i) for i in items],
+        "items": [{**_item_payload(i), "physical_stock": counts.get(i.product_id, 0),
+                   "status": "stock_trading" if counts.get(i.product_id, 0) > 0 else i.status} for i in items],
         "agent": _product_test_agent_status(workspace),
         "required_agent_version": ARCHIVE_AGENT_VERSION,
     }
@@ -236,6 +264,9 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
     if len(items) > 1:
         raise HTTPException(409, "В Тесте товара несколько записей этой карточки; устраните дубликаты")
     item = items[0] if items else None
+    from .preorder_modes import check_rocket_capacity, pause_pricing
+    if payload.rocket_enabled:
+        check_rocket_capacity(db, workspace, item.id if item else None, product.id if product else None)
     if item is not None:
         pending = db.scalar(
             select(ProductTestJob.id)
@@ -274,7 +305,11 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
     item.active = False
     item.last_error = None
     item.offers_json = {**(item.offers_json or {}), "mode": "manual_preorder", "manual_preorder": True,
-                        "source_sku": source_sku}
+                        "source_sku": source_sku, "dump_enabled": payload.dump_enabled,
+                        "ozon_url": payload.ozon_url, "rocket_enabled": payload.rocket_enabled,
+                        "minimum_profit_kzt": payload.minimum_profit_kzt, "stock_mode": False}
+    if product:
+        pause_pricing(db, product, item)
     job = _queue_job(
         db,
         workspace_id=workspace,
@@ -314,6 +349,7 @@ def edit_preorder(
             stock_count=payload.stock_count if payload.stock_count is not None else item.stock_count,
             city_id=item.city_id,
             zone_id=item.zone_id,
+            **payload.model_dump(include={"dump_enabled", "ozon_url", "rocket_enabled", "minimum_profit_kzt"}),
         ),
         db,
     )
@@ -390,6 +426,9 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
             pass
     item.brand = str(result.get("brand") or item.brand or "")[:255] or None
     item.image_url = normalize_product_image_url(result.get("image_url")) or item.image_url
+    if product:
+        from .preorder_modes import pause_pricing
+        pause_pricing(db, product, item)
     item.status = "adding_to_kaspi"
     followup = _queue_job(
         db,
@@ -551,7 +590,8 @@ def enroll_preorder(db: Session, *, job: ProductTestJob, result: dict):
         feed.source_xml = source_mirror
         feed.generated_at = _now()
     item.product_id = product.id
-    item.fast_dumping_policy_id = None
+    from .preorder_modes import activate_preorder_pricing
+    activate_preorder_pricing(db, product, item)
     item.status = "preorder_connected"
     item.added_at = _now()
     item.last_error = None

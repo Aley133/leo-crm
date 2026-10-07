@@ -84,6 +84,10 @@ class ProductTestSettingsUpdate(BaseModel):
     zone_id: str | None = Field(default=None, min_length=1, max_length=64)
 
 
+class ProductTestAddRequest(BaseModel):
+    rocket_enabled: bool = False
+
+
 class SupplierUrlRequest(BaseModel):
     supplier_url: str = Field(min_length=12, max_length=4000, pattern=r"^https://(?:[^/]+\.)?ozon\.(?:ru|kz)/")
 
@@ -1579,6 +1583,9 @@ def _enroll_created_product(db: Session, *, job: ProductTestJob, result: dict) -
     else:
         for key, value in policy_values.items():
             setattr(policy, key, value)
+    if (item.offers_json or {}).get("rocket_enabled"):
+        from .preorder_modes import configure_rocket
+        configure_rocket(db, policy, True)
     ensure_state(db, policy=policy, workspace_id=job.workspace_id)
     queue_scan(db, policy=policy, workspace_id=job.workspace_id, reason="product_test_auto_enroll")
     queue_browser_target_now(db, target_id=target.id, supplier_code="ozon")
@@ -1860,8 +1867,10 @@ def map_product_test_new_card_category(
 
 
 @router.post("/new-cards/{item_id}/create")
-def create_product_test_new_card(item_id: int, db: Session = Depends(get_db)) -> dict:
+def create_product_test_new_card(item_id: int, db: Session = Depends(get_db), *, payload: ProductTestAddRequest | None = None) -> dict:
     workspace_id = current_workspace_id()
+    from .workspace_models import Workspace
+    db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
     item = db.scalar(
         select(ProductTestItem).where(
             ProductTestItem.id == item_id,
@@ -1901,6 +1910,11 @@ def create_product_test_new_card(item_id: int, db: Session = Depends(get_db)) ->
     supplier = (item.offers_json or {}).get("supplier") or {}
     if not supplier.get("validated") or _money(supplier.get("supplier_price_kzt")) is None:
         raise HTTPException(status_code=409, detail="Ozon не подтвердил цену новой карточки")
+    rocket = bool(payload and payload.rocket_enabled)
+    from .preorder_modes import check_rocket_capacity
+    if rocket:
+        check_rocket_capacity(db, workspace_id, item.id, item.product_id)
+    item.offers_json = {**(item.offers_json or {}), "rocket_enabled": rocket}
     settings = _settings(db, workspace_id)
     pricing = _refresh_upload_plan(item, settings)
     if pricing is None or item.test_price_kzt is None:
@@ -2022,8 +2036,10 @@ def validate_product_supplier(item_id: int, payload: SupplierUrlRequest, db: Ses
 
 
 @router.post("/items/{item_id}/add")
-def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
+def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db), *, payload: ProductTestAddRequest | None = None) -> dict:
     workspace_id = current_workspace_id()
+    from .workspace_models import Workspace
+    db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
     item = db.scalar(
         select(ProductTestItem).where(ProductTestItem.id == item_id, ProductTestItem.workspace_id == workspace_id).with_for_update()
     )
@@ -2042,6 +2058,11 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db)) -> dict:
         or supplier_cost is None
     ):
         raise HTTPException(status_code=409, detail="Сначала подтвердите ссылку и цену поставщика Ozon")
+    rocket = bool(payload and payload.rocket_enabled)
+    from .preorder_modes import check_rocket_capacity
+    if rocket:
+        check_rocket_capacity(db, workspace_id, item.id, item.product_id)
+    item.offers_json = {**(item.offers_json or {}), "rocket_enabled": rocket}
     settings = _settings(db, workspace_id)
     pricing = _refresh_upload_plan(item, settings)
     if pricing is None or item.test_price_kzt is None:

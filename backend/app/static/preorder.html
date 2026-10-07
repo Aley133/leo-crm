@@ -33,10 +33,14 @@
             <label><span>Количество для предзаказа, шт.</span><input id="stock" type="number" min="1" max="1000000" step="1" value="5" required></label>
             <label><span>Город Kaspi</span><input id="city" value="196220100" maxlength="32" required></label>
             <label><span>Зона Kaspi</span><input id="zone" value="Magnum_ZONE1" maxlength="64" required></label>
+      <label class="wide"><span>Ссылка на товар Ozon для мониторинга</span><input id="ozon" type="url" maxlength="2000" placeholder="https://www.ozon.kz/product/…"></label>
+      <label><span>Демпить этот товар</span><input id="dump" type="checkbox"></label>
+      <label><span>🚀 Полная автоматизация</span><input id="rocket" type="checkbox"></label>
+      <label><span>Минимальная прибыль, ₸</span><input id="profit" type="number" min="0" max="100000000" step="1" value="1000" required></label>
             <button id="connect" class="button" type="submit">Подключить к карточке</button>
             <div id="connect-message" class="wide fast-dialog-note hidden" role="alert" tabindex="-1"></div>
           </form>
-          <p class="fast-dialog-note">Используется уже подключённый агент «Тест товара». После подтверждения Kaspi товар появится в CRM. Подключение и редактирование цены, срока и количества выполняет агент «Тест товара».</p>
+          <p class="fast-dialog-note">Используется уже подключённый агент «Тест товара». После подтверждения Kaspi товар появится в CRM. Без тумблера цена фиксирована, демпинг заблокирован. С тумблером мониторинг Ozon передаёт цену и доставку в Fast Dumping. Физический остаток переводит товар в обычную торговлю.</p>
         </section>
         <section class="fast-section"><h2>Подключения</h2><div id="preorder-list" class="fast-list"></div></section>
       </section>
@@ -49,6 +53,10 @@
       <label><span>Цена продажи, ₸</span><input id="edit-price" type="number" min="1" max="100000000" step="1" required></label>
       <label><span>Предзаказ, дней</span><input id="edit-days" type="number" min="1" max="365" step="1" required></label>
             <label><span>Количество для предзаказа, шт.</span><input id="edit-stock" type="number" min="1" max="1000000" step="1" value="5" required></label>
+      <label class="wide"><span>Ссылка на товар Ozon для мониторинга</span><input id="edit-ozon" type="url" maxlength="2000" placeholder="https://www.ozon.kz/product/…"></label>
+      <label><span>Демпить этот товар</span><input id="edit-dump" type="checkbox"></label>
+      <label><span>🚀 Полная автоматизация</span><input id="edit-rocket" type="checkbox"></label>
+      <label><span>Минимальная прибыль, ₸</span><input id="edit-profit" type="number" min="0" max="100000000" step="1" value="1000" required></label>
       <p class="wide fast-dialog-note">Изменения применит агент «Тест товара» после подтверждения Kaspi.</p>
       <div id="edit-message" class="wide fast-dialog-note hidden" role="alert" tabindex="-1"></div>
       <button id="edit-save" class="button" type="submit">Сохранить</button>
@@ -56,5 +64,5 @@
     </form>
   </dialog>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/preorder.js?v=20261007-6" defer></script>
+  <script src="/static/preorder.js?v=20261007-7" defer></script>
 </body></html>

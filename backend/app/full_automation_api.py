@@ -2,7 +2,7 @@ from decimal import Decimal
 from typing import Literal
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 from .auth import require_service_token
 from .db import get_db
@@ -124,20 +124,8 @@ def save_automation(
             409, "Дождитесь подтверждения текущей операции Kaspi перед сменой режима"
         )
     if payload.enabled and policy.pricing_mode != "automation":
-        count = db.scalar(
-            select(func.count())
-            .select_from(FastDumpingPolicy)
-            .where(
-                FastDumpingPolicy.workspace_id == workspace,
-                FastDumpingPolicy.pricing_mode == "automation",
-                FastDumpingPolicy.enabled.is_(True),
-            )
-        )
-        if count >= CAPACITY:
-            raise HTTPException(
-                409,
-                f"Быстрый канал рассчитан на {CAPACITY} активных товаров. Отключите другой товар перед подключением.",
-            )
+        from .preorder_modes import check_rocket_capacity
+        check_rocket_capacity(db, workspace, product_id=product_id)
     classic = db.scalar(
         select(DumpingPolicy)
         .where(DumpingPolicy.product_id == product_id)

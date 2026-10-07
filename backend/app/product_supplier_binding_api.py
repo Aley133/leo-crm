@@ -261,16 +261,22 @@ def create_manual_supplier_binding(
     payload: ManualSupplierBindingCreate,
     db: Session = Depends(get_db),
 ) -> ManualSupplierBindingResult:
-    product = db.get(Product, product_id)
+    return attach_manual_supplier_binding(product_id, payload, db)
+
+
+def attach_manual_supplier_binding(product_id, payload, db, *, commit=True):
+    from .workspace_context import current_workspace_id
+    workspace = current_workspace_id()
+    product = db.scalar(select(Product).where(Product.id == product_id, Product.workspace_id == workspace))
     if product is None:
         raise HTTPException(status_code=404, detail="Product not found")
 
     url = str(payload.url)
     supplier_code, supplier_name, external_id = _source_from_url(url)
 
-    supplier = db.scalar(select(Supplier).where(Supplier.code == supplier_code).with_for_update())
+    supplier = db.scalar(select(Supplier).where(Supplier.code == supplier_code, Supplier.workspace_id == workspace).with_for_update())
     if supplier is None:
-        supplier = Supplier(code=supplier_code, name=supplier_name, is_active=True)
+        supplier = Supplier(workspace_id=workspace, code=supplier_code, name=supplier_name, is_active=True)
         db.add(supplier)
         db.flush()
 
@@ -283,6 +289,7 @@ def create_manual_supplier_binding(
     created_supplier_product = supplier_product is None
     if supplier_product is None:
         supplier_product = SupplierProduct(
+            workspace_id=workspace,
             supplier_id=supplier.id,
             external_id=external_id,
             title=(payload.title or product.name).strip(),
@@ -316,6 +323,7 @@ def create_manual_supplier_binding(
     created_binding = binding is None
     if binding is None:
         binding = ProductBinding(
+            workspace_id=workspace,
             product_id=product.id,
             supplier_product_id=supplier_product.id,
             status=BindingStatus.ACTIVE.value,
@@ -361,6 +369,7 @@ def create_manual_supplier_binding(
     )
     if monitor_target is None:
         monitor_target = MonitorTarget(
+            workspace_id=workspace,
             product_binding_id=binding.id,
             status=MonitorStatus.ACTIVE.value,
             interval_seconds=300,
@@ -382,7 +391,8 @@ def create_manual_supplier_binding(
         if queue_result.job_id is not None:
             job = db.get(BrowserAgentJob, queue_result.job_id)
 
-    db.commit()
+    if commit:
+        db.commit()
 
     return ManualSupplierBindingResult(
         product_id=product.id,

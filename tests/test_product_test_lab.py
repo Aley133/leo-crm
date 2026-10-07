@@ -697,8 +697,8 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert '@router.get("/crm/add-product"' in ui
     assert 'data-product-test-page="product-test"' in test_html
     assert 'data-product-test-page="add-product"' in add_html
-    assert 'product-test.js?v=20261007-1' in test_html
-    assert 'product-test.js?v=20261007-1' in add_html
+    assert 'product-test.js?v=20261007-2' in test_html
+    assert 'product-test.js?v=20261007-2' in add_html
     assert ui.count('headers={"Cache-Control": "no-store"}') >= 3
     assert 'id="discover-form"' in test_html
     assert 'id="discover-mode"' in test_html
@@ -2471,7 +2471,8 @@ def test_manual_ozon_url_reuses_validation_job_and_refreshes_visual_pair(db_sess
     assert supplier["image_match"]["status"] == "OPERATOR_CONFIRMED"
 
 
-def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_session, monkeypatch) -> None:
+@pytest.mark.parametrize("rocket", [False, True])
+def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_session, monkeypatch, rocket) -> None:
     _seed_agent_account(db_session)
     item = ProductTestItem(
         workspace_id=1,
@@ -2502,7 +2503,8 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
     )
     db_session.add(item)
     db_session.commit()
-    queued = add_product_to_kaspi(item.id, db_session)
+    from backend.app.product_test_api import ProductTestAddRequest
+    queued = add_product_to_kaspi(item.id, db_session, payload=ProductTestAddRequest(rocket_enabled=rocket))
     claim = claim_product_test_job(
         ProductTestAgentIdentity(agent_id="agent-w1", agent_kind="product_test", workspace_id=1, merchant_uid="merchant-1"),
         db_session,
@@ -2542,6 +2544,7 @@ def test_confirmed_kaspi_create_enrolls_existing_fast_dumping_atomically(db_sess
     assert product is not None and product.merchant_sku == "333333333_987654321"
     assert db_session.scalar(select(FastDumpingPolicy).where(FastDumpingPolicy.product_id == product.id)) is not None
     assert db_session.scalar(select(FastDumpingJob).where(FastDumpingJob.product_id == product.id)) is not None
+    assert db_session.scalar(select(FastDumpingPolicy)).pricing_mode == ("automation" if rocket else "manual")
     assert db_session.scalar(select(MonitorTarget)) is not None
     assert db_session.scalar(select(BrowserAgentJob)) is not None
     assert db_session.scalar(select(SupplierOfferState)) is not None
