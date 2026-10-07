@@ -150,6 +150,7 @@ def test_fast_claim_skips_busy_card_without_locking_other_policy_settings(postgr
     from backend.app import fast_dumping_service as svc
     from backend.app.fast_dumping_models import FastDumpingPolicy
     from backend.app.product_test_models import ProductTestItem  # noqa: F401
+    from backend.app.inventory_models import InventoryBatch
 
     monkeypatch.setattr(svc, "_reserve_inventory_recovery", lambda _: False)
     with postgres_factory() as seed:
@@ -163,6 +164,8 @@ def test_fast_claim_skips_busy_card_without_locking_other_policy_settings(postgr
             seed.add(policy)
             seed.flush()
             policy_ids.append(policy.id)
+            seed.add(InventoryBatch(product_id=product.id, received_at=datetime.now(UTC),
+                                    quantity_received=1, quantity_remaining=1, unit_cost=1000))
             svc.ensure_state(seed, policy=policy, workspace_id=1)
             svc.queue_scan(seed, policy=policy, workspace_id=1, reason="policy_saved")
         seed.commit()
@@ -179,6 +182,31 @@ def test_fast_claim_skips_busy_card_without_locking_other_policy_settings(postgr
         assert job1.status == job2.status == "leased_scan"
         second.commit()
         first.commit()
+
+
+def test_empty_supply_guard_skips_concurrent_product_edit(postgres_factory):
+    from backend.app.fast_dumping_models import FastDumpingPolicy
+    from backend.app.fast_dumping_supply_guard import disable_empty_products
+    from backend.app import fast_dumping_service as svc
+    with postgres_factory() as seed:
+        product = Product(name="Empty", kaspi_product_id="EMPTY", merchant_sku="EMPTY")
+        seed.add(product)
+        seed.flush()
+        policy = FastDumpingPolicy(product_id=product.id)
+        seed.add(policy)
+        seed.flush()
+        svc.ensure_state(seed, policy=policy, workspace_id=1)
+        svc.queue_scan(seed, policy=policy, workspace_id=1, reason="scheduled")
+        seed.commit()
+        product_id, policy_id = product.id, policy.id
+    with postgres_factory() as first, postgres_factory() as second:
+        first.scalar(select(Product).where(Product.id == product_id).with_for_update())
+        second.execute(text("SET LOCAL lock_timeout = '2s'"))
+        assert disable_empty_products(second, 1) == 0
+        first.commit()
+        assert disable_empty_products(second, 1) == 1
+        second.commit()
+        assert not second.get(FastDumpingPolicy, policy_id).enabled
 
 
 def test_xml_import_waits_for_feed_before_updating_products(postgres_factory):

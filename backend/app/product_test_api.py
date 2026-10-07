@@ -1869,8 +1869,6 @@ def map_product_test_new_card_category(
 @router.post("/new-cards/{item_id}/create")
 def create_product_test_new_card(item_id: int, db: Session = Depends(get_db), *, payload: ProductTestAddRequest | None = None) -> dict:
     workspace_id = current_workspace_id()
-    from .workspace_models import Workspace
-    db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
     item = db.scalar(
         select(ProductTestItem).where(
             ProductTestItem.id == item_id,
@@ -1911,9 +1909,6 @@ def create_product_test_new_card(item_id: int, db: Session = Depends(get_db), *,
     if not supplier.get("validated") or _money(supplier.get("supplier_price_kzt")) is None:
         raise HTTPException(status_code=409, detail="Ozon не подтвердил цену новой карточки")
     rocket = bool(payload and payload.rocket_enabled)
-    from .preorder_modes import check_rocket_capacity
-    if rocket:
-        check_rocket_capacity(db, workspace_id, item.id, item.product_id)
     item.offers_json = {**(item.offers_json or {}), "rocket_enabled": rocket}
     settings = _settings(db, workspace_id)
     pricing = _refresh_upload_plan(item, settings)
@@ -2038,8 +2033,6 @@ def validate_product_supplier(item_id: int, payload: SupplierUrlRequest, db: Ses
 @router.post("/items/{item_id}/add")
 def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db), *, payload: ProductTestAddRequest | None = None) -> dict:
     workspace_id = current_workspace_id()
-    from .workspace_models import Workspace
-    db.scalar(select(Workspace).where(Workspace.id == workspace_id).with_for_update())
     item = db.scalar(
         select(ProductTestItem).where(ProductTestItem.id == item_id, ProductTestItem.workspace_id == workspace_id).with_for_update()
     )
@@ -2059,9 +2052,6 @@ def add_product_to_kaspi(item_id: int, db: Session = Depends(get_db), *, payload
     ):
         raise HTTPException(status_code=409, detail="Сначала подтвердите ссылку и цену поставщика Ozon")
     rocket = bool(payload and payload.rocket_enabled)
-    from .preorder_modes import check_rocket_capacity
-    if rocket:
-        check_rocket_capacity(db, workspace_id, item.id, item.product_id)
     item.offers_json = {**(item.offers_json or {}), "rocket_enabled": rocket}
     settings = _settings(db, workspace_id)
     pricing = _refresh_upload_plan(item, settings)

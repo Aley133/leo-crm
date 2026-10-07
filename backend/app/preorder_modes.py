@@ -1,8 +1,7 @@
 """Ownership of explicitly requested preorders, shared by the existing workers."""
 from datetime import timedelta
 from decimal import Decimal
-from fastapi import HTTPException
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, or_
 from .product_test_models import ProductTestItem
 from .fast_dumping_models import FastDumpingPolicy, FastDumpingJob, FastDumpingState
 from .dumping_models import DumpingPolicy
@@ -70,22 +69,6 @@ def configure_rocket(db, policy, enabled):
                   delivery_advantage_days=4, maximum_price_kzt=None, observation_hours=12)
     policy.pricing_mode = "automation"
     policy.automation_config = config
-
-
-def check_rocket_capacity(db, workspace, item_id=None, product_id=None):
-    from .full_automation_api import CAPACITY
-    active = db.scalar(select(func.count()).select_from(FastDumpingPolicy).where(
-        FastDumpingPolicy.workspace_id == workspace,
-        FastDumpingPolicy.enabled.is_(True), FastDumpingPolicy.pricing_mode == "automation",
-        FastDumpingPolicy.product_id != product_id if product_id else True)) or 0
-    reserved = db.scalar(select(func.count()).select_from(ProductTestItem).where(
-        ProductTestItem.workspace_id == workspace,
-        ProductTestItem.status.in_(("preorder_inspecting", "adding_to_kaspi", "new_card_importing", "new_card_moderation")),
-        ProductTestItem.offers_json["rocket_enabled"].as_boolean().is_(True),
-        ProductTestItem.id != item_id if item_id else True,
-        or_(ProductTestItem.product_id.is_(None), ProductTestItem.product_id != product_id) if product_id else True)) or 0
-    if active + reserved >= CAPACITY:
-        raise HTTPException(409, f"Для полной автоматизации доступны {CAPACITY} активных карточек. Отключите другую карточку.")
 
 
 def activate_preorder_pricing(db, product, item):

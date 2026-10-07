@@ -220,15 +220,18 @@ def list_fast_dumping_products(db: Session = Depends(get_db)) -> dict:
         )
 
     def row_status(row: dict) -> str:
+        if not row["policy"]["enabled"]:
+            return "paused"
         state = row.get("state") or {}
         return str(state.get("status") or "idle")
 
     summary = {
         "total": len(items),
         "enabled": sum(bool(row["policy"]["enabled"]) for row in items),
+        "disabled": sum(not row["policy"]["enabled"] for row in items),
         "floor_limited": sum(
-            row_status(row) == "floor_limited"
-            or (row.get("state") or {}).get("decision_status") == "floor_limited"
+            row["policy"]["enabled"] and (row_status(row) == "floor_limited"
+            or (row.get("state") or {}).get("decision_status") == "floor_limited")
             for row in items
         ),
         "attention": sum(row_status(row) in ATTENTION_STATUSES for row in items),

@@ -57,6 +57,16 @@ _AUTO_QUEUE_LOCK = Lock()
 _HISTORY_PRUNE_NOT_BEFORE: dict[int, float] = {}
 _INVENTORY_RECOVERY_LOCK = Lock()
 _INVENTORY_RECOVERY_NOT_BEFORE: dict[int, float] = {}
+_SUPPLY_RECOVERY_NOT_BEFORE: dict[int, float] = {}
+
+
+def _reserve_supply_recovery(workspace_id: int) -> bool:
+    now = monotonic()
+    with _INVENTORY_RECOVERY_LOCK:
+        if _SUPPLY_RECOVERY_NOT_BEFORE.get(workspace_id, 0) > now:
+            return False
+        _SUPPLY_RECOVERY_NOT_BEFORE[workspace_id] = now + 60
+        return True
 
 
 def utcnow() -> datetime:
@@ -773,6 +783,9 @@ def claim_job(
 ) -> FastDumpingJob | None:
     from .preorder_modes import reconcile_preorder_policies
     reconcile_preorder_policies(db, workspace_id)
+    if _reserve_supply_recovery(workspace_id):
+        from .fast_dumping_supply_guard import disable_empty_products
+        disable_empty_products(db, workspace_id)
     recover_expired_leases(db, workspace_id=workspace_id)
     # Retention over completed JSON history must never run inside the agent's
     # latency-sensitive claim transaction. The callable is kept for controlled

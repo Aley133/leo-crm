@@ -18,6 +18,8 @@ const floorList = document.querySelector("#floor-list");
 const floorSection = document.querySelector("#floor-section");
 const attentionList = document.querySelector("#attention-list");
 const attentionSection = document.querySelector("#attention-section");
+const disabledList = document.querySelector("#disabled-list");
+const disabledSection = document.querySelector("#disabled-section");
 const empty = document.querySelector("#empty");
 const editDialog = document.querySelector("#edit-dialog");
 const editForm = document.querySelector("#edit-form");
@@ -33,8 +35,8 @@ const workingStatuses = new Set(["queued","scanning","queued_apply","preparing_a
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU") : "—";
-const statusOf = (row) => row.state?.status || (row.policy.enabled ? "idle" : "paused");
-const isFloor = (row) => statusOf(row) === "floor_limited" || row.state?.decision_status === "floor_limited";
+const statusOf = (row) => row.policy.enabled ? row.state?.status || "idle" : "paused";
+const isFloor = (row) => row.policy.enabled && (statusOf(row) === "floor_limited" || row.state?.decision_status === "floor_limited");
 const productPhoto = (row, css = "fast-product-photo") => row.image_url
   ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
   : `<span class="${css} placeholder" data-resolve-product-image data-product-id="${Number(row.product_id)}" data-image-class="${css}">Фото…</span>`;
@@ -79,7 +81,7 @@ const statusView = (row) => {
     price_anomaly:"Аномалия цены", market_context_mismatch:"Контекст не совпал",
     own_offer_missing:"Наша строка не найдена", out_of_stock:"Нет FIFO-остатка",
     apply_timeout:"Не подтверждено", apply_unconfirmed:"Защитная пауза", verification_retry:"Перепроверка", error:"Ошибка",
-    paused:"Отключён", stale:"Решение устарело", apply_failed:"Ошибка записи",
+    paused:"Отключена", stale:"Решение устарело", apply_failed:"Ошибка записи",
   };
   const successStatuses = ["applied","watching","cooldown","delivery_advantage","preorder_position","preorder_position_best_effort"];
   const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : successStatuses.includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
@@ -136,6 +138,13 @@ const rowMatches = (row) => {
   return true;
 };
 
+const renderDisabled = () => {
+  if (!disabledSection.classList.contains("is-open")) return;
+  const disabled = rows.filter((row) => !row.policy.enabled);
+  document.querySelector("#disabled-count").textContent = disabled.length;
+  disabledList.innerHTML = disabled.map((row) => `<article class="attention-item" data-product-id="${row.product_id}"><div><span class="fast-status off">Отключена</span><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")}</small><p>${escapeHtml(row.state?.status_reason || "Демпинг выключен")}</p></div><div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button></div></article>`).join("") || '<p class="fast-card-reason">Отключённых карточек нет.</p>';
+};
+
 const card = (row) => {
   const state = row.state || {};
   const view = statusView(row);
@@ -175,11 +184,13 @@ const render = (payload) => {
   const summary = payload.summary || {};
   document.querySelector("#summary-total").textContent = summary.total || 0;
   document.querySelector("#summary-enabled").textContent = summary.enabled || 0;
+  document.querySelector("#summary-disabled").textContent = rows.filter((row) => !row.policy.enabled).length;
   document.querySelector("#summary-floor").textContent = summary.floor_limited || 0;
   document.querySelector("#summary-working").textContent = summary.working || 0;
   document.querySelector("#summary-attention").textContent = summary.attention || 0;
   renderFloor();
   renderAttention();
+  renderDisabled();
   const visible = rows.filter(rowMatches);
   list.innerHTML = visible.map(card).join("");
   empty.classList.toggle("hidden", rows.length > 0);
@@ -454,7 +465,8 @@ list.addEventListener("toggle", async (event) => {
 }, true);
 floorList.addEventListener("click", actionClick);
 attentionList.addEventListener("click", actionClick);
-for (const [name, section, renderContent] of [["floor", floorSection, renderFloor], ["attention", attentionSection, renderAttention]]) {
+disabledList.addEventListener("click", actionClick);
+for (const [name, section, renderContent] of [["floor", floorSection, renderFloor], ["attention", attentionSection, renderAttention], ["disabled", disabledSection, renderDisabled]]) {
   const toggle = document.querySelector(`#${name}-toggle`);
   toggle.addEventListener("click", () => {
     const open = section.classList.toggle("is-open");

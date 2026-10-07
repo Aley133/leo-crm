@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Быстрый демпинг</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
-  <link rel="stylesheet" href="/static/fast-dumping.css?v=20261006-3">
+  <link rel="stylesheet" href="/static/fast-dumping.css?v=20261007-2">
   <link rel="stylesheet" href="/static/product-images.css?v=20260819-2">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
@@ -57,6 +57,7 @@
         <section class="metrics fast-metrics" aria-label="Сводка быстрого демпинга">
           <article class="metric"><span>Подключено</span><strong id="summary-total">0</strong><small>товаров</small></article>
           <article class="metric"><span>Активно</span><strong id="summary-enabled">0</strong><small>политик</small></article>
+          <button id="disabled-toggle" class="metric metric-toggle" type="button" aria-expanded="false" aria-controls="disabled-section"><span>Отключены</span><strong id="summary-disabled">0</strong><small>демпинг выключен <span class="metric-chevron" aria-hidden="true">⌄</span></small></button>
           <button id="floor-toggle" class="metric attention metric-toggle" type="button" aria-expanded="false" aria-controls="floor-section"><span>На пороге</span><strong id="summary-floor">0</strong><small>конкурент ниже floor <span class="metric-chevron" aria-hidden="true">⌄</span></small></button>
           <article class="metric"><span>В работе</span><strong id="summary-working">0</strong><small>scan / apply</small></article>
           <button id="attention-toggle" class="metric danger metric-toggle" type="button" aria-expanded="false" aria-controls="attention-section"><span>Требуют внимания</span><strong id="summary-attention">0</strong><small>защиты и ошибки <span class="metric-chevron" aria-hidden="true">⌄</span></small></button>
@@ -76,6 +77,11 @@
             <span id="attention-count" class="fast-pill warning">0</span>
           </div>
           <div id="attention-list" class="floor-list"></div>
+        </div></div></section>
+
+        <section id="disabled-section" class="fast-collapse" aria-hidden="true" inert><div class="collapse-clip"><div class="fast-section">
+          <div class="fast-section-head"><div><span class="fast-kicker">ОТКЛЮЧЕНЫ</span><h2>Карточки с выключенным демпингом</h2><p>Нулевой остаток без поставщика или ручное отключение. Настройки сохранены; включить демпинг можно в настройках карточки.</p></div><span id="disabled-count" class="fast-pill">0</span></div>
+          <div id="disabled-list" class="floor-list"></div>
         </div></div></section>
 
         <section class="fast-section connect-section">
@@ -147,7 +153,7 @@
 
   <script src="/static/workspace-context.js?v=20260731-1"></script>
   <script src="/static/product-image-resolver.js?v=20260819-2" defer></script>
-  <script src="/static/fast-dumping.js?v=20261007-8" defer></script>
+  <script src="/static/fast-dumping.js?v=20261007-9" defer></script>
   <script src="/static/fast-dumping-remove.js?v=20260824-1" defer></script>
 </body>
 </html>

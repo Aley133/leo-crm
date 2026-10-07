@@ -303,6 +303,9 @@ def _complete_scan_v2(
         )
         return {"status": state.status, "queued_apply": True, "decision": decision}
 
+    from .fast_dumping_supply_guard import disable_empty_products
+    if disable_empty_products(db, workspace_id, {product.id}):
+        return {"status": "paused", "queued_apply": False}
     decision = _off_decision(state)
     state.inventory_on_hand = 0
     state.desired_stock_count = 0
