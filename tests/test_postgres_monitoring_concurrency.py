@@ -101,6 +101,51 @@ def _offer(supplier_product_id: int, *, price: str, observed_at: datetime) -> No
     )
 
 
+def test_fast_due_batches_skip_locked_rows_without_duplicate_jobs(postgres_factory):
+    from backend.app.fast_dumping_models import (
+        FastDumpingJob, FastDumpingPolicy, FastDumpingState,
+    )
+    from backend.app.fast_dumping_service import schedule_due_scans
+
+    with postgres_factory() as seed:
+        for i in range(12):
+            product = Product(
+                name=f"Fast batch {i}", kaspi_product_id=f"PG-FAST-{i}",
+                merchant_sku=f"PG-FAST-{i}", sale_enabled=True,
+            )
+            seed.add(product)
+            seed.flush()
+            policy = FastDumpingPolicy(product_id=product.id, enabled=True)
+            seed.add(policy)
+            seed.flush()
+            seed.add(FastDumpingState(policy_id=policy.id, product_id=product.id))
+        seed.commit()
+
+    with postgres_factory() as first, postgres_factory() as second:
+        second.execute(text("SET LOCAL statement_timeout = '2s'"))
+        assert schedule_due_scans(
+            first, workspace_id=1, limit=10, recover_inventory_transitions=False,
+        ) == 10
+        # The first transaction still owns its locks. The second must make
+        # progress on the remaining rows, without waiting or duplicating work.
+        assert schedule_due_scans(
+            second, workspace_id=1, limit=10, recover_inventory_transitions=False,
+        ) == 2
+        second.commit()
+        first.commit()
+
+    with postgres_factory() as check:
+        jobs = check.scalars(select(FastDumpingJob)).all()
+        states = check.scalars(select(FastDumpingState)).all()
+        assert len(jobs) == len(states) == 12
+        assert len({job.product_id for job in jobs}) == 12
+        job_ids = {job.product_id: job.id for job in jobs}
+        assert all(state.active_job_id == job_ids[state.product_id] for state in states)
+        assert schedule_due_scans(
+            check, workspace_id=1, recover_inventory_transitions=False,
+        ) == 0
+
+
 def test_xml_import_waits_for_feed_before_updating_products(postgres_factory):
     from backend.app.dumping_models import KaspiXmlFeed
     from backend.app.fast_dumping_models import FastDumpingPolicy
