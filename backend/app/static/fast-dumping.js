@@ -30,13 +30,13 @@ let searchController = null;
 let loading = false;
 const offersCache = new Map();
 
-const attentionStatuses = new Set(["floor_limited","price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error","apply_failed","merchant_write_failed","automation_market_incomplete","automation_market_stale"]);
+const attentionStatuses = new Set(["price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error","apply_failed","merchant_write_failed","automation_market_incomplete","automation_market_stale"]);
 const workingStatuses = new Set(["queued","scanning","queued_apply","preparing_apply","applying","verifying"]);
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (char) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[char]));
 const money = (value) => value == null || value === "" ? "—" : `${Number(value).toLocaleString("ru-RU", {maximumFractionDigits:2})} ₸`;
 const dateTime = (value) => value ? new Date(value).toLocaleString("ru-RU") : "—";
 const statusOf = (row) => row.policy.enabled ? row.state?.status || "idle" : "paused";
-const isFloor = (row) => row.policy.enabled && (statusOf(row) === "floor_limited" || row.state?.decision_status === "floor_limited");
+const isFloor = (row) => row.policy.enabled && !attentionStatuses.has(statusOf(row)) && (statusOf(row) === "floor_limited" || row.state?.decision_status === "floor_limited");
 const productPhoto = (row, css = "fast-product-photo") => row.image_url
   ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
   : `<span class="${css} placeholder" data-resolve-product-image data-product-id="${Number(row.product_id)}" data-image-class="${css}">Фото…</span>`;
