@@ -84,3 +84,8 @@ def crm_monitoring() -> FileResponse:
 @router.get("/crm/full-automation", response_class=RedirectResponse)
 def full_automation_page():
     return RedirectResponse("/crm/fast-dumping", status_code=307)
+
+
+@router.get("/crm/preorder", response_class=FileResponse)
+def preorder_page():
+    return FileResponse(STATIC_DIR / "preorder.html", headers={"Cache-Control": "no-store"})

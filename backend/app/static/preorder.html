@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LEO CRM — Предзаказ</title>
+  <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
+  <link rel="stylesheet" href="/static/fast-dumping.css?v=20261006-3">
+  <link rel="stylesheet" href="/static/product-images.css?v=20260819-2">
+  <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
+  <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
+  <script src="/static/theme.js?v=20260803-2"></script>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar">
+      <div class="brand"><span>LEO</span><small>CRM</small></div>
+      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/product-test">Тест товара</a><a class="active" href="/crm/preorder">Предзаказ</a><a href="/crm/add-product">Добавить товар</a><a href="/crm/orders">Заказы</a><a href="/crm/revenue">Выручка</a><a href="/crm/accounting">Бух учёт</a><a href="/crm/fast-dumping">Быстрый демпинг</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+      </nav>
+      <div class="runtime-status"><span class="dot"></span><span>Realtime Pricing</span></div>
+    </aside>
+    <main>
+      <header class="page-header"><div><span class="fast-kicker">KASPI</span><h1>Предзаказ</h1><p>Подключите магазин к выбранной карточке Kaspi по своей цене и сроку.</p></div><button id="refresh" class="button secondary" type="button">Обновить</button></header>
+      <p id="message" role="status"></p>
+      <section id="auth-panel" class="panel hidden"><h2>Подключение к LEO CRM</h2><form id="token-form"><input id="token" type="password" placeholder="SERVICE_API_TOKEN" required><button class="button">Подключить</button></form></section>
+      <section id="preorder-page" class="hidden">
+        <section class="fast-section"><h2>Подключить карточку</h2><p id="agent-status">Проверяю связь с агентом «Тест товара»…</p>
+          <form id="preorder-form" class="fast-policy-form">
+            <label class="wide"><span>Ссылка на карточку Kaspi</span><input id="reference" type="url" placeholder="https://kaspi.kz/shop/p/…" required></label>
+            <label><span>Цена продажи, ₸</span><input id="price" type="number" min="1" max="100000000" step="1" required></label>
+            <label><span>Предзаказ, дней</span><input id="days" type="number" min="1" max="365" step="1" required></label>
+            <label><span>Город Kaspi</span><input id="city" value="196220100" maxlength="32" required></label>
+            <label><span>Зона Kaspi</span><input id="zone" value="Magnum_ZONE1" maxlength="64" required></label>
+            <button id="connect" class="button" type="submit">Подключить к карточке</button>
+          </form>
+          <p class="fast-dialog-note">Используется уже подключённый агент «Тест товара». После подтверждения Kaspi товар появится в CRM и Fast Dumping. Цена останется указанной: для автоматического демпинга настройте себестоимость или поставщика и включите его в настройках товара.</p>
+        </section>
+        <section class="fast-section"><h2>Подключения</h2><div id="preorder-list" class="fast-list"></div></section>
+      </section>
+    </main>
+  </div>
+  <script src="/static/workspace-context.js?v=20260731-1"></script>
+  <script src="/static/preorder.js?v=20261007-1" defer></script>
+</body></html>

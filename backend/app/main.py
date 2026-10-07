@@ -35,6 +35,7 @@ from .fixed_procurement_source_api import router as fixed_procurement_source_rou
 from .fast_dumping_agent_api import router as fast_dumping_agent_router
 from .fast_dumping_api import router as fast_dumping_router
 from .full_automation_api import router as full_automation_router
+from .preorder_api import router as preorder_router
 from .inventory_api import router as inventory_router
 from .kaspi_competitor_agent_api import router as kaspi_competitor_agent_router
 from .kaspi_order_polling import ENRICHMENT_LAST_RUN as KASPI_ENRICHMENT_STATUS
@@ -145,6 +146,7 @@ app.include_router(pricing_router)
 app.include_router(dumping_router)
 app.include_router(fast_dumping_router)
 app.include_router(full_automation_router)
+app.include_router(preorder_router)
 app.include_router(dumping_run_compat_router)
 app.include_router(dumping_public_router)
 app.include_router(marketplace_router)
