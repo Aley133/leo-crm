@@ -507,7 +507,7 @@ def upsert_dumping_policy(
     if auto is not None:
         raise HTTPException(409, "Отключите полную автоматизацию в настройках товара")
     from .preorder_api import assert_no_preorder_write
-    assert_no_preorder_write(db, product=product)
+    assert_no_preorder_write(db, product=product, classic=True)
     policy = db.scalar(select(DumpingPolicy).where(DumpingPolicy.product_id == product_id))
     existing_policy = policy is not None
     if policy is None:

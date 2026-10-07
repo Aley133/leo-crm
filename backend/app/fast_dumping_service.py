@@ -768,6 +768,8 @@ def claim_job(
     workspace_id: int,
     agent_id: str,
 ) -> FastDumpingJob | None:
+    from .preorder_modes import reconcile_preorder_policies
+    reconcile_preorder_policies(db, workspace_id)
     recover_expired_leases(db, workspace_id=workspace_id)
     # Retention over completed JSON history must never run inside the agent's
     # latency-sensitive claim transaction. The callable is kept for controlled

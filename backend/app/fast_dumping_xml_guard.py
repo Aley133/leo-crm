@@ -38,6 +38,8 @@ def _sync_product_inventory_to_feed(
     product_id: int,
     reason: str,
 ) -> dict[str, int | str | None]:
+    from .preorder_modes import stock_arrived
+    stock_arrived(db, product_id)
     policy = _fast_policy(db, product_id)
     if policy is None:
         return _PREVIOUS_SYNC(db, product_id=product_id, reason=reason)
@@ -88,6 +90,10 @@ def _sync_product_inventory_to_feed(
 
 
 def _publish_decision(db: Session, *, product: Product, policy: Any, decision: Any):
+    from .preorder_modes import pricing_locked
+    if pricing_locked(db, product):
+        policy.enabled = False
+        policy.auto_publish_xml = False
     if _fast_policy(db, product.id) is None:
         return _PREVIOUS_PUBLISH(db, product=product, policy=policy, decision=decision)
 

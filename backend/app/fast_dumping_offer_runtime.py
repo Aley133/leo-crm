@@ -201,6 +201,15 @@ def _complete_scan_v2(
 
     stock = physical_stock_count(db, product_id=product.id)
     source = resolve_cost_source(db, product_id=product.id, inventory_first=True)
+    from .preorder_modes import preorder_item, monitored_preorder_source
+    manual_item = preorder_item(db, product)
+    if stock <= 0 and manual_item is not None and not (manual_item.offers_json or {}).get("stock_mode"):
+        source = monitored_preorder_source(db, product, source)
+
+    if stock <= 0 and manual_item is not None and not (manual_item.offers_json or {}).get("stock_mode") and source is None:
+        svc._finish_without_write(state=state, job=job, policy=policy, status="awaiting_supplier_refresh",
+            reason="Ожидается свежая подтверждённая цена и доставка Ozon. Цена предзаказа сохранена.", now=svc.utcnow())
+        return {"status": state.status, "queued_apply": False}
 
     if stock > 0 and source is not None and source.kind == "inventory":
         state.inventory_on_hand = stock
@@ -212,6 +221,15 @@ def _complete_scan_v2(
             FastDumpingJob.status == "applied",
         ).order_by(FastDumpingJob.completed_at.desc(), FastDumpingJob.id.desc()).limit(1))
         was_preorder = confirmed is not None and (confirmed.decision_json or {}).get("fulfillment_mode") == "preorder"
+        if (manual_item is not None and state.own_price_kzt is not None
+                and state.own_price_kzt < calculate_safe_floor(unit_cost_kzt=source.unit_cost_kzt,
+                    minimum_profit_kzt=Decimal(policy.minimum_profit_kzt))):
+            # A warehouse batch can cost more than the former supplier offer.
+            # Keep the safe price decision instead of endlessly retrying an
+            # inventory-only transition at the old price below FIFO floor.
+            if result.get("queued_apply"):
+                job.decision_json = _inventory_decision(job, state, stock)
+            return result
         if ((str(job.reason or "").startswith("inventory_priority:") or was_preorder)
                 and not state.automatic_writes_paused and state.market_context_ok
                 and state.own_price_kzt is not None):
@@ -240,12 +258,16 @@ def _complete_scan_v2(
         return result
 
     if source is not None and source.kind == "supplier":
+        if manual_item is not None and (state.automatic_writes_paused or not state.market_context_ok or state.own_price_kzt is None):
+            return result
         if policy.pricing_mode == "automation" and (state.automatic_writes_paused or not state.market_context_ok or state.own_price_kzt is None):
             return result
         if policy.pricing_mode == "automation":
             from .full_automation_service import observe_sales
             observe_sales(db, policy=policy, state=state)
         decision = _supplier_decision(state=state, policy=policy, source=source)
+        if manual_item is not None:
+            decision["stock_count"] = int(manual_item.stock_count)
         if policy.pricing_mode == "automation" and decision["status"] == "automation_market_incomplete":
             state.status = decision["status"]; state.status_reason = decision["reason"]
             return {"status":state.status, "queued_apply":False}
@@ -376,6 +398,13 @@ def _prepare_apply_v2(
 
     stock = physical_stock_count(db, product_id=product.id)
     source = resolve_cost_source(db, product_id=product.id, inventory_first=True)
+    from .preorder_modes import preorder_item, monitored_preorder_source
+    manual_item = preorder_item(db, product)
+    if stock <= 0 and manual_item is not None and not (manual_item.offers_json or {}).get("stock_mode"):
+        source = monitored_preorder_source(db, product, source)
+    if (stock <= 0 and manual_item is not None and not (manual_item.offers_json or {}).get("stock_mode")
+            and not (manual_item.offers_json or {}).get("dump_enabled")):
+        return _stale_offer_job(state=state, job=job, reason="Предзаказ сохраняет заданную цену; демпинг выключен.")
     decision = dict(job.decision_json or {})
     if mode == "inventory":
         target = Decimal(str(decision.get("target_price_kzt") or 0))
@@ -420,6 +449,15 @@ def _prepare_apply_v2(
                     f"сейчас {preorder}. Выполняется новый scan."
                 ),
             )
+        if manual_item is not None:
+            current = _supplier_decision(state=state, policy=policy, source=source)
+            if (svc._aware(state.last_scanned_at) is None
+                    or svc.utcnow() - svc._aware(state.last_scanned_at) > timedelta(seconds=300)
+                    or not state.market_context_ok or not current.get("write_allowed")
+                    or Decimal(str(current.get("target_price_kzt") or 0)) != Decimal(str(decision.get("target_price_kzt") or 0))
+                    or int(decision.get("stock_count") or 0) != int(manual_item.stock_count)
+                    or Decimal(str(decision.get("target_price_kzt") or 0)) < Decimal(str(current["safe_floor_kzt"]))):
+                return _stale_offer_job(state=state, job=job, reason="Цена, остаток или экономика предзаказа изменились; нужен новый scan.")
         if policy.pricing_mode == "automation":
             if svc._aware(state.last_scanned_at) is None or svc.utcnow() - svc._aware(state.last_scanned_at) > timedelta(seconds=300):
                 return _stale_offer_job(state=state, job=job, reason="Рынок устарел; нужна новая проверка автоматизации.")
@@ -432,7 +470,7 @@ def _prepare_apply_v2(
             if cooldown is not None and svc.utcnow() < cooldown:
                 svc._finish_without_write(state=state, job=job, policy=policy, status="cooldown", reason="Ожидается интервал записи цены.", now=svc.utcnow())
                 return {"ready":False,"cooldown":True}
-        desired_stock = int(SUPPLIER_PREORDER_STOCK_COUNT)
+        desired_stock = int(manual_item.stock_count) if manual_item is not None else int(SUPPLIER_PREORDER_STOCK_COUNT)
         state.source_kind = "supplier"
         state.source_name = source.name
         state.source_cost_kzt = source.unit_cost_kzt
