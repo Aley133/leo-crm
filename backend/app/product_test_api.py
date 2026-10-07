@@ -2122,6 +2122,8 @@ def claim_product_test_job(
             merchant_uid=payload.merchant_uid,
         )
         now = _now()
+        from .preorder_api import supports_archive_preorder
+        archive_capable = supports_archive_preorder(payload.version)
         with workspace_context(payload.workspace_id):
             _touch_product_test_agent(payload)
             db.execute(
@@ -2144,6 +2146,8 @@ def claim_product_test_job(
                 .where(
                     ProductTestJob.workspace_id == payload.workspace_id,
                     ProductTestJob.status == "queued",
+                    or_(archive_capable,
+                        ProductTestJob.options_json["manual_preorder"].as_boolean().is_not(True)),
                     or_(
                         ProductTestJob.lease_until.is_(None),
                         ProductTestJob.lease_until <= now,
@@ -2156,10 +2160,12 @@ def claim_product_test_job(
             if job is None:
                 db.commit()
                 return {"job": None, "retry_after_seconds": 5}
+            if (job.options_json or {}).get("manual_preorder"):
+                job.options_json = {**job.options_json, "preorder_archive": True}
             if job.job_type == "create_offer" and (job.options_json or {}).get("manual_preorder"):
                 from .preorder_api import _check_existing
                 try:
-                    _check_existing(db, workspace=payload.workspace_id, kaspi_id=str(job.options_json["master_sku"]))
+                    _check_existing(db, workspace=payload.workspace_id, kaspi_id=str(job.options_json["master_sku"]), merchant_sku=job.options_json.get("merchant_sku"))
                 except HTTPException as exc:
                     job.status = "failed"
                     job.completed_at = now

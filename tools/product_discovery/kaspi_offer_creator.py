@@ -34,6 +34,9 @@ class OfferState:
     operation_type: str | None = None
     processed: bool | None = None
     raw_status: str | None = None
+    model: str | None = None
+    brand: str | None = None
+    image_url: str | None = None
 
     def dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -214,12 +217,15 @@ class MerchantOfferApi:
                     if availability.get("available") is None
                     else str(availability.get("available")).strip().lower()
                 ),
-                row_available=(None if row.get("available") is None else bool(row.get("available"))),
+                row_available=(None if row.get("available") is None else str(row.get("available")).lower() in {"true", "yes", "1"}),
                 price_kzt=_to_int(city_price),
                 query_mode=mode,
                 operation_type=(None if row.get("operationType") is None else str(row.get("operationType"))),
                 processed=(None if row.get("processed") is None else bool(row.get("processed"))),
                 raw_status=(None if row.get("status") is None else str(row.get("status"))),
+                model=str(row.get("model") or row.get("name") or row.get("title") or "")[:500] or None,
+                brand=str(row.get("brand") or "")[:255] or None,
+                image_url=str(row.get("imageUrl") or "")[:2048] or None,
             )
         return OfferState(found=False, sku=reference, requested_reference=reference)
 
@@ -520,6 +526,7 @@ class MerchantOfferApi:
         live: bool,
         attempts: int = 12,
         poll_seconds: float = 2.0,
+        merchant_sku: str | None = None,
     ) -> dict[str, Any]:
         master_sku = str(master_sku).strip()
         price = int(price)
@@ -538,6 +545,9 @@ class MerchantOfferApi:
                 and state.price_kzt == price
                 and state.stock_count == stock
                 and state.preorder_days == preorder
+                and state.row_available is not False
+                and state.nested_available not in {"no", "false", "0"}
+                and state.query_mode != "inactive"
             )
 
         def poll_offer(
@@ -567,7 +577,10 @@ class MerchantOfferApi:
                 time.sleep(min(poll_interval, remaining))
             return last_state
 
-        before = self.read_offer(master_sku)
+        before = self.read_offer(merchant_sku or master_sku)
+        if merchant_sku and (not before.found or before.sku != merchant_sku
+                             or before.master_sku != master_sku):
+            raise ValueError("Архивный SKU не подтвердил выбранную карточку; новый оффер не создавался")
         if before.found:
             if not live or is_confirmed(before):
                 return {

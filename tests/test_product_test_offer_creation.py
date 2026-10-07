@@ -576,3 +576,73 @@ def test_product_test_agent_blocks_duplicate_new_card_import(monkeypatch) -> Non
             store_id="11843018_041600",
             kaspi_api_token_provider=lambda: "secret-token",
         ))
+
+
+def test_archive_preorder_inspection_reads_inactive_cabinet_without_public_card(monkeypatch):
+    class Catalog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def read_offer(self, reference):
+            assert reference == "117556298_386692612"
+            return OfferState(found=True, sku=reference, master_sku="117556298",
+                              row_available=False, query_mode="inactive", model="Ayusri")
+    monkeypatch.setattr(product_test_agent, "MerchantOfferApi", Catalog)
+    async def no_public(**kwargs):
+        raise AssertionError("Archive restoration must not require a public card")
+    monkeypatch.setattr(product_test_agent, "inspect_kaspi_product", no_public)
+    result = asyncio.run(product_test_agent._execute_job(
+        {"job_type": "inspect", "reference": "117556298",
+         "options": {"manual_preorder": True, "preorder_archive": True,
+                     "source_sku": "117556298_386692612", "master_sku": "117556298"}},
+        merchant_session=object(), store_id="store-1"))
+    assert result["product_name"] == "Ayusri"
+    assert result["kaspi_product_id"] == "117556298"
+    assert result["catalog_state"]["query_mode"] == "inactive"
+
+
+@pytest.mark.parametrize("activated", [True, False])
+def test_archived_offer_with_matching_values_requires_activation(monkeypatch, activated):
+    api = object.__new__(MerchantOfferApi)
+    before = OfferState(found=True, sku="117556298_386692612", master_sku="117556298",
+                        price_kzt=4500, stock_count=5, preorder_days=5,
+                        row_available=False, query_mode="inactive")
+    after = OfferState(found=True, sku=before.sku, master_sku=before.master_sku,
+                       price_kzt=4500, stock_count=5, preorder_days=5,
+                       row_available=activated, query_mode="active" if activated else "inactive")
+    states = iter([before, after])
+    references, writes = [], []
+    def read(reference):
+        references.append(reference)
+        return next(states)
+    monkeypatch.setattr(api, "read_offer", read)
+    monkeypatch.setattr(api, "process_offer", lambda **kwargs: writes.append(kwargs) or {"accepted": True})
+    result = api.create_linked_offer(master_sku=before.master_sku, merchant_sku=before.sku,
+        model="Ayusri", price=4500, stock=5, preorder=5, live=True, attempts=1, poll_seconds=0.5)
+    assert writes[0]["sku"] == before.sku
+    assert references == [before.sku, before.sku]
+    assert result["result"] == ("ALREADY_EXISTS" if activated else "EXISTING_PROCESS_ACCEPTED_NOT_CONFIRMED")
+
+
+def test_missing_exact_archive_sku_never_creates_a_duplicate(monkeypatch):
+    api = object.__new__(MerchantOfferApi)
+    monkeypatch.setattr(api, "read_offer", lambda ref: OfferState(found=False, sku=ref))
+    with pytest.raises(ValueError, match="новый оффер не создавался"):
+        api.create_linked_offer(master_sku="117556298", merchant_sku="117556298_386692612",
+            model="Ayusri", price=4500, stock=5, preorder=5, live=True)
+
+
+def test_missing_merchant_sku_never_falls_back_to_public_creation(monkeypatch):
+    class Catalog:
+        def __init__(self, *_args, **_kwargs):
+            pass
+        def read_offer(self, reference):
+            return OfferState(found=False, sku=reference)
+    monkeypatch.setattr(product_test_agent, "MerchantOfferApi", Catalog)
+    async def no_public(**kwargs):
+        raise AssertionError("Missing exact merchant SKU must not create another offer")
+    monkeypatch.setattr(product_test_agent, "inspect_kaspi_product", no_public)
+    with pytest.raises(ValueError, match="ни в продаже, ни в архиве"):
+        asyncio.run(product_test_agent._execute_job(
+            {"job_type": "inspect", "options": {"manual_preorder": True,
+             "source_sku": "117556298_386692612", "master_sku": "117556298"}},
+            merchant_session=object(), store_id="store-1"))
