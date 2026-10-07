@@ -131,7 +131,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.24: если Ozon скрывает срок из page/json/v2, агент чистым HTTP читает видимый срок из webAddToCart точной страницы товара. Даты рекомендаций не используются; Chromium и Playwright не добавлены."
+          $notes = "LEO Product Test Agent 1.1.25: восстановление предзаказа по SKU из архива Kaspi. Чтение активных и архивных офферов, сохранение merchant SKU, подтверждение доступности перед регистрацией в CRM. Новый агент и отдельный процесс не нужны."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

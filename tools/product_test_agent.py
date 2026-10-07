@@ -10,6 +10,7 @@ import json
 import os
 import platform
 import random
+import re
 import socket
 import sys
 import time
@@ -38,7 +39,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.24"
+VERSION = "1.1.25"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -557,6 +558,30 @@ async def _execute_job(
 ) -> dict:
     job_type = str(job.get("job_type") or "inspect")
     options = job.get("options") if isinstance(job.get("options"), dict) else {}
+    if job_type == "inspect" and options.get("manual_preorder"):
+        creator = MerchantOfferApi(merchant_session, store_id=store_id,
+                                  city_id=str(job.get("city_id") or "196220100"))
+        reference = str(options.get("source_sku") or options.get("master_sku") or "")
+        state = await asyncio.to_thread(creator.read_offer, reference)
+        if state.found:
+            master = str(state.master_sku or "")
+            if not re.fullmatch(r"\d{5,18}", master):
+                raise ValueError("Архивный SKU пока не привязан к карточке Kaspi")
+            if not options.get("source_sku") and options.get("master_sku") and master != str(options["master_sku"]):
+                raise ValueError("SKU в кабинете Kaspi связан с другой карточкой")
+            # Archive membership is enough to restore an existing offer. It
+            # must not depend on public offers being visible before activation.
+            return {"kaspi_product_id": master,
+                    "product_name": state.model or options.get("product_name") or f"Карточка Kaspi {master}",
+                    "brand": state.brand, "image_url": state.image_url,
+                    "catalog_state": state.dict()}
+        if (not options.get("master_sku") or
+            (options.get("source_sku") and options["source_sku"] != options["master_sku"])):
+            raise ValueError("SKU не найден ни в продаже, ни в архиве текущего кабинета Kaspi")
+        return await inspect_kaspi_product(
+            reference=str(job.get("reference") or options["master_sku"]),
+            city_id=str(job.get("city_id") or "196220100"),
+            zone_id=str(job.get("zone_id") or "Magnum_ZONE1"))
     if job_type in {"discover", "discover_popular"}:
         merchant_catalog = MerchantOfferApi(
             merchant_session,
@@ -686,6 +711,8 @@ async def _execute_job(
             store_id=store_id,
             city_id=str(job.get("city_id") or "196220100"),
         )
+        existing_options = ({"merchant_sku": options["merchant_sku"]}
+                            if options.get("preorder_archive") and options.get("merchant_sku") else {})
         result = await asyncio.to_thread(
             creator.create_linked_offer,
             master_sku=str(options["master_sku"]),
@@ -696,6 +723,7 @@ async def _execute_job(
             live=True,
             attempts=KASPI_CONFIRMATION_ATTEMPTS,
             poll_seconds=KASPI_CONFIRMATION_POLL_SECONDS,
+            **existing_options,
         )
         if result.get("result") not in {"CREATED_AND_VISIBLE", "ALREADY_EXISTS"}:
             raise RuntimeError(str(result.get("result") or "Kaspi offer was not confirmed"))

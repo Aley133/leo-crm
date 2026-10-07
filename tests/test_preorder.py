@@ -296,6 +296,7 @@ def test_stock_arriving_while_waiting_prevents_agent_write(db_session, monkeypat
         result = api.claim_product_test_job(
             api.ProductTestAgentIdentity(
                 agent_id="preorder-test",
+                version="1.1.25",
                 workspace_id=1,
                 merchant_uid="merchant",
                 agent_kind="product_test",
@@ -419,10 +420,11 @@ def test_old_merchant_sku_adopts_existing_test_preorder_without_duplicates(db_se
         assert read_preorders(db_session)["items"][0]["id"] == item.id
         assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 1
     with workspace_context(3):
-        with pytest.raises(HTTPException) as exc:
-            connect_preorder(PreorderRequest(reference="old-sku",
-                price_kzt=14000, preorder_days=7), db_session)
-        assert exc.value.status_code == 422
+        queued = connect_preorder(PreorderRequest(reference="old-sku",
+            price_kzt=14000, preorder_days=7), db_session)
+        assert queued["item"]["product_id"] is None
+        assert queued["item"]["kaspi_product_id"].startswith("sku:")
+        assert db_session.get(ProductTestJob, queued["job"]["id"]).options_json["master_sku"] is None
 
 
 def test_adopting_existing_test_item_waits_for_its_pending_job(db_session):
@@ -449,3 +451,94 @@ def test_invalid_preorder_quantity_is_rejected(quantity):
         PreorderRequest(reference=URL, price_kzt=14000, preorder_days=7, stock_count=quantity)
     with pytest.raises(ValidationError):
         PreorderEdit(price_kzt=14000, preorder_days=7, stock_count=quantity)
+
+
+def test_archived_sku_imported_as_product_id_is_normalized_without_losing_history(db_session):
+    product, batch, policy, _ = _seed_fast_product(db_session)
+    with workspace_context(1):
+        batch.quantity_remaining = 0
+        product.kaspi_product_id = "117556298_386692612"
+        product.merchant_sku = "117556298_386692612"
+        product.sale_enabled = False
+        policy.enabled = False
+        db_session.commit()
+        saved_id = product.id
+        queued = connect_preorder(PreorderRequest(reference=product.merchant_sku,
+            price_kzt=4500, preorder_days=5, stock_count=5), db_session)
+        assert db_session.get(ProductTestJob, queued["job"]["id"]).options_json["master_sku"] == "117556298"
+        assert queued["item"]["product_id"] == saved_id
+        _persist_product_inspection(db_session,
+            job=db_session.get(ProductTestJob, queued["job"]["id"]),
+            result={"kaspi_product_id": "117556298", "product_name": "Ayusri",
+                    "catalog_state": {"found": True, "sku": product.merchant_sku,
+                                      "master_sku": "117556298"}})
+        write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
+        assert write.options_json["merchant_sku"] == "117556298_386692612"
+        state = {"found": True, "sku": "117556298_386692612", "master_sku": "117556298",
+                 "stock_count": 5, "preorder_days": 5, "price_kzt": 4500,
+                 "row_available": False, "query_mode": "inactive"}
+        result = {"after": state, "merchant_sku": state["sku"], "master_sku": state["master_sku"]}
+        with pytest.raises(ValueError):
+            _enroll_created_product(db_session, job=write, result=result)
+        assert not product.sale_enabled and product.kaspi_product_id == "117556298_386692612"
+        state.update(row_available=True, query_mode="active", nested_available="yes")
+        done = _enroll_created_product(db_session, job=write, result=result)
+        assert done["product_id"] == saved_id
+        assert product.kaspi_product_id == "117556298"
+        assert product.merchant_sku == "117556298_386692612"
+        assert product.sale_enabled
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 1
+
+
+def test_unknown_archive_sku_resolves_to_existing_preorder_record(db_session):
+    with workspace_context(1):
+        earlier = queue(db_session)
+        earlier_job = db_session.get(ProductTestJob, earlier["job"]["id"])
+        earlier_job.status = "failed"
+        db_session.commit()
+        queued = connect_preorder(PreorderRequest(reference="archive-only-sku",
+            price_kzt=14000, preorder_days=7, stock_count=9), db_session)
+        resolving = db_session.get(ProductTestJob, queued["job"]["id"])
+        assert queued["item"]["kaspi_product_id"].startswith("sku:")
+        with pytest.raises(ValueError):
+            inspect(db_session, resolving)  # Unmapped SKU needs cabinet proof.
+        result = _persist_product_inspection(db_session, job=resolving,
+            result={"kaspi_product_id": "123456789", "product_name": "Phone",
+                    "catalog_state": {"found": True, "sku": "archive-only-sku",
+                                      "master_sku": "123456789"}})
+        assert result["item"]["id"] == earlier["item"]["id"]
+        assert resolving.item_id == earlier_job.item_id
+        assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 1
+        write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
+        state = confirmed(stock_count=9, sku="archive-only-sku")
+        state["merchant_sku"] = "archive-only-sku"
+        done = _enroll_created_product(db_session, job=write, result=state)
+        assert done["item"]["id"] == earlier["item"]["id"]
+
+
+def test_old_agent_cannot_claim_archive_preorder_but_new_agent_can(db_session, monkeypatch):
+    from backend.app import product_test_api as api
+    monkeypatch.setattr(api, "_validate_workspace_merchant", lambda *a, **k: None)
+    monkeypatch.setattr(api, "_touch_product_test_agent", lambda *a, **k: None)
+    with workspace_context(1):
+        queued = queue(db_session)
+        identity = dict(agent_id="archive-test", workspace_id=1, merchant_uid="merchant", agent_kind="product_test")
+        old = api.claim_product_test_job(api.ProductTestAgentIdentity(**identity, version="1.1.24"), db_session)
+        assert old["job"] is None
+        assert db_session.get(ProductTestJob, queued["job"]["id"]).status == "queued"
+        new = api.claim_product_test_job(api.ProductTestAgentIdentity(**identity, version="1.1.25"), db_session)
+        assert new["job"]["id"] == queued["job"]["id"]
+        assert new["job"]["options"]["preorder_archive"] is True
+
+
+def test_numeric_merchant_sku_is_not_confused_with_master_id(db_session):
+    with workspace_context(1):
+        queued = connect_preorder(PreorderRequest(reference="4671307561",
+            price_kzt=14000, preorder_days=7), db_session)
+        _persist_product_inspection(db_session,
+            job=db_session.get(ProductTestJob, queued["job"]["id"]),
+            result={"kaspi_product_id": "1671307561", "product_name": "Phone",
+                    "catalog_state": {"found": True, "sku": "4671307561", "master_sku": "1671307561"}})
+        write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
+        assert write.options_json["master_sku"] == "1671307561"
+        assert write.options_json["merchant_sku"] == "4671307561"
