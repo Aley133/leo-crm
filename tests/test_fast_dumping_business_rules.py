@@ -208,7 +208,7 @@ def test_inventory_arrival_replaces_queued_preorder_apply_with_fresh_scan(
     assert state.inventory_on_hand == 3
 
 
-def test_inventory_exhaustion_replaces_queued_fifo_apply_with_fresh_scan(
+def test_inventory_exhaustion_disables_unbound_product_and_cancels_apply(
     db_session,
 ) -> None:
     product, policy, state = _seed_fast_policy(db_session)
@@ -238,12 +238,11 @@ def test_inventory_exhaustion_replaces_queued_fifo_apply_with_fresh_scan(
 
     db_session.refresh(old_job)
     db_session.refresh(state)
-    replacement = db_session.get(FastDumpingJob, state.active_job_id)
     assert result["stock_count"] == 0
     assert old_job.status == "cancelled"
-    assert replacement is not None
-    assert replacement.id != old_job.id
-    assert replacement.status == "queued_scan"
+    assert state.active_job_id is None
+    assert state.status == "paused"
+    assert not policy.enabled
     assert state.inventory_on_hand == 0
 
 

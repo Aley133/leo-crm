@@ -18,7 +18,6 @@ router = APIRouter(
     tags=["full-automation"],
     dependencies=[Depends(require_service_token)],
 )
-CAPACITY = 8
 SNAPSHOT_FIELDS = (
     "enabled",
     "minimum_profit_kzt",
@@ -72,7 +71,7 @@ def read_automation(db: Session = Depends(get_db)):
         item["automation"]["observation"] = (
             (state.automation_json or {}) if state is not None else {}
         )
-    result["capacity"] = CAPACITY
+    result["capacity"] = None
     return result
 
 
@@ -81,10 +80,6 @@ def save_automation(
     product_id: int, payload: AutomationSettings, db: Session = Depends(get_db)
 ):
     workspace = current_workspace_id()
-    # Lock the tenant root to serialize capacity checks and mode transitions.
-    from .workspace_models import Workspace
-
-    db.scalar(select(Workspace).where(Workspace.id == workspace).with_for_update())
     product = db.scalar(
         select(Product)
         .where(Product.id == product_id, Product.workspace_id == workspace)
@@ -123,9 +118,6 @@ def save_automation(
         raise HTTPException(
             409, "Дождитесь подтверждения текущей операции Kaspi перед сменой режима"
         )
-    if payload.enabled and policy.pricing_mode != "automation":
-        from .preorder_modes import check_rocket_capacity
-        check_rocket_capacity(db, workspace, product_id=product_id)
     classic = db.scalar(
         select(DumpingPolicy)
         .where(DumpingPolicy.product_id == product_id)

@@ -19,6 +19,7 @@ from backend.app import (
 )
 from backend.app.workspace_context import workspace_context
 from tests.test_fast_dumping import _seed_fast_product
+from backend.app.inventory_models import InventoryBatch
 
 
 def offers():
@@ -133,6 +134,8 @@ def test_auto_scan_precedes_old_manual_backlog_and_retains_fairness(db_session):
         )
         db_session.add(auto_product)
         db_session.flush()
+        db_session.add(InventoryBatch(product_id=auto_product.id, received_at=datetime.now(UTC),
+                                      quantity_received=1, quantity_remaining=1, unit_cost=1000))
         auto = FastDumpingPolicy(
             product_id=auto_product.id, pricing_mode="automation", enabled=True
         )
@@ -334,7 +337,7 @@ def test_only_real_non_cancelled_kaspi_orders_restore_profit_priority(db_session
         assert observed["orders_units"] == 2 and observed["target_position"] == 3
 
 
-def test_automation_capacity_prevents_unbounded_priority_load(db_session):
+def test_automation_supports_more_than_eight_cards(db_session):
     from backend.app.models import Product
 
     product, batch, policy, state = _seed_fast_product(db_session)
@@ -351,9 +354,9 @@ def test_automation_capacity_prevents_unbounded_priority_load(db_session):
                 )
             )
         db_session.flush()
-        with pytest.raises(HTTPException) as exc:
-            save_automation(product.id, AutomationSettings(), db_session)
-        assert exc.value.status_code == 409 and policy.pricing_mode == "manual"
+        save_automation(product.id, AutomationSettings(), db_session)
+        assert policy.pricing_mode == "automation"
+        assert read_automation(db_session)["capacity"] is None
 
 
 def test_owned_shop_cannot_become_an_undercut_target():

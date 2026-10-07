@@ -40,6 +40,10 @@ def _sync_product_inventory_to_feed(
 ) -> dict[str, int | str | None]:
     from .preorder_modes import stock_arrived
     stock_arrived(db, product_id)
+    from .fast_dumping_supply_guard import disable_empty_products
+    product = db.get(Product, product_id)
+    if product is not None:
+        disable_empty_products(db, product.workspace_id, {product_id})
     policy = _fast_policy(db, product_id)
     if policy is None:
         return _PREVIOUS_SYNC(db, product_id=product_id, reason=reason)

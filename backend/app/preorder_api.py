@@ -264,9 +264,7 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
     if len(items) > 1:
         raise HTTPException(409, "В Тесте товара несколько записей этой карточки; устраните дубликаты")
     item = items[0] if items else None
-    from .preorder_modes import check_rocket_capacity, pause_pricing
-    if payload.rocket_enabled:
-        check_rocket_capacity(db, workspace, item.id if item else None, product.id if product else None)
+    from .preorder_modes import pause_pricing
     if item is not None:
         pending = db.scalar(
             select(ProductTestJob.id)

@@ -29,6 +29,7 @@ def isolated_counters(monkeypatch):
     monkeypatch.setattr(svc, "_AUTO_SCAN_STREAK", {})
     monkeypatch.setattr(svc, "_NON_SCAN_STREAK", {})
     monkeypatch.setattr(svc, "_reserve_inventory_recovery", lambda _: False)
+    monkeypatch.setattr(svc, "_reserve_supply_recovery", lambda _: False)
 
 
 @pytest.mark.parametrize("reason", ["policy_saved", "automation_mode_changed", "product_test_auto_enroll"])
