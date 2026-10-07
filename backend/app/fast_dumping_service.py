@@ -8,7 +8,7 @@ from time import monotonic
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import case, delete, or_, select
+from sqlalchemy import and_, case, delete, or_, select
 from sqlalchemy.orm import Session
 
 from .dumping_service import (
@@ -52,6 +52,7 @@ HISTORY_PRUNE_INTERVAL_SECONDS = 3600
 INVENTORY_RECOVERY_INTERVAL_SECONDS = 300
 _HISTORY_PRUNE_LOCK = Lock()
 _AUTO_SCAN_STREAK: dict[int, int] = {}
+_NON_SCAN_STREAK: dict[int, int] = {}
 _AUTO_QUEUE_LOCK = Lock()
 _HISTORY_PRUNE_NOT_BEFORE: dict[int, float] = {}
 _INVENTORY_RECOVERY_LOCK = Lock()
@@ -546,7 +547,7 @@ def recover_expired_leases(
             FastDumpingJob.lease_until.is_not(None),
             FastDumpingJob.lease_until < checked_at,
         )
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, of=FastDumpingJob)
     ).all()
     recovered = 0
     for job in jobs:
@@ -657,7 +658,7 @@ def _schedule_inventory_transitions(db: Session, workspace_id: int, limit: int) 
         )
         .order_by(FastDumpingState.id)
         .limit(max(1, min(100, int(limit))))
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, of=FastDumpingState)
     ).all()
     created_count = 0
     for state in states:
@@ -734,9 +735,11 @@ def schedule_due_scans(
                 FastDumpingState.next_scan_at <= checked_at,
             ),
         )
-        .order_by(case((FastDumpingPolicy.pricing_mode == "automation", 0), else_=1), FastDumpingState.next_scan_at, FastDumpingState.id)
+        .order_by(case((FastDumpingState.last_scanned_at.is_(None), 0), else_=1),
+                  case((FastDumpingPolicy.pricing_mode == "automation", 0), else_=1),
+                  FastDumpingState.next_scan_at, FastDumpingState.id)
         .limit(max(1, min(100, int(limit))))
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, of=FastDumpingState)
     ).all()
     # These states and policies are already locked and have no active job.
     # Avoid re-reading both rows and flushing the entire session per product:
@@ -781,29 +784,49 @@ def claim_job(
     )
     now = utcnow()
     with _AUTO_QUEUE_LOCK:
-        prefer_auto = _AUTO_SCAN_STREAK.get(workspace_id, 0) % 5 != 4
+        scan_streak = _AUTO_SCAN_STREAK.get(workspace_id, 0)
+        prefer_auto = scan_streak % 5 != 4
+        prefer_scan = _NON_SCAN_STREAK.get(workspace_id, 0) >= 3
+    is_scan = FastDumpingJob.status == "queued_scan"
+    interactive_scan = and_(is_scan, FastDumpingJob.reason.in_(
+        ("policy_saved", "automation_mode_changed", "manual", "manual_resume", "preorder_monitoring_enabled", "product_test_auto_enroll")
+    ))
+    aged_scan = and_(is_scan, FastDumpingJob.created_at <= now - timedelta(minutes=15),
+                     scan_streak % 2 == 1)
+    # User connections must not sit behind hours of periodic backlog. Reserve
+    # a scan after three write/verify claims too, so confirmations cannot starve
+    # every other card. Normal traffic retains the 4:1 rocket/ordinary share;
+    # overdue scans get every other scan slot until the old backlog clears.
     priority = case(
-        (FastDumpingJob.reason.startswith("inventory_priority:"), -1),
+        (FastDumpingJob.reason.startswith("inventory_priority:"), -3),
+        (interactive_scan, -2),
+        (and_(is_scan, prefer_scan), -1),
         (FastDumpingJob.status == "queued_apply", 0),
         (FastDumpingJob.status == "queued_verify", 1),
-        (FastDumpingPolicy.pricing_mode == "automation", 2 if prefer_auto else 3),
-        else_=3 if prefer_auto else 2,
+        (aged_scan, 2),
+        (FastDumpingPolicy.pricing_mode == "automation", 3 if prefer_auto else 4),
+        else_=4 if prefer_auto else 3,
     )
     job = db.scalar(
         select(FastDumpingJob)
         .join(FastDumpingPolicy, FastDumpingPolicy.id == FastDumpingJob.policy_id)
+        .join(FastDumpingState, FastDumpingState.active_job_id == FastDumpingJob.id)
         .where(
             FastDumpingJob.workspace_id == workspace_id,
             FastDumpingPolicy.workspace_id == workspace_id,
+            FastDumpingState.workspace_id == workspace_id,
             FastDumpingJob.status.in_(QUEUED_JOB_STATUSES),
             or_(
                 FastDumpingJob.not_before_at.is_(None),
                 FastDumpingJob.not_before_at <= now,
             ),
         )
-        .order_by(priority, FastDumpingJob.id)
+        .order_by(priority,
+                  case((aged_scan, 0), else_=1),
+                  case((and_(is_scan, FastDumpingState.last_scanned_at.is_(None)), 0), else_=1),
+                  FastDumpingJob.id)
         .limit(1)
-        .with_for_update(skip_locked=True)
+        .with_for_update(skip_locked=True, of=(FastDumpingJob, FastDumpingState))
     )
     if job is None:
         return None
@@ -812,6 +835,11 @@ def claim_job(
         job.status = "cancelled"
         job.completed_at = utcnow()
         return None
+
+    with _AUTO_QUEUE_LOCK:
+        _NON_SCAN_STREAK[workspace_id] = (
+            0 if job.status == "queued_scan" else _NON_SCAN_STREAK.get(workspace_id, 0) + 1
+        )
 
     job.agent_id = _text(agent_id, limit=255)
     job.lease_token = uuid4().hex

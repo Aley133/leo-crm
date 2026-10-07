@@ -41,8 +41,17 @@ const productPhoto = (row, css = "fast-product-photo") => row.image_url
 
 const request = async (url, options = {}) => {
   const token = localStorage.getItem(storageKey) || "";
-  const response = await fetch(url, {cache:"no-store", ...options, headers:{Authorization:`Bearer ${token}`, ...(options.headers || {})}});
-  const payload = await response.json().catch(() => ({}));
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 30000);
+  let response;
+  let payload;
+  try {
+    response = await fetch(url, {cache:"no-store", signal:controller.signal, ...options, headers:{Authorization:`Bearer ${token}`, ...(options.headers || {})}});
+    payload = await response.json().catch(() => ({}));
+  } catch (error) {
+    if (controller.signal.aborted) throw new Error("CRM не ответила за 30 секунд. Обновите страницу, чтобы проверить, сохранились ли настройки.");
+    throw error;
+  } finally { clearTimeout(timer); }
   if (response.status === 401) {
     localStorage.removeItem(storageKey);
     throw new Error("SERVICE_API_TOKEN не принят");
@@ -324,6 +333,8 @@ const saveSettings = async (productId, prefix = "") => {
 
 const openEdit = (row) => {
   editingRow = row;
+  document.querySelector("#edit-message").hidden = true;
+  document.querySelector("#edit-message").textContent = "";
   const policy = row.policy;
   document.querySelector("#edit-product-id").value = row.product_id;
   document.querySelector("#edit-title").textContent = row.name;
@@ -364,12 +375,18 @@ editForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const productId = Number(document.querySelector("#edit-product-id").value);
   const button = document.querySelector("#edit-save"); setBusy(button, true, "Сохраняю…");
+  const editMessage = document.querySelector("#edit-message");
+  editMessage.hidden = true;
   try {
     await saveSettings(productId, "edit-");
     editDialog.close();
     message.textContent = "Настройки сохранены. Fast пересчитает цену и место по свежему рынку.";
     await loadPage();
-  } catch (error) { message.textContent = error.message || "Не удалось изменить настройки"; }
+  } catch (error) {
+    editMessage.textContent = error.message || "Не удалось изменить настройки";
+    editMessage.hidden = false;
+    message.textContent = editMessage.textContent;
+  }
   finally { setBusy(button, false, ""); }
 });
 
