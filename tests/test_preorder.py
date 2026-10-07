@@ -7,6 +7,8 @@ from backend.app.preorder_api import (
     card_id,
     connect_preorder,
     read_preorders,
+    PreorderEdit,
+    edit_preorder,
 )
 from backend.app.product_test_api import (
     _persist_product_inspection,
@@ -137,6 +139,80 @@ def test_duplicate_pending_preorder_is_rejected(db_session):
             queue(db_session)
         assert exc.value.status_code == 409
         assert db_session.scalar(select(func.count()).select_from(ProductTestJob)) == 1
+
+
+def test_edit_reuses_product_and_waits_for_exact_kaspi_confirmation(db_session):
+    from backend.app.fast_dumping_models import FastDumpingState
+
+    with workspace_context(1):
+        queued = queue(db_session)
+        inspect(db_session, db_session.get(ProductTestJob, queued["job"]["id"]))
+        write = db_session.scalar(
+            select(ProductTestJob).where(ProductTestJob.job_type == "create_offer")
+        )
+        enrolled = _enroll_created_product(db_session, job=write, result=confirmed())
+        product_id = enrolled["product_id"]
+        state = db_session.scalar(select(FastDumpingState))
+        updated = edit_preorder(
+            queued["item"]["id"], PreorderEdit(price_kzt=15999, preorder_days=4),
+            db_session,
+        )
+        assert updated["item"]["id"] == queued["item"]["id"]
+        assert updated["item"]["product_id"] == product_id
+        assert state.own_price_kzt == 14000
+        read_job = db_session.get(ProductTestJob, updated["job"]["id"])
+        inspect(db_session, read_job)
+        next_write = db_session.scalar(
+            select(ProductTestJob).where(
+                ProductTestJob.job_type == "create_offer",
+                ProductTestJob.status == "queued",
+            )
+        )
+        assert next_write.options_json["initial_price_kzt"] == 15999
+        assert next_write.options_json["preorder_days"] == 4
+        with pytest.raises(ValueError):
+            _enroll_created_product(db_session, job=next_write, result=confirmed())
+        assert state.own_price_kzt == 14000
+        done = _enroll_created_product(
+            db_session, job=next_write,
+            result=confirmed(price_kzt=15999, preorder_days=4),
+        )
+        assert done["product_id"] == product_id
+        assert state.own_price_kzt == 15999
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 1
+        assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 1
+
+
+def test_edit_rejects_pending_job_and_other_workspace(db_session):
+    with workspace_context(1):
+        queued = queue(db_session)
+        with pytest.raises(HTTPException) as exc:
+            edit_preorder(
+                queued["item"]["id"], PreorderEdit(price_kzt=15000, preorder_days=3),
+                db_session,
+            )
+        assert exc.value.status_code == 409
+        assert db_session.get(ProductTestItem, queued["item"]["id"]).test_price_kzt == 14000
+    with workspace_context(3):
+        with pytest.raises(HTTPException) as exc:
+            edit_preorder(
+                queued["item"]["id"], PreorderEdit(price_kzt=15000, preorder_days=3),
+                db_session,
+            )
+        assert exc.value.status_code == 404
+
+
+def test_edit_cannot_modify_ordinary_product_test_item(db_session):
+    with workspace_context(1):
+        item = ProductTestItem(
+            workspace_id=1, input_reference=URL, kaspi_product_id="123456789",
+            merchant_sku="ordinary-test", name="Ordinary test", kaspi_url=URL,
+        )
+        db_session.add(item)
+        db_session.commit()
+        with pytest.raises(HTTPException) as exc:
+            edit_preorder(item.id, PreorderEdit(price_kzt=15000, preorder_days=3), db_session)
+        assert exc.value.status_code == 404
 
 
 @pytest.mark.parametrize(

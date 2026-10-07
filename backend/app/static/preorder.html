@@ -40,6 +40,18 @@
       </section>
     </main>
   </div>
+  <dialog id="edit-dialog" class="fast-dialog">
+    <form id="edit-form" class="fast-policy-form fast-dialog-card">
+      <h2 class="wide">Редактировать предзаказ</h2>
+      <p id="edit-name" class="wide"></p>
+      <label><span>Цена продажи, ₸</span><input id="edit-price" type="number" min="1" max="100000000" step="1" required></label>
+      <label><span>Предзаказ, дней</span><input id="edit-days" type="number" min="1" max="365" step="1" required></label>
+      <p class="wide fast-dialog-note">Изменения применит агент «Тест товара» после подтверждения Kaspi. Если включён демпинг, сначала выключите его и дождитесь завершения текущей операции.</p>
+      <p id="edit-message" class="wide" role="status"></p>
+      <button id="edit-save" class="button" type="submit">Сохранить</button>
+      <button id="edit-cancel" class="button secondary" type="button">Отмена</button>
+    </form>
+  </dialog>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/preorder.js?v=20261007-1" defer></script>
+  <script src="/static/preorder.js?v=20261007-2" defer></script>
 </body></html>

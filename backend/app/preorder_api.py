@@ -35,6 +35,11 @@ class PreorderRequest(BaseModel):
     zone_id: str = Field(default="Magnum_ZONE1", min_length=1, max_length=64)
 
 
+class PreorderEdit(BaseModel):
+    price_kzt: int = Field(gt=0, le=100000000)
+    preorder_days: int = Field(ge=1, le=365)
+
+
 def card_id(reference: str) -> str:
     try:
         parts = urlsplit(reference.strip())
@@ -239,6 +244,33 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
     )
     db.commit()
     return {"item": _item_payload(item), "job": _job_payload(job)}
+
+
+@router.patch("/{item_id}")
+def edit_preorder(
+    item_id: int, payload: PreorderEdit, db: Session = Depends(get_db)
+):
+    item = db.scalar(
+        select(ProductTestItem).where(
+            ProductTestItem.id == item_id,
+            ProductTestItem.workspace_id == current_workspace_id(),
+            ProductTestItem.input_reference.startswith(PREFIX),
+        )
+    )
+    if item is None:
+        raise HTTPException(404, "Предзаказ не найден в текущем магазине")
+    # Reuse the same workspace/product/item lock order and the exact existing
+    # offer confirmation pipeline. Never change XML before Kaspi confirms it.
+    return connect_preorder(
+        PreorderRequest(
+            reference=item.kaspi_url,
+            price_kzt=payload.price_kzt,
+            preorder_days=payload.preorder_days,
+            city_id=item.city_id,
+            zone_id=item.zone_id,
+        ),
+        db,
+    )
 
 
 def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dict):
