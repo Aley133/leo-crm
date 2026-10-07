@@ -496,13 +496,17 @@ def queue_scan(
     )
     db.add(job)
     db.flush()
+    _mark_scan_queued(state, job)
+    return job, True
+
+
+def _mark_scan_queued(state: FastDumpingState, job: FastDumpingJob) -> None:
     state.active_job_id = job.id
     state.status = "queued"
     state.status_reason = "Ожидает локальный Fast Dumping Agent."
     state.next_scan_at = None
     state.last_error_code = None
     state.last_error_message = None
-    return job, True
 
 
 def cancel_active_job(
@@ -710,8 +714,8 @@ def schedule_due_scans(
         if recover_inventory_transitions
         else 0
     )
-    states = db.scalars(
-        select(FastDumpingState)
+    candidates = db.execute(
+        select(FastDumpingState, FastDumpingPolicy)
         .join(
             FastDumpingPolicy,
             FastDumpingPolicy.id == FastDumpingState.policy_id,
@@ -734,19 +738,28 @@ def schedule_due_scans(
         .limit(max(1, min(100, int(limit))))
         .with_for_update(skip_locked=True)
     ).all()
-    queued = priority_queued
-    for state in states:
-        policy = db.get(FastDumpingPolicy, state.policy_id)
-        if policy is None or policy.workspace_id != workspace_id:
-            continue
-        _job, created = queue_scan(
-            db,
-            policy=policy,
+    # These states and policies are already locked and have no active job.
+    # Avoid re-reading both rows and flushing the entire session per product:
+    # remote database round trips otherwise grow linearly with each due batch.
+    pending = []
+    for state, policy in candidates:
+        job = FastDumpingJob(
             workspace_id=workspace_id,
+            policy_id=policy.id,
+            product_id=policy.product_id,
+            status="queued_scan",
             reason="scheduled",
         )
-        queued += int(created)
-    return queued
+        db.add(job)
+        pending.append((state, job))
+    if pending:
+        db.flush()
+        for state, job in pending:
+            _mark_scan_queued(state, job)
+        # Subsequent scheduling in this transaction must see the active job IDs
+        # even though SessionLocal deliberately disables implicit autoflush.
+        db.flush()
+    return priority_queued + len(pending)
 
 
 def claim_job(
