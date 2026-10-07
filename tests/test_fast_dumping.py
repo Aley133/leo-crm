@@ -1218,6 +1218,7 @@ def test_floor_limited_product_is_exposed_for_inline_threshold_edit(db_session) 
     assert result["status"] == "floor_limited"
     assert state.status == "floor_limited"
     assert payload["summary"]["floor_limited"] == 1
+    assert payload["summary"]["attention"] == 0
     assert payload["items"][0]["current_safe_floor_kzt"] == floor
     assert "offers" not in payload["items"][0]["state"]
     assert payload["items"][0]["state"]["offers_count"] == 2
@@ -1584,3 +1585,14 @@ def test_offer_verification_completion_preserves_scan_interval(db_session, succe
         assert state.active_job_id is None
         assert state.next_scan_at.replace(tzinfo=UTC) >= datetime.now(UTC) + timedelta(seconds=590)
         assert schedule_due_scans(db_session, workspace_id=1, recover_inventory_transitions=False) == 0
+
+
+def test_attention_error_takes_priority_over_previous_floor_decision(db_session) -> None:
+    _product, _batch, policy, state = _seed_fast_product(db_session)
+    state.status = "own_offer_missing"
+    state.decision_status = "floor_limited"
+    db_session.commit()
+    with workspace_context(1):
+        payload = list_fast_dumping_products(db_session)
+    assert payload["summary"]["attention"] == 1
+    assert payload["summary"]["floor_limited"] == 0

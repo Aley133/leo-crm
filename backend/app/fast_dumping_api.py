@@ -55,7 +55,6 @@ router = APIRouter(
 )
 
 ATTENTION_STATUSES = {
-    "floor_limited",
     "price_anomaly",
     "market_context_mismatch",
     "own_offer_missing",
@@ -230,7 +229,8 @@ def list_fast_dumping_products(db: Session = Depends(get_db)) -> dict:
         "enabled": sum(bool(row["policy"]["enabled"]) for row in items),
         "disabled": sum(not row["policy"]["enabled"] for row in items),
         "floor_limited": sum(
-            row["policy"]["enabled"] and (row_status(row) == "floor_limited"
+            row["policy"]["enabled"] and row_status(row) not in ATTENTION_STATUSES
+            and (row_status(row) == "floor_limited"
             or (row.get("state") or {}).get("decision_status") == "floor_limited")
             for row in items
         ),
