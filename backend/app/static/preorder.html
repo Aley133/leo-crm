@@ -21,15 +21,16 @@
       <div class="runtime-status"><span class="dot"></span><span>Realtime Pricing</span></div>
     </aside>
     <main>
-      <header class="page-header"><div><span class="fast-kicker">KASPI</span><h1>Предзаказ</h1><p>Подключите магазин к выбранной карточке Kaspi по своей цене и сроку.</p></div><button id="refresh" class="button secondary" type="button">Обновить</button></header>
+      <header class="page-header"><div><span class="fast-kicker">KASPI</span><h1>Предзаказ</h1><p>Подключите магазин к выбранной карточке Kaspi по SKU или ссылке, со своей ценой, сроком и количеством.</p></div><button id="refresh" class="button secondary" type="button">Обновить</button></header>
       <p id="message" role="status"></p>
       <section id="auth-panel" class="panel hidden"><h2>Подключение к LEO CRM</h2><form id="token-form"><input id="token" type="password" placeholder="SERVICE_API_TOKEN" required><button class="button">Подключить</button></form></section>
       <section id="preorder-page" class="hidden">
         <section class="fast-section"><h2>Подключить карточку</h2><p id="agent-status">Проверяю связь с агентом «Тест товара»…</p>
           <form id="preorder-form" class="fast-policy-form">
-            <label class="wide"><span>Ссылка на карточку Kaspi</span><input id="reference" type="url" placeholder="https://kaspi.kz/shop/p/…" required></label>
+            <label class="wide"><span>SKU или ссылка на карточку Kaspi</span><input id="reference" type="text" placeholder="SKU ранее продававшегося товара или https://kaspi.kz/shop/p/…" required></label>
             <label><span>Цена продажи, ₸</span><input id="price" type="number" min="1" max="100000000" step="1" required></label>
             <label><span>Предзаказ, дней</span><input id="days" type="number" min="1" max="365" step="1" required></label>
+            <label><span>Количество для предзаказа, шт.</span><input id="stock" type="number" min="1" max="1000000" step="1" value="5" required></label>
             <label><span>Город Kaspi</span><input id="city" value="196220100" maxlength="32" required></label>
             <label><span>Зона Kaspi</span><input id="zone" value="Magnum_ZONE1" maxlength="64" required></label>
             <button id="connect" class="button" type="submit">Подключить к карточке</button>
@@ -46,6 +47,7 @@
       <p id="edit-name" class="wide"></p>
       <label><span>Цена продажи, ₸</span><input id="edit-price" type="number" min="1" max="100000000" step="1" required></label>
       <label><span>Предзаказ, дней</span><input id="edit-days" type="number" min="1" max="365" step="1" required></label>
+            <label><span>Количество для предзаказа, шт.</span><input id="edit-stock" type="number" min="1" max="1000000" step="1" value="5" required></label>
       <p class="wide fast-dialog-note">Изменения применит агент «Тест товара» после подтверждения Kaspi. Если включён демпинг, сначала выключите его и дождитесь завершения текущей операции.</p>
       <p id="edit-message" class="wide" role="status"></p>
       <button id="edit-save" class="button" type="submit">Сохранить</button>
@@ -53,5 +55,5 @@
     </form>
   </dialog>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/preorder.js?v=20261007-2" defer></script>
+  <script src="/static/preorder.js?v=20261007-3" defer></script>
 </body></html>
