@@ -146,6 +146,41 @@ def test_fast_due_batches_skip_locked_rows_without_duplicate_jobs(postgres_facto
         ) == 0
 
 
+def test_fast_claim_skips_busy_card_without_locking_other_policy_settings(postgres_factory, monkeypatch):
+    from backend.app import fast_dumping_service as svc
+    from backend.app.fast_dumping_models import FastDumpingPolicy
+    from backend.app.product_test_models import ProductTestItem  # noqa: F401
+
+    monkeypatch.setattr(svc, "_reserve_inventory_recovery", lambda _: False)
+    with postgres_factory() as seed:
+        policy_ids = []
+        for index in range(2):
+            product = Product(name=f"Claim {index}", kaspi_product_id=f"CLAIM-{index}",
+                              merchant_sku=f"CLAIM-{index}", sale_enabled=True)
+            seed.add(product)
+            seed.flush()
+            policy = FastDumpingPolicy(product_id=product.id)
+            seed.add(policy)
+            seed.flush()
+            policy_ids.append(policy.id)
+            svc.ensure_state(seed, policy=policy, workspace_id=1)
+            svc.queue_scan(seed, policy=policy, workspace_id=1, reason="policy_saved")
+        seed.commit()
+
+    with postgres_factory() as first, postgres_factory() as second:
+        second.execute(text("SET LOCAL lock_timeout = '2s'"))
+        job1 = svc.claim_job(first, workspace_id=1, agent_id="first")
+        # A queue claim protects the job and state, rather than locking every
+        # joined product/policy and blocking unrelated settings edits.
+        second.execute(text("UPDATE fast_dumping_policies SET minimum_profit_kzt=1234 WHERE id=:id"),
+                       {"id": policy_ids[0]})
+        job2 = svc.claim_job(second, workspace_id=1, agent_id="second")
+        assert job1.id != job2.id
+        assert job1.status == job2.status == "leased_scan"
+        second.commit()
+        first.commit()
+
+
 def test_xml_import_waits_for_feed_before_updating_products(postgres_factory):
     from backend.app.dumping_models import KaspiXmlFeed
     from backend.app.fast_dumping_models import FastDumpingPolicy
