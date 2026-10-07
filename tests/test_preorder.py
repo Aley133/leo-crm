@@ -353,3 +353,99 @@ def test_resurrection_reuses_product_and_preserves_manual_preorder(db_session):
         assert done["fast_dumping_policy_id"] == policy_id
         assert product.sale_enabled and not product.sale_state_overridden
         assert db_session.scalar(select(func.count()).select_from(Product)) == 1
+
+
+@pytest.mark.parametrize("reference", ["123456789", "123456789_old-store"])
+def test_master_sku_reference_uses_existing_inspector(db_session, reference):
+    with workspace_context(1):
+        queued = connect_preorder(PreorderRequest(
+            reference=reference, price_kzt=14000, preorder_days=7, stock_count=12,
+        ), db_session)
+        assert queued["job"]["reference"] == "123456789"
+        inspect(db_session, db_session.get(ProductTestJob, queued["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer"))
+        assert write.options_json["stock_count"] == 12
+        with pytest.raises(ValueError):
+            _enroll_created_product(db_session, job=write, result=confirmed())
+        done = _enroll_created_product(db_session, job=write, result=confirmed(stock_count=12))
+        assert done["item"]["stock_count"] == 12
+        edited = edit_preorder(queued["item"]["id"],
+            PreorderEdit(price_kzt=15000, preorder_days=8), db_session)
+        assert edited["item"]["stock_count"] == 12  # Older clients preserve quantity.
+        inspect(db_session, db_session.get(ProductTestJob, edited["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer", ProductTestJob.status == "queued"))
+        _enroll_created_product(db_session, job=write,
+            result=confirmed(price_kzt=15000, preorder_days=8, stock_count=12))
+        edited = edit_preorder(queued["item"]["id"],
+            PreorderEdit(price_kzt=15000, preorder_days=8, stock_count=3), db_session)
+        inspect(db_session, db_session.get(ProductTestJob, edited["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer", ProductTestJob.status == "queued"))
+        done = _enroll_created_product(db_session, job=write,
+            result=confirmed(price_kzt=15000, preorder_days=8, stock_count=3))
+        assert done["item"]["stock_count"] == 3
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 1
+
+
+def test_old_merchant_sku_adopts_existing_test_preorder_without_duplicates(db_session):
+    product, batch, policy, _ = _seed_fast_product(db_session)
+    with workspace_context(1):
+        batch.quantity_remaining = 0
+        product.kaspi_product_id = "123456789"
+        product.merchant_sku = "old-sku"
+        policy.enabled = False
+        item = ProductTestItem(workspace_id=1, input_reference=URL,
+            kaspi_product_id=product.kaspi_product_id, merchant_sku="old-sku",
+            name="Old phone", kaspi_url=URL, product_id=product.id,
+            stock_count=5, preorder_days=7, active=True,
+            offers_json={"supplier": {"cost_kzt": 9000}})
+        db_session.add(item)
+        db_session.commit()
+        queued = connect_preorder(PreorderRequest(reference="old-sku",
+            price_kzt=14000, preorder_days=7, stock_count=9), db_session)
+        assert queued["item"]["id"] == item.id
+        assert queued["item"]["product_id"] == product.id
+        assert not item.active
+        assert item.offers_json["supplier"]["cost_kzt"] == 9000
+        inspect(db_session, db_session.get(ProductTestJob, queued["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer"))
+        result = confirmed(sku="old-sku", stock_count=9)
+        result["merchant_sku"] = "old-sku"
+        done = _enroll_created_product(db_session, job=write, result=result)
+        assert done["product_id"] == product.id
+        assert read_preorders(db_session)["items"][0]["id"] == item.id
+        assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 1
+    with workspace_context(3):
+        with pytest.raises(HTTPException) as exc:
+            connect_preorder(PreorderRequest(reference="old-sku",
+                price_kzt=14000, preorder_days=7), db_session)
+        assert exc.value.status_code == 422
+
+
+def test_adopting_existing_test_item_waits_for_its_pending_job(db_session):
+    with workspace_context(1):
+        item = ProductTestItem(workspace_id=1, input_reference=URL,
+            kaspi_product_id="123456789", merchant_sku="old-sku",
+            name="Phone", kaspi_url=URL, active=True)
+        db_session.add(item)
+        db_session.flush()
+        db_session.add(ProductTestJob(workspace_id=1, item_id=item.id,
+            input_reference=URL, job_type="inspect", status="leased"))
+        db_session.commit()
+        with pytest.raises(HTTPException) as exc:
+            connect_preorder(PreorderRequest(reference="old-sku",
+                price_kzt=14000, preorder_days=7), db_session)
+        assert exc.value.status_code == 409
+        assert item.active and item.input_reference == URL
+
+
+@pytest.mark.parametrize("quantity", [0, -1, 1000001, 1.5])
+def test_invalid_preorder_quantity_is_rejected(quantity):
+    from pydantic import ValidationError
+    with pytest.raises(ValidationError):
+        PreorderRequest(reference=URL, price_kzt=14000, preorder_days=7, stock_count=quantity)
+    with pytest.raises(ValidationError):
+        PreorderEdit(price_kzt=14000, preorder_days=7, stock_count=quantity)

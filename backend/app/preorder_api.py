@@ -28,9 +28,10 @@ PREFIX = "manual-preorder:"
 
 
 class PreorderRequest(BaseModel):
-    reference: str = Field(min_length=12, max_length=2000)
+    reference: str = Field(min_length=1, max_length=2000)
     price_kzt: int = Field(gt=0, le=100000000)
     preorder_days: int = Field(ge=1, le=365)
+    stock_count: int = Field(default=5, ge=1, le=1000000)
     city_id: str = Field(default="196220100", min_length=1, max_length=32)
     zone_id: str = Field(default="Magnum_ZONE1", min_length=1, max_length=64)
 
@@ -38,6 +39,52 @@ class PreorderRequest(BaseModel):
 class PreorderEdit(BaseModel):
     price_kzt: int = Field(gt=0, le=100000000)
     preorder_days: int = Field(ge=1, le=365)
+    stock_count: int | None = Field(default=None, ge=1, le=1000000)
+
+
+def resolve_reference(db: Session, *, workspace: int, reference: str) -> tuple[str, str]:
+    reference = reference.strip()
+    if "://" in reference or "/" in reference:
+        return card_id(reference), reference
+    if not reference or len(reference) > 128:
+        raise HTTPException(422, "Укажите SKU или ссылку на карточку Kaspi")
+    # Merchant SKU is not necessarily a master ID. Exact local mappings take
+    # precedence over numeric prefixes, and never cross workspace boundaries.
+    ids = set(db.scalars(select(Product.kaspi_product_id).where(
+        Product.workspace_id == workspace, Product.merchant_sku == reference
+    )).all())
+    ids.update(db.scalars(select(ProductTestItem.kaspi_product_id).where(
+        ProductTestItem.workspace_id == workspace,
+        ProductTestItem.merchant_sku == reference,
+    )).all())
+    if len(ids) > 1:
+        raise HTTPException(409, "SKU связан с несколькими карточками; устраните дубликаты")
+    master = next(iter(ids), None)
+    if master is None:
+        match = re.fullmatch(r"(\d{6,18})(?:_[^\s/]{1,109})?", reference)
+        master = match.group(1) if match else None
+    if not master or not re.fullmatch(r"\d{5,18}", master):
+        raise HTTPException(422, "SKU не найден в текущем магазине. Вставьте ссылку на карточку Kaspi или сначала импортируйте товар в CRM")
+    # Prefer a previously confirmed URL to avoid rediscovering an old card.
+    from .fast_dumping_models import FastDumpingState
+
+    urls = db.scalars(select(ProductTestItem.kaspi_url).where(
+        ProductTestItem.workspace_id == workspace,
+        ProductTestItem.kaspi_product_id == master,
+    )).all()
+    urls.extend(db.scalars(select(FastDumpingState.product_url).join(
+        Product, Product.id == FastDumpingState.product_id
+    ).where(Product.workspace_id == workspace, Product.kaspi_product_id == master)).all())
+    for url in urls:
+        if not url:
+            continue
+        try:
+            if card_id(url) == master:
+                return master, url
+        except HTTPException:
+            continue
+    # The existing agent resolves a master ID to the real public card URL.
+    return master, master
 
 
 def card_id(reference: str) -> str:
@@ -177,8 +224,10 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
     from .product_test_api import _queue_job, _item_payload, _job_payload
 
     workspace = current_workspace_id()
-    kaspi_id = card_id(payload.reference)
     db.scalar(select(Workspace).where(Workspace.id == workspace).with_for_update())
+    kaspi_id, inspection_reference = resolve_reference(
+        db, workspace=workspace, reference=payload.reference
+    )
     product = _check_existing(db, workspace=workspace, kaspi_id=kaspi_id)
     if product is not None:
         classic = db.scalar(
@@ -188,14 +237,17 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
         )
         if classic is not None:
             classic.auto_publish_xml = False
-    item = db.scalar(
+    items = db.scalars(
         select(ProductTestItem)
         .where(
             ProductTestItem.workspace_id == workspace,
-            ProductTestItem.input_reference == PREFIX + kaspi_id,
+            ProductTestItem.kaspi_product_id == kaspi_id,
         )
         .with_for_update()
-    )
+    ).all()
+    if len(items) > 1:
+        raise HTTPException(409, "В Тесте товара несколько записей этой карточки; устраните дубликаты")
+    item = items[0] if items else None
     if item is not None:
         pending = db.scalar(
             select(ProductTestJob.id)
@@ -221,17 +273,18 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
         )
         db.add(item)
         db.flush()
-    item.kaspi_url = payload.reference.strip()
+    item.input_reference = PREFIX + kaspi_id
+    item.kaspi_url = inspection_reference
     item.city_id = payload.city_id.strip()
     item.zone_id = payload.zone_id.strip()
     item.test_price_kzt = Decimal(payload.price_kzt)
     item.preorder_days = payload.preorder_days
-    item.stock_count = 5
+    item.stock_count = payload.stock_count
     item.product_id = product.id if product else None
     item.status = "preorder_inspecting"
     item.active = False
     item.last_error = None
-    item.offers_json = {"manual_preorder": True}
+    item.offers_json = {**(item.offers_json or {}), "mode": "manual_preorder", "manual_preorder": True}
     job = _queue_job(
         db,
         workspace_id=workspace,
@@ -266,6 +319,7 @@ def edit_preorder(
             reference=item.kaspi_url,
             price_kzt=payload.price_kzt,
             preorder_days=payload.preorder_days,
+            stock_count=payload.stock_count if payload.stock_count is not None else item.stock_count,
             city_id=item.city_id,
             zone_id=item.zone_id,
         ),
@@ -299,6 +353,13 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
     item.name = str(result["product_name"])[:500]
+    product_url = str(result.get("product_url") or "")
+    if product_url:
+        try:
+            if card_id(product_url) == item.kaspi_product_id:
+                item.kaspi_url = product_url
+        except HTTPException:
+            pass
     item.brand = str(result.get("brand") or "")[:255] or None
     item.image_url = normalize_product_image_url(result.get("image_url"))
     item.status = "adding_to_kaspi"

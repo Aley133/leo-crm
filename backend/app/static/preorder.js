@@ -23,7 +23,7 @@
     items = new Map(data.items.map(item => [Number(item.id), item]));
     document.querySelector("#agent-status").textContent = data.agent?.online ? "Агент «Тест товара» онлайн." : "Агент «Тест товара» офлайн. Задание дождётся его подключения.";
     const labels = {preorder_inspecting:"Чтение карточки",adding_to_kaspi:"Подключение к Kaspi",enrolled_fast_dumping:"Подключён",error:"Ошибка"};
-    list.innerHTML = data.items.map(item => `<article class="fast-card"><div class="fast-card-head"><div><h3>${escape(item.name)}</h3><span>${escape(labels[item.status] || item.status)}</span></div>${item.product_id && item.status === "enrolled_fast_dumping" ? `<div class="fast-card-actions"><button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button><a class="button secondary" href="/crm/products/${Number(item.product_id)}">Товар</a><a class="button secondary" href="/crm/fast-dumping">Fast Dumping</a></div>` : item.status === "error" ? `<button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button>` : ""}</div><div class="fast-card-reason">${Number(item.test_price_kzt).toLocaleString("ru-RU")} ₸ · предзаказ ${Number(item.preorder_days)} дн. · Kaspi ${escape(item.kaspi_product_id)}${item.last_error ? `<p>${escape(item.last_error)}</p>` : ""}</div></article>`).join("") || '<p>Пока нет подключений.</p>';
+    list.innerHTML = data.items.map(item => `<article class="fast-card"><div class="fast-card-head"><div><h3>${escape(item.name)}</h3><span>${escape(labels[item.status] || item.status)}</span></div>${item.product_id && item.status === "enrolled_fast_dumping" ? `<div class="fast-card-actions"><button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button><a class="button secondary" href="/crm/products/${Number(item.product_id)}">Товар</a><a class="button secondary" href="/crm/fast-dumping">Fast Dumping</a></div>` : item.status === "error" ? `<button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button>` : ""}</div><div class="fast-card-reason">${Number(item.test_price_kzt).toLocaleString("ru-RU")} ₸ · предзаказ ${Number(item.preorder_days)} дн. · ${Number(item.stock_count)} шт. · SKU ${escape(item.merchant_sku)} · Kaspi ${escape(item.kaspi_product_id)}${item.last_error ? `<p>${escape(item.last_error)}</p>` : ""}</div></article>`).join("") || '<p>Пока нет подключений.</p>';
   };
   list.addEventListener("click", event => {
     const editButton = event.target.closest("[data-edit-preorder]");
@@ -34,6 +34,7 @@
     document.querySelector("#edit-name").textContent = item.name;
     document.querySelector("#edit-price").value = Number(item.test_price_kzt);
     document.querySelector("#edit-days").value = Number(item.preorder_days);
+    document.querySelector("#edit-stock").value = Number(item.stock_count);
     editMessage.textContent = "";
     editDialog.showModal();
   });
@@ -45,9 +46,9 @@
     const submittedId = editingId;
     editSave.disabled = true;
     try {
-      await request(`/api/preorder/${submittedId}`, {method:"PATCH", body:JSON.stringify({price_kzt:Number(document.querySelector("#edit-price").value), preorder_days:Number(document.querySelector("#edit-days").value)})});
+      await request(`/api/preorder/${submittedId}`, {method:"PATCH", body:JSON.stringify({price_kzt:Number(document.querySelector("#edit-price").value), preorder_days:Number(document.querySelector("#edit-days").value), stock_count:Number(document.querySelector("#edit-stock").value)})});
       if (editingId === submittedId) editDialog.close();
-      message.textContent = "Изменения цены и срока переданы агенту. Дождитесь подтверждения Kaspi.";
+      message.textContent = "Изменения цены, срока и количества переданы агенту. Дождитесь подтверждения Kaspi.";
       await load();
     } catch(error) { if (editingId === submittedId) editMessage.textContent = error.message; }
     finally { editSave.disabled = false; }
@@ -65,7 +66,7 @@
   form.addEventListener("submit", async event => {
     event.preventDefault(); button.disabled = true;
     try {
-      await request("/api/preorder", {method:"POST", body:JSON.stringify({reference:document.querySelector("#reference").value.trim(), price_kzt:Number(document.querySelector("#price").value), preorder_days:Number(document.querySelector("#days").value), city_id:document.querySelector("#city").value.trim(), zone_id:document.querySelector("#zone").value.trim()})});
+      await request("/api/preorder", {method:"POST", body:JSON.stringify({reference:document.querySelector("#reference").value.trim(), price_kzt:Number(document.querySelector("#price").value), preorder_days:Number(document.querySelector("#days").value), stock_count:Number(document.querySelector("#stock").value), city_id:document.querySelector("#city").value.trim(), zone_id:document.querySelector("#zone").value.trim()})});
       message.textContent = "Задание передано агенту «Тест товара». Здесь появится результат подключения.";
       await load();
     } catch(error) { message.textContent = error.message; }
