@@ -37,6 +37,7 @@ const statusText = (item) => ({
   needs_supplier_validation: "Ссылка изменена — проверьте",
   validating_supplier: "Проверяем ссылку",
   adding_to_kaspi: "Выгружаем на Kaspi и ждём реальный SKU",
+  preorder_connected: "Предзаказ подключён в Kaspi и Товарах",
   enrolled_fast_dumping: "Создан в Товарах, подключён к Мониторингу и Быстрому демпингу",
   error: item.last_error || "Ошибка",
 }[item.status] || item.status || "Кандидат");
@@ -69,7 +70,7 @@ const itemRow = (item, index) => {
   const cardPrice = source.startsWith("search_card.") || exactPagePrice;
   const priceSource = source.startsWith("manual_product_page.") ? "точно по вашей ссылке" : exactPagePrice ? "цена страницы Ozon" : cardPrice ? "цена карточки Ozon" : sellerOffers ? `${sellerOffers} предложений` : "";
   const supplierLabel = supplier.supplier_seller_name || (cardPrice ? "Ozon" : "не подтверждён");
-  const locked = ["validating_supplier", "adding_to_kaspi", "enrolled_fast_dumping"].includes(item.status);
+  const locked = ["validating_supplier", "adding_to_kaspi", "preorder_connected", "enrolled_fast_dumping"].includes(item.status);
   const canAdd = item.status === "ready_to_add" && supplier.validated;
   const deliveryText = supplier.supplier_delivery_text || (supplier.supplier_delivery_date ? `до ${supplier.supplier_delivery_date}` : supplier.supplier_delivery_days != null ? `${supplier.supplier_delivery_days} дн.` : "—");
   const matchClass = ["CONFIRMED", "OPERATOR_CONFIRMED"].includes(supplier.match_status) ? "found" : supplier.match_status === "REVIEW" || supplier.match_status === "MANUAL_REVIEW" ? "review" : "missing";
@@ -417,7 +418,7 @@ const render = (payload) => {
   if (empty) empty.classList.toggle("hidden", items.length > 0);
   const newCardJobTypes = new Set(["prepare_new_card", "map_new_card_category", "create_new_card", "confirm_new_card"]);
   const pageJobs = jobs.filter((job) => isAddProductPage ? newCardJobTypes.has(job.job_type) : !newCardJobTypes.has(job.job_type));
-  document.querySelector("#total-count").textContent = isAddProductPage ? newCards.length : items.filter((item) => item.status !== "enrolled_fast_dumping").length;
+  document.querySelector("#total-count").textContent = isAddProductPage ? newCards.length : items.filter((item) => !["preorder_connected", "enrolled_fast_dumping"].includes(item.status)).length;
   document.querySelector("#ready-count").textContent = isAddProductPage ? newCards.filter((item) => item.status === "new_card_ready").length : items.filter((item) => item.status === "ready_to_add").length;
   document.querySelector("#job-count").textContent = pageJobs.filter((job) => ["queued", "leased"].includes(job.status)).length;
   document.querySelector("#enrolled-count").textContent = pageSubmissions.filter((item) => item.offers?.kaspi_submission?.status === "succeeded").length;

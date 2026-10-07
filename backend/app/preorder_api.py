@@ -15,8 +15,8 @@ from .auth import require_service_token
 from .db import get_db
 from .models import Product, ProductStatus
 from .product_test_models import ProductTestItem, ProductTestJob
-from .fast_dumping_models import FastDumpingPolicy, FastDumpingJob
-from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
+from .fast_dumping_models import FastDumpingJob
+from .dumping_models import DumpingRun, KaspiXmlFeed
 from .workspace_context import current_workspace_id
 from .workspace_models import Workspace
 
@@ -75,15 +75,10 @@ def resolve_reference(db: Session, *, workspace: int, reference: str) -> tuple[s
     if not master:
         return "sku:" + sha256(reference.encode()).hexdigest()[:32], reference
     # Prefer a previously confirmed URL to avoid rediscovering an old card.
-    from .fast_dumping_models import FastDumpingState
-
     urls = db.scalars(select(ProductTestItem.kaspi_url).where(
         ProductTestItem.workspace_id == workspace,
         ProductTestItem.kaspi_product_id == master,
     )).all()
-    urls.extend(db.scalars(select(FastDumpingState.product_url).join(
-        Product, Product.id == FastDumpingState.product_id
-    ).where(Product.workspace_id == workspace, Product.kaspi_product_id == master)).all())
     for url in urls:
         if not url:
             continue
@@ -167,19 +162,6 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str, merchant_sku:
         raise HTTPException(
             409, "У товара есть физический остаток. Его нельзя заменять предзаказом"
         )
-    fast = db.scalar(
-        select(FastDumpingPolicy)
-        .where(
-            FastDumpingPolicy.workspace_id == workspace,
-            FastDumpingPolicy.product_id == product.id,
-        )
-        .with_for_update()
-    )
-    classic = db.scalar(
-        select(DumpingPolicy)
-        .where(DumpingPolicy.product_id == product.id)
-        .with_for_update()
-    )
     pending = db.scalar(
         select(FastDumpingJob.id)
         .where(
@@ -200,29 +182,12 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str, merchant_sku:
         )
         .limit(1)
     )
-    if (
-        (fast and fast.enabled)
-        or (classic and classic.enabled)
-        or pending
-        or legacy_pending
-    ):
-        active_modes = []
-        if fast and fast.enabled:
-            active_modes.append("полная автоматизация" if fast.pricing_mode == "automation" else "быстрый демпинг")
-        if classic and classic.enabled:
-            active_modes.append("классический демпинг")
-        detail = (
-            "Изменения не отправлены агенту: включён " + ", ".join(active_modes)
-            + ". Сначала выключите его в настройках этого товара и повторите подключение."
-            if active_modes else
-            "Изменения не отправлены агенту: Kaspi ещё подтверждает предыдущую операцию демпинга. Дождитесь её завершения и повторите попытку."
-        )
+    # Read-only serialization guard: enabled pricing settings are not a
+    # preorder prerequisite, but an outstanding write must finish first.
+    if pending or legacy_pending:
         raise HTTPException(
-            409,
-            detail,
-            headers={"X-Preorder-Product-Id": str(product.id),
-                     "X-Preorder-Fast-Enabled": "1" if fast and fast.enabled else "0",
-                     "X-Preorder-Classic-Enabled": "1" if classic and classic.enabled else "0"},
+            409, "Kaspi ещё подтверждает предыдущую запись этой карточки. "
+            "Дождитесь её завершения и повторите попытку."
         )
     return product
 
@@ -248,31 +213,6 @@ def read_preorders(db: Session = Depends(get_db)):
     }
 
 
-@router.post("/products/{product_id}/stop-classic")
-def stop_classic_for_preorder(product_id: int, db: Session = Depends(get_db)):
-    """Explicit owner action for legacy settings no longer exposed by the UI."""
-    from .dumping_api import DumpingPolicyUpsert, upsert_dumping_policy
-
-    workspace = current_workspace_id()
-    db.scalar(select(Workspace).where(Workspace.id == workspace).with_for_update())
-    product = db.scalar(select(Product).where(
-        Product.id == product_id, Product.workspace_id == workspace
-    ).with_for_update())
-    if product is None:
-        raise HTTPException(404, "Товар не найден в текущем магазине")
-    assert_no_preorder_write(db, product=product)
-    policy = db.scalar(select(DumpingPolicy).where(
-        DumpingPolicy.product_id == product_id
-    ).with_for_update())
-    if policy is None:
-        return {"product_id": product_id, "enabled": False}
-    values = {field: getattr(policy, field) for field in DumpingPolicyUpsert.model_fields}
-    values.update(enabled=False, auto_publish_xml=False)
-    # Preserve thresholds and use the established manual-disable history so
-    # legacy automatic recovery cannot re-enable the policy behind the owner.
-    return upsert_dumping_policy(product_id, DumpingPolicyUpsert(**values), db)
-
-
 @router.post("")
 def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
     from .product_test_api import _queue_job, _item_payload, _job_payload
@@ -284,14 +224,6 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
     )
     source_sku = payload.reference.strip() if "://" not in payload.reference else None
     product = _check_existing(db, workspace=workspace, kaspi_id=kaspi_id, merchant_sku=source_sku)
-    if product is not None:
-        classic = db.scalar(
-            select(DumpingPolicy)
-            .where(DumpingPolicy.product_id == product.id)
-            .with_for_update()
-        )
-        if classic is not None:
-            classic.auto_publish_xml = False
     items = db.scalars(
         select(ProductTestItem)
         .where(
@@ -488,11 +420,9 @@ def enroll_preorder(db: Session, *, job: ProductTestJob, result: dict):
         _finish_job,
         _item_payload,
         _job_payload,
-        _settings,
         _now,
         build_product_test_xml,
     )
-    from .fast_dumping_service import ensure_state, cancel_active_job
 
     db.scalar(
         select(Workspace).where(Workspace.id == job.workspace_id).with_for_update()
@@ -616,51 +546,21 @@ def enroll_preorder(db: Session, *, job: ProductTestJob, result: dict):
         product.status = ProductStatus.ACTIVE.value
         product.sale_enabled = True
     product.sale_state_overridden = False
-    policy = db.scalar(
-        select(FastDumpingPolicy)
-        .where(
-            FastDumpingPolicy.workspace_id == job.workspace_id,
-            FastDumpingPolicy.product_id == product.id,
-        )
-        .with_for_update()
-    )
-    if policy is None:
-        settings = _settings(db, job.workspace_id)
-        policy = FastDumpingPolicy(
-            workspace_id=job.workspace_id,
-            product_id=product.id,
-            enabled=False,
-            minimum_profit_kzt=settings.minimum_profit_kzt,
-            city_id=item.city_id,
-            zone_id=item.zone_id,
-        )
-        db.add(policy)
-        db.flush()
-    state_row = ensure_state(db, policy=policy, workspace_id=job.workspace_id)
-    cancel_active_job(db, state=state_row, reason="Подключён ручной предзаказ")
-    policy.enabled = False
-    policy.city_id = item.city_id
-    policy.zone_id = item.zone_id
-    state_row.status = "paused"
-    state_row.status_reason = "Предзаказ подключён по указанной цене. Настройте себестоимость и включите демпинг при необходимости."
-    state_row.own_price_kzt = item.test_price_kzt
-    state_row.next_scan_at = None
     if mirror:
         feed.generated_xml = mirror
         feed.source_xml = source_mirror
         feed.generated_at = _now()
     item.product_id = product.id
-    item.fast_dumping_policy_id = policy.id
-    item.status = "enrolled_fast_dumping"
+    item.fast_dumping_policy_id = None
+    item.status = "preorder_connected"
     item.added_at = _now()
     item.last_error = None
     _finish_job(
-        job, {"product_id": product.id, "policy_id": policy.id, "merchant_sku": sku}
+        job, {"product_id": product.id, "merchant_sku": sku}
     )
     db.commit()
     return {
         "job": _job_payload(job),
         "item": _item_payload(item),
         "product_id": product.id,
-        "fast_dumping_policy_id": policy.id,
     }

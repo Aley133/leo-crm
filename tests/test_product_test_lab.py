@@ -697,8 +697,8 @@ def test_product_test_ui_uses_local_fast_agent() -> None:
     assert '@router.get("/crm/add-product"' in ui
     assert 'data-product-test-page="product-test"' in test_html
     assert 'data-product-test-page="add-product"' in add_html
-    assert 'product-test.js?v=20260906-2' in test_html
-    assert 'product-test.js?v=20260906-2' in add_html
+    assert 'product-test.js?v=20261007-1' in test_html
+    assert 'product-test.js?v=20261007-1' in add_html
     assert ui.count('headers={"Cache-Control": "no-store"}') >= 3
     assert 'id="discover-form"' in test_html
     assert 'id="discover-mode"' in test_html

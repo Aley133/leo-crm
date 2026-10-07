@@ -105,17 +105,16 @@ def test_existing_agent_pipeline_enrolls_with_requested_price_and_no_supplier(
         assert write_job.options_json["stock_count"] == 5
         done = _enroll_created_product(db_session, job=write_job, result=confirmed())
         product = db_session.get(Product, done["product_id"])
-        policy = db_session.get(FastDumpingPolicy, done["fast_dumping_policy_id"])
+        assert db_session.scalar(select(FastDumpingPolicy)) is None
         assert (
             product.kaspi_product_id == "123456789"
             and product.merchant_sku == "actual-merchant-sku"
         )
-        assert not policy.enabled
         item = db_session.get(ProductTestItem, queued["item"]["id"])
         assert (
             not item.active
             and not item.supplier_url
-            and item.status == "enrolled_fast_dumping"
+            and item.status == "preorder_connected"
         )
         assert (
             "actual-merchant-sku" in feed.generated_xml
@@ -159,7 +158,7 @@ def test_edit_reuses_product_and_waits_for_exact_kaspi_confirmation(db_session):
         )
         assert updated["item"]["id"] == queued["item"]["id"]
         assert updated["item"]["product_id"] == product_id
-        assert state.own_price_kzt == 14000
+        assert state is None
         read_job = db_session.get(ProductTestJob, updated["job"]["id"])
         inspect(db_session, read_job)
         next_write = db_session.scalar(
@@ -172,13 +171,13 @@ def test_edit_reuses_product_and_waits_for_exact_kaspi_confirmation(db_session):
         assert next_write.options_json["preorder_days"] == 4
         with pytest.raises(ValueError):
             _enroll_created_product(db_session, job=next_write, result=confirmed())
-        assert state.own_price_kzt == 14000
+        assert state is None
         done = _enroll_created_product(
             db_session, job=next_write,
             result=confirmed(price_kzt=15999, preorder_days=4),
         )
         assert done["product_id"] == product_id
-        assert state.own_price_kzt == 15999
+        assert db_session.scalar(select(FastDumpingState)) is None
         assert db_session.scalar(select(func.count()).select_from(Product)) == 1
         assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 1
 
@@ -243,7 +242,7 @@ def test_wrong_inspection_card_cannot_queue_a_write(db_session):
         assert db_session.scalar(select(func.count()).select_from(ProductTestJob)) == 1
 
 
-def test_physical_stock_and_enabled_fast_block_preorder(db_session):
+def test_physical_stock_blocks_but_enabled_settings_do_not_block_preorder(db_session):
     product, batch, policy, _ = _seed_fast_product(db_session)
     with workspace_context(1):
         product.kaspi_product_id = "123456789"
@@ -252,11 +251,8 @@ def test_physical_stock_and_enabled_fast_block_preorder(db_session):
             queue(db_session)
         batch.quantity_remaining = 0
         db_session.commit()
-        with pytest.raises(HTTPException, match="409"):
-            queue(db_session)
-        policy.enabled = False
-        db_session.commit()
         queue(db_session)
+        assert policy.enabled
         for call in (
             lambda: upsert_fast_dumping_policy(
                 product.id, FastDumpingPolicyUpsert(), db_session
@@ -351,7 +347,8 @@ def test_resurrection_reuses_product_and_preserves_manual_preorder(db_session):
         )
         done = _enroll_created_product(db_session, job=job, result=confirmed())
         assert done["product_id"] == product_id
-        assert done["fast_dumping_policy_id"] == policy_id
+        assert db_session.get(FastDumpingPolicy, policy_id) is policy
+        assert not policy.enabled
         assert product.sale_enabled and not product.sale_state_overridden
         assert db_session.scalar(select(func.count()).select_from(Product)) == 1
 
@@ -544,34 +541,65 @@ def test_numeric_merchant_sku_is_not_confused_with_master_id(db_session):
         assert write.options_json["merchant_sku"] == "4671307561"
 
 
-def test_legacy_policy_block_has_actionable_details_and_explicit_stop_preserves_settings(db_session):
-    from backend.app.preorder_api import stop_classic_for_preorder
+def _snapshot(row):
+    return {column.key: getattr(row, column.key) for column in row.__table__.columns}
+
+
+@pytest.mark.parametrize("pricing_mode", ["manual", "automation"])
+def test_preorder_connect_and_edit_leave_pricing_policies_state_and_jobs_unchanged(db_session, pricing_mode):
     from backend.app.dumping_models import DumpingPolicy, DumpingRun
-    product, batch, fast, _ = _seed_fast_product(db_session)
+    from backend.app.fast_dumping_models import FastDumpingJob
+    product, batch, fast, fast_state = _seed_fast_product(db_session)
     with workspace_context(1):
         batch.quantity_remaining = 0
         product.kaspi_product_id = "123456789"
-        fast.enabled = False
+        product.merchant_sku = "actual-merchant-sku"
+        fast.pricing_mode = pricing_mode
+        fast_state.own_price_kzt = 12345
         classic = DumpingPolicy(product_id=product.id, enabled=True,
             auto_publish_xml=True, minimum_profit_kzt=3456, undercut_step_kzt=7,
             supplier_delivery_buffer_days=3, city_id="196220100", zone_id="Magnum_ZONE1")
         db_session.add(classic)
         db_session.commit()
+        for row in (fast, fast_state, classic):
+            db_session.refresh(row)
+        before = [_snapshot(row) for row in (fast, fast_state, classic)]
+        queued = queue(db_session)
+        inspect(db_session, db_session.get(ProductTestJob, queued["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
+        done = _enroll_created_product(db_session, job=write, result=confirmed())
+        assert done["product_id"] == product.id
+        edited = edit_preorder(queued["item"]["id"],
+            PreorderEdit(price_kzt=15999, preorder_days=4, stock_count=10), db_session)
+        inspect(db_session, db_session.get(ProductTestJob, edited["job"]["id"]))
+        next_write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer", ProductTestJob.status == "queued"))
+        _enroll_created_product(db_session, job=next_write,
+            result=confirmed(price_kzt=15999, preorder_days=4, stock_count=10))
+        for row in (fast, fast_state, classic):
+            db_session.refresh(row)
+        assert [_snapshot(row) for row in (fast, fast_state, classic)] == before
+        assert db_session.scalar(select(func.count()).select_from(FastDumpingJob)) == 0
+        assert db_session.scalar(select(func.count()).select_from(DumpingRun)) == 0
+
+
+@pytest.mark.parametrize("status", ["queued_apply", "leased_apply", "queued_verify", "leased_verify"])
+def test_only_outstanding_same_offer_write_blocks_preorder_without_changing_it(db_session, status):
+    from backend.app.fast_dumping_models import FastDumpingJob
+    product, batch, fast, state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        batch.quantity_remaining = 0
+        product.kaspi_product_id = "123456789"
+        job = FastDumpingJob(workspace_id=1, product_id=product.id,
+            policy_id=fast.id, status=status)
+        db_session.add(job)
+        db_session.commit()
+        db_session.refresh(job)
+        before = _snapshot(job)
         with pytest.raises(HTTPException) as exc:
-            connect_preorder(PreorderRequest(reference=product.kaspi_product_id,
-                price_kzt=14000, preorder_days=7), db_session)
-        assert "классический демпинг" in exc.value.detail
-        assert "не отправлены агенту" in exc.value.detail
-        assert exc.value.headers["X-Preorder-Product-Id"] == str(product.id)
-        assert exc.value.headers["X-Preorder-Classic-Enabled"] == "1"
-        stop_classic_for_preorder(product.id, db_session)
-        assert not classic.enabled and not classic.auto_publish_xml
-        assert classic.minimum_profit_kzt == 3456 and classic.undercut_step_kzt == 7
-        assert db_session.scalar(select(DumpingRun).where(
-            DumpingRun.product_id == product.id, DumpingRun.status == "policy_disabled_manual"))
-        connect_preorder(PreorderRequest(reference=product.kaspi_product_id,
-            price_kzt=14000, preorder_days=7), db_session)
-    with workspace_context(3):
-        with pytest.raises(HTTPException) as exc:
-            stop_classic_for_preorder(product.id, db_session)
-        assert exc.value.status_code == 404
+            queue(db_session)
+        assert exc.value.status_code == 409
+        assert "предыдущую запись" in exc.value.detail
+        db_session.refresh(job)
+        assert _snapshot(job) == before
+        assert db_session.scalar(select(func.count()).select_from(ProductTestJob)) == 0

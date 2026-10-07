@@ -19,9 +19,6 @@
     if (response.status === 401) { localStorage.removeItem(tokenKey); throw Error("SERVICE_API_TOKEN не принят"); }
     if (!response.ok) {
       const error = Error(typeof data.detail === "string" ? data.detail : `Ошибка HTTP ${response.status}`);
-      error.productId = Number(response.headers?.get("X-Preorder-Product-Id"));
-      error.fastEnabled = response.headers?.get("X-Preorder-Fast-Enabled") === "1";
-      error.classicEnabled = response.headers?.get("X-Preorder-Classic-Enabled") === "1";
       throw error;
     }
     return data;
@@ -29,36 +26,6 @@
   const showFeedback = (target, text, error=null) => {
     target.replaceChildren(document.createTextNode(text));
     target.classList.remove("hidden");
-    if (error?.productId > 0) {
-      const settings = [];
-      if (error.fastEnabled) settings.push(["/crm/fast-dumping", "Настройки быстрого демпинга"]);
-      for (const [href, label] of settings) {
-        const link = document.createElement("a");
-        link.className = "button secondary";
-        link.href = href;
-        link.target = "_blank";
-        link.rel = "noopener";
-        link.textContent = label;
-        target.append(document.createElement("br"), link);
-      }
-      if (error.classicEnabled) {
-        const stop = document.createElement("button");
-        stop.type = "button";
-        stop.className = "button secondary";
-        stop.textContent = "Выключить классический демпинг";
-        stop.addEventListener("click", async () => {
-          if (stop.disabled) return;
-          stop.disabled = true;
-          stop.textContent = "Выключаю…";
-          try {
-            await request(`/api/preorder/products/${error.productId}/stop-classic`, {method:"POST"});
-            showFeedback(target, "Классический демпинг выключен. Дождитесь завершения текущей операции, если она была, и повторите подключение или сохранение.",
-              error.fastEnabled ? {...error, classicEnabled:false} : null);
-          } catch (failure) { showFeedback(target, failure.message, failure); }
-        });
-        target.append(document.createElement("br"), stop);
-      }
-    }
     target.scrollIntoView({block:"nearest", behavior:"smooth"});
     target.focus({preventScroll:true});
   };
@@ -66,8 +33,8 @@
     items = new Map(data.items.map(item => [Number(item.id), item]));
     const archiveReady = (data.agent?.agents || []).some(agent => agent.online && /^\d+\.\d+\.\d+$/.test(agent.version || "") && agent.version.split(".").map(Number).reduce((value, part) => value * 1000 + part, 0) >= 1001025);
     document.querySelector("#agent-status").textContent = data.required_agent_version && data.agent?.online && !archiveReady ? "Обновите «Тест товара» до 1.1.25: задания восстановления дождутся нового агента." : data.agent?.online ? "Агент «Тест товара» онлайн." : "Агент «Тест товара» офлайн. Задание дождётся его подключения.";
-    const labels = {preorder_inspecting:"Чтение карточки",adding_to_kaspi:"Подключение к Kaspi",enrolled_fast_dumping:"Подключён",error:"Ошибка"};
-    list.innerHTML = data.items.map(item => `<article class="fast-card"><div class="fast-card-head"><div><h3>${escape(item.name)}</h3><span>${escape(labels[item.status] || item.status)}</span></div>${item.product_id && item.status === "enrolled_fast_dumping" ? `<div class="fast-card-actions"><button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button><a class="button secondary" href="/crm/products/${Number(item.product_id)}">Товар</a><a class="button secondary" href="/crm/fast-dumping">Fast Dumping</a></div>` : item.status === "error" ? `<button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button>` : ""}</div><div class="fast-card-reason">${Number(item.test_price_kzt).toLocaleString("ru-RU")} ₸ · предзаказ ${Number(item.preorder_days)} дн. · ${Number(item.stock_count)} шт. · SKU ${escape(item.merchant_sku)} · Kaspi ${escape(item.kaspi_product_id)}${item.last_error ? `<p>${escape(item.last_error)}</p>` : ""}</div></article>`).join("") || '<p>Пока нет подключений.</p>';
+    const labels = {preorder_inspecting:"Чтение карточки",adding_to_kaspi:"Подключение к Kaspi",preorder_connected:"Подключён",enrolled_fast_dumping:"Подключён",error:"Ошибка"};
+    list.innerHTML = data.items.map(item => `<article class="fast-card"><div class="fast-card-head"><div><h3>${escape(item.name)}</h3><span>${escape(labels[item.status] || item.status)}</span></div>${item.product_id && ["preorder_connected", "enrolled_fast_dumping"].includes(item.status) ? `<div class="fast-card-actions"><button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button><a class="button secondary" href="/crm/products/${Number(item.product_id)}">Товар</a></div>` : item.status === "error" ? `<button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button>` : ""}</div><div class="fast-card-reason">${Number(item.test_price_kzt).toLocaleString("ru-RU")} ₸ · предзаказ ${Number(item.preorder_days)} дн. · ${Number(item.stock_count)} шт. · SKU ${escape(item.merchant_sku)} · Kaspi ${escape(item.kaspi_product_id)}${item.last_error ? `<p>${escape(item.last_error)}</p>` : ""}</div></article>`).join("") || '<p>Пока нет подключений.</p>';
   };
   list.addEventListener("click", event => {
     const editButton = event.target.closest("[data-edit-preorder]");
