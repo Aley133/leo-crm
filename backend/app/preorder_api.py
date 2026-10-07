@@ -206,9 +206,23 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str, merchant_sku:
         or pending
         or legacy_pending
     ):
+        active_modes = []
+        if fast and fast.enabled:
+            active_modes.append("полная автоматизация" if fast.pricing_mode == "automation" else "быстрый демпинг")
+        if classic and classic.enabled:
+            active_modes.append("классический демпинг")
+        detail = (
+            "Изменения не отправлены агенту: включён " + ", ".join(active_modes)
+            + ". Сначала выключите его в настройках этого товара и повторите подключение."
+            if active_modes else
+            "Изменения не отправлены агенту: Kaspi ещё подтверждает предыдущую операцию демпинга. Дождитесь её завершения и повторите попытку."
+        )
         raise HTTPException(
             409,
-            "Сначала выключите демпинг товара и дождитесь подтверждения текущей операции",
+            detail,
+            headers={"X-Preorder-Product-Id": str(product.id),
+                     "X-Preorder-Fast-Enabled": "1" if fast and fast.enabled else "0",
+                     "X-Preorder-Classic-Enabled": "1" if classic and classic.enabled else "0"},
         )
     return product
 
@@ -232,6 +246,31 @@ def read_preorders(db: Session = Depends(get_db)):
         "agent": _product_test_agent_status(workspace),
         "required_agent_version": ARCHIVE_AGENT_VERSION,
     }
+
+
+@router.post("/products/{product_id}/stop-classic")
+def stop_classic_for_preorder(product_id: int, db: Session = Depends(get_db)):
+    """Explicit owner action for legacy settings no longer exposed by the UI."""
+    from .dumping_api import DumpingPolicyUpsert, upsert_dumping_policy
+
+    workspace = current_workspace_id()
+    db.scalar(select(Workspace).where(Workspace.id == workspace).with_for_update())
+    product = db.scalar(select(Product).where(
+        Product.id == product_id, Product.workspace_id == workspace
+    ).with_for_update())
+    if product is None:
+        raise HTTPException(404, "Товар не найден в текущем магазине")
+    assert_no_preorder_write(db, product=product)
+    policy = db.scalar(select(DumpingPolicy).where(
+        DumpingPolicy.product_id == product_id
+    ).with_for_update())
+    if policy is None:
+        return {"product_id": product_id, "enabled": False}
+    values = {field: getattr(policy, field) for field in DumpingPolicyUpsert.model_fields}
+    values.update(enabled=False, auto_publish_xml=False)
+    # Preserve thresholds and use the established manual-disable history so
+    # legacy automatic recovery cannot re-enable the policy behind the owner.
+    return upsert_dumping_policy(product_id, DumpingPolicyUpsert(**values), db)
 
 
 @router.post("")

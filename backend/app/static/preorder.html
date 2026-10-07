@@ -34,6 +34,7 @@
             <label><span>Город Kaspi</span><input id="city" value="196220100" maxlength="32" required></label>
             <label><span>Зона Kaspi</span><input id="zone" value="Magnum_ZONE1" maxlength="64" required></label>
             <button id="connect" class="button" type="submit">Подключить к карточке</button>
+            <div id="connect-message" class="wide fast-dialog-note hidden" role="alert" tabindex="-1"></div>
           </form>
           <p class="fast-dialog-note">Используется уже подключённый агент «Тест товара». После подтверждения Kaspi товар появится в CRM и Fast Dumping. Цена останется указанной: для автоматического демпинга настройте себестоимость или поставщика и включите его в настройках товара.</p>
         </section>
@@ -49,11 +50,11 @@
       <label><span>Предзаказ, дней</span><input id="edit-days" type="number" min="1" max="365" step="1" required></label>
             <label><span>Количество для предзаказа, шт.</span><input id="edit-stock" type="number" min="1" max="1000000" step="1" value="5" required></label>
       <p class="wide fast-dialog-note">Изменения применит агент «Тест товара» после подтверждения Kaspi. Если включён демпинг, сначала выключите его и дождитесь завершения текущей операции.</p>
-      <p id="edit-message" class="wide" role="status"></p>
+      <div id="edit-message" class="wide fast-dialog-note hidden" role="alert" tabindex="-1"></div>
       <button id="edit-save" class="button" type="submit">Сохранить</button>
       <button id="edit-cancel" class="button secondary" type="button">Отмена</button>
     </form>
   </dialog>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/preorder.js?v=20261007-4" defer></script>
+  <script src="/static/preorder.js?v=20261007-5" defer></script>
 </body></html>
