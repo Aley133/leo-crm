@@ -542,3 +542,36 @@ def test_numeric_merchant_sku_is_not_confused_with_master_id(db_session):
         write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
         assert write.options_json["master_sku"] == "1671307561"
         assert write.options_json["merchant_sku"] == "4671307561"
+
+
+def test_legacy_policy_block_has_actionable_details_and_explicit_stop_preserves_settings(db_session):
+    from backend.app.preorder_api import stop_classic_for_preorder
+    from backend.app.dumping_models import DumpingPolicy, DumpingRun
+    product, batch, fast, _ = _seed_fast_product(db_session)
+    with workspace_context(1):
+        batch.quantity_remaining = 0
+        product.kaspi_product_id = "123456789"
+        fast.enabled = False
+        classic = DumpingPolicy(product_id=product.id, enabled=True,
+            auto_publish_xml=True, minimum_profit_kzt=3456, undercut_step_kzt=7,
+            supplier_delivery_buffer_days=3, city_id="196220100", zone_id="Magnum_ZONE1")
+        db_session.add(classic)
+        db_session.commit()
+        with pytest.raises(HTTPException) as exc:
+            connect_preorder(PreorderRequest(reference=product.kaspi_product_id,
+                price_kzt=14000, preorder_days=7), db_session)
+        assert "классический демпинг" in exc.value.detail
+        assert "не отправлены агенту" in exc.value.detail
+        assert exc.value.headers["X-Preorder-Product-Id"] == str(product.id)
+        assert exc.value.headers["X-Preorder-Classic-Enabled"] == "1"
+        stop_classic_for_preorder(product.id, db_session)
+        assert not classic.enabled and not classic.auto_publish_xml
+        assert classic.minimum_profit_kzt == 3456 and classic.undercut_step_kzt == 7
+        assert db_session.scalar(select(DumpingRun).where(
+            DumpingRun.product_id == product.id, DumpingRun.status == "policy_disabled_manual"))
+        connect_preorder(PreorderRequest(reference=product.kaspi_product_id,
+            price_kzt=14000, preorder_days=7), db_session)
+    with workspace_context(3):
+        with pytest.raises(HTTPException) as exc:
+            stop_classic_for_preorder(product.id, db_session)
+        assert exc.value.status_code == 404

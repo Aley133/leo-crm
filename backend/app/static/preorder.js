@@ -4,6 +4,7 @@
   const message = document.querySelector("#message");
   const form = document.querySelector("#preorder-form");
   const button = document.querySelector("#connect");
+  const connectMessage = document.querySelector("#connect-message");
   const list = document.querySelector("#preorder-list");
   const editDialog = document.querySelector("#edit-dialog");
   const editMessage = document.querySelector("#edit-message");
@@ -16,8 +17,50 @@
     const response = await fetch(url, {cache:"no-store", ...options, headers:{Authorization:`Bearer ${localStorage.getItem(tokenKey) || ""}`, "Content-Type":"application/json"}});
     const data = await response.json().catch(()=>({}));
     if (response.status === 401) { localStorage.removeItem(tokenKey); throw Error("SERVICE_API_TOKEN не принят"); }
-    if (!response.ok) throw Error(typeof data.detail === "string" ? data.detail : `Ошибка HTTP ${response.status}`);
+    if (!response.ok) {
+      const error = Error(typeof data.detail === "string" ? data.detail : `Ошибка HTTP ${response.status}`);
+      error.productId = Number(response.headers?.get("X-Preorder-Product-Id"));
+      error.fastEnabled = response.headers?.get("X-Preorder-Fast-Enabled") === "1";
+      error.classicEnabled = response.headers?.get("X-Preorder-Classic-Enabled") === "1";
+      throw error;
+    }
     return data;
+  };
+  const showFeedback = (target, text, error=null) => {
+    target.replaceChildren(document.createTextNode(text));
+    target.classList.remove("hidden");
+    if (error?.productId > 0) {
+      const settings = [];
+      if (error.fastEnabled) settings.push(["/crm/fast-dumping", "Настройки быстрого демпинга"]);
+      for (const [href, label] of settings) {
+        const link = document.createElement("a");
+        link.className = "button secondary";
+        link.href = href;
+        link.target = "_blank";
+        link.rel = "noopener";
+        link.textContent = label;
+        target.append(document.createElement("br"), link);
+      }
+      if (error.classicEnabled) {
+        const stop = document.createElement("button");
+        stop.type = "button";
+        stop.className = "button secondary";
+        stop.textContent = "Выключить классический демпинг";
+        stop.addEventListener("click", async () => {
+          if (stop.disabled) return;
+          stop.disabled = true;
+          stop.textContent = "Выключаю…";
+          try {
+            await request(`/api/preorder/products/${error.productId}/stop-classic`, {method:"POST"});
+            showFeedback(target, "Классический демпинг выключен. Дождитесь завершения текущей операции, если она была, и повторите подключение или сохранение.",
+              error.fastEnabled ? {...error, classicEnabled:false} : null);
+          } catch (failure) { showFeedback(target, failure.message, failure); }
+        });
+        target.append(document.createElement("br"), stop);
+      }
+    }
+    target.scrollIntoView({block:"nearest", behavior:"smooth"});
+    target.focus({preventScroll:true});
   };
   const render = data => {
     items = new Map(data.items.map(item => [Number(item.id), item]));
@@ -36,7 +79,8 @@
     document.querySelector("#edit-price").value = Number(item.test_price_kzt);
     document.querySelector("#edit-days").value = Number(item.preorder_days);
     document.querySelector("#edit-stock").value = Number(item.stock_count);
-    editMessage.textContent = "";
+    editMessage.replaceChildren();
+    editMessage.classList.add("hidden");
     editDialog.showModal();
   });
   editDialog.addEventListener("close", () => { editingId = null; });
@@ -46,13 +90,15 @@
     if (editingId === null || editSave.disabled) return;
     const submittedId = editingId;
     editSave.disabled = true;
+    editSave.textContent = "Отправляю…";
+    editMessage.classList.add("hidden");
     try {
       await request(`/api/preorder/${submittedId}`, {method:"PATCH", body:JSON.stringify({price_kzt:Number(document.querySelector("#edit-price").value), preorder_days:Number(document.querySelector("#edit-days").value), stock_count:Number(document.querySelector("#edit-stock").value)})});
       if (editingId === submittedId) editDialog.close();
       message.textContent = "Изменения цены, срока и количества переданы агенту. Дождитесь подтверждения Kaspi.";
       await load();
-    } catch(error) { if (editingId === submittedId) editMessage.textContent = error.message; }
-    finally { editSave.disabled = false; }
+    } catch(error) { if (editingId === submittedId) showFeedback(editMessage, error.message, error); }
+    finally { editSave.disabled = false; editSave.textContent = "Сохранить"; }
   });
   const load = async () => {
     const authorized = Boolean(localStorage.getItem(tokenKey));
@@ -65,13 +111,18 @@
     finally { loading = false; }
   };
   form.addEventListener("submit", async event => {
-    event.preventDefault(); button.disabled = true;
+    event.preventDefault();
+    if (button.disabled) return;
+    button.disabled = true;
+    button.textContent = "Отправляю…";
+    connectMessage.classList.add("hidden");
     try {
       await request("/api/preorder", {method:"POST", body:JSON.stringify({reference:document.querySelector("#reference").value.trim(), price_kzt:Number(document.querySelector("#price").value), preorder_days:Number(document.querySelector("#days").value), stock_count:Number(document.querySelector("#stock").value), city_id:document.querySelector("#city").value.trim(), zone_id:document.querySelector("#zone").value.trim()})});
       message.textContent = "Задание передано агенту «Тест товара». Здесь появится результат подключения.";
+      showFeedback(connectMessage, message.textContent);
       await load();
-    } catch(error) { message.textContent = error.message; }
-    finally { button.disabled = false; }
+    } catch(error) { message.textContent = error.message; showFeedback(connectMessage, error.message, error); }
+    finally { button.disabled = false; button.textContent = "Подключить к карточке"; }
   });
   document.querySelector("#token-form").addEventListener("submit", async event => { event.preventDefault();localStorage.setItem(tokenKey, document.querySelector("#token").value.trim());document.querySelector("#token").value="";await load(); });
   document.querySelector("#refresh").addEventListener("click", load);
