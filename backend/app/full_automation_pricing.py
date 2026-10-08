@@ -95,8 +95,12 @@ def decide_automated_price(
             + premium
             - (Decimal(0) if premium else Decimal(1))
         )
-    ceiling = min(ceilings)
     rank = max(1, min(3, int(target_position)))
+    # TOP-N allows N-1 cheaper sellers. The cheapest rival is therefore not
+    # the ceiling for profit-first automation. With a short market use the
+    # highest observed rival's bounded offer; never extrapolate an unbounded price.
+    ceiling = (min(ceilings) if coordinated else
+               sorted(ceilings)[min(rank, len(ceilings)) - 1])
     rank_rivals = external if coordinated else rivals
     if len(rank_rivals) >= rank:
         ceiling = min(ceiling, Decimal(str(rank_rivals[rank - 1]["price_kzt"])) - 1)

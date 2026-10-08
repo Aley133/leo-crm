@@ -4,7 +4,7 @@ from .models import MarketplaceOrder, MarketplaceOrderLine, MarketplaceAccount, 
 
 
 def observe_sales(db, *, policy, state):
-    """Only observed orders influence experiments; no inferred demand diagnosis."""
+    """Observe sales without sacrificing the profit-first TOP-3 objective."""
     now = datetime.now(UTC)
     data = dict(state.automation_json or {})
     price = str(state.own_price_kzt)
@@ -55,11 +55,8 @@ def observe_sales(db, *, policy, state):
         )
         or 0
     )
-    tier = int(data.get("target_position", 3))
-    if quantity:
-        tier = 3
-    elif now - started >= window:
-        tier = max(1, tier - 1)
+    tier = 3
+    if now - started >= window:
         data["exposure_started_at"] = now.isoformat()
     data.update(
         target_position=tier,

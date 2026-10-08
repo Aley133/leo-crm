@@ -51,13 +51,33 @@ def test_user_example_maximizes_profit_in_top_three():
 def test_unknown_delivery_has_no_premium():
     rows = offers()
     rows[0]["delivery_days"] = None
-    assert decide(rows).target_price_kzt == 13998
+    assert decide(rows).target_price_kzt == 15999
 
 
 def test_faster_rivals_disallow_premium():
     rows = offers()
     rows[1]["delivery_days"] = 0
-    assert decide(rows).target_price_kzt == 13998
+    assert decide(rows).target_price_kzt == 15999
+
+
+@pytest.mark.parametrize("cheap_days", [0, 5, None])
+def test_raise_2381_to_2549_when_cheapest_seller_does_not_limit_top_three(cheap_days):
+    decision = decide_automated_price(own_price_kzt=2381, safe_floor_kzt=2000,
+        unit_cost_kzt=1000, offers_complete=True,
+        market_offers=[{"is_own": True, "price_kzt": 2381, "delivery_days": 2},
+            {"price_kzt": 2380, "delivery_days": cheap_days},
+            {"price_kzt": 2550, "delivery_days": 2}])
+    assert decision.target_price_kzt == 2549
+    assert decision.write_allowed
+
+
+def test_profit_raise_stops_before_fourth_place_in_large_field():
+    decision = decide_automated_price(own_price_kzt=2381, safe_floor_kzt=2000,
+        unit_cost_kzt=1000, offers_complete=True,
+        market_offers=[{"is_own": True, "price_kzt": 2381, "delivery_days": 2}]
+            + [{"price_kzt": p, "delivery_days": 2} for p in (2380, 2550, 2800, 3500)])
+    assert decision.target_price_kzt == 2799
+    assert 1 + sum(p <= decision.target_price_kzt for p in (2380,2550,2800,3500)) == 3
 
 
 def test_floor_never_undercut_when_top_three_impossible():
@@ -152,7 +172,7 @@ def test_auto_scan_precedes_old_manual_backlog_and_retains_fairness(db_session):
         assert svc.claim_job(db_session, workspace_id=1, agent_id="test").id == old.id
 
 
-def test_sales_experiment_persists_while_market_price_is_stable(db_session):
+def test_missing_sales_preserves_profit_first_top_three_and_resets_old_target(db_session):
     from backend.app.full_automation_service import observe_sales
 
     p, batch, policy, state = _seed_fast_product(db_session)
@@ -162,16 +182,16 @@ def test_sales_experiment_persists_while_market_price_is_stable(db_session):
     state.automation_json = {
         "observed_price": "14000",
         "exposure_started_at": (datetime.now(UTC) - timedelta(hours=2)).isoformat(),
-        "target_position": 3,
+        "target_position": 1,
     }
     with workspace_context(1):
         assert (
             observe_sales(db_session, policy=policy, state=state)["target_position"]
-            == 2
+            == 3
         )
         assert (
             observe_sales(db_session, policy=policy, state=state)["target_position"]
-            == 2
+            == 3
         )
 
 
