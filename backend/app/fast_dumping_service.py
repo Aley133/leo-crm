@@ -1626,12 +1626,15 @@ def _decide_policy_price(*, db, policy, state, source, **kwargs):
         return FastPriceDecision(Decimal(kwargs["safe_floor_kzt"]), None, state.own_price_kzt, state.own_price_kzt,
                                  Decimal(1), "automation_market_stale", "Рынок устарел; нужна новая проверка перед записью.", False)
     experiment = observe_sales(db, policy=policy, state=state)
+    from .full_automation_owned_cycle import read_shared_cycle
+    owned_cycle = read_shared_cycle(db, policy=policy, state=state)
     decision = decide_automated_price(
         own_price_kzt=kwargs["own_price_kzt"], safe_floor_kzt=kwargs["safe_floor_kzt"],
         market_offers=kwargs["market_offers"], unit_cost_kzt=source.unit_cost_kzt,
         config=policy.automation_config, offers_complete=(getattr(state, "automation_json", None) or {}).get("offers_complete", False),
-        target_position=experiment["target_position"],
+        target_position=experiment["target_position"], owned_cycle=owned_cycle,
+        observed_at=_aware(state.last_scanned_at),
     )
-    state.automation_json = {**(state.automation_json or {}), "plan_reason":decision.reason,
+    state.automation_json = {**(state.automation_json or {}), "owned_cycle":owned_cycle, "plan_reason":decision.reason,
                              "planned_price_kzt":str(decision.target_price_kzt), "plan_status":decision.status}
     return decision

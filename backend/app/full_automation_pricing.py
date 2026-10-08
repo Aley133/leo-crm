@@ -22,6 +22,9 @@ def decide_automated_price(
     config=None,
     offers_complete=False,
     target_position=3,
+    owned_cycle=None,
+    observed_at=None,
+    now=None,
 ):
     config = config or {}
     own = _optional_money(own_price_kzt)
@@ -55,7 +58,9 @@ def decide_automated_price(
         ),
         key=lambda r: Decimal(str(r["price_kzt"])),
     )
-    external = [r for r in rivals if not r.get("is_owned_group")]
+    external = [r for r in rivals if not (r.get("is_owned_group") or r.get("is_owned_peer"))]
+    from .full_automation_owned_cycle import participants, cycle_price
+    coordinated = bool(participants(market_offers))
     if not external:
         target = max(own, floor)
         if config.get("maximum_price_kzt"):
@@ -92,8 +97,9 @@ def decide_automated_price(
         )
     ceiling = min(ceilings)
     rank = max(1, min(3, int(target_position)))
-    if len(rivals) >= rank:
-        ceiling = min(ceiling, Decimal(str(rivals[rank - 1]["price_kzt"])) - 1)
+    rank_rivals = external if coordinated else rivals
+    if len(rank_rivals) >= rank:
+        ceiling = min(ceiling, Decimal(str(rank_rivals[rank - 1]["price_kzt"])) - 1)
     if config.get("maximum_price_kzt"):
         ceiling = min(ceiling, Decimal(str(config["maximum_price_kzt"])))
     ceiling = ceiling.to_integral_value(rounding=ROUND_FLOOR)
@@ -115,6 +121,12 @@ def decide_automated_price(
             - Decimal(unit_cost_kzt)
         )
 
+    if coordinated:
+        cycle_decision = cycle_price(offers=market_offers, own=own, floor=floor, ceiling=ceiling,
+                                     cycle=owned_cycle if owned_cycle is not None else {},
+                                     result=result, profit=profit, observed_at=observed_at, now=now)
+        if cycle_decision is not None:
+            return cycle_decision
     target = max(candidates, key=lambda p: (profit(p), p))
     peer_prices = [
         Decimal(str(r["price_kzt"])) for r in rivals if r.get("is_owned_group")
