@@ -39,6 +39,8 @@ class AutomationSettings(BaseModel):
     monitor_seconds: Literal[60, 120, 180, 300] = 120
     premium_per_day_kzt: int = Field(default=500, ge=0, le=10000)
     premium_cap_kzt: int = Field(default=2000, ge=0, le=100000)
+    delivery_premium_percent_per_day: Decimal = Field(default=Decimal("5"), ge=0, le=15)
+    delivery_premium_percent_cap: Decimal = Field(default=Decimal("15"), ge=0, le=30)
     delivery_advantage_days: int = Field(default=4, ge=1, le=30)
     maximum_price_kzt: int | None = Field(default=None, gt=0, le=100000000)
     observation_hours: int = Field(default=12, ge=1, le=72)

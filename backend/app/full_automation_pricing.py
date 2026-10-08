@@ -73,10 +73,12 @@ def decide_automated_price(
         )
     own_rows = [r for r in market_offers if r.get("is_own")]
     own_days = own_rows[0].get("delivery_days") if own_rows else None
-    # Missing delivery data gives no premium. Only a configured, significant
-    # advantage permits a higher price; it does not guarantee conversion.
+    # A buyer must get a delivery advantage to justify paying more. Percentage
+    # bounds keep the legacy monetary premium from overwhelming cheap goods.
     premium_day = Decimal(str(config.get("premium_per_day_kzt", 500)))
     premium_cap = Decimal(str(config.get("premium_cap_kzt", 2000)))
+    percent_day = Decimal(str(config.get("delivery_premium_percent_per_day", 5))) / 100
+    percent_cap = Decimal(str(config.get("delivery_premium_percent_cap", 15))) / 100
     ceilings = []
     for rival in external:
         days = rival.get("delivery_days")
@@ -85,22 +87,17 @@ def decide_automated_price(
             if days is not None and own_days is not None
             else 0
         )
-        premium = (
-            min(premium_cap, premium_day * gap)
-            if gap >= int(config.get("delivery_advantage_days", 4))
-            else Decimal(0)
-        )
+        rival_price = Decimal(str(rival["price_kzt"]))
+        premium = min(premium_cap, premium_day * gap,
+                      rival_price * min(percent_cap, percent_day * gap))
         ceilings.append(
-            Decimal(str(rival["price_kzt"]))
-            + premium
-            - (Decimal(0) if premium else Decimal(1))
+            rival_price + premium - (Decimal(0) if premium else Decimal(1))
         )
     rank = max(1, min(3, int(target_position)))
-    # TOP-N allows N-1 cheaper sellers. The cheapest rival is therefore not
-    # the ceiling for profit-first automation. With a short market use the
-    # highest observed rival's bounded offer; never extrapolate an unbounded price.
-    ceiling = (min(ceilings) if coordinated else
-               sorted(ceilings)[min(rank, len(ceilings)) - 1])
+    # TOP-N is a safety limit, not permission to give up a competitive offer.
+    # Remain cheaper than every equally fast/faster/unknown-delivery competitor;
+    # pass a slower seller only within the bounded delivery premium.
+    ceiling = min(ceilings)
     rank_rivals = external if coordinated else rivals
     if len(rank_rivals) >= rank:
         ceiling = min(ceiling, Decimal(str(rank_rivals[rank - 1]["price_kzt"])) - 1)
@@ -111,7 +108,7 @@ def decide_automated_price(
         return result(
             max(own, floor),
             "floor_limited",
-            "Первая тройка недоступна при заданной минимальной прибыли; порог сохранён.",
+            "Конкурентная цена с учётом доставки недоступна при заданной минимальной прибыли; порог сохранён.",
             own < floor,
         )
     candidates = [ceiling] + [
@@ -150,7 +147,8 @@ def decide_automated_price(
     estimated = 1 + sum(Decimal(str(r["price_kzt"])) <= target for r in rivals)
     reason = (
         f"Максимальная расчётная прибыль {profit(target):.2f} ₸; место по цене ≈{estimated}, "
-        f"цель TOP-{rank}. Надбавка за доставку ограничена {premium_cap} ₸. "
+        f"ограничение TOP-{rank}. Надбавка за день более быстрой доставки до {percent_day * 100}% "
+        f"(всего до {percent_cap * 100}% и {premium_cap} ₸); при одинаковой или неизвестной доставке дешевле на 1 ₸. "
         "Позиция зависит также от сортировки Kaspi и адреса покупателя."
     )
     return result(

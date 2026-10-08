@@ -51,21 +51,20 @@ def test_user_example_maximizes_profit_in_top_three():
 def test_unknown_delivery_has_no_premium():
     rows = offers()
     rows[0]["delivery_days"] = None
-    assert decide(rows).target_price_kzt == 15999
+    assert decide(rows).target_price_kzt == 13998
 
 
 def test_faster_rivals_disallow_premium():
     rows = offers()
     rows[1]["delivery_days"] = 0
-    assert decide(rows).target_price_kzt == 15999
+    assert decide(rows).target_price_kzt == 13998
 
 
-@pytest.mark.parametrize("cheap_days", [0, 5, None])
-def test_raise_2381_to_2549_when_cheapest_seller_does_not_limit_top_three(cheap_days):
+def test_raise_2381_to_2549_when_only_cheapest_seller_is_slower():
     decision = decide_automated_price(own_price_kzt=2381, safe_floor_kzt=2000,
         unit_cost_kzt=1000, offers_complete=True,
         market_offers=[{"is_own": True, "price_kzt": 2381, "delivery_days": 2},
-            {"price_kzt": 2380, "delivery_days": cheap_days},
+            {"price_kzt": 2380, "delivery_days": 5},
             {"price_kzt": 2550, "delivery_days": 2}])
     assert decision.target_price_kzt == 2549
     assert decision.write_allowed
@@ -76,8 +75,42 @@ def test_profit_raise_stops_before_fourth_place_in_large_field():
         unit_cost_kzt=1000, offers_complete=True,
         market_offers=[{"is_own": True, "price_kzt": 2381, "delivery_days": 2}]
             + [{"price_kzt": p, "delivery_days": 2} for p in (2380, 2550, 2800, 3500)])
-    assert decision.target_price_kzt == 2799
-    assert 1 + sum(p <= decision.target_price_kzt for p in (2380,2550,2800,3500)) == 3
+    assert decision.target_price_kzt == 2379
+    assert 1 + sum(p <= decision.target_price_kzt for p in (2380,2550,2800,3500)) == 1
+
+
+@pytest.mark.parametrize("rival_days", [0, 2, None])
+def test_equal_faster_or_unknown_delivery_never_justifies_higher_price(rival_days):
+    decision = decide_automated_price(own_price_kzt=2589, safe_floor_kzt=2000,
+        unit_cost_kzt=1000, offers_complete=True,
+        market_offers=[{"is_own": True, "price_kzt": 2589, "delivery_days": 2},
+            {"price_kzt": 2380, "delivery_days": 5},
+            {"price_kzt": 2550, "delivery_days": rival_days},
+            {"price_kzt": 2590, "delivery_days": 2}])
+    assert decision.target_price_kzt == 2549
+    assert decision.write_allowed
+
+
+@pytest.mark.parametrize("gap, expected", [(0, 2549), (1, 2677), (2, 2805), (3, 2932), (10, 2932)])
+def test_delivery_premium_scales_with_price_and_has_total_cap(gap, expected):
+    decision = decide_automated_price(own_price_kzt=2382, safe_floor_kzt=2000,
+        unit_cost_kzt=1000, offers_complete=True,
+        config={"delivery_advantage_days": 4},  # Existing defaults need no resave.
+        market_offers=[{"is_own": True, "price_kzt": 2382, "delivery_days": 2},
+            {"price_kzt": 2550, "delivery_days": 2 + gap}])
+    assert decision.target_price_kzt == expected
+
+
+def test_delivery_premium_never_breaks_top_three_price_boundary():
+    decision = decide_automated_price(own_price_kzt=2382, safe_floor_kzt=2000,
+        unit_cost_kzt=1000, offers_complete=True,
+        market_offers=[{"is_own": True, "price_kzt": 2382, "delivery_days": 2}]
+            + [{"price_kzt": p, "delivery_days": 12} for p in (2380, 2550, 2590, 3500)])
+    assert decision.target_price_kzt == 2589
+
+
+def test_zero_premium_preserves_one_tenge_undercut():
+    assert decide(config={"delivery_premium_percent_per_day": 0}).target_price_kzt == 13998
 
 
 def test_floor_never_undercut_when_top_three_impossible():
