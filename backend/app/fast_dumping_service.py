@@ -8,7 +8,7 @@ from time import monotonic
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, case, delete, or_, select
+from sqlalchemy import and_, case, delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from .dumping_service import (
@@ -493,6 +493,10 @@ def queue_scan(
             and active.workspace_id == workspace_id
             and active.status in ACTIVE_JOB_STATUSES
         ):
+            if (reason == "manual" and active.status == "queued_scan"
+                    and not str(active.reason or "").startswith("inventory_priority:")):
+                active.reason = "manual"
+                _mark_scan_queued(state, active)
             return active, False
         state.active_job_id = None
     if not policy.enabled or state.automatic_writes_paused:
@@ -737,7 +741,7 @@ def schedule_due_scans(
             FastDumpingPolicy.workspace_id == workspace_id,
             Product.workspace_id == workspace_id,
             FastDumpingPolicy.enabled.is_(True),
-            Product.sale_enabled.is_(True),
+            or_(Product.sale_enabled.is_(True), Product.sale_state_overridden.is_(False)),
             FastDumpingState.active_job_id.is_(None),
             FastDumpingState.automatic_writes_paused.is_(False),
             or_(
@@ -1055,11 +1059,28 @@ def complete_scan(
     state.last_error_message = None
     state.state_version += 1
 
+    own_rows = [r for r in state.offers_json if r.get("is_own")]
+    if (policy.enabled and not product.sale_enabled and not product.sale_state_overridden
+            and state.market_context_ok and state.own_price_kzt is not None
+            and state.own_price_kzt > 0 and len(own_rows) == 1
+            and own_rows[0].get("own_match") in {"merchant_uid", "merchant_sku"}
+            and _decimal(own_rows[0].get("price_kzt"), field="own_offer_price") == state.own_price_kzt
+            and physical_stock_count(db, product_id=product.id) > 0):
+        # Imported unavailability is an observation, not a manual prohibition.
+        # Recover only from the current exact own offer plus physical FIFO.
+        # The conditional UPDATE cannot overwrite a concurrent manual disable.
+        db.execute(update(Product).where(
+            Product.id == product.id, Product.workspace_id == workspace_id,
+            Product.sale_enabled.is_(False), Product.sale_state_overridden.is_(False)
+        ).values(sale_enabled=True))
+        db.refresh(product)
+
     if not policy.enabled or not product.sale_enabled:
         reason = (
             "Быстрый демпинг выключен."
             if not policy.enabled
-            else "Товар снят с продажи."
+            else ("Товар вручную снят с продажи." if product.sale_state_overridden
+                  else "Статус «снят с продажи» из импорта не подтверждён: нужны точный собственный оффер Kaspi и физический остаток.")
         )
         _finish_without_write(
             state=state,

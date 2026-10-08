@@ -24,6 +24,7 @@ def test_due_batch_uses_one_read_and_preserves_guards_and_priority(db_session):
                 kaspi_product_id=f"scheduled-{i}",
                 merchant_sku=f"scheduled-{i}",
                 sale_enabled=i != 23,
+                sale_state_overridden=i == 23,
             )
             db_session.add(product)
             db_session.flush()
