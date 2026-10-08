@@ -77,13 +77,15 @@ const statusView = (row) => {
     applied:"Применено", watching:"Цена актуальна", delivery_advantage:"Быстрая доставка",
     preorder_position:"Место предзаказа", preorder_position_best_effort:"Место best-effort",
     floor_limited:"На пороге",
+    owned_group_reset:"Возврат цикла", owned_group_band:"Цикл магазинов",
+    owned_peer_guard:"Маржа сохранена", owned_cycle_sync:"Синхронизация магазинов",
     cooldown:"Интервал цены",
     price_anomaly:"Аномалия цены", market_context_mismatch:"Контекст не совпал",
     own_offer_missing:"Наша строка не найдена", out_of_stock:"Нет FIFO-остатка",
     apply_timeout:"Не подтверждено", apply_unconfirmed:"Защитная пауза", verification_retry:"Перепроверка", error:"Ошибка",
     paused:"Отключена", stale:"Решение устарело", apply_failed:"Ошибка записи",
   };
-  const successStatuses = ["applied","watching","cooldown","delivery_advantage","preorder_position","preorder_position_best_effort"];
+  const successStatuses = ["applied","watching","cooldown","delivery_advantage","preorder_position","preorder_position_best_effort","owned_group_reset","owned_group_band","owned_peer_guard","owned_cycle_sync"];
   const kind = isFloor(row) ? "floor" : workingStatuses.has(status) ? "working" : successStatuses.includes(status) ? "success" : attentionStatuses.has(status) || status === "apply_failed" ? "error" : "off";
   return {status, label:labels[status] || status, kind};
 };
