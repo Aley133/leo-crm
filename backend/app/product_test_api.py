@@ -2176,7 +2176,14 @@ def claim_product_test_job(
             if job.job_type == "create_offer" and (job.options_json or {}).get("manual_preorder"):
                 from .preorder_api import _check_existing
                 try:
-                    _check_existing(db, workspace=payload.workspace_id, kaspi_id=str(job.options_json["master_sku"]), merchant_sku=job.options_json.get("merchant_sku"))
+                    preorder_item = db.scalar(select(ProductTestItem).where(
+                        ProductTestItem.id == job.item_id,
+                        ProductTestItem.workspace_id == payload.workspace_id,
+                    ))
+                    _check_existing(db, workspace=payload.workspace_id,
+                        kaspi_id=str(job.options_json["master_sku"]),
+                        merchant_sku=job.options_json.get("merchant_sku"),
+                        product_id=preorder_item.product_id if preorder_item else None)
                 except HTTPException as exc:
                     job.status = "failed"
                     job.completed_at = now

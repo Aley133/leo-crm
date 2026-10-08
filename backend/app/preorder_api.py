@@ -157,7 +157,9 @@ def assert_no_preorder_write(db: Session, *, product: Product, classic: bool = F
         )
 
 
-def _check_existing(db: Session, *, workspace: int, kaspi_id: str, merchant_sku: str | None = None) -> Product | None:
+def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
+                    merchant_sku: str | None = None, product_id: int | None = None,
+                    allow_unresolved: bool = False) -> Product | None:
     from .dumping_service import physical_stock_counts
     from .product_inventory_group import inventory_owner_ids_for_products
 
@@ -170,13 +172,32 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str, merchant_sku:
         ))
         .with_for_update()
     ).all()
+    # A master card can have several merchant offers/history rows. Select the
+    # exact offer first; never treat all rows of a master as interchangeable.
+    exact = [p for p in products if merchant_sku and p.merchant_sku == merchant_sku]
+    if exact:
+        products = exact
+    if product_id is not None:
+        linked = [p for p in products if p.id == product_id]
+        if not linked:
+            raise HTTPException(409, "Привязка предзаказа не совпадает с выбранным офером Kaspi")
+        products = linked
     if len(products) > 1:
+        if allow_unresolved and not exact and product_id is None:
+            # Inspection will supply the actual merchant SKU before any write.
+            return None
         raise HTTPException(
-            409, "В CRM несколько товаров с этим Kaspi ID; сначала устраните дубликаты"
+            409, "Не удалось однозначно выбрать офер. Укажите его точный Merchant SKU"
         )
     if not products:
         return None
     product = products[0]
+    if merchant_sku and product.merchant_sku == merchant_sku and not (
+        product.kaspi_product_id == kaspi_id
+        or str(product.kaspi_product_id or "").startswith(kaspi_id + "_")
+        or kaspi_id.startswith("sku:")
+    ):
+        raise HTTPException(409, "Merchant SKU связан с другой карточкой Kaspi")
     owners = inventory_owner_ids_for_products(db, {product.id})
     if (
         physical_stock_counts(
@@ -243,6 +264,10 @@ def read_preorders(db: Session = Depends(get_db)):
 
 @router.post("")
 def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
+    return _connect_preorder(payload, db)
+
+
+def _connect_preorder(payload: PreorderRequest, db: Session, *, item_id: int | None = None):
     from .product_test_api import _queue_job, _item_payload, _job_payload
 
     workspace = current_workspace_id()
@@ -251,19 +276,33 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
         db, workspace=workspace, reference=payload.reference
     )
     source_sku = payload.reference.strip() if "://" not in payload.reference else None
-    product = _check_existing(db, workspace=workspace, kaspi_id=kaspi_id, merchant_sku=source_sku)
     items = db.scalars(
         select(ProductTestItem)
         .where(
             ProductTestItem.workspace_id == workspace,
-            or_(ProductTestItem.kaspi_product_id == kaspi_id,
+            ProductTestItem.id == item_id if item_id is not None else or_(
+                ProductTestItem.kaspi_product_id == kaspi_id,
                 ProductTestItem.merchant_sku == source_sku if source_sku else False),
         )
         .with_for_update()
     ).all()
+    exact_items = [i for i in items if source_sku and i.merchant_sku == source_sku]
+    if exact_items:
+        items = exact_items
     if len(items) > 1:
-        raise HTTPException(409, "В Тесте товара несколько записей этой карточки; устраните дубликаты")
+        raise HTTPException(409, "Укажите точный Merchant SKU нужного офера")
+    if item_id is not None and not items:
+        raise HTTPException(404, "Предзаказ не найден в текущем магазине")
     item = items[0] if items else None
+    existing_sku = (item.offers_json or {}).get("existing_merchant_sku") if item else None
+    if not existing_sku and item and not item.merchant_sku.startswith(PREFIX):
+        existing_sku = item.merchant_sku
+    product = _check_existing(
+        db, workspace=workspace, kaspi_id=kaspi_id,
+        merchant_sku=existing_sku or source_sku,
+        product_id=item.product_id if item else None, allow_unresolved=True,
+    )
+    inspection_sku = existing_sku or (product.merchant_sku if product else None) or source_sku
     from .preorder_modes import pause_pricing
     if item is not None:
         pending = db.scalar(
@@ -303,9 +342,11 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
     item.active = False
     item.last_error = None
     item.offers_json = {**(item.offers_json or {}), "mode": "manual_preorder", "manual_preorder": True,
-                        "source_sku": source_sku, "dump_enabled": payload.dump_enabled,
+                        "source_sku": inspection_sku, "dump_enabled": payload.dump_enabled,
                         "ozon_url": payload.ozon_url, "rocket_enabled": payload.rocket_enabled,
                         "minimum_profit_kzt": payload.minimum_profit_kzt, "stock_mode": False}
+    if existing_sku:
+        item.offers_json = {**item.offers_json, "existing_merchant_sku": existing_sku}
     if product:
         pause_pricing(db, product, item)
     job = _queue_job(
@@ -318,7 +359,7 @@ def connect_preorder(payload: PreorderRequest, db: Session = Depends(get_db)):
         zone_id=item.zone_id,
         options={"manual_preorder": True, "preorder_archive": True,
                  "master_sku": None if kaspi_id.startswith("sku:") else kaspi_id,
-                 "source_sku": source_sku, "product_name": product.name if product else None},
+                 "source_sku": inspection_sku, "product_name": product.name if product else None},
     )
     db.commit()
     return {"item": _item_payload(item), "job": _job_payload(job)}
@@ -337,9 +378,9 @@ def edit_preorder(
     )
     if item is None:
         raise HTTPException(404, "Предзаказ не найден в текущем магазине")
-    # Reuse the same workspace/product/item lock order and the exact existing
-    # offer confirmation pipeline. Never change XML before Kaspi confirms it.
-    return connect_preorder(
+    # Serialize by workspace and preserve the selected item throughout the
+    # existing offer confirmation pipeline. XML waits for Kaspi confirmation.
+    return _connect_preorder(
         PreorderRequest(
             reference=(item.offers_json or {}).get("source_sku") or item.kaspi_url,
             price_kzt=payload.price_kzt,
@@ -350,6 +391,7 @@ def edit_preorder(
             **payload.model_dump(include={"dump_enabled", "ozon_url", "rocket_enabled", "minimum_profit_kzt"}),
         ),
         db,
+        item_id=item_id,
     )
 
 
@@ -377,9 +419,14 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
     if (item is None or not re.fullmatch(r"\d{5,18}", master)
         or not result.get("product_name") or (unresolved and not cabinet_proof)):
         raise ValueError("Agent не подтвердил выбранную карточку Kaspi")
+    if catalog.get("found") and (
+        str(catalog.get("master_sku")) != master
+        or (source_sku and source_sku != master and catalog.get("sku") != source_sku)
+    ):
+        raise ValueError("Agent не подтвердил точный офер выбранного предзаказа")
     try:
         product = _check_existing(db, workspace=job.workspace_id, kaspi_id=master,
-                                  merchant_sku=catalog.get("sku"))
+                                  merchant_sku=catalog.get("sku"), product_id=item.product_id)
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
     if unresolved:
@@ -389,6 +436,9 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
             or_(ProductTestItem.kaspi_product_id == master,
                 ProductTestItem.merchant_sku == catalog["sku"]),
         ).with_for_update()).all()
+        exact_items = [i for i in existing if i.merchant_sku == catalog["sku"]]
+        if exact_items:
+            existing = exact_items
         if len(existing) > 1:
             raise ValueError("В CRM несколько записей выбранной карточки")
         if existing:
@@ -505,7 +555,8 @@ def enroll_preorder(db: Session, *, job: ProductTestJob, result: dict):
         )
     try:
         product = _check_existing(
-            db, workspace=job.workspace_id, kaspi_id=item.kaspi_product_id, merchant_sku=sku
+            db, workspace=job.workspace_id, kaspi_id=item.kaspi_product_id, merchant_sku=sku,
+            product_id=item.product_id,
         )
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
@@ -515,6 +566,7 @@ def enroll_preorder(db: Session, *, job: ProductTestJob, result: dict):
             Product.workspace_id == job.workspace_id,
             Product.merchant_sku == sku,
             Product.kaspi_product_id != item.kaspi_product_id,
+            ~Product.kaspi_product_id.startswith(item.kaspi_product_id + "_", autoescape=True),
             Product.id != product.id if product else True,
         )
         .limit(1)
