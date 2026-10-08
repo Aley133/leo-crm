@@ -29,6 +29,116 @@ from tests.test_fast_dumping import _seed_fast_product
 URL = "https://kaspi.kz/shop/p/phone-123456789/"
 
 
+@pytest.mark.parametrize("duplicate_sku", ["another-offer", "actual-merchant-sku"])
+@pytest.mark.parametrize("duplicate_master", ["123456789", "123456789_legacy"])
+def test_edit_targets_linked_product_even_with_same_master_history(db_session, monkeypatch, duplicate_sku, duplicate_master):
+    with workspace_context(1):
+        queued = queue(db_session)
+        inspect(db_session, db_session.get(ProductTestJob, queued["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
+        enrolled = _enroll_created_product(db_session, job=write, result=confirmed())
+        duplicate = Product(workspace_id=1, name="Historical row",
+                            kaspi_product_id=duplicate_master, merchant_sku=duplicate_sku)
+        other_item = ProductTestItem(workspace_id=1, input_reference=URL,
+            kaspi_product_id="123456789", merchant_sku="another-test-offer",
+            name="Other offer", kaspi_url=URL, product_id=duplicate.id)
+        db_session.add_all([duplicate, other_item])
+        db_session.commit()
+        original_id = enrolled["product_id"]
+        edited = edit_preorder(queued["item"]["id"],
+            PreorderEdit(price_kzt=15999, preorder_days=4), db_session)
+        read_job = db_session.get(ProductTestJob, edited["job"]["id"])
+        assert read_job.options_json["source_sku"] == "actual-merchant-sku"
+        assert edited["item"]["product_id"] == original_id
+        inspect(db_session, read_job)
+        write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer", ProductTestJob.status == "queued"))
+        assert write.options_json["merchant_sku"] == "actual-merchant-sku"
+        from backend.app import product_test_api as api
+        monkeypatch.setattr(api, "_validate_workspace_merchant", lambda *a, **k: None)
+        monkeypatch.setattr(api, "_touch_product_test_agent", lambda *a, **k: None)
+        claimed = api.claim_product_test_job(api.ProductTestAgentIdentity(
+            agent_id="preorder-test", version="1.1.25", workspace_id=1,
+            merchant_uid="merchant", agent_kind="product_test"), db_session)
+        assert claimed["job"]["id"] == write.id
+        done = _enroll_created_product(db_session, job=write,
+            result=confirmed(price_kzt=15999, preorder_days=4))
+        assert done["product_id"] == original_id
+        assert done["item"]["id"] == queued["item"]["id"]
+        assert duplicate.name == "Historical row"
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 2
+        assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 2
+
+
+def test_exact_sku_selects_one_offer_of_master_and_preserves_other_item(db_session):
+    with workspace_context(1):
+        selected = Product(workspace_id=1, name="Selected", kaspi_product_id="123456789", merchant_sku="sku-selected")
+        other = Product(workspace_id=1, name="Other", kaspi_product_id="123456789_old", merchant_sku="sku-other")
+        db_session.add_all([selected, other])
+        db_session.flush()
+        selected_item = ProductTestItem(workspace_id=1, input_reference=URL,
+            kaspi_product_id="123456789", merchant_sku="sku-selected", name="Selected",
+            kaspi_url=URL, product_id=selected.id)
+        other_item = ProductTestItem(workspace_id=1, input_reference=URL,
+            kaspi_product_id="123456789", merchant_sku="sku-other", name="Other", kaspi_url=URL)
+        db_session.add_all([selected_item, other_item])
+        db_session.commit()
+        result = connect_preorder(PreorderRequest(reference="sku-selected", price_kzt=14000, preorder_days=7), db_session)
+        assert result["item"]["id"] == selected_item.id
+        assert result["item"]["product_id"] == selected.id
+        assert other_item.input_reference == URL
+
+
+def test_master_duplicates_are_resolved_by_confirmed_cabinet_sku_before_write(db_session):
+    with workspace_context(1):
+        selected = Product(workspace_id=1, name="Selected", kaspi_product_id="123456789", merchant_sku="actual-merchant-sku")
+        other = Product(workspace_id=1, name="Other", kaspi_product_id="123456789_old", merchant_sku="sku-other")
+        db_session.add_all([selected, other])
+        db_session.commit()
+        queued = queue(db_session)
+        assert queued["item"]["product_id"] is None
+        _persist_product_inspection(db_session, job=db_session.get(ProductTestJob, queued["job"]["id"]),
+            result={"kaspi_product_id": "123456789", "product_name": "Phone",
+                    "catalog_state": {"found": True, "sku": "actual-merchant-sku", "master_sku": "123456789"}})
+        write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
+        done = _enroll_created_product(db_session, job=write, result=confirmed())
+        assert done["product_id"] == selected.id
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 2
+
+
+def test_preorder_inspection_cannot_switch_confirmed_offer(db_session):
+    with workspace_context(1):
+        queued = queue(db_session)
+        inspect(db_session, db_session.get(ProductTestJob, queued["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
+        _enroll_created_product(db_session, job=write, result=confirmed())
+        edited = edit_preorder(queued["item"]["id"], PreorderEdit(price_kzt=15999, preorder_days=4), db_session)
+        with pytest.raises(ValueError, match="точный офер"):
+            _persist_product_inspection(db_session, job=db_session.get(ProductTestJob, edited["job"]["id"]),
+                result={"kaspi_product_id": "123456789", "product_name": "Wrong offer",
+                        "catalog_state": {"found": True, "sku": "other-sku", "master_sku": "123456789"}})
+
+
+def test_exact_sku_of_another_card_is_rejected(db_session):
+    from backend.app.preorder_api import _check_existing
+    with workspace_context(1):
+        db_session.add(Product(workspace_id=1, name="Other card", kaspi_product_id="999999999", merchant_sku="actual-merchant-sku"))
+        db_session.commit()
+        with pytest.raises(HTTPException, match="409"):
+            _check_existing(db_session, workspace=1, kaspi_id="123456789", merchant_sku="actual-merchant-sku")
+
+
+def test_exact_sku_lookup_never_uses_other_workspace_with_unscoped_session(db_session):
+    from backend.app.preorder_api import _check_existing
+    db_session.info["include_all_workspaces"] = True
+    with workspace_context(1):
+        db_session.add(Product(workspace_id=1, name="Other shop", kaspi_product_id="123456789", merchant_sku="actual-merchant-sku"))
+        db_session.commit()
+    with workspace_context(3):
+        assert _check_existing(db_session, workspace=3, kaspi_id="123456789", merchant_sku="actual-merchant-sku") is None
+    db_session.info.pop("include_all_workspaces")
+
+
 def queue(db):
     return connect_preorder(
         PreorderRequest(reference=URL, price_kzt=14000, preorder_days=7), db
