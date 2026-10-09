@@ -51,33 +51,33 @@ const renderCapital = (capital) => {
   setText("#capital-warehouse", money(capital.warehouse_at_cost));
   setText("#capital-transit", money(capital.goods_in_transit));
   setText("#capital-free", moneyOrDash(capital.free_capital));
+  setText("#capital-profit", moneyOrDash(capital.accumulated_profit));
   setText("#capital-total-label", `Общий капитал ${capital.workspace_name || ""}`.trim());
 
   const totalNode = document.querySelector("#capital-total");
   const totalCard = totalNode.closest(".capital-total");
   const unpricedUnits = Number(capital.unpriced_warehouse_units || 0) + Number(capital.unpriced_incoming_units || 0);
-  if (!capital.cash_is_configured) {
-    totalNode.textContent = "—";
-    setText("#capital-total-note", "Укажите текущие деньги для полного расчёта");
-  } else if (!capital.valuation_is_complete) {
+  if (!capital.valuation_is_complete) {
     totalNode.textContent = `≥ ${money(capital.known_total_capital)}`;
     setText("#capital-total-note", `Минимально подтверждённая сумма · ${number(unpricedUnits)} ед. без закупочной цены`);
   } else {
     totalNode.textContent = money(capital.total_capital);
     const updated = capital.snapshot_created_at ? new Date(capital.snapshot_created_at).toLocaleString("ru-RU") : "";
-    setText("#capital-total-note", updated ? `Деньги обновлены ${updated}` : "Деньги + склад + товар в пути");
+    setText("#capital-total-note", updated ? `Автоматически от остатка на ${updated}` : "Расчёт по всей учтённой истории · начальный остаток 0 ₸");
   }
-  totalCard.classList.toggle("incomplete", !capital.cash_is_configured || !capital.valuation_is_complete);
-  capitalEditButton.textContent = capital.cash_is_configured ? "Изменить деньги" : "Указать деньги";
+  totalCard.classList.toggle("incomplete", !capital.valuation_is_complete);
+  capitalEditButton.textContent = capital.cash_is_configured ? "Сверить остаток" : "Начальный остаток";
 
-  capitalForm.elements.cash_balance_kzt.value = capital.cash_balance ?? "";
-  capitalForm.elements.free_capital_kzt.value = capital.free_capital ?? "";
-  capitalForm.elements.note.value = capital.snapshot_note ?? "";
+  if (capitalForm.classList.contains("hidden")) {
+    capitalForm.elements.cash_balance_kzt.value = Math.max(Number(capital.cash_balance || 0), 0);
+    capitalForm.elements.free_capital_kzt.value = capital.free_capital ?? "";
+    capitalForm.elements.note.value = capital.snapshot_note ?? "";
+  }
 };
 
 const showCapitalForm = () => {
   if (capitalCache) {
-    capitalForm.elements.cash_balance_kzt.value = capitalCache.cash_balance ?? "";
+    capitalForm.elements.cash_balance_kzt.value = Math.max(Number(capitalCache.cash_balance || 0), 0);
     capitalForm.elements.free_capital_kzt.value = capitalCache.free_capital ?? "";
     capitalForm.elements.note.value = capitalCache.snapshot_note ?? "";
   }
@@ -197,6 +197,7 @@ const renderProducts = () => {
 };
 
 const loadReport = async () => {
+  if (refreshButton.disabled) return;
   page.setAttribute("aria-busy", "true");
   refreshButton.disabled = true;
   message.textContent = "Формирую отчёт без изменения данных…";
@@ -299,3 +300,11 @@ capitalForm.addEventListener("submit", async (event) => {
 });
 
 if (localStorage.getItem(storageKey)) loadReport();
+
+// Refresh only visible reports, preserving an open balance calibration form.
+setInterval(() => {
+  if (!document.hidden && localStorage.getItem(storageKey) && capitalForm.classList.contains("hidden")) loadReport();
+}, 60000);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden && localStorage.getItem(storageKey) && capitalForm.classList.contains("hidden")) loadReport();
+});

@@ -4,8 +4,8 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Бух учёт</title>
-  <link rel="stylesheet" href="/static/dashboard.css?v=20260928-1">
-  <link rel="stylesheet" href="/static/accounting.css?v=20260928-2">
+  <link rel="stylesheet" href="/static/dashboard.css?v=20261009-1">
+  <link rel="stylesheet" href="/static/accounting.css?v=20261009-2">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
   <script src="/static/theme.js?v=20260803-2"></script>
@@ -51,10 +51,11 @@
           </div>
           <div class="capital-layout">
             <div class="capital-lines">
-              <div><span>Деньги <small>вводятся вручную</small></span><strong id="capital-cash">—</strong></div>
+              <div><span>Расчётные деньги <small>выданные заказы − расходы − оплаченные закупки</small></span><strong id="capital-cash">—</strong></div>
               <div><span>Склад по закупке <small>фактический FIFO</small></span><strong id="capital-warehouse">0 ₸</strong></div>
               <div><span>Товар в пути <small>незавершённые партии</small></span><strong id="capital-transit">0 ₸</strong></div>
-              <div class="capital-free"><span>Свободный капитал <small>часть строки «Деньги»</small></span><strong id="capital-free">—</strong></div>
+              <div><span>Накопленная прибыль <small>автоматически по выданным товарам</small></span><strong id="capital-profit">—</strong></div>
+              <div class="capital-free"><span>Доступная прибыль <small>после себестоимости, в пределах расчётных денег</small></span><strong id="capital-free">—</strong></div>
             </div>
             <div class="capital-total">
               <span id="capital-total-label">Общий капитал</span>
@@ -68,7 +69,7 @@
             <label class="capital-note-field"><span>Комментарий <small>необязательно</small></span><input name="note" maxlength="500" placeholder="Например: резерв на белый ввоз"></label>
             <div class="capital-form-actions"><button class="button" type="submit">Сохранить снимок</button><button id="capital-cancel" class="button secondary" type="button">Отмена</button></div>
           </form>
-          <p class="card-note capital-explanation">Общий капитал = Деньги + Склад по закупке + Товар в пути. Свободный капитал уже входит в «Деньги» и второй раз к итогу не прибавляется. Каждое сохранение создаёт новый снимок; предыдущие значения не удаляются.</p>
+          <p class="card-note capital-explanation">Деньги и прибыль обновляются автоматически по выданным заказам. Закупочные партии считаются оплаченными, включая товар в пути. Комиссия, налог и доставка рассчитываются по тарифам CRM. Это расчётный остаток, а не банковская выписка: внешние расходы, пополнения и вывод денег учитывайте через сверку остатка. Без начального остатка расчёт начинается с 0 ₸ по всей истории. Доступная прибыль уже входит в деньги. При отсутствующей себестоимости прибыль не подтверждена. Старые ручные снимки используют приблизительную историческую базу; одна сверка фиксирует точную базу для дальнейшего автоматического расчёта.</p>
         </section>
 
         <section class="accounting-grid">
@@ -124,6 +125,6 @@
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/accounting.js?v=20260928-2" defer></script>
+  <script src="/static/accounting.js?v=20261009-2" defer></script>
 </body>
 </html>

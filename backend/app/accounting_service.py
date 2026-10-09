@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal, ROUND_HALF_UP
 from statistics import median
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from .commerce.profit_calculator import (
@@ -17,7 +18,7 @@ from .commerce.profit_calculator import (
 )
 from .accounting_models import AccountingCapitalSnapshot
 from .inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
-from .models import MarketplaceOrder, MarketplaceOrderLine, Product
+from .models import MarketplaceOrder, MarketplaceOrderEvent, MarketplaceOrderLine, Product
 from .workspace_models import Workspace
 
 
@@ -40,6 +41,105 @@ def _aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def _accounting_date_expression():
+    first_delivery = (
+        select(func.min(MarketplaceOrderEvent.occurred_at))
+        .where(
+            MarketplaceOrderEvent.marketplace_order_id == MarketplaceOrder.id,
+            MarketplaceOrderEvent.current_status == _DELIVERED,
+        )
+        .correlate(MarketplaceOrder)
+        .scalar_subquery()
+    )
+    return case(
+        (MarketplaceOrder.status == _DELIVERED, func.coalesce(
+            MarketplaceOrder.delivered_at, first_delivery,
+            MarketplaceOrder.source_updated_at, MarketplaceOrder.ordered_at,
+            MarketplaceOrder.created_at,
+        )),
+        else_=func.coalesce(MarketplaceOrder.ordered_at, MarketplaceOrder.created_at),
+    )
+
+
+def _order_cost_data(db: Session, orders: list[MarketplaceOrder]):
+    ids = [int(order.id) for order in orders]
+    lines = list(db.scalars(select(MarketplaceOrderLine).where(
+        MarketplaceOrderLine.marketplace_order_id.in_(ids)
+    )).all()) if ids else []
+    by_order = defaultdict(list)
+    for line in lines:
+        by_order[int(line.marketplace_order_id)].append(line)
+    line_ids = [int(line.id) for line in lines]
+    allocations = {
+        int(line_id): (int(quantity or 0), Decimal(cost or 0))
+        for line_id, quantity, cost in (db.execute(
+            select(InventoryAllocation.marketplace_order_line_id,
+                   func.sum(InventoryAllocation.quantity),
+                   func.sum(InventoryAllocation.quantity * InventoryAllocation.unit_cost))
+            .where(InventoryAllocation.marketplace_order_line_id.in_(line_ids))
+            .group_by(InventoryAllocation.marketplace_order_line_id)
+        ).all() if line_ids else [])
+    }
+    return by_order, allocations
+
+
+
+def _historical_line_costs(db: Session, *, workspace_id: int, orders, lines_by_order, owner_by_product):
+    histories = defaultdict(list)
+    batches = db.scalars(select(InventoryBatch).where(
+        InventoryBatch.workspace_id == workspace_id,
+        InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
+        InventoryBatch.is_received.is_(True),
+    )).all()
+    for batch in batches:
+        owner = owner_by_product.get(int(batch.product_id), int(batch.product_id))
+        histories[owner].append((_aware(batch.received_at), int(batch.id), Decimal(batch.unit_cost)))
+    for history in histories.values():
+        history.sort()
+    dates = dict(db.execute(select(MarketplaceOrder.id, _accounting_date_expression()).where(
+        MarketplaceOrder.id.in_([int(order.id) for order in orders])
+    )).all()) if orders else {}
+    costs = {}
+    for order in orders:
+        at = _aware(dates.get(int(order.id)))
+        for line in lines_by_order.get(int(order.id), []):
+            owner = owner_by_product.get(int(line.product_id or 0), int(line.product_id or 0))
+            history = histories.get(owner, [])
+            index = bisect_right(history, (at, float("inf"), Decimal("0"))) - 1 if at is not None else -1
+            costs[int(line.id)] = history[index][2] if index >= 0 else None
+    return costs
+
+def _capital_totals(db: Session, *, workspace_id: int, before: datetime | None = None):
+    """Cumulative recorded operations; recomputation also reverses returned sales."""
+    inventory = build_inventory_snapshot(db, workspace_id=workspace_id)
+    query = select(MarketplaceOrder).where(
+        MarketplaceOrder.workspace_id == workspace_id,
+        MarketplaceOrder.status == _DELIVERED,
+    )
+    if before is not None:
+        query = query.where(_accounting_date_expression() <= before)
+    orders = list(db.scalars(query).all())
+    lines, allocations = _order_cost_data(db, orders)
+    summary, _ = _summarize_period(
+        orders, lines_by_order=lines, allocation_by_line=allocations,
+        fallback_cost_by_line=_historical_line_costs(db, workspace_id=workspace_id, orders=orders,
+            lines_by_order=lines, owner_by_product=inventory["owner_by_product"]),
+        owner_by_product=inventory["owner_by_product"],
+        products_by_id=inventory["products_by_id"],
+        inventory_by_owner={int(row["product_id"]): row for row in inventory["items"]},
+    )
+    purchase_query = select(func.sum(InventoryBatch.quantity_received * InventoryBatch.unit_cost)).where(
+        InventoryBatch.workspace_id == workspace_id,
+        InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
+    )
+    if before is not None:
+        purchase_query = purchase_query.where(InventoryBatch.created_at <= before)
+    purchases = _money(Decimal(db.scalar(purchase_query) or 0))
+    receipts = _money(summary["delivered_revenue"] - summary["kaspi_commission"]
+                      - summary["tax"] - summary["logistics"])
+    return receipts, summary["known_net_profit"], purchases, summary["result_is_complete"]
 
 
 def _change_pct(current: Decimal | int, previous: Decimal | int) -> Decimal | None:
@@ -316,6 +416,10 @@ def record_capital_snapshot(
         free_capital_kzt=free,
         note=(note or "").strip() or None,
     )
+    receipts, profit, purchases, _ = _capital_totals(db, workspace_id=workspace_id)
+    snapshot.sales_receipts_kzt = receipts
+    snapshot.sales_profit_kzt = profit
+    snapshot.purchases_kzt = purchases
     db.add(snapshot)
     db.flush()
     return snapshot
@@ -327,7 +431,7 @@ def build_capital_position(
     workspace_id: int,
     inventory: dict[str, Any],
 ) -> dict[str, Any]:
-    """Combine manual cash with automatically valued stock without double counting."""
+    """Opening balance plus cumulative sales and paid purchase changes."""
 
     latest = db.scalar(
         select(AccountingCapitalSnapshot)
@@ -343,8 +447,26 @@ def build_capital_position(
     ) or f"Workspace {workspace_id}"
     warehouse_value = _money(Decimal(inventory.get("inventory_value") or 0))
     incoming_value = _money(Decimal(inventory.get("incoming_value") or 0))
-    cash_balance = None if latest is None else _money(Decimal(latest.cash_balance_kzt))
-    free_capital = None if latest is None else _money(Decimal(latest.free_capital_kzt))
+    receipts, profit, purchases, profit_complete = _capital_totals(db, workspace_id=workspace_id)
+    legacy_baseline = latest is not None and latest.sales_receipts_kzt is None
+    if latest is None:
+        baseline_receipts = baseline_profit = baseline_purchases = Decimal("0")
+    elif legacy_baseline:
+        baseline_receipts, baseline_profit, baseline_purchases, _ = _capital_totals(
+            db, workspace_id=workspace_id, before=_aware(latest.created_at),
+        )
+    else:
+        baseline_receipts = Decimal(latest.sales_receipts_kzt)
+        baseline_profit = Decimal(latest.sales_profit_kzt)
+        baseline_purchases = Decimal(latest.purchases_kzt)
+    receipts_change = _money(receipts - baseline_receipts)
+    purchases_change = _money(purchases - baseline_purchases)
+    profit_change = _money(profit - baseline_profit)
+    cash_balance = _money(Decimal(latest.cash_balance_kzt if latest else 0)
+                          + receipts_change - purchases_change)
+    accumulated_profit = _money(Decimal(latest.free_capital_kzt if latest else 0) + profit_change)
+    free_capital = _money(min(max(cash_balance, Decimal("0")),
+                             max(accumulated_profit, Decimal("0")))) if profit_complete else None
     unpriced_warehouse_units = int(inventory.get("unpriced_units") or 0)
     unpriced_incoming_units = int(inventory.get("incoming_unpriced_units") or 0)
     valuation_is_complete = (
@@ -353,13 +475,23 @@ def build_capital_position(
     known_total = _money(
         warehouse_value + incoming_value + Decimal(cash_balance or 0)
     )
-    total_capital = known_total if latest is not None and valuation_is_complete else None
+    total_capital = known_total if valuation_is_complete else None
     return {
         "workspace_id": workspace_id,
         "workspace_name": workspace_name,
         "currency": "KZT",
         "cash_is_configured": latest is not None,
         "cash_balance": cash_balance,
+        "cash_is_estimated": True,
+        "opening_balance_is_configured": latest is not None,
+        "legacy_baseline_is_estimated": legacy_baseline,
+        "sales_net_receipts": receipts,
+        "sales_net_profit": profit if profit_complete else None,
+        "sales_profit_is_complete": profit_complete,
+        "sales_receipts_change": receipts_change,
+        "sales_profit_change": profit_change if profit_complete else None,
+        "paid_purchases_change": purchases_change,
+        "accumulated_profit": accumulated_profit if profit_complete else None,
         "warehouse_at_cost": warehouse_value,
         "goods_in_transit": incoming_value,
         "free_capital": free_capital,
@@ -382,6 +514,7 @@ def _line_cost(
     allocation_by_line: dict[int, tuple[int, Decimal]],
     owner_id: int | None,
     inventory_by_owner: dict[int, dict[str, Any]],
+    fallback_cost_by_line: dict[int, Decimal | None],
 ) -> dict[str, Any]:
     quantity = max(int(line.quantity or 0), 0)
     allocated_quantity, allocated_cost = allocation_by_line.get(
@@ -394,8 +527,7 @@ def _line_cost(
         fifo_cost = allocated_cost * Decimal(allocated_quantity) / Decimal(raw_quantity)
 
     remaining = quantity - allocated_quantity
-    inventory = inventory_by_owner.get(owner_id or -1, {})
-    fallback_cost = inventory.get("weighted_purchase_price") or inventory.get("last_purchase_price")
+    fallback_cost = fallback_cost_by_line.get(int(line.id))
     estimated_quantity = remaining if fallback_cost is not None else 0
     estimated_cost = Decimal(fallback_cost or 0) * estimated_quantity
     return {
@@ -435,6 +567,7 @@ def _summarize_period(
     owner_by_product: dict[int, int],
     products_by_id: dict[int, Product],
     inventory_by_owner: dict[int, dict[str, Any]],
+    fallback_cost_by_line: dict[int, Decimal | None],
 ) -> tuple[dict[str, Any], dict[int | str, dict[str, Any]]]:
     product_stats: dict[int | str, dict[str, Any]] = {}
     delivered_values: list[Decimal] = []
@@ -451,6 +584,7 @@ def _summarize_period(
     fifo_units = 0
     estimated_cost_units = 0
     unpriced_units = 0
+    missing_cost_orders = 0
     kaspi_commission = Decimal("0")
     tax = Decimal("0")
     logistics = Decimal("0")
@@ -463,6 +597,8 @@ def _summarize_period(
         status = str(order.status or "unknown").casefold()
         amount = Decimal(order.total_amount or 0)
         lines = lines_by_order.get(int(order.id), [])
+        if status == _DELIVERED and not lines:
+            missing_cost_orders += 1
         order_units = sum(max(int(line.quantity or 0), 0) for line in lines)
         all_units += order_units
 
@@ -534,6 +670,7 @@ def _summarize_period(
                 allocation_by_line=allocation_by_line,
                 owner_id=owner_id,
                 inventory_by_owner=inventory_by_owner,
+                fallback_cost_by_line=fallback_cost_by_line,
             )
             procurement_cost += cost["procurement_cost"]
             fifo_units += int(cost["fifo_units"])
@@ -563,7 +700,7 @@ def _summarize_period(
     kaspi_commission = _money(kaspi_commission)
     tax = _money(tax)
     logistics = _money(logistics)
-    is_complete = unpriced_units == 0
+    is_complete = unpriced_units == 0 and missing_cost_orders == 0
     complete_profit = _money(
         delivered_revenue - procurement_cost - kaspi_commission - tax - logistics
     ) if is_complete else None
@@ -600,6 +737,7 @@ def _summarize_period(
         "fifo_cost_units": fifo_units,
         "estimated_cost_units": estimated_cost_units,
         "unpriced_units": unpriced_units,
+        "missing_cost_orders": missing_cost_orders,
         "cost_coverage_pct": _percent(Decimal(delivered_units - unpriced_units) * 100 / delivered_units) if delivered_units else Decimal("100.00"),
     }, product_stats
 
@@ -613,7 +751,7 @@ def _last_sales_by_owner(
     rows = db.execute(
         select(
             MarketplaceOrderLine.product_id,
-            func.max(func.coalesce(MarketplaceOrder.delivered_at, MarketplaceOrder.ordered_at)),
+            func.max(_accounting_date_expression()),
         )
         .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
         .where(
@@ -797,44 +935,17 @@ def build_accounting_report(
     previous_start = observed_at - timedelta(days=days * 2) if days > 0 else None
     query_start = previous_start if previous_start is not None else None
 
-    order_query = select(MarketplaceOrder).where(
+    accounting_date = _accounting_date_expression()
+    order_query = select(MarketplaceOrder, accounting_date.label("accounting_at")).where(
         MarketplaceOrder.workspace_id == workspace_id,
-        MarketplaceOrder.ordered_at.is_not(None),
-        MarketplaceOrder.ordered_at <= observed_at,
+        accounting_date <= observed_at,
     )
     if query_start is not None:
-        order_query = order_query.where(MarketplaceOrder.ordered_at >= query_start)
-    orders = list(db.scalars(order_query.order_by(MarketplaceOrder.ordered_at, MarketplaceOrder.id)).all())
-    order_ids = [int(order.id) for order in orders]
-
-    lines = list(
-        db.scalars(
-            select(MarketplaceOrderLine)
-            .where(MarketplaceOrderLine.marketplace_order_id.in_(order_ids))
-            .order_by(MarketplaceOrderLine.marketplace_order_id, MarketplaceOrderLine.id)
-        ).all()
-    ) if order_ids else []
-    lines_by_order: dict[int, list[MarketplaceOrderLine]] = defaultdict(list)
-    for line in lines:
-        lines_by_order[int(line.marketplace_order_id)].append(line)
-
-    line_ids = [int(line.id) for line in lines]
-    allocation_by_line = {
-        int(line_id): (int(quantity or 0), Decimal(total_cost or 0))
-        for line_id, quantity, total_cost in (
-            db.execute(
-                select(
-                    InventoryAllocation.marketplace_order_line_id,
-                    func.sum(InventoryAllocation.quantity),
-                    func.sum(InventoryAllocation.quantity * InventoryAllocation.unit_cost),
-                )
-                .where(InventoryAllocation.marketplace_order_line_id.in_(line_ids))
-                .group_by(InventoryAllocation.marketplace_order_line_id)
-            ).all()
-            if line_ids
-            else []
-        )
-    }
+        order_query = order_query.where(accounting_date >= query_start)
+    dated_rows = db.execute(order_query.order_by(accounting_date, MarketplaceOrder.id)).all()
+    orders = [order for order, _ in dated_rows]
+    dates = {int(order.id): _aware(at) for order, at in dated_rows}
+    lines_by_order, allocation_by_line = _order_cost_data(db, orders)
 
     inventory = build_inventory_snapshot(
         db,
@@ -855,20 +966,22 @@ def build_accounting_report(
     if current_start is None:
         current_orders = orders
         previous_orders: list[MarketplaceOrder] = []
-        dated_orders = [_aware(order.ordered_at) for order in orders if order.ordered_at]
+        dated_orders = list(dates.values())
         period_days = max((observed_at - min(dated_orders)).days + 1, 1) if dated_orders else 1
     else:
         current_orders = [
             order for order in orders
-            if (_aware(order.ordered_at) or observed_at) >= current_start
+            if (dates[int(order.id)] or observed_at) >= current_start
         ]
         previous_orders = [
             order for order in orders
             if previous_start is not None
-            and previous_start <= (_aware(order.ordered_at) or observed_at) < current_start
+            and previous_start <= (dates[int(order.id)] or observed_at) < current_start
         ]
         period_days = days
 
+    fallback_cost_by_line = _historical_line_costs(db, workspace_id=workspace_id, orders=orders,
+        lines_by_order=lines_by_order, owner_by_product=owner_by_product)
     current_summary, current_products = _summarize_period(
         current_orders,
         lines_by_order=lines_by_order,
@@ -876,6 +989,7 @@ def build_accounting_report(
         owner_by_product=owner_by_product,
         products_by_id=products_by_id,
         inventory_by_owner=inventory_by_owner,
+        fallback_cost_by_line=fallback_cost_by_line,
     )
     previous_summary, previous_products = _summarize_period(
         previous_orders,
@@ -884,6 +998,7 @@ def build_accounting_report(
         owner_by_product=owner_by_product,
         products_by_id=products_by_id,
         inventory_by_owner=inventory_by_owner,
+        fallback_cost_by_line=fallback_cost_by_line,
     )
     last_sales = _last_sales_by_owner(
         db,
@@ -939,8 +1054,10 @@ def build_accounting_report(
             "kind": "management_accounting",
             "commission_rate_pct": _percent(KASPI_COMMISSION_RATE * 100),
             "tax_rate_pct": _percent(TAX_RATE * 100),
-            "cost_policy": "FIFO allocation; current weighted purchase price; last purchase price",
+            "cost_policy": "FIFO allocation; last received purchase price on or before the sale",
             "read_only": True,
+            "sales_date_policy": "delivery date; first delivered event; source update; creation fallback",
+            "cash_policy": "estimated net delivered receipts minus recorded paid purchases; optional opening balance",
         },
         "summary": current_summary,
         "capital": capital,

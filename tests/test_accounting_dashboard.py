@@ -20,7 +20,7 @@ from backend.app.accounting_service import (
 from backend.app.db import get_db
 from backend.app.inventory_models import InventoryAllocation, InventoryBatch
 from backend.app.main import app
-from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderLine, Product
+from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderEvent, MarketplaceOrderLine, Product
 from backend.app.workspace_context import workspace_context
 from backend.app.workspace_models import Workspace
 
@@ -178,8 +178,10 @@ def test_accounting_report_calculates_profit_losses_and_abc(db_session) -> None:
 
     assert report["inventory"]["inventory_value"] == Decimal("28000.00")
     assert report["capital"]["warehouse_at_cost"] == Decimal("28000.00")
-    assert report["capital"]["cash_balance"] is None
-    assert report["capital"]["total_capital"] is None
+    assert report["capital"]["cash_balance"] == Decimal("-29684.00")
+    assert report["capital"]["total_capital"] == Decimal("-1684.00")
+    assert report["capital"]["cash_is_estimated"] is True
+    assert report["capital"]["opening_balance_is_configured"] is False
     assert report["comparison"]["delivered_revenue_change_pct"] == Decimal("100.00")
     product_row = next(row for row in report["products"] if row["product_id"] == product.id)
     assert product_row["abc_class"] == "A"
@@ -549,3 +551,82 @@ def test_every_crm_navigation_exposes_accounting_tab() -> None:
         source = path.read_text(encoding="utf-8")
         if '<nav aria-label="Основная навигация">' in source:
             assert 'href="/crm/accounting"' in source, path.name
+
+
+def test_old_order_issued_today_belongs_to_delivery_period(db_session):
+    now, product, _ = _seed_accounting(db_session)
+    order = db_session.scalar(select(MarketplaceOrder).where(MarketplaceOrder.external_code == 'delivered-previous'))
+    order.ordered_at = now - timedelta(days=120)
+    order.delivered_at = now - timedelta(hours=1)
+    db_session.flush()
+    report = build_accounting_report(db_session, workspace_id=1, days=30, as_of=now)
+    assert report['summary']['delivered_orders'] == 2
+    assert report['summary']['delivered_revenue'] == Decimal('15000.00')
+    assert report['comparison']['previous']['delivered_orders'] == 0
+
+
+def test_delivery_event_is_used_when_kaspi_omits_delivery_date(db_session):
+    now, product, _ = _seed_accounting(db_session)
+    order = db_session.scalar(select(MarketplaceOrder).where(MarketplaceOrder.external_code == 'delivered-previous'))
+    order.ordered_at = now - timedelta(days=120)
+    order.delivered_at = None
+    db_session.add(MarketplaceOrderEvent(workspace_id=1, marketplace_order_id=order.id,
+        source_event_key='issued', event_type='status_changed', current_status='delivered',
+        previous_status='shipping', occurred_at=now - timedelta(hours=1)))
+    db_session.flush()
+    report = build_accounting_report(db_session, workspace_id=1, days=30, as_of=now)
+    assert report['summary']['delivered_revenue'] == Decimal('15000.00')
+
+
+def test_automatic_balances_sales_purchases_return_and_repeated_reads(db_session):
+    now, product, batch = _seed_accounting(db_session)
+    record_capital_snapshot(db_session, workspace_id=1, cash_balance_kzt=Decimal('100000'),
+        free_capital_kzt=Decimal('10000'))
+    account = db_session.get(MarketplaceAccount, db_session.scalar(select(MarketplaceOrder.marketplace_account_id).limit(1)))
+    sale, line = _order(db_session, account=account, product=product, code='new-issued',
+        status='shipping', amount=Decimal('10000'), ordered_at=now - timedelta(days=90))
+    # A reservation is not earned revenue.
+    assert build_accounting_report(db_session, workspace_id=1)['capital']['cash_balance'] == Decimal('100000.00')
+    sale.status = 'delivered'
+    sale.delivered_at = datetime.now(UTC)
+    db_session.add(InventoryAllocation(workspace_id=1, inventory_batch_id=batch.id,
+        marketplace_order_line_id=line.id, quantity=1, unit_cost=Decimal('4000'), allocated_at=now))
+    batch.quantity_remaining -= 1
+    db_session.flush()
+    for _ in range(2):
+        capital = build_accounting_report(db_session, workspace_id=1, days=1)['capital']
+        assert capital['cash_balance'] == Decimal('106993.00')
+        assert capital['free_capital'] == Decimal('12993.00')
+        assert capital['sales_profit_change'] == Decimal('2993.00')
+    # Paid incoming purchases reduce cash immediately, receiving is not a second payment.
+    incoming = InventoryBatch(workspace_id=1, product_id=product.id, received_at=now,
+        quantity_received=2, quantity_remaining=2, unit_cost=Decimal('2000'),
+        is_received=False, batch_type='purchase')
+    db_session.add(incoming)
+    db_session.flush()
+    assert build_accounting_report(db_session, workspace_id=1)['capital']['cash_balance'] == Decimal('102993.00')
+    incoming.is_received = True
+    db_session.flush()
+    assert build_accounting_report(db_session, workspace_id=1)['capital']['cash_balance'] == Decimal('102993.00')
+    # Returning a previously delivered order reverses it instead of adding a second sale.
+    sale.status = 'returned'
+    db_session.flush()
+    capital = build_accounting_report(db_session, workspace_id=1)['capital']
+    assert capital['cash_balance'] == Decimal('96000.00')
+    assert capital['free_capital'] == Decimal('10000.00')
+    assert capital['sales_profit_change'] == Decimal('0.00')
+
+
+def test_no_cost_does_not_publish_free_profit(db_session):
+    now, product, _ = _seed_accounting(db_session)
+    account = db_session.scalar(select(MarketplaceAccount))
+    unpriced = Product(workspace_id=1, kaspi_product_id='no-cost', merchant_sku='no-cost', name='No cost')
+    db_session.add(unpriced)
+    db_session.flush()
+    _order(db_session, account=account, product=unpriced, code='unpriced-issued',
+        status='delivered', amount=Decimal('10000'), ordered_at=now)
+    capital = build_accounting_report(db_session, workspace_id=1)['capital']
+    assert capital['sales_net_receipts'] > 0
+    assert capital['sales_profit_is_complete'] is False
+    assert capital['free_capital'] is None
+    assert capital['accumulated_profit'] is None
