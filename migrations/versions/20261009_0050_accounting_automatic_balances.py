@@ -26,15 +26,27 @@ def _restore_completion_dates():
         sa.column("external_object_id", sa.String), sa.column("payload_type", sa.String),
         sa.column("received_at", sa.DateTime(timezone=True)), sa.column("payload_json", sa.JSON))
     completion = raw.c.payload_json["attributes"]["completionDate"].as_string()
-    rows = connection.execute(sa.select(orders.c.id, completion).select_from(
-        orders.join(raw, sa.and_(orders.c.workspace_id == raw.c.workspace_id,
-            orders.c.marketplace_account_id == raw.c.marketplace_account_id,
-            orders.c.external_order_id == raw.c.external_object_id))
-    ).where(orders.c.delivered_at.is_(None), orders.c.status.in_(["delivered", "returned"]),
-        raw.c.payload_type == "order", completion.is_not(None)
-    ).order_by(raw.c.received_at.desc(), raw.c.id.desc()))
+    pending = {
+        (workspace, account, external): order_id
+        for order_id, workspace, account, external in connection.execute(
+            sa.select(orders.c.id, orders.c.workspace_id, orders.c.marketplace_account_id,
+                orders.c.external_order_id).where(orders.c.delivered_at.is_(None),
+                orders.c.status.in_(["delivered", "returned"]))
+        )
+    }
+    if not pending:
+        return
+    # One streamed audit scan avoids a costly multi-column join over every
+    # historical raw revision on small production PostgreSQL instances.
+    rows = connection.execute(sa.select(raw.c.workspace_id, raw.c.marketplace_account_id,
+        raw.c.external_object_id, completion).where(raw.c.payload_type == "order",
+        completion.is_not(None)).order_by(raw.c.received_at.desc(), raw.c.id.desc())
+        .execution_options(stream_results=True, yield_per=1000))
     recovered = {}
-    for order_id, value in rows:
+    for workspace, account, external, value in rows:
+        order_id = pending.get((workspace, account, external))
+        if order_id is None:
+            continue
         if order_id in recovered:
             continue
         try:
