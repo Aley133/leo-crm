@@ -256,6 +256,13 @@ def test_migration_restores_completion_date_without_overwriting_existing_date(db
     module._restore_completion_dates()
     db_session.expire_all()
     assert order.delivered_at == datetime(2026, 3, 19, 6, 18, 41, 746000, tzinfo=UTC)
+    payload['attributes']['completionDate'] += 86400000
+    import_kaspi_order(db_session, marketplace_account_id=account.id, payload=payload)
+    order.delivered_at = None
+    db_session.flush()
+    module._restore_completion_dates()
+    db_session.expire_all()
+    assert order.delivered_at == datetime(2026, 3, 20, 6, 18, 41, 746000, tzinfo=UTC)
     protected = datetime(2026, 8, 1, 10, tzinfo=UTC)
     order.delivered_at = protected
     db_session.flush()

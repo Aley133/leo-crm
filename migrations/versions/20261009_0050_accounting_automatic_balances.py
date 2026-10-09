@@ -39,27 +39,28 @@ def _restore_completion_dates():
     # One streamed audit scan avoids a costly multi-column join over every
     # historical raw revision on small production PostgreSQL instances.
     rows = connection.execute(sa.select(raw.c.workspace_id, raw.c.marketplace_account_id,
-        raw.c.external_object_id, completion).where(raw.c.payload_type == "order",
-        completion.is_not(None)).order_by(raw.c.received_at.desc(), raw.c.id.desc())
+        raw.c.external_object_id, completion, raw.c.received_at, raw.c.id).where(
+        raw.c.payload_type == "order", completion.is_not(None))
         .execution_options(stream_results=True, yield_per=1000))
     recovered = {}
-    for workspace, account, external, value in rows:
+    for workspace, account, external, value, received_at, raw_id in rows:
         order_id = pending.get((workspace, account, external))
         if order_id is None:
             continue
-        if order_id in recovered:
+        marker = (received_at, raw_id)
+        if order_id in recovered and marker <= recovered[order_id][0]:
             continue
         try:
             milliseconds = int(value)
             if not 0 < milliseconds < 4102444800000:
                 continue
-            recovered[order_id] = datetime.fromtimestamp(milliseconds / 1000, UTC)
+            recovered[order_id] = (marker, datetime.fromtimestamp(milliseconds / 1000, UTC))
         except (ValueError, TypeError, OverflowError):
             continue
     if recovered:
         connection.execute(sa.update(orders).where(orders.c.id == sa.bindparam("order_id"),
             orders.c.delivered_at.is_(None)).values(delivered_at=sa.bindparam("issued_at")),
-            [{"order_id": key, "issued_at": value} for key, value in recovered.items()])
+            [{"order_id": key, "issued_at": value[1]} for key, value in recovered.items()])
 
 
 def downgrade():
