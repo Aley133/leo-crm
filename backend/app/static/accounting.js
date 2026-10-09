@@ -18,7 +18,8 @@ const capitalCancelButton = document.querySelector("#capital-cancel");
 let selectedDays = 30;
 let productCache = [];
 let capitalCache = null;
-const autoRefreshIntervalMs = 5 * 60 * 1000;
+const autoRefreshIntervalMs = 60 * 60 * 1000;
+const reportRequestTimeoutMs = 60 * 1000;
 let lastReportRequestAt = 0;
 
 const headers = () => ({Authorization: `Bearer ${localStorage.getItem(storageKey) || ""}`});
@@ -204,8 +205,12 @@ const loadReport = async () => {
   page.setAttribute("aria-busy", "true");
   refreshButton.disabled = true;
   message.textContent = "Формирую отчёт без изменения данных…";
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), reportRequestTimeoutMs);
   try {
-    const response = await fetch(`/api/accounting/report?days=${selectedDays}`, {headers:headers(), cache:"no-store"});
+    const response = await fetch(`/api/accounting/report?days=${selectedDays}`, {
+      headers:headers(), cache:"no-store", signal:controller.signal,
+    });
     if (!response.ok) throw await responseError(response);
     const payload = await response.json();
     renderSummary(payload);
@@ -216,11 +221,14 @@ const loadReport = async () => {
     renderProducts();
     authPanel.classList.add("hidden");
     page.classList.remove("hidden");
-    message.textContent = `Отчёт обновлён ${new Date(payload.generated_at).toLocaleString("ru-RU")}. Все расчёты выполнены только для чтения.`;
+    message.textContent = `Отчёт обновлён ${new Date(payload.generated_at).toLocaleString("ru-RU")}. Автообновление раз в час.`;
   } catch (error) {
-    message.textContent = error instanceof Error ? error.message : "Не удалось сформировать отчёт.";
+    message.textContent = controller.signal.aborted
+      ? "Сервер не ответил за минуту. Нажмите «Обновить», чтобы повторить запрос."
+      : error instanceof Error ? error.message : "Не удалось сформировать отчёт.";
     if (/401|Bearer|token/i.test(message.textContent)) authPanel.classList.remove("hidden");
   } finally {
+    clearTimeout(timeout);
     page.setAttribute("aria-busy", "false");
     refreshButton.disabled = false;
   }
@@ -304,7 +312,7 @@ capitalForm.addEventListener("submit", async (event) => {
 
 if (localStorage.getItem(storageKey)) loadReport();
 
-// Refresh visible reports at most every five minutes, preserving calibration edits.
+// Refresh visible reports at most once per hour, preserving calibration edits.
 const autoRefreshReport = () => {
   if (!document.hidden && localStorage.getItem(storageKey) && capitalForm.classList.contains("hidden")
       && Date.now() - lastReportRequestAt >= autoRefreshIntervalMs) loadReport();

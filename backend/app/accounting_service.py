@@ -86,7 +86,8 @@ def _order_cost_data(db: Session, orders: list[MarketplaceOrder]):
 
 
 
-def _historical_line_costs(db: Session, *, workspace_id: int, orders, lines_by_order, owner_by_product):
+def _historical_line_costs(db: Session, *, workspace_id: int, orders, lines_by_order,
+                           owner_by_product, accounting_dates):
     histories = defaultdict(list)
     batches = db.scalars(select(InventoryBatch).where(
         InventoryBatch.workspace_id == workspace_id,
@@ -98,12 +99,9 @@ def _historical_line_costs(db: Session, *, workspace_id: int, orders, lines_by_o
         histories[owner].append((_aware(batch.received_at), int(batch.id), Decimal(batch.unit_cost)))
     for history in histories.values():
         history.sort()
-    dates = dict(db.execute(select(MarketplaceOrder.id, _accounting_date_expression()).where(
-        MarketplaceOrder.id.in_([int(order.id) for order in orders])
-    )).all()) if orders else {}
     costs = {}
     for order in orders:
-        at = _aware(dates.get(int(order.id)))
+        at = _aware(accounting_dates.get(int(order.id)))
         for line in lines_by_order.get(int(order.id), []):
             owner = owner_by_product.get(int(line.product_id or 0), int(line.product_id or 0))
             history = histories.get(owner, [])
@@ -111,21 +109,27 @@ def _historical_line_costs(db: Session, *, workspace_id: int, orders, lines_by_o
             costs[int(line.id)] = history[index][2] if index >= 0 else None
     return costs
 
-def _capital_totals(db: Session, *, workspace_id: int, before: datetime | None = None):
+def _capital_totals(db: Session, *, workspace_id: int, before: datetime | None = None,
+                    inventory: dict[str, Any] | None = None):
     """Cumulative recorded operations; recomputation also reverses returned sales."""
-    inventory = build_inventory_snapshot(db, workspace_id=workspace_id)
-    query = select(MarketplaceOrder).where(
+    if inventory is None:
+        inventory = build_inventory_snapshot(db, workspace_id=workspace_id)
+    accounting_date = _accounting_date_expression()
+    query = select(MarketplaceOrder, accounting_date.label("accounting_at")).where(
         MarketplaceOrder.workspace_id == workspace_id,
         MarketplaceOrder.status == _DELIVERED,
     )
     if before is not None:
-        query = query.where(_accounting_date_expression() <= before)
-    orders = list(db.scalars(query).all())
+        query = query.where(accounting_date <= before)
+    dated_rows = db.execute(query).all()
+    orders = [order for order, _ in dated_rows]
+    dates = {int(order.id): at for order, at in dated_rows}
     lines, allocations = _order_cost_data(db, orders)
     summary, _ = _summarize_period(
         orders, lines_by_order=lines, allocation_by_line=allocations,
         fallback_cost_by_line=_historical_line_costs(db, workspace_id=workspace_id, orders=orders,
-            lines_by_order=lines, owner_by_product=inventory["owner_by_product"]),
+            lines_by_order=lines, owner_by_product=inventory["owner_by_product"],
+            accounting_dates=dates),
         owner_by_product=inventory["owner_by_product"],
         products_by_id=inventory["products_by_id"],
         inventory_by_owner={int(row["product_id"]): row for row in inventory["items"]},
@@ -447,13 +451,15 @@ def build_capital_position(
     ) or f"Workspace {workspace_id}"
     warehouse_value = _money(Decimal(inventory.get("inventory_value") or 0))
     incoming_value = _money(Decimal(inventory.get("incoming_value") or 0))
-    receipts, profit, purchases, profit_complete = _capital_totals(db, workspace_id=workspace_id)
+    receipts, profit, purchases, profit_complete = _capital_totals(
+        db, workspace_id=workspace_id, inventory=inventory,
+    )
     legacy_baseline = latest is not None and latest.sales_receipts_kzt is None
     if latest is None:
         baseline_receipts = baseline_profit = baseline_purchases = Decimal("0")
     elif legacy_baseline:
         baseline_receipts, baseline_profit, baseline_purchases, _ = _capital_totals(
-            db, workspace_id=workspace_id, before=_aware(latest.created_at),
+            db, workspace_id=workspace_id, before=_aware(latest.created_at), inventory=inventory,
         )
     else:
         baseline_receipts = Decimal(latest.sales_receipts_kzt)
@@ -952,13 +958,15 @@ def build_accounting_report(
         workspace_id=workspace_id,
         include_zero=True,
     )
-    owner_by_product: dict[int, int] = inventory.pop("owner_by_product")
-    products_by_id: dict[int, Product] = inventory.pop("products_by_id")
+    owner_by_product: dict[int, int] = inventory["owner_by_product"]
+    products_by_id: dict[int, Product] = inventory["products_by_id"]
     capital = build_capital_position(
         db,
         workspace_id=workspace_id,
         inventory=inventory,
     )
+    inventory.pop("owner_by_product")
+    inventory.pop("products_by_id")
     inventory_by_owner = {
         int(row["product_id"]): row for row in inventory["items"]
     }
@@ -981,7 +989,7 @@ def build_accounting_report(
         period_days = days
 
     fallback_cost_by_line = _historical_line_costs(db, workspace_id=workspace_id, orders=orders,
-        lines_by_order=lines_by_order, owner_by_product=owner_by_product)
+        lines_by_order=lines_by_order, owner_by_product=owner_by_product, accounting_dates=dates)
     current_summary, current_products = _summarize_period(
         current_orders,
         lines_by_order=lines_by_order,
