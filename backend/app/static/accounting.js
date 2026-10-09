@@ -18,6 +18,8 @@ const capitalCancelButton = document.querySelector("#capital-cancel");
 let selectedDays = 30;
 let productCache = [];
 let capitalCache = null;
+const autoRefreshIntervalMs = 5 * 60 * 1000;
+let lastReportRequestAt = 0;
 
 const headers = () => ({Authorization: `Bearer ${localStorage.getItem(storageKey) || ""}`});
 const escapeHtml = (value) => String(value ?? "").replace(/[&<>'"]/g, (character) => ({"&":"&amp;","<":"&lt;",">":"&gt;","'":"&#39;",'"':"&quot;"}[character]));
@@ -198,6 +200,7 @@ const renderProducts = () => {
 
 const loadReport = async () => {
   if (refreshButton.disabled) return;
+  lastReportRequestAt = Date.now();
   page.setAttribute("aria-busy", "true");
   refreshButton.disabled = true;
   message.textContent = "Формирую отчёт без изменения данных…";
@@ -301,10 +304,10 @@ capitalForm.addEventListener("submit", async (event) => {
 
 if (localStorage.getItem(storageKey)) loadReport();
 
-// Refresh only visible reports, preserving an open balance calibration form.
-setInterval(() => {
-  if (!document.hidden && localStorage.getItem(storageKey) && capitalForm.classList.contains("hidden")) loadReport();
-}, 60000);
-document.addEventListener("visibilitychange", () => {
-  if (!document.hidden && localStorage.getItem(storageKey) && capitalForm.classList.contains("hidden")) loadReport();
-});
+// Refresh visible reports at most every five minutes, preserving calibration edits.
+const autoRefreshReport = () => {
+  if (!document.hidden && localStorage.getItem(storageKey) && capitalForm.classList.contains("hidden")
+      && Date.now() - lastReportRequestAt >= autoRefreshIntervalMs) loadReport();
+};
+setInterval(autoRefreshReport, autoRefreshIntervalMs);
+document.addEventListener("visibilitychange", autoRefreshReport);
