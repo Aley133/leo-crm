@@ -8,7 +8,7 @@ from zipfile import ZipFile
 from io import BytesIO
 
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import event, func, select
 
 from backend.app.accounting_exports import build_inventory_xlsx, build_inventory_xml
 from backend.app.accounting_models import AccountingCapitalSnapshot
@@ -630,3 +630,48 @@ def test_no_cost_does_not_publish_free_profit(db_session):
     assert capital['sales_profit_is_complete'] is False
     assert capital['free_capital'] is None
     assert capital['accumulated_profit'] is None
+
+
+def test_legacy_capital_report_reuses_inventory_and_preserves_sale_dates(db_session):
+    now, product, batch = _seed_accounting(db_session)
+    batch.created_at = now - timedelta(days=60)
+    # A snapshot predating automatic accounting needs a historical baseline.
+    snapshot = AccountingCapitalSnapshot(
+        workspace_id=1,
+        cash_balance_kzt=Decimal("100000"),
+        free_capital_kzt=Decimal("10000"),
+        created_at=now - timedelta(hours=12),
+    )
+    db_session.add(snapshot)
+    account = db_session.scalar(select(MarketplaceAccount))
+    sale, _line = _order(
+        db_session, account=account, product=product, code="event-issued-after-baseline",
+        status="delivered", amount=Decimal("10000"),
+        ordered_at=now - timedelta(days=90),
+    )
+    sale.delivered_at = None
+    db_session.add(MarketplaceOrderEvent(
+        workspace_id=1, marketplace_order_id=sale.id, source_event_key="issued",
+        event_type="status", current_status="delivered", previous_status="shipping",
+        occurred_at=now - timedelta(hours=1),
+    ))
+    db_session.flush()
+    statements = []
+
+    def capture(_connection, _cursor, statement, _parameters, _context, _many):
+        statements.append(statement)
+
+    event.listen(db_session.get_bind(), "before_cursor_execute", capture)
+    try:
+        report = build_accounting_report(db_session, workspace_id=1, days=7, as_of=now)
+    finally:
+        event.remove(db_session.get_bind(), "before_cursor_execute", capture)
+
+    assert report["capital"]["cash_balance"] == Decimal("106993.00")
+    assert report["capital"]["free_capital"] == Decimal("12993.00")
+    assert report["summary"]["delivered_orders"] == 2
+    assert snapshot.sales_receipts_kzt is None  # Reporting remains read-only.
+    assert "owner_by_product" not in report["inventory"]
+    assert "products_by_id" not in report["inventory"]
+    # One physical inventory valuation, including when the legacy baseline is needed.
+    assert sum("ranked_accounting_purchase_batches" in sql for sql in statements) == 1

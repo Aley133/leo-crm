@@ -79,8 +79,6 @@ def create_capital_snapshot(
         workspace_id=workspace_id,
         include_zero=True,
     )
-    inventory.pop("owner_by_product", None)
-    inventory.pop("products_by_id", None)
     position = build_capital_position(
         db,
         workspace_id=workspace_id,
