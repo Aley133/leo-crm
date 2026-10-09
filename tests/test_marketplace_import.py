@@ -228,3 +228,48 @@ def test_rollback_keeps_checkpoint_and_order_unchanged(db_session) -> None:
     assert checkpoint is not None
     assert checkpoint.cursor == "cursor-1"
     assert checkpoint.watermark_at == initial_watermark
+
+
+def test_kaspi_completion_date_is_the_delivery_date():
+    payload = _payload(status='COMPLETED')
+    payload['attributes']['completionDate'] = 1773901121746
+    payload['attributes']['deliveryDate'] = 1706608613252
+    assert normalize_kaspi_order(payload).delivered_at == datetime(2026, 3, 19, 6, 18, 41, 746000, tzinfo=UTC)
+
+
+def test_migration_restores_completion_date_without_overwriting_existing_date(db_session, monkeypatch):
+    import importlib.util
+    from pathlib import Path
+    from types import SimpleNamespace
+    migration = Path(__file__).resolve().parents[1] / 'migrations/versions/20261009_0050_accounting_automatic_balances.py'
+    spec = importlib.util.spec_from_file_location('automatic_balances_migration', migration)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    account = _account(db_session)
+    payload = _payload(status='COMPLETED')
+    payload['attributes']['completionDate'] = 1773901121746
+    imported = import_kaspi_order(db_session, marketplace_account_id=account.id, payload=payload)
+    order = db_session.get(MarketplaceOrder, imported.order_id)
+    order.delivered_at = None
+    db_session.flush()
+    monkeypatch.setattr(module, 'op', SimpleNamespace(get_bind=lambda: db_session.connection()))
+    module._restore_completion_dates()
+    db_session.expire_all()
+    assert order.delivered_at == datetime(2026, 3, 19, 6, 18, 41, 746000, tzinfo=UTC)
+    protected = datetime(2026, 8, 1, 10, tzinfo=UTC)
+    order.delivered_at = protected
+    db_session.flush()
+    module._restore_completion_dates()
+    db_session.expire_all()
+    assert order.delivered_at == protected
+
+
+def test_short_completed_payload_does_not_erase_known_completion_date(db_session):
+    account = _account(db_session)
+    payload = _payload(status='COMPLETED')
+    payload['attributes']['completionDate'] = 1773901121746
+    first = import_kaspi_order(db_session, marketplace_account_id=account.id, payload=payload)
+    payload['attributes'].pop('completionDate')
+    import_kaspi_order(db_session, marketplace_account_id=account.id, payload=payload)
+    order = db_session.get(MarketplaceOrder, first.order_id)
+    assert order.delivered_at == datetime(2026, 3, 19, 6, 18, 41, 746000, tzinfo=UTC)

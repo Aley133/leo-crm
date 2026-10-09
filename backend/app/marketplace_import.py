@@ -263,7 +263,7 @@ def normalize_kaspi_order(payload: dict[str, Any]) -> NormalizedOrder:
         total_amount=total_amount,
         ordered_at=_as_datetime(_first(attributes, "creationDate", "orderedAt", "createdAt")),
         planned_delivery_at=_as_datetime(_first(attributes, "plannedDeliveryDate", "plannedDeliveryAt")),
-        delivered_at=_as_datetime(_first(attributes, "deliveryDate", "deliveredAt")),
+        delivered_at=_as_datetime(attributes.get("completionDate") or _first(attributes, "deliveryDate", "deliveredAt")),
         source_updated_at=_as_datetime(_first(attributes, "updatedAt", "modifiedAt")),
         lines=tuple(lines),
     )
@@ -390,6 +390,9 @@ def import_kaspi_order(
     else:
         previous_status = order.status
         previous_manual_stage = order.manual_stage
+        delivered_at = normalized.delivered_at
+        if delivered_at is None and normalized.status in {"delivered", "returned"}:
+            delivered_at = order.delivered_at
         before = (
             order.external_code,
             order.status,
@@ -408,7 +411,7 @@ def import_kaspi_order(
             normalized.total_amount,
             normalized.ordered_at,
             normalized.planned_delivery_at,
-            normalized.delivered_at,
+            delivered_at,
         )
         changed = before != after
         if changed:
@@ -420,7 +423,7 @@ def import_kaspi_order(
             order.total_amount = normalized.total_amount
             order.ordered_at = normalized.ordered_at
             order.planned_delivery_at = normalized.planned_delivery_at
-            order.delivered_at = normalized.delivered_at
+            order.delivered_at = delivered_at
             order.source_updated_at = normalized.source_updated_at
             order.version += 1
         else:
