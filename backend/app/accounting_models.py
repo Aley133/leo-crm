@@ -39,6 +39,9 @@ class AccountingCapitalSnapshot(WorkspaceOwned, Base):
     cash_balance_kzt: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     free_capital_kzt: Mapped[Decimal] = mapped_column(Numeric(18, 2), nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sales_receipts_kzt: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    sales_profit_kzt: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
+    purchases_kzt: Mapped[Decimal | None] = mapped_column(Numeric(18, 2), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         nullable=False,
