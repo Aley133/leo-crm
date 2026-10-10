@@ -4,6 +4,9 @@ import asyncio
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from types import SimpleNamespace
+import threading
+
+import pytest
 
 from sqlalchemy import create_engine, select
 from sqlalchemy.orm import sessionmaker
@@ -296,3 +299,117 @@ def test_active_order_reconciliation_is_bounded_and_advances_durable_cursor(
     finally:
         Base.metadata.drop_all(engine)
         engine.dispose()
+
+
+def test_reconciliation_yields_at_budget_with_committed_cursor(monkeypatch) -> None:
+    references = tuple(
+        kaspi_active_order_reconciliation.ActiveOrderReference(i, str(i))
+        for i in range(1, 13)
+    )
+    clock = [0.0]
+    cursors: list[str] = []
+    fetches: list[list[int]] = []
+    monkeypatch.setattr(kaspi_active_order_reconciliation, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(
+        kaspi_active_order_reconciliation, "_load_active_order_references",
+        lambda **_options: (references, "12"),
+    )
+
+    def fetch(_connection, chunk):
+        fetches.append([ref.order_id for ref in chunk])
+        return [{"id": ref.external_code} for ref in chunk], 0, ()
+
+    async def persist(payloads, **_options):
+        clock[0] += 35
+        return 0, len(payloads)
+
+    monkeypatch.setattr(kaspi_active_order_reconciliation, "_fetch_active_order_payloads", fetch)
+    monkeypatch.setattr(kaspi_active_order_reconciliation, "_persist_orders_in_batches", persist)
+    monkeypatch.setattr(
+        kaspi_active_order_reconciliation, "_save_reconciliation_cursor",
+        lambda **options: cursors.append(options["cursor"]),
+    )
+    result = asyncio.run(kaspi_active_order_reconciliation.reconcile_active_orders(
+        SimpleNamespace(account_id=1, timezone="Asia/Almaty"),
+        time_budget_seconds=30,
+    ))
+    assert result.checked == result.found == result.updated == 5
+    assert cursors == ["5"]
+    assert fetches == [[1, 2, 3, 4, 5]]
+
+
+def test_cancelled_reconciliation_finishes_current_group_and_checkpoint(monkeypatch) -> None:
+    references = tuple(
+        kaspi_active_order_reconciliation.ActiveOrderReference(i, str(i))
+        for i in range(1, 13)
+    )
+    cursors: list[str] = []
+    monkeypatch.setattr(
+        kaspi_active_order_reconciliation, "_load_active_order_references",
+        lambda **_options: (references, "12"),
+    )
+    monkeypatch.setattr(
+        kaspi_active_order_reconciliation, "_fetch_active_order_payloads",
+        lambda _connection, chunk: ([{"id": ref.external_code} for ref in chunk], 0, ()),
+    )
+    monkeypatch.setattr(
+        kaspi_active_order_reconciliation, "_save_reconciliation_cursor",
+        lambda **options: cursors.append(options["cursor"]),
+    )
+
+    async def scenario():
+        entered = asyncio.Event()
+        release = asyncio.Event()
+
+        async def persist(payloads, **_options):
+            if payloads[0]["id"] == "6":
+                entered.set()
+                await release.wait()
+            return 0, len(payloads)
+
+        monkeypatch.setattr(kaspi_active_order_reconciliation, "_persist_orders_in_batches", persist)
+        task = asyncio.create_task(kaspi_active_order_reconciliation.reconcile_active_orders(
+            SimpleNamespace(account_id=1, timezone="Asia/Almaty"),
+        ))
+        await asyncio.wait_for(entered.wait(), timeout=5)
+        assert cursors == ["5"]
+        task.cancel()
+        await asyncio.sleep(0)
+        assert not task.done()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert cursors == ["5", "10"]
+
+    asyncio.run(scenario())
+
+
+def test_cancelled_raw_persistence_waits_for_transaction_worker(monkeypatch) -> None:
+    entered = threading.Event()
+    release = threading.Event()
+    committed = threading.Event()
+
+    def persist(_payloads, **_options):
+        entered.set()
+        assert release.wait(timeout=5)
+        committed.set()
+        return 0, 1
+
+    monkeypatch.setattr(kaspi_raw_receiver_jobs, "_persist_orders", persist)
+
+    async def scenario():
+        task = asyncio.create_task(kaspi_raw_receiver_jobs._persist_orders_in_batches(
+            [{"id": "one"}], timezone_name="Asia/Almaty",
+        ))
+        try:
+            assert await asyncio.to_thread(entered.wait, 5)
+            task.cancel()
+            await asyncio.sleep(0)
+            assert not task.done()
+        finally:
+            release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert committed.is_set()
+
+    asyncio.run(scenario())
