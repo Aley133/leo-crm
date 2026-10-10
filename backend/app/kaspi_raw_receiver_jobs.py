@@ -427,11 +427,19 @@ async def _persist_orders_in_batches(
         persistence_options: dict[str, Any] = {"timezone_name": timezone_name}
         if marketplace_account_id is not None:
             persistence_options["marketplace_account_id"] = marketplace_account_id
-        batch_imported, batch_updated = await asyncio.to_thread(
+        persistence = asyncio.create_task(asyncio.to_thread(
             _persist_orders,
             batch,
             **persistence_options,
-        )
+        ))
+        try:
+            batch_imported, batch_updated = await asyncio.shield(persistence)
+        except asyncio.CancelledError:
+            # Cancelling to_thread does not stop its transaction. Keep the
+            # caller's sync lock until the worker has committed or rolled back,
+            # otherwise the next cycle competes with an orphan account lock.
+            await persistence
+            raise
         imported += batch_imported
         updated += batch_updated
         await asyncio.sleep(0)

@@ -35,6 +35,7 @@ ENRICHMENT_INTERVAL_SECONDS = 5 * 60
 MAINTENANCE_INTERVAL_SECONDS = 2 * 60
 MAINTENANCE_STARTUP_DELAY_SECONDS = 90
 MAINTENANCE_ACCOUNT_TIMEOUT_SECONDS = 60
+MAINTENANCE_WORK_BUDGET_SECONDS = 30
 MAINTENANCE_RECONCILIATION_BATCH_SIZE = 30
 FAST_ORDER_STATES = (
     "NEW",
@@ -563,6 +564,7 @@ async def run_maintenance_cycle() -> None:
                     reconcile_active_orders(
                         connection,
                         batch_size=MAINTENANCE_RECONCILIATION_BATCH_SIZE,
+                        time_budget_seconds=MAINTENANCE_WORK_BUDGET_SECONDS,
                     ),
                     timeout=MAINTENANCE_ACCOUNT_TIMEOUT_SECONDS,
                 )

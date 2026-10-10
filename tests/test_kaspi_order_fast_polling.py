@@ -76,7 +76,8 @@ def test_maintenance_uses_only_bounded_active_reconciliation(monkeypatch) -> Non
         lambda _session: connections,
     )
 
-    async def reconcile(connection, *, batch_size):
+    async def reconcile(connection, *, batch_size, time_budget_seconds):
+        assert time_budget_seconds == kaspi_order_polling.MAINTENANCE_WORK_BUDGET_SECONDS
         calls.append((connection.workspace_id, batch_size))
         return SimpleNamespace(
             checked=batch_size,

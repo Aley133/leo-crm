@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any
 
 from sqlalchemy import select
 
 from .db import SessionLocal
-from .kaspi_raw_receiver_jobs import _persist_orders_in_batches
+from .kaspi_raw_receiver_jobs import ORDER_PERSIST_BATCH_SIZE, _persist_orders_in_batches
 from .models import MarketplaceImportCheckpoint, MarketplaceOrder
 from .workspace_kaspi import WorkspaceKaspiConnection
 
@@ -168,6 +169,7 @@ async def reconcile_active_orders(
     connection: WorkspaceKaspiConnection,
     *,
     batch_size: int = RECONCILIATION_BATCH_SIZE,
+    time_budget_seconds: float | None = None,
 ) -> ActiveOrderReconciliationResult:
     """Refresh one bounded slice of CRM orders by exact Kaspi order code.
 
@@ -176,18 +178,54 @@ async def reconcile_active_orders(
     XML updates remain transactional and idempotent.
     """
 
-    references, next_cursor = await asyncio.to_thread(
+    started = monotonic()
+    references, _ = await asyncio.to_thread(
         _load_active_order_references,
         marketplace_account_id=connection.account_id,
         limit=batch_size,
     )
-    payloads, missing, errors = await asyncio.to_thread(
-        _fetch_active_order_payloads,
-        connection,
-        references,
+    checked = found = imported = updated = missing = 0
+    errors: list[str] = []
+    for start in range(0, len(references), ORDER_PERSIST_BATCH_SIZE):
+        chunk = references[start : start + ORDER_PERSIST_BATCH_SIZE]
+        payloads, chunk_missing, chunk_errors = await asyncio.to_thread(
+            _fetch_active_order_payloads, connection, chunk,
+        )
+        # Every committed group advances the cursor, even if a later group is
+        # slow. Drain persistence plus checkpoint on cancellation before the
+        # polling loop releases its single-flight lock.
+        persistence = asyncio.create_task(
+            _persist_reconciliation_chunk(connection, chunk, payloads)
+        )
+        try:
+            chunk_imported, chunk_updated = await asyncio.shield(persistence)
+        except asyncio.CancelledError:
+            await persistence
+            raise
+        checked += len(chunk)
+        found += len(payloads)
+        imported += chunk_imported
+        updated += chunk_updated
+        missing += chunk_missing
+        errors.extend(chunk_errors)
+        if time_budget_seconds is not None and monotonic() - started >= time_budget_seconds:
+            break
+    return ActiveOrderReconciliationResult(
+        checked=checked,
+        found=found,
+        imported=imported,
+        updated=updated,
+        missing=missing,
+        errors=tuple(errors),
     )
-    imported = 0
-    updated = 0
+
+
+async def _persist_reconciliation_chunk(
+    connection: WorkspaceKaspiConnection,
+    references: tuple[ActiveOrderReference, ...],
+    payloads: list[dict[str, Any]],
+) -> tuple[int, int]:
+    imported = updated = 0
     if payloads:
         imported, updated = await _persist_orders_in_batches(
             payloads,
@@ -197,13 +235,6 @@ async def reconcile_active_orders(
     await asyncio.to_thread(
         _save_reconciliation_cursor,
         marketplace_account_id=connection.account_id,
-        cursor=next_cursor,
+        cursor=str(references[-1].order_id),
     )
-    return ActiveOrderReconciliationResult(
-        checked=len(references),
-        found=len(payloads),
-        imported=imported,
-        updated=updated,
-        missing=missing,
-        errors=errors,
-    )
+    return imported, updated
