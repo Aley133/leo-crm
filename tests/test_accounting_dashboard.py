@@ -28,6 +28,15 @@ from backend.app.workspace_models import Workspace
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def test_purchase_plan_uses_recent_30_days_even_for_week_report(db_session):
+    now, product, batch = _seed_accounting(db_session)
+    report = build_accounting_report(db_session, workspace_id=1, days=7, as_of=now)
+    assert report["summary"]["delivered_orders"] == 1
+    assert report["purchase_plan"]["orders_per_day"] == Decimal("0.03")
+    assert report["purchase_plan"]["leaders"][0]["sold_units"] == 1
+    assert report["purchase_plan"]["leaders"][0]["previous_units"] == 1
+
+
 def _order(
     db_session,
     *,

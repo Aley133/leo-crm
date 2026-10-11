@@ -158,6 +158,30 @@ const signalDefinitions = [
 ];
 
 const renderSignals = (payload) => {
+  const plan = payload.purchase_plan;
+  if (plan) {
+    const list = (rows, recovery = false) => rows.map((row) => `<tr>
+      <td class="product-cell">${row.product_id ? `<a href="/crm/products/${encodeURIComponent(row.product_id)}">${escapeHtml(row.name)}</a>` : `<span>${escapeHtml(row.name)}</span>`}<small>${escapeHtml(row.action)}</small></td>
+      <td>${number(row.sold_units)} шт.${recovery ? `<small class="cell-detail">раньше ${number(row.previous_units)} шт.</small>` : ""}<small class="cell-detail">${number(row.orders_per_day, 2)} заказа/день${recovery ? " раньше" : ""}</small></td>
+      <td>${number(row.on_hand_units)} шт.<small class="cell-detail">в пути ${number(row.incoming_units)} шт.</small></td>
+      <td><strong>${row.purchase_units ? `${number(row.purchase_units)} шт.` : "—"}</strong><small class="cell-detail">${row.purchase_amount == null ? "" : money(row.purchase_amount)}</small></td>
+      <td>${row.profit_per_unit == null ? "—" : money(row.profit_per_unit)}<small class="cell-detail">на проданную единицу</small></td></tr>`).join("");
+    const section = (title, rows, recovery = false) => `<details class="plan-list" open><summary>${title} · ${number(rows.length)} товаров</summary>${rows.length ? `<div class="accounting-table-wrap"><table><thead><tr><th>Товар / действие</th><th>Продано за 30 дней</th><th>Склад / путь</th><th>Закупить</th><th>Прибыль по CRM</th></tr></thead><tbody>${list(rows, recovery)}</tbody></table></div>` : '<p class="card-note">Таких товаров сейчас нет.</p>'}</details>`;
+    document.querySelector("#purchase-plan").innerHTML = `
+      <div class="plan-overview"><div><span>Сейчас выдано в среднем</span><strong>${number(plan.orders_per_day, 2)} заказа/день</strong></div>
+      ${plan.goals.map((goal) => `<div><span>До ${number(goal.target)} заказов/день</span><strong>${goal.gap > 0 ? `ещё ${number(goal.gap, 2)}` : "Цель достигнута"}</strong></div>`).join("")}
+      <div><span>План докупки на 30 дней</span><strong>${money(plan.purchase_amount)}</strong></div></div>
+      <p class="card-note">Закупка поддерживает подтверждённые продажи. Если темпа не хватает до цели, нужны дополнительные товары со спросом или рост продаж текущих. Штуки товара и заказы считаются отдельно; заказы по товарам нельзя складывать — в одном заказе бывает несколько товаров.</p>
+      ${plan.leaders?.length ? `<div class="plan-leaders"><strong>Основные товары для оборота</strong><p class="card-note">Их покупают чаще всего среди товаров с положительной прибылью. Поддерживайте наличие.</p><ul>${plan.leaders.map((row) => `<li>${row.product_id ? `<a href="/crm/products/${encodeURIComponent(row.product_id)}">${escapeHtml(row.name)}</a>` : escapeHtml(row.name)}<span>${number(row.orders_per_day, 2)} заказа/день · ${money(row.profit_per_unit)} прибыли/шт.</span></li>`).join("")}</ul></div>` : ""}
+      ${section("Докупить в первую очередь", plan.buy)}
+      ${section("Вернуть в продажи · сначала проверить причину", plan.recover, true)}
+      ${plan.recovery_amount > 0 ? `<p class="card-note">После проверки пропавших товаров возможная отдельная закупка: ${money(plan.recovery_amount)}. В основной план не включена.</p>` : ""}
+      ${section("Не докупать / проверить", plan.hold)}
+      <p class="card-note">Всегда последние 30 дней, независимо от периода отчёта. Закупить = продажи за 30 дней − склад − товар в пути, минимум 0. Прибыль — по тарифам и себестоимости CRM; цена закупки — последняя известная. Товар в пути учтён по количеству: сроки прибытия и актуальную цену подтвердите перед заказом. План не является прогнозом новых заказов.</p>`;
+    document.querySelector("#signals").innerHTML = "";
+    document.querySelector("#signals-empty").classList.add("hidden");
+    return;
+  }
   const blocks = signalDefinitions.flatMap(([key, title, kind]) => {
     const rows = payload.signals?.[key] || [];
     if (!rows.length) return [];

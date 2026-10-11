@@ -17,6 +17,7 @@ from .commerce.profit_calculator import (
     kaspi_logistics_per_unit,
 )
 from .accounting_models import AccountingCapitalSnapshot
+from .accounting_planning import build_purchase_plan
 from .inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
 from .models import MarketplaceOrder, MarketplaceOrderEvent, MarketplaceOrderLine, Product
 from .workspace_models import Workspace
@@ -940,6 +941,9 @@ def build_accounting_report(
     current_start = observed_at - timedelta(days=days) if days > 0 else None
     previous_start = observed_at - timedelta(days=days * 2) if days > 0 else None
     query_start = previous_start if previous_start is not None else None
+    planning_start = observed_at - timedelta(days=60)
+    if query_start is not None:
+        query_start = min(query_start, planning_start)
 
     accounting_date = _accounting_date_expression()
     order_query = select(MarketplaceOrder, accounting_date.label("accounting_at")).where(
@@ -1047,6 +1051,25 @@ def build_accounting_report(
             "new_demand",
         )
     }
+    planning_kwargs = dict(
+        lines_by_order=lines_by_order, allocation_by_line=allocation_by_line,
+        owner_by_product=owner_by_product, products_by_id=products_by_id,
+        inventory_by_owner=inventory_by_owner, fallback_cost_by_line=fallback_cost_by_line,
+    )
+    planning_midpoint = observed_at - timedelta(days=30)
+    recent_summary, recent_products = _summarize_period(
+        [order for order in orders if (dates[int(order.id)] or observed_at) >= planning_midpoint],
+        **planning_kwargs,
+    )
+    _, older_products = _summarize_period(
+        [order for order in orders
+         if planning_start <= (dates[int(order.id)] or observed_at) < planning_midpoint],
+        **planning_kwargs,
+    )
+    purchase_plan = build_purchase_plan(
+        current=recent_products, previous=older_products, inventory=inventory,
+        delivered_orders=recent_summary["delivered_orders"],
+    )
     return {
         "workspace_id": workspace_id,
         "currency": "KZT",
@@ -1074,5 +1097,6 @@ def build_accounting_report(
         "abc": abc,
         "brands": brands,
         "signals": signals,
+        "purchase_plan": purchase_plan,
         "products": product_rows,
     }
