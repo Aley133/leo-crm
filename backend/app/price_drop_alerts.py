@@ -1,8 +1,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
+from datetime import UTC
 from decimal import Decimal, ROUND_HALF_UP
 from statistics import median
+from urllib.parse import urlparse
 
 from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
@@ -40,16 +43,14 @@ def _historical_prices(
     currency_filter = (
         SupplierOfferObservation.currency.is_(None)
         if observation.currency is None
-        else or_(
-            SupplierOfferObservation.currency == observation.currency,
-            SupplierOfferObservation.currency.is_(None),
-        )
+        else SupplierOfferObservation.currency == observation.currency
     )
     rows = session.scalars(
         select(SupplierOfferObservation.price)
         .where(
             SupplierOfferObservation.supplier_product_id == observation.supplier_product_id,
             SupplierOfferObservation.id != observation.id,
+            SupplierOfferObservation.observed_at <= observation.observed_at,
             SupplierOfferObservation.price.is_not(None),
             SupplierOfferObservation.price > 0,
             or_(
@@ -77,6 +78,7 @@ def _alert_context(
             Supplier,
             ProductBinding,
             Product,
+            MonitorAttempt.finished_at,
         )
         .select_from(MonitorAttempt)
         .join(MonitorTarget, MonitorTarget.id == MonitorAttempt.monitor_target_id)
@@ -97,7 +99,10 @@ def _alert_context(
     ).one_or_none()
     if row is None:
         return None
-    supplier_product, supplier, binding, product = row
+    supplier_product, supplier, binding, product, checked_at = row
+    checked_at = checked_at or observation.observed_at
+    if checked_at.tzinfo is None:
+        checked_at = checked_at.replace(tzinfo=UTC)
     return {
         "price_drop_alert_enabled": product.sudden_price_alert_enabled,
         "price_drop_threshold_percent": (
@@ -113,7 +118,28 @@ def _alert_context(
         "supplier_product_title": supplier_product.title,
         "supplier_product_url": supplier_product.url,
         "binding_id": binding.id,
+        "supplier_source_url": supplier_product.url,
+        "price_checked_at": checked_at.isoformat(),
     }
+
+
+def _offer_url(observation: SupplierOfferObservation, source_url: str, supplier_code: str) -> str:
+    """Link to the seller whose price was measured, including older agents."""
+    try:
+        metadata = json.loads(observation.raw_metadata or "{}")
+    except (ValueError, TypeError):
+        metadata = {}
+    if not isinstance(metadata, dict):
+        metadata = {}
+    if supplier_code == "ozon":
+        candidate = str(metadata.get("offer_product_url") or "")
+        parsed = urlparse(candidate)
+        if parsed.scheme == "https" and parsed.hostname in {"ozon.kz", "www.ozon.kz", "ozon.ru", "www.ozon.ru"} and parsed.path.startswith("/product/"):
+            return candidate
+        sku = str(metadata.get("offer_sku") or "")
+        if sku.isascii() and sku.isdigit():
+            return f"https://www.ozon.kz/product/{sku}/"
+    return source_url
 
 
 def enqueue_price_drop_alert(
@@ -130,8 +156,9 @@ def enqueue_price_drop_alert(
     if (
         observation.price is None
         or observation.price <= 0
-        or observation.available is False
+        or observation.available is not True
         or observation.stock == 0
+        or observation.currency is None
     ):
         return None
 
@@ -179,7 +206,7 @@ def enqueue_price_drop_alert(
             f"observation:{observation.id}"
         ),
         payload_json={
-            "version": 2,
+            "version": 3,
             "supplier_product_id": observation.supplier_product_id,
             "observation_id": observation.id,
             "baseline_price": f"{baseline_price:.2f}",
@@ -190,6 +217,11 @@ def enqueue_price_drop_alert(
             "baseline_sample_size": len(prices),
             "observed_at": observation.observed_at.isoformat(),
             **context,
+            "supplier_product_url": _offer_url(
+                observation, str(context["supplier_product_url"]), str(context["supplier_code"]),
+            ),
+            "supplier_seller": observation.seller,
+            "delivery_days": observation.delivery_days,
         },
     )
     session.add(event)

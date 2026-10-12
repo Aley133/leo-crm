@@ -3,10 +3,11 @@ from __future__ import annotations
 import asyncio
 import os
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from html import escape
 from typing import Callable
+from zoneinfo import ZoneInfo
 
 import httpx
 from sqlalchemy import select
@@ -14,6 +15,8 @@ from sqlalchemy.orm import Session
 
 from .db import SessionLocal
 from .models import OutboxEvent, Product
+from .monitoring import MonitorTarget, SupplierOfferState
+from .suppliers import ProductBinding, SupplierProduct
 from .price_drop_alerts import (
     ALLOWED_PRICE_DROP_THRESHOLDS,
     DEFAULT_PRICE_DROP_THRESHOLD_PERCENT,
@@ -23,6 +26,8 @@ from .price_drop_alerts import (
 
 PUBLISH_INTERVAL_SECONDS = 10
 PUBLISH_BATCH_SIZE = 10
+MAX_PRICE_ALERT_AGE = timedelta(minutes=30)
+MAX_CONFIRMATION_AGE = timedelta(minutes=10)
 SessionFactory = Callable[[], Session]
 PRICE_ALERT_RUNTIME_STATUS: dict[str, object] = {
     "status": "starting",
@@ -111,14 +116,78 @@ def format_price_drop_message(payload: dict[str, object]) -> str:
             f"Снижение: <b>−{drop_percent}%</b>",
             f"Порог сигнала: {escape(str(payload.get('threshold_percent') or 50))}%",
             "",
-            "Цена аномально низкая — можно рассмотреть закупку даже без текущего заказа.",
+            "Цена подтверждена повторной проверкой мониторинга.",
         ]
     )
+    if payload.get("supplier_seller"):
+        lines.append(f"Продавец: {escape(str(payload['supplier_seller']))}")
+    if payload.get("delivery_days") is not None:
+        lines.append(f"Доставка: {escape(str(payload['delivery_days']))} дн.")
+    if payload.get("confirmed_at"):
+        checked_at = _timestamp(payload.get("confirmed_at"))
+        if checked_at is not None:
+            local_time = checked_at.astimezone(ZoneInfo("Asia/Qyzylorda"))
+            lines.append(f"Проверено: {local_time:%d.%m.%Y %H:%M} (Казахстан)")
     if url:
         lines.extend(["", f'<a href="{url}">Открыть товар у поставщика</a>'])
     if supplier_title != product_name:
         lines.extend(["", f"<i>Карточка поставщика: {supplier_title}</i>"])
     return "\n".join(lines)
+
+
+def _timestamp(value: object) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
+    except (ValueError, TypeError):
+        return None
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
+
+
+def _confirmed_offer(session: Session, payload: dict[str, object], *, now: datetime) -> tuple[str, str | None]:
+    """Return ready, waiting or a suppression reason without supplier I/O.
+
+    The normal next monitoring cycle must independently confirm this price.
+    Unchanged offers update last_checked_at without creating an observation.
+    """
+    initial_check = _timestamp(payload.get("price_checked_at"))
+    if payload.get("version") != 3 or initial_check is None:
+        return "suppressed", "unverified legacy price alert"
+    if now - initial_check > MAX_PRICE_ALERT_AGE or initial_check > now:
+        return "suppressed", "price alert expired"
+    row = session.execute(
+        select(ProductBinding, MonitorTarget, SupplierProduct, SupplierOfferState)
+        .join(MonitorTarget, MonitorTarget.product_binding_id == ProductBinding.id)
+        .join(SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id)
+        .join(SupplierOfferState, SupplierOfferState.supplier_product_id == SupplierProduct.id)
+        .where(
+            ProductBinding.id == payload.get("binding_id"),
+            ProductBinding.product_id == payload.get("product_id"),
+            SupplierProduct.id == payload.get("supplier_product_id"),
+        )
+    ).one_or_none()
+    if row is None:
+        return "suppressed", "supplier source no longer matches"
+    binding, target, supplier_product, state = row
+    if binding.status not in {"active", "confirmed", "degraded"} or target.status != "active":
+        return "suppressed", "supplier source disabled"
+    if supplier_product.url != payload.get("supplier_source_url"):
+        return "suppressed", "supplier link changed"
+    try:
+        price = Decimal(str(payload.get("current_price")))
+    except Exception:
+        return "suppressed", "invalid alert price"
+    if (
+        state.available is not True or state.stock == 0
+        or state.price != price or state.currency != payload.get("currency")
+        or state.seller != payload.get("supplier_seller")
+    ):
+        return "suppressed", "price or seller changed before confirmation"
+    checked_at = _timestamp(state.last_checked_at)
+    if checked_at is None or checked_at <= initial_check or now - checked_at > MAX_CONFIRMATION_AGE:
+        return "waiting", None
+    payload["confirmed_at"] = checked_at.isoformat()
+    payload["delivery_days"] = state.delivery_days
+    return "ready", None
 
 
 async def _send_telegram_message(
@@ -201,7 +270,13 @@ def _pending_events(
                 except Exception:
                     drop_percent = Decimal("0")
                 if drop_percent >= Decimal(threshold_percent):
-                    pending.append((event.id, payload))
+                    confirmation, reason = _confirmed_offer(session, payload, now=datetime.now(UTC))
+                    if confirmation == "ready":
+                        pending.append((event.id, payload))
+                    elif confirmation == "suppressed":
+                        event.published_at = datetime.now(UTC)
+                        event.last_error = f"suppressed: {reason}"
+                        suppressed = True
                     continue
                 event.published_at = datetime.now(UTC)
                 event.last_error = (

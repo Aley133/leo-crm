@@ -53,7 +53,7 @@ def test_session_adapter_returns_normalized_kzt_other_offer(monkeypatch) -> None
         "product_id": "123456789",
         "other_offer_count": 2,
         "cheaper_price_kzt": 4990,
-        "cheaper_offer": {"offer_sku": "offer-1", "seller_name": "Supplier", "delivery_days": 2},
+        "cheaper_offer": {"offer_sku": "offer-1", "seller_name": "Supplier", "delivery_days": 2, "product_url": "https://www.ozon.kz/product/selected-987654321/", "seller_id": "seller-7"},
     }
     monkeypatch.setattr(adapter_module, "OzonSessionHttpClient", FakeClient)
     adapter = OzonSessionHttpAdapter(FakeResolver())
@@ -64,6 +64,8 @@ def test_session_adapter_returns_normalized_kzt_other_offer(monkeypatch) -> None
     assert offer.access_strategy if hasattr(offer, "access_strategy") else True
     assert adapter.access_strategy == AccessStrategy.DIRECT_HTTP
     assert offer.raw_metadata["browser_used"] is False
+    assert offer.raw_metadata["offer_product_url"] == "https://www.ozon.kz/product/selected-987654321/"
+    assert offer.raw_metadata["seller_id"] == "seller-7"
 
 
 def test_session_adapter_does_not_turn_missing_price_into_out_of_stock(monkeypatch) -> None:

@@ -111,7 +111,7 @@ jobs:
           git tag -f browser-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/browser-agent-latest --force
           gh release view browser-agent-latest *> $null
-          $notes = "LEO HTTP Agent 0.3.7: принимает товарную выдачу Ozon из /search/ и автоматически выбранного /category/. Новый поиск строится без устаревших brand, paginator_token и search_page_state; причина отказа показывается в окне повторного ввода."
+          $notes = "LEO HTTP Agent 0.3.8: передаёт точную ссылку и идентификатор выбранного продавца Ozon, чтобы сигналы мониторинга открывали предложение с проверенной ценой. Сохраняет поддержку поиска /search/ и /category/."
           if ($LASTEXITCODE -ne 0) {
             gh release create browser-agent-latest --title "LEO Windows Agents" --notes $notes
           } else {

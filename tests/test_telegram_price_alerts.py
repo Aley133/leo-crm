@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
 import httpx
@@ -11,6 +11,8 @@ from sqlalchemy.pool import StaticPool
 
 from backend.app.db import Base
 from backend.app.models import OutboxEvent, Product
+from backend.app.monitoring import MonitorTarget, SupplierOfferState
+from backend.app.suppliers import ProductBinding, Supplier, SupplierProduct
 from backend.app.price_drop_alerts import PRICE_DROP_EVENT_TYPE
 from backend.app.telegram_price_alerts import (
     PRICE_ALERT_RUNTIME_STATUS,
@@ -21,12 +23,18 @@ from backend.app.telegram_price_alerts import (
     price_alert_runtime_status,
     publish_pending_price_alerts,
     send_price_drop_message,
+    _confirmed_offer,
+    _pending_events,
 )
 
 
 def _payload() -> dict[str, object]:
     return {
-        "version": 2,
+        "version": 3,
+        "price_checked_at": (datetime.now(UTC) - timedelta(minutes=6)).isoformat(),
+        "supplier_source_url": "https://www.ozon.ru/product/123/?from=crm&price=low",
+        "supplier_seller": "CSCPharma",
+        "delivery_days": 6,
         "supplier_product_id": 7,
         "observation_id": 42,
         "baseline_price": "3050.00",
@@ -48,6 +56,24 @@ def _payload() -> dict[str, object]:
     }
 
 
+def _seed_live_offer(session):
+    now = datetime.now(UTC)
+    supplier = Supplier(code="ozon", name="Ozon")
+    session.add(supplier)
+    session.flush()
+    source = SupplierProduct(id=7, supplier_id=supplier.id, external_id="123", title="Берберин", url=_payload()["supplier_source_url"])
+    session.add(source)
+    session.flush()
+    binding = ProductBinding(id=9, product_id=3, supplier_product_id=7, status="active")
+    session.add(binding)
+    session.flush()
+    target = MonitorTarget(product_binding_id=9, status="active", interval_seconds=300, next_check_at=now)
+    state = SupplierOfferState(supplier_product_id=7, price=1000, currency="KZT", available=True, seller="CSCPharma", delivery_days=6, fingerprint="a" * 64, adapter_schema_version="ozon-http-session-v1", observed_at=now - timedelta(minutes=6), last_checked_at=now - timedelta(seconds=10))
+    session.add_all([target, state])
+    session.flush()
+    return binding, target, source, state
+
+
 def test_message_is_actionable_and_html_safe() -> None:
     message = format_price_drop_message(_payload())
 
@@ -56,7 +82,9 @@ def test_message_is_actionable_and_html_safe() -> None:
     assert "Сейчас: <b>1 000 ₸</b>" in message
     assert "−67.2%" in message
     assert "Порог сигнала: 50%" in message
-    assert "даже без текущего заказа" in message
+    assert "подтверждена повторной проверкой" in message
+    assert "Продавец: CSCPharma" in message
+    assert "Доставка: 6 дн." in message
     assert "Берберин &lt;500 мг&gt;" in message
     assert "from=crm&amp;price=low" in message
 
@@ -159,6 +187,7 @@ def test_outbox_event_is_marked_only_after_telegram_accepts_it() -> None:
                 sudden_price_alert_enabled=True,
             )
         )
+        _seed_live_offer(session)
         session.add(
             OutboxEvent(
                 id=event_id,
@@ -335,3 +364,71 @@ def test_pending_event_respects_a_threshold_changed_before_delivery() -> None:
 
     Base.metadata.drop_all(engine)
     engine.dispose()
+
+
+def test_confirmation_waits_for_an_independent_check_even_without_new_observation(db_session):
+    _, _, _, state = _seed_live_offer(db_session)
+    payload = _payload()
+    now = datetime.now(UTC)
+    state.last_checked_at = datetime.fromisoformat(payload['price_checked_at'])
+    db_session.flush()
+    assert _confirmed_offer(db_session, payload, now=now) == ('waiting', None)
+    # An unchanged fingerprint produces no observation; its successful next
+    # check alone is sufficient proof that the price survived a second read.
+    state.last_checked_at = now - timedelta(seconds=1)
+    db_session.flush()
+    assert _confirmed_offer(db_session, payload, now=now) == ('ready', None)
+    assert payload['confirmed_at'] == state.last_checked_at.isoformat()
+
+
+def test_confirmation_rejects_a_price_that_recovered_before_delivery(db_session):
+    _, _, _, state = _seed_live_offer(db_session)
+    state.price = 3050
+    db_session.flush()
+    assert _confirmed_offer(db_session, _payload(), now=datetime.now(UTC)) == (
+        'suppressed', 'price or seller changed before confirmation',
+    )
+
+
+def test_confirmation_rejects_a_changed_seller_even_at_the_same_price(db_session):
+    _, _, _, state = _seed_live_offer(db_session)
+    state.seller = 'Другой продавец'
+    db_session.flush()
+    assert _confirmed_offer(db_session, _payload(), now=datetime.now(UTC))[0] == 'suppressed'
+
+
+def test_confirmation_rejects_removed_or_replaced_sources(db_session):
+    binding, target, source, _ = _seed_live_offer(db_session)
+    binding.status = 'disabled'
+    db_session.flush()
+    assert _confirmed_offer(db_session, _payload(), now=datetime.now(UTC))[0] == 'suppressed'
+    binding.status = 'active'
+    source.url = 'https://www.ozon.kz/product/456/'
+    db_session.flush()
+    assert _confirmed_offer(db_session, _payload(), now=datetime.now(UTC)) == (
+        'suppressed', 'supplier link changed',
+    )
+
+
+def test_confirmation_rejects_expired_and_unverified_legacy_alerts(db_session):
+    payload = _payload()
+    payload['price_checked_at'] = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
+    assert _confirmed_offer(db_session, payload, now=datetime.now(UTC)) == ('suppressed', 'price alert expired')
+    payload['version'] = 2
+    assert _confirmed_offer(db_session, payload, now=datetime.now(UTC)) == ('suppressed', 'unverified legacy price alert')
+
+
+def test_publisher_discards_recovered_price_instead_of_sending_it(db_session):
+    product = Product(id=3, kaspi_product_id='TEST-DROP', name='Товар', sudden_price_alert_enabled=True)
+    db_session.add(product)
+    _, _, _, state = _seed_live_offer(db_session)
+    state.price = 3050
+    event = OutboxEvent(aggregate_type='supplier_product', aggregate_id='7', event_type=PRICE_DROP_EVENT_TYPE, idempotency_key='recovered-drop', payload_json=_payload())
+    db_session.add(event)
+    db_session.commit()
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    assert _pending_events(factory, limit=10) == []
+    db_session.refresh(event)
+    assert event.published_at is not None
+    assert event.publish_attempts == 0
+    assert event.last_error == 'suppressed: price or seller changed before confirmation'

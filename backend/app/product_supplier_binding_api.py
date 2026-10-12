@@ -4,7 +4,7 @@ from datetime import UTC, datetime
 
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field, HttpUrl
-from sqlalchemy import select
+from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -24,6 +24,7 @@ from .supplier_identity import (
     parse_supplier_url,
 )
 from .suppliers import ProductBinding, Supplier, SupplierProduct
+from .workspace_context import current_workspace_id
 
 
 class ManualSupplierBindingCreate(BaseModel):
@@ -62,6 +63,13 @@ class ManualSupplierBindingUpdateResult(BaseModel):
     cancelled_stale_jobs: int
     job_id: int | None
     queued_initial_check: bool
+
+
+class SupplierBindingRemoveResult(BaseModel):
+    product_id: int
+    binding_id: int
+    status: str
+    cancelled_stale_jobs: int
 
 
 router = APIRouter(
@@ -106,16 +114,25 @@ def _matching_supplier_products(
     *,
     supplier: Supplier,
     external_id: str,
+    lock: bool = True,
 ) -> list[tuple[SupplierProduct, SupplierOfferState | None]]:
-    rows = db.execute(
+    statement = (
         select(SupplierProduct, SupplierOfferState)
         .outerjoin(
             SupplierOfferState,
             SupplierOfferState.supplier_product_id == SupplierProduct.id,
         )
-        .where(SupplierProduct.supplier_id == supplier.id)
-        .with_for_update(of=SupplierProduct)
-    ).all()
+        .where(
+            SupplierProduct.supplier_id == supplier.id,
+            or_(
+                SupplierProduct.external_id == external_id,
+                SupplierProduct.url.contains(external_id, autoescape=True),
+            ),
+        )
+    )
+    if lock:
+        statement = statement.with_for_update(of=SupplierProduct)
+    rows = db.execute(statement).all()
     matches = [
         (supplier_product, state)
         for supplier_product, state in rows
@@ -157,6 +174,7 @@ def _disable_duplicate_bindings(
         )
         .where(
             ProductBinding.product_id == product_id,
+            ProductBinding.workspace_id == current_workspace_id(),
             SupplierProduct.supplier_id == supplier.id,
             SupplierProduct.id != winner_supplier_product_id,
         )
@@ -200,8 +218,8 @@ def _cancel_stale_browser_jobs(
     db: Session,
     *,
     monitor_target_id: int,
-    supplier_product_id: int,
-    url: str,
+    supplier_product_id: int | None,
+    url: str | None,
 ) -> int:
     jobs = db.scalars(
         select(BrowserAgentJob)
@@ -219,13 +237,16 @@ def _cancel_stale_browser_jobs(
     cancelled = 0
     finished_at = datetime.now(UTC)
     for job in jobs:
-        if job.supplier_product_id == supplier_product_id and job.url == url:
+        if supplier_product_id is not None and job.supplier_product_id == supplier_product_id and job.url == url:
             continue
         job.status = BrowserAgentJobStatus.FAILED.value
         job.error_code = "supplier_source_replaced"
         job.error_message = (
             "Задание отменено: ссылка источника закупки была заменена"
         )
+        if supplier_product_id is None:
+            job.error_code = "supplier_source_removed"
+            job.error_message = "Задание отменено: источник закупки удалён из товара"
         job.finished_at = finished_at
         job.lease_owner = None
         job.lease_token = None
@@ -246,6 +267,7 @@ def _locked_binding_source_statement(*, product_id: int, binding_id: int):
         .where(
             ProductBinding.id == binding_id,
             ProductBinding.product_id == product_id,
+            ProductBinding.workspace_id == current_workspace_id(),
         )
         .with_for_update(of=ProductBinding)
     )
@@ -274,7 +296,7 @@ def attach_manual_supplier_binding(product_id, payload, db, *, commit=True):
     url = str(payload.url)
     supplier_code, supplier_name, external_id = _source_from_url(url)
 
-    supplier = db.scalar(select(Supplier).where(Supplier.code == supplier_code, Supplier.workspace_id == workspace).with_for_update())
+    supplier = db.scalar(select(Supplier).where(Supplier.code == supplier_code, Supplier.workspace_id == workspace))
     if supplier is None:
         supplier = Supplier(workspace_id=workspace, code=supplier_code, name=supplier_name, is_active=True)
         db.add(supplier)
@@ -284,8 +306,21 @@ def attach_manual_supplier_binding(product_id, payload, db, *, commit=True):
         db,
         supplier=supplier,
         external_id=external_id,
+        lock=False,
     )
     supplier_product = matching_products[0][0] if matching_products else None
+    if supplier_product is not None:
+        # Re-adding/restoring an existing source follows the target-first
+        # lock order too, before changing the shared supplier product.
+        db.scalar(
+            select(MonitorTarget)
+            .join(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
+            .where(
+                ProductBinding.product_id == product.id,
+                ProductBinding.supplier_product_id == supplier_product.id,
+            )
+            .with_for_update(of=MonitorTarget)
+        )
     created_supplier_product = supplier_product is None
     if supplier_product is None:
         supplier_product = SupplierProduct(
@@ -417,6 +452,14 @@ def update_manual_supplier_binding(
     payload: ManualSupplierBindingUpdate,
     db: Session = Depends(get_db),
 ) -> ManualSupplierBindingUpdateResult:
+    # Browser ingestion locks target before binding; use the same order.
+    monitor_target = db.scalar(
+        select(MonitorTarget)
+        .join(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
+        .where(ProductBinding.id == binding_id, ProductBinding.product_id == product_id)
+        .where(ProductBinding.workspace_id == current_workspace_id())
+        .with_for_update(of=MonitorTarget)
+    )
     row = db.execute(
         _locked_binding_source_statement(
             product_id=product_id,
@@ -427,11 +470,6 @@ def update_manual_supplier_binding(
         raise HTTPException(status_code=404, detail="Источник закупки не найден")
 
     binding, previous_supplier_product, previous_supplier = row
-    monitor_target = db.scalar(
-        select(MonitorTarget)
-        .where(MonitorTarget.product_binding_id == binding.id)
-        .with_for_update()
-    )
     previous_supplier_product_id = previous_supplier_product.id
     previous_url = previous_supplier_product.url
     if previous_supplier.code.startswith(("offline-", "production-")):
@@ -448,11 +486,11 @@ def update_manual_supplier_binding(
     supplier_code, supplier_name, external_id = _source_from_url(url)
     supplier = db.scalar(
         select(Supplier)
-        .where(Supplier.code == supplier_code)
-        .with_for_update()
+        .where(Supplier.code == supplier_code, Supplier.workspace_id == binding.workspace_id)
     )
     if supplier is None:
         supplier = Supplier(
+            workspace_id=binding.workspace_id,
             code=supplier_code,
             name=supplier_name,
             is_active=True,
@@ -469,6 +507,7 @@ def update_manual_supplier_binding(
     created_supplier_product = supplier_product is None
     if supplier_product is None:
         supplier_product = SupplierProduct(
+            workspace_id=binding.workspace_id,
             supplier_id=supplier.id,
             external_id=external_id,
             title=previous_supplier_product.title or product.name,
@@ -515,6 +554,7 @@ def update_manual_supplier_binding(
 
     if monitor_target is None:
         monitor_target = MonitorTarget(
+            workspace_id=binding.workspace_id,
             product_binding_id=binding.id,
             status=MonitorStatus.ACTIVE.value,
             interval_seconds=300,
@@ -538,6 +578,10 @@ def update_manual_supplier_binding(
         supplier_product_id=supplier_product.id,
         url=url,
     )
+
+    # Production sessions disable autoflush. The queue's JOIN must see the
+    # replacement source and the cancelled jobs before looking for pending work.
+    db.flush()
 
     job: BrowserAgentJob | None = None
     if payload.run_initial_check:
@@ -563,4 +607,49 @@ def update_manual_supplier_binding(
         cancelled_stale_jobs=cancelled_stale_jobs,
         job_id=None if job is None else job.id,
         queued_initial_check=job is not None,
+    )
+
+
+@router.delete(
+    "/products/{product_id}/supplier-bindings/{binding_id}",
+    response_model=SupplierBindingRemoveResult,
+)
+def remove_supplier_binding(
+    product_id: int,
+    binding_id: int,
+    db: Session = Depends(get_db),
+) -> SupplierBindingRemoveResult:
+    """Detach one source, preserving history and other products' sources.
+
+    Adding the same URL again restores this binding through the manual upsert.
+    Lock order matches source replacement and browser result ingestion.
+    """
+    target = db.scalar(
+        select(MonitorTarget)
+        .join(ProductBinding, ProductBinding.id == MonitorTarget.product_binding_id)
+        .where(ProductBinding.id == binding_id, ProductBinding.product_id == product_id)
+        .where(ProductBinding.workspace_id == current_workspace_id())
+        .with_for_update(of=MonitorTarget)
+    )
+    row = db.execute(
+        _locked_binding_source_statement(product_id=product_id, binding_id=binding_id)
+    ).one_or_none()
+    if row is None:
+        raise HTTPException(status_code=404, detail="Источник закупки не найден")
+    binding, _supplier_product, _supplier = row
+    binding.status = BindingStatus.DISABLED.value
+    binding.is_primary = False
+    cancelled = 0
+    if target is not None:
+        target.status = MonitorStatus.DISABLED.value
+        target.lease_owner = None
+        target.lease_token = None
+        target.lease_until = None
+        cancelled = _cancel_stale_browser_jobs(
+            db, monitor_target_id=target.id, supplier_product_id=None, url=None,
+        )
+    db.commit()
+    return SupplierBindingRemoveResult(
+        product_id=product_id, binding_id=binding_id,
+        status=BindingStatus.DISABLED.value, cancelled_stale_jobs=cancelled,
     )

@@ -91,6 +91,8 @@ class OzonSessionHttpAdapter:
                 "source": result.get("price_source") or "otherOffersFromSellers.webSellerList",
                 "offer_count": int(result.get("other_offer_count") or 0),
                 "offer_sku": offer.get("offer_sku"),
+                "offer_product_url": offer.get("product_url"),
+                "seller_id": offer.get("seller_id"),
                 "product_id": result.get("product_id"),
                 "product_page_fallback": bool(result.get("product_page_fallback")),
                 "read_only": True,
@@ -140,6 +142,7 @@ class OzonSessionHttpAdapter:
                     "cheaper_price_text": page.get("price_text"),
                     "cheaper_offer": {
                         "offer_sku": page.get("product_id") or modal.get("product_id"),
+                        "product_url": url,
                         "seller_name": card.get("seller_name") or "Ozon",
                         "delivery_days": page.get("delivery_days"),
                         "delivery_text": page.get("delivery_text"),
