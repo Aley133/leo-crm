@@ -515,12 +515,17 @@ def queue_failed_recovery_retries(
 def recovery_job_diagnostics(
     db: Session,
     *,
+    job_ids: tuple[int, ...],
     limit: int = RECOVERY_DIAGNOSTIC_LIMIT,
 ) -> list[dict[str, Any]]:
+    # Diagnostics must not scan JSON across the entire job history while the
+    # scheduler holds its transaction open. Only inspect this dispatch's jobs.
+    if not job_ids:
+        return []
     reason = DumpingRun.explanation_json["reason"].as_string()
     jobs = db.scalars(
         select(DumpingRun)
-        .where(reason.in_(_RECOVERY_REASONS))
+        .where(DumpingRun.id.in_(job_ids), reason.in_(_RECOVERY_REASONS))
         .order_by(DumpingRun.id.desc())
         .limit(limit)
     ).all()
@@ -554,7 +559,9 @@ def dispatch_due_competitor_jobs() -> tuple[int, ...]:
             recovered_job_ids = recover_legacy_auto_disabled_policies(db)
             retry_job_ids = queue_failed_recovery_retries(db)
             due_job_ids = queue_due_competitor_jobs(db)
-            recovery_jobs = recovery_job_diagnostics(db)
+            recovery_jobs = recovery_job_diagnostics(
+                db, job_ids=(*recovered_job_ids, *retry_job_ids)
+            )
             db.commit()
             job_ids = (*recovered_job_ids, *retry_job_ids, *due_job_ids)
             SCHEDULER_LAST_RUN.update(

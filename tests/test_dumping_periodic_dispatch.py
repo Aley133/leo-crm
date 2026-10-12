@@ -88,6 +88,25 @@ def _run(
     return run
 
 
+def test_empty_recovery_diagnostics_does_not_access_database() -> None:
+    assert dumping_competitor_worker.recovery_job_diagnostics(None, job_ids=()) == []
+
+
+def test_recovery_diagnostics_only_reads_current_dispatch_jobs(db_session) -> None:
+    policy = _policy(db_session, kaspi_product_id="RECOVERY-DIAGNOSTICS")
+    old_job = _run(db_session, policy=policy, status="failed_local", created_at=NOW)
+    current_job = _run(db_session, policy=policy, status="queued_local", created_at=NOW)
+    for job in (old_job, current_job):
+        job.explanation_json = {"reason": "automatic_policy_recovery"}
+    db_session.flush()
+
+    rows = dumping_competitor_worker.recovery_job_diagnostics(
+        db_session, job_ids=(current_job.id,)
+    )
+    assert [row["job_id"] for row in rows] == [current_job.id]
+    assert rows[0]["status"] == "queued_local"
+
+
 def test_manual_out_of_stock_product_is_not_queued_for_dumping(db_session) -> None:
     policy = _policy(db_session, kaspi_product_id="MANUAL-STOP")
     product = db_session.get(Product, policy.product_id)
