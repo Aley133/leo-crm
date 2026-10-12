@@ -167,14 +167,20 @@ def build_due_competitor_policies_statement(
     if limit < 1 or limit > 1000:
         raise ValueError("limit must be between 1 and 1000")
 
-    latest_scan_at = (
-        select(func.max(DumpingRun.created_at))
+    due_before = now - timedelta(seconds=refresh_seconds)
+    # max(created_at) <= cutoff is equivalent to having no newer local scan.
+    # PostgreSQL's correlated MAX plan scanned the global timestamp index once
+    # or twice for every policy, including products absent from recent history.
+    # EXISTS bounds the search to the refresh window and stops at the first hit.
+    recent_job_exists = (
+        select(DumpingRun.id)
         .where(
             DumpingRun.product_id == DumpingPolicy.product_id,
             DumpingRun.status.in_(_LOCAL_JOB_STATUSES),
+            DumpingRun.created_at > due_before,
         )
         .correlate(DumpingPolicy)
-        .scalar_subquery()
+        .exists()
     )
     active_job_exists = (
         select(DumpingRun.id)
@@ -184,7 +190,6 @@ def build_due_competitor_policies_statement(
         )
         .exists()
     )
-    due_before = now - timedelta(seconds=refresh_seconds)
     return (
         select(DumpingPolicy)
         .join(Product, Product.id == DumpingPolicy.product_id)
@@ -193,7 +198,7 @@ def build_due_competitor_policies_statement(
             DumpingPolicy.auto_publish_xml.is_(True),
             Product.sale_enabled.is_(True),
             ~active_job_exists,
-            or_(latest_scan_at.is_(None), latest_scan_at <= due_before),
+            ~recent_job_exists,
         )
         .order_by(DumpingPolicy.id)
         .with_for_update(skip_locked=True)
