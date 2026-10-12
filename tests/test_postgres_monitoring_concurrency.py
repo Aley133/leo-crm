@@ -418,3 +418,57 @@ def test_reclaimed_lease_rejects_stale_observation_without_side_effects(postgres
         assert verification.scalar(select(func.count()).select_from(MonitorAttempt)) == 0
         assert verification.scalar(select(func.count()).select_from(SupplierOfferState)) == 0
         assert verification.scalar(select(func.count()).select_from(SupplierOfferObservation)) == 0
+
+
+def test_source_replacement_uses_ingestion_lock_order_and_production_flush(postgres_factory):
+    from backend.app.browser_agent_models import BrowserAgentJob
+    from backend.app.product_supplier_binding_api import ManualSupplierBindingUpdate, update_manual_supplier_binding
+
+    now = datetime.now(UTC)
+    target_id, _ = _seed_target(postgres_factory, now=now)
+    with postgres_factory() as lookup:
+        target = lookup.get(MonitorTarget, target_id)
+        binding = lookup.get(ProductBinding, target.product_binding_id)
+        binding_id, product_id = binding.id, binding.product_id
+
+    ingestion = postgres_factory()
+    ingestion.execute(text("SET LOCAL lock_timeout = '500ms'"))
+    ingestion.scalar(select(MonitorTarget).where(MonitorTarget.id == target_id).with_for_update())
+    replacement_waits_for_target = Event()
+
+    def replace_source():
+        with postgres_factory() as replacement:
+            replacement.autoflush = False
+            replacement.execute(text("SET LOCAL lock_timeout = '5s'"))
+            connection = replacement.connection()
+
+            def observe_target_lock(_conn, _cursor, statement, _params, _context, _many):
+                if 'FROM monitor_targets' in statement and 'FOR UPDATE' in statement:
+                    replacement_waits_for_target.set()
+
+            event.listen(connection, 'before_cursor_execute', observe_target_lock)
+            return update_manual_supplier_binding(
+                product_id, binding_id,
+                ManualSupplierBindingUpdate(url='https://www.ozon.kz/product/replacement-123456789/'),
+                replacement,
+            )
+
+    try:
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            future = executor.submit(replace_source)
+            try:
+                assert replacement_waits_for_target.wait(timeout=3)
+                # Ingestion can still lock its binding. The old endpoint held
+                # this binding while waiting for our target, causing a cycle.
+                ingestion.scalar(select(ProductBinding).where(ProductBinding.id == binding_id).with_for_update())
+            finally:
+                ingestion.rollback()
+            result = future.result(timeout=8)
+        assert result.queued_initial_check is True
+        with postgres_factory() as verification:
+            job = verification.get(BrowserAgentJob, result.job_id)
+            assert job.supplier_product_id == result.supplier_product_id
+            assert job.url == 'https://www.ozon.kz/product/replacement-123456789/'
+    finally:
+        ingestion.rollback()
+        ingestion.close()

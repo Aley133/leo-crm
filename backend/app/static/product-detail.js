@@ -105,7 +105,7 @@ const renderBindings = (bindings, supplierScores) => {
     const score = scores.get(Number(binding.binding_id));
     const rank = rankByBinding.get(Number(binding.binding_id));
     const scoreHtml = score ? `<span class="muted">${rank ? `Место ${rank} · ` : ""}Рейтинг ${Number(score.total_score).toLocaleString("ru-RU", {maximumFractionDigits:2})}${score.eligible ? "" : " · не участвует"}</span>` : "";
-    const editAction = isFixedSource(binding) ? "" : `<button class="button secondary source-edit-button" type="button" data-edit-binding="${Number(binding.binding_id)}">Изменить ссылку</button>`;
+    const editAction = (isFixedSource(binding) ? "" : `<button class="button secondary source-edit-button" type="button" data-edit-binding="${Number(binding.binding_id)}">Изменить ссылку</button>`) + `<button class="button secondary source-edit-button" type="button" data-remove-binding="${Number(binding.binding_id)}">Удалить поставщика</button>`;
     return `<article class="binding-card"><div class="binding-head"><h3 class="binding-title">${escapeHtml(binding.supplier_name)}${binding.is_primary ? '<span class="primary-mark">Основной</span>' : ""}</h3>${supplierLink(binding, "Открыть карточку поставщика")}<span class="muted">${isFixedSource(binding) ? fixedSourceLabel(binding) : escapeHtml(binding.supplier_code)} · ${escapeHtml(binding.binding_status)} · приоритет ${binding.priority}</span>${scoreHtml}${editAction}</div><div><span class="label">Цена</span><strong>${money(binding.price, binding.currency)}</strong>${binding.old_price != null ? `<span class="muted">было ${money(binding.old_price, binding.currency)}</span>` : ""}</div><div><span class="label">Получение</span><strong>${binding.delivery_days == null ? "—" : `${binding.delivery_days} дн.`}</strong><span class="muted">${escapeHtml(binding.seller || "источник не указан")}</span></div><div><span class="label">Наличие</span>${availabilityBadge(binding.available)}${binding.stock != null ? `<span class="muted">остаток ${binding.stock}</span>` : ""}</div><div><span class="label">Мониторинг</span>${monitorBadge(binding)}<span class="muted">${escapeHtml(monitorSchedule(binding))}</span></div></article>`;
   }).join("");
   document.querySelector("#bindings-empty").classList.toggle("hidden", bindings.length > 0);
@@ -198,7 +198,22 @@ const configureSupplierDialog = (binding = null) => {
   supplierDialog.showModal();
 };
 addSupplierButton.addEventListener("click", () => configureSupplierDialog());
-bindingsContainer.addEventListener("click", (event) => {
+bindingsContainer.addEventListener("click", async (event) => {
+  const removeButton = event.target.closest("[data-remove-binding]");
+  if (removeButton) {
+    const bindingId = Number(removeButton.dataset.removeBinding);
+    if (!window.confirm("Удалить этого поставщика из товара и остановить его мониторинг?")) return;
+    removeButton.disabled = true;
+    try {
+      const token = localStorage.getItem(storageKey);
+      const response = await fetch(`/api/product-registry/products/${productId}/supplier-bindings/${bindingId}`, {method:"DELETE",headers:{Authorization:`Bearer ${token}`}});
+      if (!response.ok) throw await responseError(response);
+      await loadDetail();
+    } catch (error) {
+      message.textContent = error instanceof Error ? error.message : "Не удалось удалить поставщика.";
+    } finally { removeButton.disabled = false; }
+    return;
+  }
   const button = event.target.closest("[data-edit-binding]");
   if (!button) return;
   const bindingId = Number(button.dataset.editBinding);

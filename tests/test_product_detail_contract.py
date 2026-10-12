@@ -105,7 +105,9 @@ def test_product_detail_allows_only_explicit_supplier_binding_write() -> None:
     assert 'data-edit-binding=' in script
     assert "Старая ссылка перестанет проверяться" in script
     assert "/run-now" not in script
-    assert 'method:"DELETE"' not in script
+    assert 'method:"DELETE"' in script
+    assert 'data-remove-binding=' in script
+    assert 'window.confirm(' in script
 
 
 def test_product_detail_exposes_price_alert_opt_in() -> None:

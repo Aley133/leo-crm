@@ -233,7 +233,10 @@ def get_product_detail(
             SupplierOfferState,
             SupplierOfferState.supplier_product_id == SupplierProduct.id,
         )
-        .where(ProductBinding.product_id == product_id)
+        .where(
+            ProductBinding.product_id == product_id,
+            ProductBinding.status != BindingStatus.DISABLED.value,
+        )
         .order_by(ProductBinding.is_primary.desc(), ProductBinding.priority, ProductBinding.id)
     ).all()
 

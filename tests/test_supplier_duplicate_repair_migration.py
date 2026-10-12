@@ -152,7 +152,6 @@ def test_duplicate_supplier_migration_preserves_newest_binding_and_history(
     assert registry_row.best_supplier_price is None
     assert registry_row.available_offer_count == 0
     assert detail.best_offer is None
-    assert {binding.binding_status for binding in detail.bindings} == {
-        "active",
-        "disabled",
-    }
+    # Removed/disabled sources stay in the database but disappear from the
+    # operational source list, including sources retired by this migration.
+    assert {binding.binding_status for binding in detail.bindings} == {"active"}

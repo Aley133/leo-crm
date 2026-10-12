@@ -130,7 +130,7 @@ def test_six_price_baseline_detects_a_sudden_ozon_drop(db_session: Session) -> N
     alerts = _alerts(db_session)
     assert len(alerts) == 1
     assert alerts[0].payload_json == {
-        "version": 2,
+        "version": 3,
         "supplier_product_id": supplier_product.id,
         "observation_id": alerts[0].payload_json["observation_id"],
         "baseline_price": "3050.00",
@@ -149,6 +149,10 @@ def test_six_price_baseline_detects_a_sudden_ozon_drop(db_session: Session) -> N
         "supplier_product_title": "Выгодный товар на Ozon",
         "supplier_product_url": "https://www.ozon.ru/product/price-drop-001/",
         "binding_id": alerts[0].payload_json["binding_id"],
+        "supplier_source_url": "https://www.ozon.ru/product/price-drop-001/",
+        "price_checked_at": (STARTED_AT + timedelta(minutes=6, seconds=2)).isoformat(),
+        "supplier_seller": "Ozon",
+        "delivery_days": 2,
     }
     assert alerts[0].workspace_id == 1
 
@@ -344,3 +348,15 @@ def test_unavailable_or_zero_stock_offer_does_not_alert(db_session: Session) -> 
     )
 
     assert _alerts(db_session) == []
+
+
+def test_alert_links_to_the_selected_ozon_seller_not_the_original_card():
+    from backend.app.monitoring import SupplierOfferObservation
+    from backend.app.price_drop_alerts import _offer_url
+
+    observation = SupplierOfferObservation(raw_metadata='{"source":"otherOffersFromSellers.webSellerList","offer_sku":"5848662944"}')
+    assert _offer_url(observation, 'https://ozon.kz/product/1471197969/', 'ozon') == 'https://www.ozon.kz/product/5848662944/'
+    observation.raw_metadata = '{"offer_product_url":"https://www.ozon.kz/product/selected-123/?seller=9","offer_sku":"123"}'
+    assert _offer_url(observation, 'https://ozon.kz/product/old-456/', 'ozon') == 'https://www.ozon.kz/product/selected-123/?seller=9'
+    observation.raw_metadata = '{"offer_product_url":"https://evil.test/","offer_sku":"not-a-sku"}'
+    assert _offer_url(observation, 'https://ozon.kz/product/old-456/', 'ozon') == 'https://ozon.kz/product/old-456/'

@@ -213,6 +213,7 @@ def test_manual_upsert_disables_older_duplicate_binding(db_session) -> None:
 def test_manual_source_replacement_keeps_one_binding_and_rejects_stale_jobs(
     db_session,
 ) -> None:
+    db_session.autoflush = False
     product, supplier = _seed_product_and_supplier(db_session)
     sibling_product = Product(
         kaspi_product_id="151877904",
@@ -378,3 +379,55 @@ def test_manual_source_replacement_reuses_same_canonical_listing(db_session) -> 
     assert result.queued_initial_check is False
     assert source.url == "https://ozon.kz/product/new-slug-51853964/"
     assert db_session.query(SupplierProduct).count() == 1
+
+
+def test_remove_source_stops_jobs_keeps_history_and_can_be_restored(db_session):
+    from backend.app.product_supplier_binding_api import remove_supplier_binding
+    from backend.app.product_detail_api import get_product_detail
+
+    db_session.autoflush = False
+    product, supplier = _seed_product_and_supplier(db_session)
+    added = create_manual_supplier_binding(product.id, ManualSupplierBindingCreate(url='https://www.ozon.kz/product/51853964/', is_primary=True), db_session)
+    job = db_session.get(BrowserAgentJob, added.job_id)
+    job.status = 'leased'
+    job.lease_token = 'source-removal-lease'
+    job.lease_owner = 'agent'
+    job.lease_until = datetime.now(UTC) + timedelta(minutes=5)
+    history = SupplierOfferObservation(supplier_product_id=added.supplier_product_id, price=1000, currency='KZT', available=True, fingerprint='d'*64, adapter_schema_version='test', observed_at=datetime.now(UTC))
+    db_session.add(history)
+    sibling = Product(kaspi_product_id='SIBLING', name='Другой товар')
+    db_session.add(sibling)
+    db_session.flush()
+    sibling_binding = ProductBinding(product_id=sibling.id, supplier_product_id=added.supplier_product_id, status='active')
+    db_session.add(sibling_binding)
+    db_session.commit()
+
+    result = remove_supplier_binding(product.id, added.binding_id, db_session)
+    assert result.cancelled_stale_jobs == 1
+    assert db_session.get(ProductBinding, added.binding_id).status == 'disabled'
+    assert db_session.get(MonitorTarget, added.monitor_target_id).status == 'disabled'
+    assert job.status == 'failed'
+    assert job.lease_token is None and job.lease_owner is None and job.lease_until is None
+    assert job.error_code == 'supplier_source_removed'
+    assert sibling_binding.status == 'active'
+    assert db_session.get(SupplierOfferObservation, history.id) is history
+    assert get_product_detail(product.id, observation_limit=25, db=db_session).bindings == []
+    # Idempotent removal; no physical deletion and no duplicate on restoring.
+    assert remove_supplier_binding(product.id, added.binding_id, db_session).cancelled_stale_jobs == 0
+    restored = create_manual_supplier_binding(product.id, ManualSupplierBindingCreate(url='https://www.ozon.kz/product/51853964/'), db_session)
+    assert restored.binding_id == added.binding_id
+    assert restored.monitor_target_id == added.monitor_target_id
+    assert restored.job_id != added.job_id
+
+
+def test_remove_source_cannot_target_another_products_binding(db_session):
+    import pytest
+    from fastapi import HTTPException
+    from backend.app.product_supplier_binding_api import remove_supplier_binding
+
+    product, _ = _seed_product_and_supplier(db_session)
+    added = create_manual_supplier_binding(product.id, ManualSupplierBindingCreate(url='https://www.ozon.kz/product/51853964/', run_initial_check=False), db_session)
+    with pytest.raises(HTTPException) as exc:
+        remove_supplier_binding(product.id + 100, added.binding_id, db_session)
+    assert exc.value.status_code == 404
+    assert db_session.get(ProductBinding, added.binding_id).status == 'active'
