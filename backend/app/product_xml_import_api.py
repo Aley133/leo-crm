@@ -236,10 +236,30 @@ def _existing_products(db: Session, ids: list[str]) -> dict[str, Product]:
             rows[product.id] = product
     result: dict[str, Product] = {}
     for identity in ids:
+        # Historical aliases can retain the same merchant SKU after their
+        # warehouses are joined. The exact registry ID remains authoritative;
+        # a repaired shared pool also resolves SKU-only imports deterministically.
         exact = [p for p in rows.values() if identity in (p.kaspi_product_id, p.merchant_sku)]
+        owners = {p.inventory_owner_product_id or p.id for p in exact}
+        if len(owners) == 1:
+            owner = rows.get(next(iter(owners)))
+            if owner is not None and (owner.merchant_sku == identity or
+                    compound_master_id(identity) == owner.merchant_sku):
+                result[identity] = owner
+                continue
+        primary = [p for p in rows.values() if p.kaspi_product_id == identity]
+        if len(primary) == 1:
+            result[identity] = primary[0]
+            continue
         if len(exact) == 1:
             result[identity] = exact[0]
             continue
+        if exact and len({p.inventory_owner_product_id or p.id for p in exact}) == 1:
+            owner_id = exact[0].inventory_owner_product_id or exact[0].id
+            result[identity] = next((p for p in exact if p.id == owner_id), exact[0])
+            continue
+        if exact:
+            raise HTTPException(status_code=409, detail=f"Неоднозначные карточки SKU {identity}: требуется сверка склада")
         base = compound_master_id(identity)
         if not exact and base and sum(
             value == base or compound_master_id(value) == base for value in ids

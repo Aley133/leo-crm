@@ -496,3 +496,39 @@ def test_multiple_compound_offers_do_not_adopt_one_numeric_stock_card(db_session
     xml = b"<kaspi_catalog><offers><offer sku='105353600_111'/><offer sku='105353600_222'/></offers></kaspi_catalog>"
     result = _commit_xml_import(xml, source_filename="multiple.xml", db=db_session)
     assert result["created_count"] == 2
+
+
+def test_shared_alias_import_keeps_fast_owner_verified_xml(db_session):
+    owner = Product(kaspi_product_id='105353600', merchant_sku='105353600_312511241', name='Same 20 units')
+    alias = Product(kaspi_product_id='105353600_312511241', merchant_sku='105353600_312511241', name='Same 20 units')
+    db_session.add_all([owner, alias])
+    db_session.flush()
+    alias.inventory_owner_product_id = owner.id
+    sku = owner.merchant_sku
+    verified = f"<kaspi_catalog><offers><offer sku='{sku}'><model>Same 20 units</model><price>7777</price><availabilities><availability available='yes' stockCount='3' preOrder='0' storeId='PP1'/></availabilities></offer></offers></kaspi_catalog>"
+    feed = KaspiXmlFeed(source_xml=verified, generated_xml=verified, active=True)
+    db_session.add_all([feed, FastDumpingPolicy(product_id=owner.id, enabled=True)])
+    db_session.flush()
+    incoming = verified.replace('7777', '9000').replace("stockCount='3'", "stockCount='99'")
+    result = _commit_xml_import(incoming.encode(), source_filename='archive.xml', db=db_session)
+    offer = next(ElementTree.fromstring(feed.generated_xml).iter('offer'))
+    assert result['created_count'] == 0
+    assert next(offer.iter('price')).text == '7777'
+    assert next(offer.iter('availability')).attrib['stockCount'] == '3'
+    assert db_session.query(Product).count() == 2
+    assert alias.inventory_owner_product_id == owner.id
+
+
+def test_shared_numeric_owner_is_reused_on_compound_alias_import(db_session):
+    owner = Product(kaspi_product_id='105353600', merchant_sku='105353600', name='Same 20 units')
+    alias = Product(kaspi_product_id='105353600_312511241', merchant_sku='105353600_312511241', name='Same 20 units')
+    db_session.add_all([owner, alias])
+    db_session.flush()
+    alias.inventory_owner_product_id = owner.id
+    db_session.flush()
+    xml = b"<kaspi_catalog><offers><offer sku='105353600_312511241'><model>Same 20 units</model></offer></offers></kaspi_catalog>"
+    result = _commit_xml_import(xml, source_filename='aliases.xml', db=db_session)
+    assert result['created_count'] == 0
+    assert db_session.query(Product).count() == 2
+    assert owner.merchant_sku == '105353600_312511241'
+    assert alias.inventory_owner_product_id == owner.id
