@@ -27,44 +27,55 @@ def find_product_for_order_line(session: Session, line: MarketplaceOrderLine) ->
     the seller XML. Kaspi product ID is a safe secondary identity.
     """
 
+    # Once stock has moved, automatic identity enrichment must not move the
+    # order to a different warehouse card. Explicit reassignment is separate.
+    if line.product_id is not None:
+        linked = session.get(Product, line.product_id)
+        if linked is not None:
+            return linked
+
     sku = _clean(line.merchant_sku)
     external_product_id = _clean(line.external_product_id)
-    conditions = []
-    if sku is not None:
-        conditions.append(Product.merchant_sku == sku)
-        conditions.append(Product.kaspi_product_id == sku)
-    if external_product_id is not None:
-        conditions.append(Product.kaspi_product_id == external_product_id)
-        conditions.append(Product.merchant_sku == external_product_id)
-    if conditions:
-        exact = session.scalar(
-            select(Product).where(or_(*conditions)).order_by(Product.id).limit(1)
-        )
-        if exact is not None:
-            return exact
-
-    # A fresh Kaspi order often exposes only the numeric master-product ID,
-    # while Seller XML identifies the same offer as ``<master_id>_<offer_id>``.
-    # Resolve that representation immediately when it is unambiguous instead
-    # of leaving the line as ``Unknown product`` until Kaspi's slower product
-    # endpoint happens to return the merchant SKU.
-    if external_product_id is None or not external_product_id.isdigit():
-        return None
-    compound_prefix = f"{external_product_id}_%"
-    candidates = list(
-        session.scalars(
-            select(Product)
-            .where(
-                or_(
-                    Product.merchant_sku.like(compound_prefix),
-                    Product.kaspi_product_id.like(compound_prefix),
-                )
+    for identity in (sku, external_product_id):
+        if identity is None:
+            continue
+        for field in (Product.merchant_sku, Product.kaspi_product_id):
+            exact = session.scalar(
+                select(Product).where(field == identity).order_by(Product.id).limit(1)
             )
-            .order_by(Product.id)
-            .limit(2)
-        ).all()
-    )
-    return candidates[0] if len(candidates) == 1 else None
+            if exact is not None:
+                return exact
+
+    # Accept only the numeric master_offer representation, in both directions.
+    # An arbitrary SKU containing underscores is never a catalogue identity.
+    for identity in (sku, external_product_id):
+        if identity is None:
+            continue
+        base = compound_master_id(identity)
+        if base is not None:
+            candidates = list(session.scalars(select(Product).where(or_(
+                Product.merchant_sku == base, Product.kaspi_product_id == base,
+            )).limit(2)).all())
+        elif identity.isdigit():
+            candidates = list(session.scalars(select(Product).where(or_(
+                Product.merchant_sku.startswith(identity + "_", autoescape=True),
+                Product.kaspi_product_id.startswith(identity + "_", autoescape=True),
+            )).order_by(Product.id).limit(2)).all())
+            if len(candidates) == 1 and identity not in {
+                compound_master_id(candidates[0].merchant_sku),
+                compound_master_id(candidates[0].kaspi_product_id),
+            }:
+                candidates = []
+        else:
+            continue
+        if len(candidates) == 1:
+            return candidates[0]
+    return None
+
+
+def compound_master_id(identity: str | None) -> str | None:
+    parts = (identity or "").split("_")
+    return parts[0] if len(parts) == 2 and all(part.isdigit() for part in parts) else None
 
 
 def link_order_line_to_product(
@@ -165,6 +176,9 @@ def link_all_matching_order_lines_for_products(
             if product is None:
                 continue
 
+            # XML imports must retain existing warehouse links.
+            if line.product_id is not None and line.product_id != product.id:
+                continue
             line.product_id = product.id
             if not line.title or line.title.strip().casefold() in {"unknown product", "название не получено"}:
                 line.title = product.name

@@ -130,3 +130,40 @@ def test_order_line_margin_uses_procurement_source_price() -> None:
     assert line.procurement_total_cost == Decimal("1400")
     assert line.gross_margin == Decimal("1598")
     assert line.gross_margin_pct == Decimal("53.30")
+
+
+def test_compound_order_sku_resolves_legacy_numeric_product(db_session):
+    product = Product(kaspi_product_id="105353600", merchant_sku="105353600", name="Original")
+    db_session.add(product)
+    db_session.flush()
+    line = MarketplaceOrderLine(merchant_sku="105353600_312511241", quantity=1,
+                                title="Unknown product", unit_price=Decimal("1000"), line_total=Decimal("1000"))
+    assert find_product_for_order_line(db_session, line).id == product.id
+
+
+def test_exact_merchant_sku_precedes_older_master_card(db_session):
+    legacy = Product(kaspi_product_id="105353600", merchant_sku="105353600", name="Legacy")
+    current = Product(kaspi_product_id="105353600_312511241", merchant_sku="105353600_312511241", name="Current")
+    db_session.add_all([legacy, current])
+    db_session.flush()
+    line = MarketplaceOrderLine(merchant_sku=current.merchant_sku, external_product_id="105353600",
+                                quantity=1, title="Current", unit_price=Decimal("1000"), line_total=Decimal("1000"))
+    assert find_product_for_order_line(db_session, line).id == current.id
+    line.product_id = legacy.id
+    assert find_product_for_order_line(db_session, line).id == legacy.id
+
+
+def test_xml_relink_keeps_existing_stock_card(db_session):
+    from tests.test_inventory_fifo import _order_line
+    from datetime import UTC, datetime
+
+    legacy = Product(kaspi_product_id="105353600", merchant_sku="105353600", name="Legacy")
+    current = Product(kaspi_product_id="105353600_312511241", merchant_sku="105353600_312511241", name="Current")
+    db_session.add_all([legacy, current])
+    db_session.flush()
+    _, line = _order_line(db_session, legacy, code="keep-stock-link", ordered_at=datetime(2026, 10, 1, tzinfo=UTC))
+    line.merchant_sku = current.merchant_sku
+    line.external_product_id = current.kaspi_product_id
+    db_session.flush()
+    assert link_all_matching_order_lines(db_session, product=current) == 0
+    assert line.product_id == legacy.id

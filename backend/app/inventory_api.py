@@ -386,7 +386,7 @@ def detach_product_inventory(
     db.flush()
     # First remove detached SKU orders from the old pool, then rebuild each
     # independent card (normally with zero batches) and synchronize its XML.
-    rebuild_product_fifo(db, product_id=owner_id)
+    rebuild_product_fifo(db, product_id=owner_id, detached_product_ids=set(detached_ids))
     for detached_id in detached_ids:
         rebuild_product_fifo(db, product_id=detached_id)
     db.commit()

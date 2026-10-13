@@ -447,3 +447,52 @@ def test_manual_out_of_stock_survives_xml_reimport_and_resumes_without_losing_po
     assert _offer_state(feed.generated_xml, "A")["available"] == "yes"
     assert _offer_state(feed.generated_xml, "A")["stockCount"] == "2"
     assert policy.enabled is True
+
+
+def test_numeric_sku_upgrade_retains_stock_and_removes_retired_xml_offer(db_session):
+    from sqlalchemy import select
+    from backend.app.inventory_service import allocate_order_line_fifo, rebuild_product_fifo
+    from backend.app.order_line_product_linking import find_product_for_order_line
+    from tests.test_inventory_fifo import _order_line
+
+    old_xml = b"<kaspi_catalog><offers><offer sku='105353600'><model>Stock card</model></offer></offers></kaspi_catalog>"
+    _commit_xml_import(old_xml, source_filename="old.xml", db=db_session)
+    product = db_session.scalar(select(Product))
+    batch = InventoryBatch(product_id=product.id, quantity_received=5, quantity_remaining=5,
+                           unit_cost=Decimal("500"), is_received=True,
+                           received_at=datetime(2026, 10, 1, tzinfo=UTC))
+    db_session.add(batch)
+    order, line = _order_line(db_session, product, code="before-upgrade",
+                             ordered_at=datetime(2026, 10, 2, tzinfo=UTC))
+    allocate_order_line_fifo(db_session, order_line=line, order=order, sync_feed=False)
+    new_xml = old_xml.replace(b"sku='105353600'", b"sku='105353600_312511241'")
+    for _ in range(2):
+        result = _commit_xml_import(new_xml, source_filename="new.xml", db=db_session)
+        assert result["created_count"] == 0
+        assert db_session.query(Product).count() == 1
+        assert product.merchant_sku == "105353600_312511241"
+        assert line.product_id == product.id
+        assert batch.quantity_remaining == 4
+        feed = db_session.scalar(select(KaspiXmlFeed))
+        for xml in (feed.source_xml, feed.generated_xml):
+            assert [o.attrib["sku"] for o in ElementTree.fromstring(xml).iter("offer")] == [product.merchant_sku]
+    _commit_xml_import(old_xml, source_filename="stale-archive.xml", db=db_session)
+    assert product.merchant_sku == "105353600_312511241"
+    feed = db_session.scalar(select(KaspiXmlFeed))
+    assert [o.attrib["sku"] for o in ElementTree.fromstring(feed.generated_xml).iter("offer")] == [product.merchant_sku]
+    new_order, new_line = _order_line(db_session, product, code="after-upgrade",
+                                     ordered_at=datetime(2026, 10, 3, tzinfo=UTC))
+    new_line.product_id = None
+    assert find_product_for_order_line(db_session, new_line).id == product.id
+    new_line.product_id = product.id
+    allocate_order_line_fifo(db_session, order_line=new_line, order=new_order, sync_feed=False)
+    rebuild_product_fifo(db_session, product_id=product.id)
+    assert batch.quantity_remaining == 3
+
+
+def test_multiple_compound_offers_do_not_adopt_one_numeric_stock_card(db_session):
+    db_session.add(Product(kaspi_product_id="105353600", merchant_sku="105353600", name="Original"))
+    db_session.flush()
+    xml = b"<kaspi_catalog><offers><offer sku='105353600_111'/><offer sku='105353600_222'/></offers></kaspi_catalog>"
+    result = _commit_xml_import(xml, source_filename="multiple.xml", db=db_session)
+    assert result["created_count"] == 2
