@@ -515,33 +515,46 @@ def rebuild_product_fifo(
     *,
     product_id: int,
     allocated_at: datetime | None = None,
+    detached_product_ids: set[int] | None = None,
 ) -> int:
     owner_product_id = inventory_owner_product_id(session, product_id)
-    batch_ids = select(InventoryBatch.id).where(
-        InventoryBatch.product_id == owner_product_id,
-        InventoryBatch.batch_type == InventoryBatchType.PURCHASE.value,
-    )
-    session.execute(
-        delete(InventoryAllocation).where(
-            InventoryAllocation.inventory_batch_id.in_(batch_ids)
-        )
-    )
-
+    # Lock before deleting allocations. Preserve physical movements whose
+    # lines have since been relinked, and returns awaiting warehouse acceptance.
     batches = session.scalars(
         select(InventoryBatch)
         .where(InventoryBatch.product_id == owner_product_id)
         .order_by(InventoryBatch.received_at, InventoryBatch.id)
         .with_for_update()
     ).all()
-    for batch in batches:
-        batch.quantity_remaining = (
-            batch.quantity_received
-            if (
-                batch.batch_type == InventoryBatchType.PURCHASE.value
-                and batch.is_received
-            )
-            else 0
+    purchase_ids = [b.id for b in batches if b.batch_type == InventoryBatchType.PURCHASE.value]
+    group_ids = set(inventory_group_product_ids(session, owner_product_id))
+    preserved_by_batch: dict[int, int] = defaultdict(int)
+    allocations = session.execute(
+        select(InventoryAllocation, MarketplaceOrderLine, MarketplaceOrder)
+        .join(MarketplaceOrderLine, MarketplaceOrderLine.id == InventoryAllocation.marketplace_order_line_id)
+        .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
+        .where(InventoryAllocation.inventory_batch_id.in_(purchase_ids))
+    ).all()
+    for allocation, line, order in allocations:
+        cancelled = (order.status == MarketplaceOrderStatus.CANCELLED.value
+                     or order.manual_stage == "cancelled")
+        preserve = not cancelled and (
+            (line.product_id not in group_ids
+             and line.product_id not in (detached_product_ids or set()))
+            or order.status == MarketplaceOrderStatus.RETURNED.value
+            or order.manual_stage == "returned"
         )
+        if preserve:
+            preserved_by_batch[allocation.inventory_batch_id] += int(allocation.quantity)
+        else:
+            session.delete(allocation)
+    session.flush()
+    for batch in batches:
+        if batch.batch_type == InventoryBatchType.PURCHASE.value:
+            batch.quantity_remaining = (
+                max(int(batch.quantity_received) - preserved_by_batch[batch.id], 0)
+                if batch.is_received else 0
+            )
     session.flush()
 
     rows = session.execute(

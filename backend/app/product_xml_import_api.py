@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from copy import deepcopy
+from dataclasses import replace
 from collections.abc import Iterable
 from collections.abc import Callable
 from typing import TypeVar
@@ -8,7 +9,7 @@ from urllib.parse import unquote
 from xml.etree import ElementTree
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from sqlalchemy import func, select
+from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
 from starlette.concurrency import run_in_threadpool
 
@@ -25,7 +26,7 @@ from .models import (
     Product,
     ProductStatus,
 )
-from .order_line_product_linking import link_all_matching_order_lines_for_products
+from .order_line_product_linking import compound_master_id, link_all_matching_order_lines_for_products
 
 
 router = APIRouter(
@@ -219,13 +220,45 @@ def _existing_product_ids(db: Session, ids: list[str]) -> set[str]:
 
 
 def _existing_products(db: Session, ids: list[str]) -> dict[str, Product]:
+    # Kaspi may replace a numeric offer code with master_offer. Reuse the
+    # existing row (and all its stock, policies and supplier links) only when
+    # this import contains exactly one representation for that master.
+    lookup = set(ids)
+    for identity in ids:
+        base = compound_master_id(identity)
+        if base:
+            lookup.add(base)
+    rows: dict[int, Product] = {}
+    for batch in _chunks(sorted(lookup)):
+        for product in db.scalars(select(Product).where(or_(
+            Product.kaspi_product_id.in_(batch), Product.merchant_sku.in_(batch),
+        ))).all():
+            rows[product.id] = product
     result: dict[str, Product] = {}
-    for batch in _chunks(ids):
-        for product in db.scalars(
-            select(Product).where(Product.kaspi_product_id.in_(batch))
-        ).all():
-            result[product.kaspi_product_id] = product
+    for identity in ids:
+        exact = [p for p in rows.values() if identity in (p.kaspi_product_id, p.merchant_sku)]
+        if len(exact) == 1:
+            result[identity] = exact[0]
+            continue
+        base = compound_master_id(identity)
+        if not exact and base and sum(
+            value == base or compound_master_id(value) == base for value in ids
+        ) == 1:
+            legacy = [p for p in rows.values() if base in (p.kaspi_product_id, p.merchant_sku)]
+            if len(legacy) == 1:
+                result[identity] = legacy[0]
     return result
+
+
+def _rename_offer_skus(xml: str, renames: dict[str, str]) -> str:
+    if not renames:
+        return xml
+    root = ElementTree.fromstring(xml)
+    for offer in _catalog_offers(root):
+        identity = _offer_identity(offer)
+        if identity in renames:
+            offer.set("sku", renames[identity])
+    return ElementTree.tostring(root, encoding="unicode", xml_declaration=True)
 
 
 def _locked_import_feed(db: Session) -> KaspiXmlFeed | None:
@@ -358,7 +391,7 @@ async def retain_xml_source(request: Request) -> dict:
 def _preview_xml_import(body: bytes, *, db: Session) -> dict:
     products, warnings = _parse_products(body)
     ids = list(dict.fromkeys(item.kaspi_product_id for item in products))
-    existing_ids = _existing_product_ids(db, ids)
+    existing_ids = set(_existing_products(db, ids))
     current_catalog_count = int(db.scalar(select(func.count(Product.id))) or 0)
     retained_count = max(current_catalog_count - len(existing_ids), 0)
     return {
@@ -431,6 +464,7 @@ def _commit_xml_import(
     linked_order_lines = 0
     try:
         stored_products: list[Product] = []
+        renamed_skus: dict[str, str] = {}
         for item in products:
             product = existing.get(item.kaspi_product_id)
             if product is None:
@@ -449,6 +483,16 @@ def _commit_xml_import(
                 created += 1
             else:
                 changed = False
+                old_sku = product.merchant_sku
+                if old_sku and compound_master_id(old_sku) == item.merchant_sku:
+                    # A stale archive must not resurrect the retired numeric offer.
+                    renamed_skus[item.merchant_sku] = old_sku
+                    item = replace(item, merchant_sku=old_sku)
+                if (old_sku and item.merchant_sku and old_sku != item.merchant_sku
+                        and compound_master_id(item.merchant_sku) == old_sku):
+                    renamed_skus[old_sku] = item.merchant_sku
+                    if int(product.id) in fast_product_ids:
+                        fast_skus.add(item.merchant_sku)
                 for field, value in (
                     ("merchant_sku", item.merchant_sku),
                     ("name", item.name),
@@ -479,6 +523,12 @@ def _commit_xml_import(
             products=stored_products,
         )
 
+        if renamed_skus:
+            body = _rename_offer_skus(body.decode("utf-8-sig"), renamed_skus).encode("utf-8")
+        if locked_feed is not None and renamed_skus:
+            locked_feed.source_xml = _rename_offer_skus(locked_feed.source_xml, renamed_skus)
+        if previous_generated_xml and renamed_skus:
+            previous_generated_xml = _rename_offer_skus(previous_generated_xml, renamed_skus)
         feed = _store_feed_source(
             db,
             body=body,

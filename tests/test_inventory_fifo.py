@@ -3,6 +3,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from decimal import Decimal
 
+import pytest
 from sqlalchemy import select
 
 from backend.app.inventory_models import InventoryAllocation, InventoryBatch
@@ -301,3 +302,36 @@ def test_cancelling_or_returned_order_does_not_restore_physical_stock(
     assert returned.released_quantity == 0
     assert batch.quantity_remaining == 1
     assert len(db_session.scalars(select(InventoryAllocation)).all()) == 1
+
+
+@pytest.mark.parametrize("new_link", ["duplicate", "missing", "returned"])
+def test_fifo_rebuild_never_restores_stock_after_identity_change(db_session, new_link):
+    from backend.app.inventory_service import rebuild_product_fifo
+
+    product = _product(db_session)
+    batch, _ = create_inventory_batch(
+        db_session, product=product, quantity=3, unit_cost=Decimal("500"),
+        received_at=datetime(2026, 7, 23, 8, tzinfo=UTC),
+        reconcile_existing_orders=False,
+    )
+    order, line = _order_line(db_session, product, code="renamed",
+                             ordered_at=datetime(2026, 7, 23, 10, tzinfo=UTC))
+    allocate_order_line_fifo(db_session, order_line=line, order=order, sync_feed=False)
+    if new_link == "duplicate":
+        duplicate = Product(kaspi_product_id="105721344_312511241",
+                            merchant_sku="105721344_312511241", name="Duplicate")
+        db_session.add(duplicate)
+        db_session.flush()
+        line.product_id = duplicate.id
+    elif new_link == "missing":
+        line.product_id = None
+    else:
+        order.status = "returned"
+    db_session.flush()
+    for _ in range(2):
+        rebuild_product_fifo(db_session, product_id=product.id)
+        assert batch.quantity_remaining == 2
+        assert db_session.query(InventoryAllocation).count() == 1
+    order.status = "cancelled"
+    release_cancelled_order_inventory(db_session, order=order)
+    assert batch.quantity_remaining == 3
