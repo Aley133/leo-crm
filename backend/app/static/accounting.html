@@ -5,7 +5,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Бух учёт</title>
   <link rel="stylesheet" href="/static/dashboard.css?v=20261009-1">
-  <link rel="stylesheet" href="/static/accounting.css?v=20261011-1">
+  <link rel="stylesheet" href="/static/accounting.css?v=20261014-1">
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
   <script src="/static/theme.js?v=20260803-2"></script>
@@ -49,9 +49,10 @@
             <div><span class="section-kicker">КАПИТАЛ</span><h2>Где сейчас находятся деньги</h2></div>
             <button id="capital-edit" class="button secondary" type="button">Указать деньги</button>
           </div>
+          <div class="period-switch" id="cash-period-switch" aria-label="Период выданных продаж"><button data-period="today" class="active" type="button">Сегодня</button><button data-period="yesterday" type="button">Вчера</button><button data-period="week" type="button">7 дней</button><button data-period="balance" type="button">Остаток денег</button></div>
           <div class="capital-layout">
             <div class="capital-lines">
-              <div><span>Расчётные деньги <small>выданные заказы − расходы − оплаченные закупки</small></span><strong id="capital-cash">—</strong></div>
+              <div><span><span id="capital-cash-label">Продажи за сегодня к получению</span><small id="capital-cash-formula">выданные заказы − комиссия − логистика</small><small id="capital-cash-detail"></small></span><strong id="capital-cash">—</strong></div>
               <div><span>Склад по закупке <small>фактический FIFO</small></span><strong id="capital-warehouse">0 ₸</strong></div>
               <div><span>Товар в пути <small>незавершённые партии</small></span><strong id="capital-transit">0 ₸</strong></div>
               <div><span>Накопленная прибыль <small>автоматически по выданным товарам</small></span><strong id="capital-profit">—</strong></div>
@@ -69,7 +70,7 @@
             <label class="capital-note-field"><span>Комментарий <small>необязательно</small></span><input name="note" maxlength="500" placeholder="Например: резерв на белый ввоз"></label>
             <div class="capital-form-actions"><button class="button" type="submit">Сохранить снимок</button><button id="capital-cancel" class="button secondary" type="button">Отмена</button></div>
           </form>
-          <p class="card-note capital-explanation">Деньги и прибыль обновляются автоматически по выданным заказам. Закупочные партии считаются оплаченными, включая товар в пути. Комиссия, налог и доставка рассчитываются по тарифам CRM. Это расчётный остаток, а не банковская выписка: внешние расходы, пополнения и вывод денег учитывайте через сверку остатка. Без начального остатка расчёт начинается с 0 ₸ по всей истории. Доступная прибыль уже входит в деньги. При отсутствующей себестоимости прибыль не подтверждена. Старые ручные снимки используют приблизительную историческую базу; одна сверка фиксирует точную базу для дальнейшего автоматического расчёта.</p>
+          <p class="card-note capital-explanation">Продажи за день или 7 дней — сумма заказов по дате выдачи Kaspi минус комиссия и логистика; налог и закупки из этой суммы не вычитаются. Дни начинаются в 00:00 по времени Казахстана, 7 дней включают сегодня и 6 предыдущих дней. Заказы без даты выдачи исключены из дневной сверки. Доставка берётся из Kaspi, при отсутствии — из тарифа CRM; комиссия пока расчётная по тарифу CRM. Остальные строки и общий капитал показывают текущую позицию за всю историю. Деньги и прибыль обновляются автоматически по выданным заказам. Закупочные партии считаются оплаченными, включая товар в пути. Комиссия, налог и доставка рассчитываются по тарифам CRM. Это расчётный остаток, а не банковская выписка: внешние расходы, пополнения и вывод денег учитывайте через сверку остатка. Без начального остатка расчёт начинается с 0 ₸ по всей истории. Доступная прибыль уже входит в деньги. При отсутствующей себестоимости прибыль не подтверждена. Старые ручные снимки используют приблизительную историческую базу; одна сверка фиксирует точную базу для дальнейшего автоматического расчёта.</p>
         </section>
 
         <section class="accounting-grid">
@@ -126,6 +127,6 @@
     </main>
   </div>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/accounting.js?v=20261011-1" defer></script>
+  <script src="/static/accounting.js?v=20261014-1" defer></script>
 </body>
 </html>

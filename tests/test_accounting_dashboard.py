@@ -684,3 +684,109 @@ def test_legacy_capital_report_reuses_inventory_and_preserves_sale_dates(db_sess
     assert "products_by_id" not in report["inventory"]
     # One physical inventory valuation, including when the legacy baseline is needed.
     assert sum("ranked_accounting_purchase_batches" in sql for sql in statements) == 1
+
+
+def test_daily_receipts_use_kazakhstan_midnight_issue_date_and_order_rounding(db_session):
+    from backend.app.accounting_service import build_delivered_receipts
+    from backend.app.models import MarketplaceRawPayload
+    _, product, _ = _seed_accounting(db_session)
+    for old in db_session.scalars(select(MarketplaceOrder)):
+        old.status = 'cancelled'
+    account = db_session.scalar(select(MarketplaceAccount))
+    now = datetime(2026, 10, 14, 12, tzinfo=UTC)
+    start = datetime(2026, 10, 13, 19, tzinfo=UTC)
+    for code, at, amount, status in [
+        ('before', start - timedelta(microseconds=1), '10000', 'delivered'),
+        ('midnight', start, '10000.04', 'delivered'),
+        ('today', now, '10000.04', 'delivered'),
+        ('future', now + timedelta(seconds=1), '10000', 'delivered'),
+        ('cancelled-today', now, '10000', 'cancelled'),
+        ('returned-today', now, '10000', 'returned'),
+    ]:
+        order, _ = _order(db_session, account=account, product=product, code=code,
+            status=status, amount=Decimal(amount), ordered_at=now - timedelta(days=100))
+        order.delivered_at = at
+        db_session.add(MarketplaceRawPayload(workspace_id=1, marketplace_account_id=account.id,
+            payload_type='order', external_object_id=order.external_order_id, content_hash=code,
+            payload_json={'attributes': {'deliveryCostForSeller': '200.50'}}, received_at=now))
+    db_session.flush()
+    result = build_delivered_receipts(db_session, workspace_id=1, as_of=now)
+    assert result['delivered_orders'] == 2
+    assert result['delivered_revenue'] == Decimal('20000.08')
+    # Round each order's commission before summing (2400.01 would be incorrect).
+    assert result['kaspi_commission'] == Decimal('2400.00')
+    assert result['logistics'] == Decimal('401.00')
+    assert result['receipts'] == Decimal('17199.08')
+    assert result['commission_is_estimated'] is True
+    assert result['estimated_logistics_orders'] == 0
+    yesterday = build_delivered_receipts(db_session, workspace_id=1, period='yesterday', as_of=now)
+    assert [row['code'] for row in yesterday['orders']] == ['before']
+
+
+def test_receipts_missing_issue_date_is_excluded_and_zero_delivery_is_preserved(db_session):
+    from backend.app.accounting_service import build_delivered_receipts
+    from backend.app.models import MarketplaceRawPayload
+    now, product, _ = _seed_accounting(db_session)
+    for old in db_session.scalars(select(MarketplaceOrder)):
+        old.status = 'cancelled'
+    account = db_session.scalar(select(MarketplaceAccount))
+    now = now.replace(hour=12)
+    missing, _ = _order(db_session, account=account, product=product, code='undated',
+        status='delivered', amount=Decimal('10000'), ordered_at=now)
+    missing.delivered_at = None
+    db_session.add(MarketplaceOrderEvent(workspace_id=1, marketplace_order_id=missing.id,
+        source_event_key='imported-today', event_type='status_changed', current_status='delivered',
+        occurred_at=now))
+    for code, delivery in [('free-pickup', '0'), ('discounted', '123.45'), ('bad', 'NaN')]:
+        order, _ = _order(db_session, account=account, product=product, code=code,
+            status='delivered', amount=Decimal('10000'), ordered_at=now)
+        # Older source revision must not replace the latest logistics amount.
+        for index, value in enumerate(['9999', delivery]):
+            db_session.add(MarketplaceRawPayload(workspace_id=1, marketplace_account_id=account.id,
+                payload_type='order', external_object_id=order.external_order_id,
+                content_hash=f'{code}-{index}', payload_json={'attributes': {'deliveryCostForSeller': value}},
+                received_at=now - timedelta(minutes=1-index)))
+    db_session.flush()
+    result = build_delivered_receipts(db_session, workspace_id=1, as_of=now)
+    assert result['delivered_orders'] == 3
+    assert result['undated_delivered_orders'] == 1
+    assert result['logistics'] == Decimal('1630.45')
+    assert result['estimated_logistics_orders'] == 1
+    assert result['receipts'] == Decimal('24769.55')
+    assert build_delivered_receipts(db_session, workspace_id=2, as_of=now)['receipts'] == 0
+
+
+def test_receipts_week_includes_six_previous_calendar_days(db_session):
+    from backend.app.accounting_service import build_delivered_receipts
+    now, product, _ = _seed_accounting(db_session)
+    for old in db_session.scalars(select(MarketplaceOrder)):
+        old.status = 'cancelled'
+    account = db_session.scalar(select(MarketplaceAccount))
+    now = datetime(2026, 10, 14, 12, tzinfo=UTC)
+    start = datetime(2026, 10, 7, 19, tzinfo=UTC)
+    for code, at in [('outside', start-timedelta(microseconds=1)), ('inside', start)]:
+        _order(db_session, account=account, product=product, code=code,
+            status='delivered', amount=Decimal('10000'), ordered_at=at)
+    db_session.flush()
+    result = build_delivered_receipts(db_session, workspace_id=1, period='week', as_of=now)
+    assert [row['code'] for row in result['orders']] == ['inside']
+    assert result['receipts'] == Decimal('7293.00')
+
+
+def test_receipts_api_is_read_only_authenticated_and_validates_period(db_session, monkeypatch):
+    _seed_accounting(db_session)
+    monkeypatch.setenv('SERVICE_API_TOKEN', 'test-service-token')
+    def override_db():
+        yield db_session
+    app.dependency_overrides[get_db] = override_db
+    try:
+        client = TestClient(app)
+        assert client.get('/api/accounting/receipts').status_code == 401
+        headers = {'Authorization': 'Bearer test-service-token'}
+        result = client.get('/api/accounting/receipts?period=today', headers=headers)
+        assert result.status_code == 200
+        assert result.json()['timezone'] == 'Asia/Qyzylorda'
+        assert client.get('/api/accounting/receipts?period=bad', headers=headers).status_code == 422
+        assert db_session.scalar(select(func.count(AccountingCapitalSnapshot.id))) == 0
+    finally:
+        app.dependency_overrides.pop(get_db, None)
