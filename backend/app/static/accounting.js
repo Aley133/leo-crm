@@ -14,6 +14,10 @@ const signalFilter = document.querySelector("#signal-filter");
 const capitalEditButton = document.querySelector("#capital-edit");
 const capitalForm = document.querySelector("#capital-form");
 const capitalCancelButton = document.querySelector("#capital-cancel");
+const cashPeriodSwitch = document.querySelector("#cash-period-switch");
+let cashPeriod = "today";
+let receiptsCache = null;
+let receiptsRequest = 0;
 
 let selectedDays = 30;
 let productCache = [];
@@ -50,7 +54,7 @@ const setText = (selector, value) => {
 
 const renderCapital = (capital) => {
   capitalCache = capital;
-  setText("#capital-cash", moneyOrDash(capital.cash_balance));
+  renderCashReceipts();
   setText("#capital-warehouse", money(capital.warehouse_at_cost));
   setText("#capital-transit", money(capital.goods_in_transit));
   setText("#capital-free", moneyOrDash(capital.free_capital));
@@ -77,6 +81,64 @@ const renderCapital = (capital) => {
     capitalForm.elements.note.value = capital.snapshot_note ?? "";
   }
 };
+
+function renderCashReceipts() {
+  if (cashPeriod === "balance") {
+    setText("#capital-cash-label", "Расчётный остаток денег");
+    setText("#capital-cash", moneyOrDash(capitalCache?.cash_balance));
+    setText("#capital-cash-formula", "вся история: выданные заказы − расходы − оплаченные закупки");
+    setText("#capital-cash-detail", "");
+    return;
+  }
+  const labels = {today:"сегодня", yesterday:"вчера", week:"7 дней"};
+  setText("#capital-cash-label", `Продажи за ${labels[cashPeriod]} к получению`);
+  setText("#capital-cash-formula", "выданные заказы − комиссия − логистика · время Казахстана");
+  const data = receiptsCache?.period === cashPeriod ? receiptsCache : null;
+  setText("#capital-cash", data ? money(data.receipts) : "—");
+  if (!data) {
+    setText("#capital-cash-detail", "Загрузка продаж…");
+    return;
+  }
+  const date = value => new Date(value).toLocaleDateString("ru-RU", {timeZone:data.timezone});
+  const range = cashPeriod === "week" ? `${date(data.start)}–${date(data.end)}` : date(data.start);
+  const warnings = [];
+  if (data.commission_is_estimated) warnings.push(`комиссия расчётная ${percent(data.commission_rate_pct)}`);
+  if (data.estimated_logistics_orders) warnings.push(`доставка по тарифу CRM: ${number(data.estimated_logistics_orders)} заказов`);
+  if (data.undated_delivered_orders) warnings.push(`без даты выдачи не включено: ${number(data.undated_delivered_orders)}`);
+  setText("#capital-cash-detail", `${range} · выдано ${number(data.delivered_orders)} · ${money(data.delivered_revenue)} − ${money(data.kaspi_commission)} − ${money(data.logistics)}${warnings.length ? ` · ${warnings.join("; ")}` : ""}. Склад и общий капитал — текущие остатки.`);
+}
+
+async function loadCashReceipts() {
+  const request = ++receiptsRequest;
+  renderCashReceipts();
+  if (cashPeriod === "balance") return;
+  const period = cashPeriod;
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), reportRequestTimeoutMs);
+  try {
+    const response = await fetch(`/api/accounting/receipts?period=${period}`, {headers:headers(), cache:"no-store", signal:controller.signal});
+    if (!response.ok) throw await responseError(response);
+    const data = await response.json();
+    if (request !== receiptsRequest) return;
+    receiptsCache = data;
+    renderCashReceipts();
+  } catch (error) {
+    if (request !== receiptsRequest) return;
+    receiptsCache = null;
+    setText("#capital-cash", "—");
+    setText("#capital-cash-detail", controller.signal.aborted ? "Продажи не загрузились. Нажмите «Обновить»." : `Не удалось загрузить продажи: ${error.message}`);
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+cashPeriodSwitch.addEventListener("click", event => {
+  const button = event.target.closest("button[data-period]");
+  if (!button) return;
+  cashPeriod = button.dataset.period;
+  cashPeriodSwitch.querySelectorAll("button").forEach(item => item.classList.toggle("active", item === button));
+  loadCashReceipts();
+});
 
 const showCapitalForm = () => {
   if (capitalCache) {
@@ -239,6 +301,7 @@ const loadReport = async () => {
     const payload = await response.json();
     renderSummary(payload);
     renderCapital(payload.capital);
+    await loadCashReceipts();
     renderAbc(payload);
     renderSignals(payload);
     productCache = payload.products || [];

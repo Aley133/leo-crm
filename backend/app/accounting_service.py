@@ -3,7 +3,8 @@ from __future__ import annotations
 from bisect import bisect_right
 from collections import defaultdict
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal, ROUND_HALF_UP
+from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
+from zoneinfo import ZoneInfo
 from statistics import median
 from typing import Any
 
@@ -19,7 +20,7 @@ from .commerce.profit_calculator import (
 from .accounting_models import AccountingCapitalSnapshot
 from .accounting_planning import build_purchase_plan
 from .inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
-from .models import MarketplaceOrder, MarketplaceOrderEvent, MarketplaceOrderLine, Product
+from .models import MarketplaceAccount, MarketplaceRawPayload, MarketplaceOrder, MarketplaceOrderEvent, MarketplaceOrderLine, Product
 from .workspace_models import Workspace
 
 
@@ -42,6 +43,70 @@ def _aware(value: datetime | None) -> datetime | None:
     if value is None:
         return None
     return value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+
+
+def build_delivered_receipts(db: Session, *, workspace_id: int,
+                            period: str = "today", as_of: datetime | None = None) -> dict[str, Any]:
+    """Calendar sales receipts, independent of purchases, tax and capital snapshots."""
+    if period not in {"today", "yesterday", "week"}:
+        raise ValueError("unsupported receipts period")
+    observed_at = _aware(as_of) or datetime.now(UTC)
+    timezone = ZoneInfo("Asia/Qyzylorda")
+    midnight = observed_at.astimezone(timezone).replace(hour=0, minute=0, second=0, microsecond=0)
+    start = midnight - timedelta(days=1 if period == "yesterday" else 6 if period == "week" else 0)
+    end = midnight if period == "yesterday" else observed_at
+    latest_payload = select(MarketplaceRawPayload.payload_json).where(
+        MarketplaceRawPayload.workspace_id == workspace_id,
+        MarketplaceRawPayload.marketplace_account_id == MarketplaceOrder.marketplace_account_id,
+        MarketplaceRawPayload.payload_type == "order",
+        MarketplaceRawPayload.external_object_id == MarketplaceOrder.external_order_id,
+    ).order_by(MarketplaceRawPayload.received_at.desc(), MarketplaceRawPayload.id.desc()).limit(1).correlate(MarketplaceOrder).scalar_subquery()
+    filters = (
+        MarketplaceOrder.workspace_id == workspace_id,
+        MarketplaceOrder.status == _DELIVERED,
+        MarketplaceOrder.currency == "KZT",
+        MarketplaceAccount.provider == "kaspi",
+        MarketplaceAccount.workspace_id == workspace_id,
+    )
+    query = select(MarketplaceOrder, latest_payload).join(MarketplaceAccount).where(
+        *filters, MarketplaceOrder.delivered_at >= start.astimezone(UTC),
+        MarketplaceOrder.delivered_at < end.astimezone(UTC) if period == "yesterday"
+        else MarketplaceOrder.delivered_at <= end,
+    ).order_by(MarketplaceOrder.delivered_at, MarketplaceOrder.id)
+    rows = []
+    estimated_logistics_orders = 0
+    for order, payload in db.execute(query):
+        amount = _money(Decimal(order.total_amount or 0))
+        attributes = payload.get("attributes", {}) if isinstance(payload, dict) else {}
+        raw_delivery = attributes.get("deliveryCostForSeller") if isinstance(attributes, dict) else None
+        try:
+            delivery = Decimal(str(raw_delivery)) if raw_delivery is not None and not isinstance(raw_delivery, bool) else None
+            if delivery is not None and (not delivery.is_finite() or delivery < 0):
+                delivery = None
+        except InvalidOperation:
+            delivery = None
+        estimated = delivery is None
+        if estimated:
+            estimated_logistics_orders += 1
+            delivery = kaspi_logistics_per_unit(amount)
+        commission = _money(amount * KASPI_COMMISSION_RATE)
+        delivery = _money(delivery)
+        rows.append({"order_id": order.id, "code": order.external_code,
+                     "delivered_at": order.delivered_at, "revenue": amount,
+                     "commission": commission, "logistics": delivery,
+                     "logistics_is_estimated": estimated,
+                     "receipts": _money(amount - commission - delivery)})
+    total = lambda key: _money(sum((row[key] for row in rows), Decimal("0")))
+    undated = db.scalar(select(func.count(MarketplaceOrder.id)).join(MarketplaceAccount).where(
+        *filters, MarketplaceOrder.delivered_at.is_(None))) or 0
+    return {"period": period, "start": start, "end": end, "timezone": timezone.key,
+            "generated_at": observed_at, "delivered_orders": len(rows),
+            "delivered_revenue": total("revenue"), "kaspi_commission": total("commission"),
+            "logistics": total("logistics"), "receipts": total("receipts"),
+            "commission_rate_pct": _percent(KASPI_COMMISSION_RATE * 100),
+            "commission_is_estimated": bool(rows),
+            "estimated_logistics_orders": estimated_logistics_orders,
+            "undated_delivered_orders": int(undated), "orders": rows}
 
 
 def _accounting_date_expression():

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 from .accounting_exports import build_inventory_xlsx, build_inventory_xml
 from .accounting_service import (
     build_accounting_report,
+    build_delivered_receipts,
     build_capital_position,
     build_inventory_snapshot,
     record_capital_snapshot,
@@ -59,6 +60,14 @@ def accounting_report(
         workspace_id=current_workspace_id(),
         days=days,
     )
+
+
+@router.get("/receipts")
+def delivered_receipts(
+    period: Literal["today", "yesterday", "week"] = Query(default="today"),
+    db: Session = Depends(get_db),
+) -> dict[str, object]:
+    return build_delivered_receipts(db, workspace_id=current_workspace_id(), period=period)
 
 
 @router.post("/capital-snapshot", status_code=201)
