@@ -14,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .db import SessionLocal
+from .market_recovery import EVENT_TYPE as MARKET_RECOVERY_EVENT, market_event_current, format_market_message
 from .models import OutboxEvent, Product
 from .monitoring import MonitorTarget, SupplierOfferState
 from .suppliers import ProductBinding, SupplierProduct
@@ -240,7 +241,7 @@ def _pending_events(
         events = session.scalars(
             select(OutboxEvent)
             .where(
-                OutboxEvent.event_type == PRICE_DROP_EVENT_TYPE,
+                OutboxEvent.event_type.in_([PRICE_DROP_EVENT_TYPE, MARKET_RECOVERY_EVENT]),
                 OutboxEvent.published_at.is_(None),
             )
             .order_by(OutboxEvent.created_at.desc(), OutboxEvent.id.desc())
@@ -250,6 +251,14 @@ def _pending_events(
         suppressed = False
         for event in events:
             payload = dict(event.payload_json)
+            if event.event_type == MARKET_RECOVERY_EVENT:
+                if market_event_current(session, payload):
+                    pending.append((event.id, {**payload, "market_recovery": True}))
+                else:
+                    event.published_at = datetime.now(UTC)
+                    event.last_error = "suppressed: market opportunity no longer current"
+                    suppressed = True
+                continue
             product_id = payload.get("product_id")
             try:
                 product = session.get(Product, int(product_id))
@@ -333,11 +342,10 @@ async def publish_pending_price_alerts(
     try:
         for event_id, payload in events:
             try:
-                await send_price_drop_message(
-                    active_client,
-                    settings=settings,
-                    payload=payload,
-                )
+                if payload.get("market_recovery"):
+                    await _send_telegram_message(active_client, settings=settings, text=format_market_message(payload))
+                else:
+                    await send_price_drop_message(active_client, settings=settings, payload=payload)
             except Exception as exc:
                 failed += 1
                 safe_error = (
