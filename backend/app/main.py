@@ -50,6 +50,7 @@ from .marketplace_api import router as marketplace_router
 from .marketplace_orders_api import router as marketplace_orders_router
 from .monitoring_api import router as monitoring_router
 from .monitoring_center_api import router as monitoring_center_router
+from .market_recovery import router as market_recovery_router, agent_router as market_recovery_agent_router
 from .pricing_api import router as pricing_router
 from .product_commerce_api import router as product_commerce_router
 from .product_detail_api import router as product_detail_router
@@ -137,6 +138,8 @@ app.include_router(supplier_state_router)
 app.include_router(dashboard_router)
 app.include_router(monitoring_router)
 app.include_router(monitoring_center_router)
+app.include_router(market_recovery_router)
+app.include_router(market_recovery_agent_router)
 app.include_router(browser_agent_router)
 app.include_router(browser_agent_monitoring_router)
 app.include_router(browser_agent_registry_router)

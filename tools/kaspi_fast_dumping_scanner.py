@@ -308,6 +308,24 @@ def _page_visible_price(page_html: str) -> Decimal | None:
     return None
 
 
+def _validated_market_offers(payload: Any) -> list[dict[str, Any]]:
+    def array(value):
+        if isinstance(value, list):
+            return value
+        if (isinstance(value, dict) and not value.get("error") and not value.get("errors")
+                and value.get("success") is not False and not value.get("errorCode")):
+            for key in ("offers", "data", "items", "result"):
+                if key in value:
+                    found = array(value[key])
+                    if found is not None:
+                        return found
+        return None
+    rows = array(payload)
+    if rows is None or any(not isinstance(row, dict) or not _merchant_id(row) or _offer_price(row) is None or _offer_price(row) <= 0 for row in rows):
+        raise ValueError("Kaspi вернул неподтверждённый список продавцов")
+    return rows
+
+
 def _offers(payload: Any) -> list[dict[str, Any]]:
     if isinstance(payload, list):
         return [item for item in payload if isinstance(item, dict)]
@@ -904,6 +922,7 @@ async def inspect_kaspi_product(
     city_id: str,
     zone_id: str,
     max_pages: int = 3,
+    strict_offers: bool = False,
 ) -> dict[str, Any]:
     """Read a public Kaspi product card with ordinary HTTP requests."""
 
@@ -959,6 +978,8 @@ async def inspect_kaspi_product(
         final_host = (urlparse(product_url).hostname or "").casefold()
         if final_host != "kaspi.kz" and not final_host.endswith(".kaspi.kz"):
             raise ValueError("Kaspi перенаправил карточку на внешний домен")
+        if strict_offers and (_product_id_from_url(product_url) != master_id or not _page_title(page.text)):
+            raise ValueError("Kaspi не подтвердил страницу нужной карточки")
         title = _page_title(page.text) or f"Kaspi product {master_id}"
         brand = str(promo.get("brand") or "").strip() or _meta_content(page.text, "property", "product:brand")
         image_url = _meta_content(page.text, "property", "og:image")
@@ -988,16 +1009,21 @@ async def inspect_kaspi_product(
             "installationId": "-1",
         }
         rows: list[dict[str, Any]] = []
+        offers_complete = False
         try:
             for page_no in range(max_pages):
                 body = dict(body_base)
                 body["page"] = page_no
                 response = await _request_with_retry(client, "POST", endpoint, headers=headers, json=body)
-                page_rows = _offers(response.json())
+                payload = response.json()
+                page_rows = _validated_market_offers(payload) if strict_offers else _offers(payload)
                 rows.extend(page_rows)
                 if len(page_rows) < 5:
+                    offers_complete = True
                     break
         except Exception:
+            if strict_offers:
+                raise
             rows = []
     rows.sort(key=lambda row: _offer_price(row) or Decimal("999999999"))
     top_offers = [
@@ -1021,6 +1047,7 @@ async def inspect_kaspi_product(
         "city_id": city_id,
         "offers": {
             "seller_count_scanned": len(rows),
+            "complete": offers_complete,
             "best_offer_price_kzt": None if not rows or _offer_price(rows[0]) is None else format(_offer_price(rows[0]), "f"),
             "top_offers": top_offers,
         },

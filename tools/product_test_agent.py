@@ -27,6 +27,7 @@ from tools.kaspi_fast_dumping_http_auth import (
 )
 from tools.ozon_http import OzonSessionRefreshRequiredError, OzonSessionResolver
 from tools.product_discovery.kaspi_offer_creator import MerchantOfferApi
+from tools.product_discovery.market_watch import inspect_market_card
 from tools.product_discovery.runtime import (
     discover_popular_products,
     discover_products,
@@ -39,7 +40,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.26"
+VERSION = "1.1.27"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -1110,12 +1111,41 @@ async def main(
 
     if once:
         return await worker()
+    async def market_watch() -> None:
+        # Separate coroutine, one Kaspi card at a time. Manual product tasks keep their queue.
+        while True:
+            try:
+                claimed = await _post_json_with_retry(
+                    f"{api_url}/api/product-test-agent/market-recovery/claim", token, identity,
+                    operation="Получение карточки рынка Kaspi")
+                card = claimed.get("card")
+                if not card:
+                    await asyncio.sleep(60)
+                    continue
+                try:
+                    async with asyncio.timeout(180):
+                        observed = await inspect_market_card(card)
+                    result = {"status": "succeeded", **observed}
+                except Exception as exc:
+                    result = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"[:1000]}
+                await _post_json_with_retry(
+                    f"{api_url}/api/product-test-agent/market-recovery/{card['id']}/complete", token,
+                    {**identity, "lease_token": card["lease_token"], **result}, operation="Результат рынка Kaspi")
+                await asyncio.sleep(2)
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                _log(f"Рынок Kaspi: {exc}", workspace_id=selected_workspace)
+                await asyncio.sleep(60)
+
     heartbeat_task = asyncio.create_task(heartbeat())
+    market_task = asyncio.create_task(market_watch())
     try:
         return await worker()
     finally:
         heartbeat_task.cancel()
-        await asyncio.gather(heartbeat_task, return_exceptions=True)
+        market_task.cancel()
+        await asyncio.gather(heartbeat_task, market_task, return_exceptions=True)
 
 
 def _parse_args() -> argparse.Namespace:

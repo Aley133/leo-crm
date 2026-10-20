@@ -10,6 +10,7 @@
   <link rel="stylesheet" href="/static/responsive-ui.css?v=20260803-2">
   <link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css?v=20260803-2" media="not all">
   <script src="/static/theme.js?v=20260803-2"></script>
+  <link rel="stylesheet" href="/static/market-recovery.css?v=20261020-1">
 </head>
 <body>
   <div class="shell">
@@ -45,6 +46,25 @@
         <form id="token-form"><input id="token" type="password" placeholder="Сервисный токен" required><button class="button" type="submit">Подключить</button></form>
       </section>
       <div id="message" class="message" role="status"></div>
+      <section id="market-recovery" class="market-recovery hidden">
+        <h2>Возвращение в рынок Kaspi</h2>
+        <p>Весь ассортимент CRM, включая отключённые и спящие товары. Проверки раз в сутки через LEO Product Test Agent. Новые карточки подключаются автоматически.</p>
+        <p id="market-status" role="status">Проверяю состояние наблюдения…</p>
+        <strong id="market-summary"></strong>
+        <form id="market-settings" class="market-settings">
+          <label><input id="market-enabled" type="checkbox" checked> Наблюдение включено</label>
+          <label>Сигнал роста цены <select id="market-rise"><option value="0">Любой рост</option><option value="25">+25%</option><option value="50" selected>+50%</option><option value="100">+100%</option></select></label>
+          <button class="button" type="submit">Сохранить</button>
+          <button id="market-sync" class="button secondary" type="button">Обновить ассортимент</button>
+          <a class="button secondary" href="https://github.com/Aley133/leo-crm/releases/download/product-test-agent-latest/LEO-Product-Test-Agent.exe">Скачать Product Test Agent 1.1.27</a>
+        </form>
+        <p>Рост считаем от минимальной цены с начала наблюдения. Telegram приходит при новом пороге роста или подтверждённом отсутствии продавцов. Одинаковые сигналы каждый день не повторяются. Используются те же токен и чат, что у мониторинга Ozon.</p>
+        <div id="market-signals" class="market-signals"></div>
+        <details><summary>Все карточки под наблюдением</summary>
+          <div class="table-wrap"><table><thead><tr><th>Карточка Kaspi</th><th>Минимум за наблюдение</th><th>Цена сейчас</th><th>Продавцов</th><th>Последняя проверка</th></tr></thead><tbody id="market-cards"></tbody></table></div>
+          <div class="market-pagination"><button id="market-prev" class="button secondary" type="button">Назад</button><span id="market-page"></span><button id="market-next" class="button secondary" type="button">Далее</button></div>
+        </details>
+      </section>
       <section id="monitoring" class="monitoring-page hidden" aria-busy="false">
         <section id="runtime-health" class="runtime-health" aria-live="polite">
           <div class="runtime-health-icon" id="runtime-health-icon">●</div>
@@ -106,5 +126,6 @@
   <script src="/static/monitoring.js?v=20260729-1" defer></script>
   <script src="/static/browser-agent-presence.js?v=20260729-1" defer></script>
   <script src="/static/connection-status.js?v=20260729-1" defer></script>
+  <script src="/static/market-recovery.js?v=20261020-1" defer></script>
 </body>
 </html>
