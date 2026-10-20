@@ -237,3 +237,18 @@ def test_failed_scan_retains_baseline_and_retries_in_one_hour(db_session,monkeyp
     assert row.last_error=="HTTP 403"
     assert timedelta(minutes=59)<market.aware(row.next_check_at)-market.now()<timedelta(hours=1,seconds=1)
     assert not events(db_session)
+
+
+def test_kaspi_jobs_do_not_require_ozon_session_and_ozon_is_prepared_lazily(monkeypatch):
+    from tools import product_test_agent as agent
+    calls=[]
+    monkeypatch.setattr(agent,"_OZON_SESSION_PREPARED",False)
+    monkeypatch.setattr(agent,"_ensure_ozon_session",lambda:calls.append("ozon"))
+    async def run():
+        for kind in ("inspect","discover_popular","create_offer","confirm_new_card"):
+            await agent._prepare_ozon_job({"job_type":kind})
+        assert calls==[]
+        await agent._prepare_ozon_job({"job_type":"validate_supplier"})
+        await agent._prepare_ozon_job({"job_type":"discover"})
+    asyncio.run(run())
+    assert calls==["ozon"]

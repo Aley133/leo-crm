@@ -797,6 +797,16 @@ async def _run_job_with_retry(
             await asyncio.to_thread(_ensure_ozon_session, force_replace=True)
 
 
+_OZON_SESSION_PREPARED = False
+
+
+async def _prepare_ozon_job(job: dict) -> None:
+    global _OZON_SESSION_PREPARED
+    if job.get("job_type") in {"discover", "validate_supplier", "prepare_new_card"} and not _OZON_SESSION_PREPARED:
+        await asyncio.to_thread(_ensure_ozon_session)
+        _OZON_SESSION_PREPARED = True
+
+
 async def _process_job(
     *,
     api_url: str,
@@ -831,6 +841,9 @@ async def _process_job(
 
     lease_task = asyncio.create_task(renew_lease())
     try:
+        # Ozon credential prompts must not delay the independent Kaspi market watch.
+        # Lease renewal is already active while the operator configures Ozon.
+        await _prepare_ozon_job(job)
         result = await _run_job_with_retry(
             job,
             merchant_session=merchant_session,
@@ -984,7 +997,6 @@ async def main(
         }
     )
     _save_config(config, selected_workspace)
-    _ensure_ozon_session()
 
     merchant_session = KaspiMerchantSession(
         workspace_id=selected_workspace,
