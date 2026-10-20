@@ -39,7 +39,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.25"
+VERSION = "1.1.26"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -599,6 +599,7 @@ async def _execute_job(
                 minimum_reviews=int(options.get("minimum_reviews", 50)),
                 minimum_price_kzt=int(options.get("minimum_price_kzt", 20_000)),
                 maximum_sellers=int(options.get("maximum_sellers", 5)),
+                excluded_brands=set(options.get("excluded_brands") or []),
                 existing_kaspi_ids={str(value) for value in options.get("existing_kaspi_ids") or []},
                 merchant_catalog=merchant_catalog,
             )
@@ -610,6 +611,7 @@ async def _execute_job(
             max_kaspi_scan=int(options.get("max_kaspi_scan") or 200),
             max_ozon_queries=int(options.get("max_ozon_queries") or 3),
             image_verify=bool(options.get("image_verify", True)),
+            excluded_brands=set(options.get("excluded_brands") or []),
             existing_kaspi_ids={str(value) for value in options.get("existing_kaspi_ids") or []},
             merchant_catalog=merchant_catalog,
         )
