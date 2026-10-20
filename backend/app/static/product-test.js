@@ -9,6 +9,28 @@ const isAddProductPage = pageMode === "add-product";
 let refreshTimer = null;
 let currentNewCards = new Map();
 const rocketChoices = new Map();
+const selectedCandidates = new Set();
+let visibleCandidates = [];
+const syncReviewControls = () => {
+  const selected = visibleCandidates.filter(item => selectedCandidates.has(Number(item.id))).length;
+  const count = document.querySelector("#selected-count");
+  if (count) count.textContent = `Выбрано: ${selected}`;
+  const hideSelected = document.querySelector("#hide-selected");
+  if (hideSelected) hideSelected.disabled = !selected;
+  const hideAll = document.querySelector("#hide-all-candidates");
+  if (hideAll) hideAll.disabled = !visibleCandidates.length;
+  const selectAll = document.querySelector("#select-all-candidates");
+  if (selectAll) {
+    selectAll.disabled = !visibleCandidates.length;
+    selectAll.checked = Boolean(visibleCandidates.length && selected === visibleCandidates.length);
+    selectAll.indeterminate = selected > 0 && selected < visibleCandidates.length;
+  }
+};
+const hideCandidates = async body => {
+  await request("/api/product-test/exclusions", {method:"POST", body:JSON.stringify(body)});
+  await load();
+  notify(body.brand ? `Бренд «${body.brand}» исключён из подборок.` : "Просмотренные товары скрыты и больше не попадут в подборки.", "success");
+};
 document.addEventListener("change", event => {
   if (!event.target.matches(".rocket, .new-card-rocket")) return;
   const card = event.target.closest("[data-id]");
@@ -81,7 +103,7 @@ const itemRow = (item, index) => {
   const deliveryText = supplier.supplier_delivery_text || (supplier.supplier_delivery_date ? `до ${supplier.supplier_delivery_date}` : supplier.supplier_delivery_days != null ? `${supplier.supplier_delivery_days} дн.` : "—");
   const matchClass = ["CONFIRMED", "OPERATOR_CONFIRMED"].includes(supplier.match_status) ? "found" : supplier.match_status === "REVIEW" || supplier.match_status === "MANUAL_REVIEW" ? "review" : "missing";
   return `<article class="lab-result-row ${matchClass}" data-id="${item.id}" data-supplier-url="${escapeHtml(item.supplier_url || "")}" data-can-add="${canAdd ? "1" : "0"}">
-    <div class="row-number">${index + 1}</div>
+    <div class="row-number"><input class="select-candidate" type="checkbox" aria-label="Выбрать товар ${escapeHtml(item.name)}" ${selectedCandidates.has(Number(item.id)) ? "checked" : ""}>${index + 1}</div>
     <div data-label="KASPI">${marketProduct({market:"Kaspi", title:item.name, brand:item.brand, sku:item.kaspi_product_id, image:item.image_url, url:item.kaspi_url, rating:kaspi.rating, reviews:kaspi.reviews, sellers:kaspi.seller_count})}</div>
     <div class="table-value" data-label="KASPI ЦЕНА"><strong>${money(item.observed_price_kzt)}</strong><small>конкурент</small></div>
     <div data-label="OZON">${marketProduct({market:"Ozon", title:ozonTitle, brand:autoOzon.brand, sku:supplier.supplier_offer_sku || autoOzon.sku, image:ozonImage, url:item.supplier_url, rating:supplier.supplier_rating ?? autoOzon.rating, reviews:supplier.supplier_reviews ?? autoOzon.reviews})}</div>
@@ -89,7 +111,7 @@ const itemRow = (item, index) => {
     <div class="table-value" data-label="ДОСТАВКА"><strong>${escapeHtml(deliveryText)}</strong>${supplier.supplier_delivery_days != null ? `<small>${supplier.supplier_delivery_days} дн.</small>` : ""}</div>
     <div class="table-value kaspi-plan" data-label="СТАРТ KASPI"><strong>${money(item.test_price_kzt)}</strong><small>preOrder ${Math.max(1, Number(item.preorder_days || 1))} дн.</small></div>
     <div class="match-cell" data-label="MATCH"><strong>${score == null ? "—" : `${score}%`}</strong><span>${escapeHtml(visualText)}</span><small>${escapeHtml(supplier.match_status || "NO_RESULT")}</small></div>
-    <div class="result-actions" data-label="СТАТУС / ДЕЙСТВИЯ"><span class="result-status ${matchClass}">${escapeHtml(statusText(item))}</span><label><span>Правильная ссылка Ozon</span><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="https://www.ozon.kz/product/…" ${locked ? "disabled" : ""}></label><button class="button validate" type="button" ${locked ? "disabled" : ""}>Проверить / заменить</button><label><span>🚀 Полная автоматизация</span><input class="rocket" type="checkbox" ${rocketChoices.get(Number(item.id)) ?? item.offers?.rocket_enabled ? "checked" : ""} ${locked ? "disabled" : ""}></label><button class="button add" type="button" ${canAdd ? "" : "disabled"}>Выгрузить на Kaspi</button>${item.product_id ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div>` : ""}</div>
+    <div class="result-actions" data-label="СТАТУС / ДЕЙСТВИЯ"><span class="result-status ${matchClass}">${escapeHtml(statusText(item))}</span><label><span>Правильная ссылка Ozon</span><input class="supplier" type="url" maxlength="4000" value="${escapeHtml(item.supplier_url || "")}" placeholder="https://www.ozon.kz/product/…" ${locked ? "disabled" : ""}></label><button class="button validate" type="button" ${locked ? "disabled" : ""}>Проверить / заменить</button><label><span>🚀 Полная автоматизация</span><input class="rocket" type="checkbox" ${rocketChoices.get(Number(item.id)) ?? item.offers?.rocket_enabled ? "checked" : ""} ${locked ? "disabled" : ""}></label><button class="button add" type="button" ${canAdd ? "" : "disabled"}>Выгрузить на Kaspi</button><button class="button hide-candidate" type="button">Скрыть товар</button>${item.brand ? `<button class="button hide-brand" type="button" data-brand="${escapeHtml(item.brand)}">Скрыть бренд ${escapeHtml(item.brand)}</button>` : ""}${item.product_id ? `<div class="enrolled-links"><a href="/crm/products/${item.product_id}">Товар</a><a href="/crm/monitoring">Мониторинг</a><a href="/crm/fast-dumping">Демпинг</a></div>` : ""}</div>
   </article>`;
 };
 
@@ -411,6 +433,15 @@ const renderResultMode = (items) => {
 const render = (payload) => {
   if (refreshTimer) { window.clearTimeout(refreshTimer); refreshTimer = null; }
   const items = payload.items || [];
+  visibleCandidates = items;
+  const visibleIds = new Set(items.map(item => Number(item.id)));
+  for (const id of selectedCandidates) if (!visibleIds.has(id)) selectedCandidates.delete(id);
+  const exclusions = payload.exclusions || [];
+  const exclusionList = document.querySelector("#exclusions-list");
+  if (exclusionList) exclusionList.innerHTML = exclusions.map(row => `<div class="exclusion-row"><span>${row.kind === "brand" ? "Бренд" : "Товар"}: ${escapeHtml(row.label)}</span><button class="button restore-exclusion" type="button" data-id="${row.id}">Вернуть в поиск</button></div>`).join("") || '<p>Исключений пока нет.</p>';
+  const exclusionsCount = document.querySelector("#exclusions-count");
+  if (exclusionsCount) exclusionsCount.textContent = `(${exclusions.length})`;
+  syncReviewControls();
   const newCards = payload.new_cards || [];
   const submissions = payload.submissions || [];
   const jobs = payload.jobs || [];
@@ -494,7 +525,13 @@ document.querySelector("#items")?.addEventListener("click", async (event) => {
   const card = event.target.closest(".lab-result-row"); const button = event.target.closest("button"); if (!card || !button) return;
   setBusy(button, true, button.classList.contains("add") ? "Выгружаю…" : "Проверяю…");
   try {
-    if (button.classList.contains("validate")) {
+    if (button.classList.contains("hide-candidate")) {
+      await hideCandidates({item_ids:[Number(card.dataset.id)]});
+      return;
+    } else if (button.classList.contains("hide-brand")) {
+      await hideCandidates({brand:button.dataset.brand});
+      return;
+    } else if (button.classList.contains("validate")) {
       const supplierUrl = card.querySelector(".supplier").value.trim();
       await request(`/api/product-test/items/${card.dataset.id}/validate-supplier`, {method:"POST", body:JSON.stringify({supplier_url:supplierUrl})});
       notify("Ссылка передана отдельному Product Test Agent. После проверки старая привязка будет заменена.", "success");
@@ -579,3 +616,48 @@ document.querySelector("#kaspi-submissions")?.addEventListener("click", async (e
   } catch (error) { notify(error.message, "error"); } finally { setBusy(button, false, ""); }
 });
 load();
+
+
+document.querySelector("#items")?.addEventListener("change", event => {
+  if (!event.target.classList.contains("select-candidate")) return;
+  const id = Number(event.target.closest("[data-id]").dataset.id);
+  if (event.target.checked) selectedCandidates.add(id); else selectedCandidates.delete(id);
+  syncReviewControls();
+});
+document.querySelector("#select-all-candidates")?.addEventListener("change", event => {
+  selectedCandidates.clear();
+  if (event.target.checked) visibleCandidates.forEach(item => selectedCandidates.add(Number(item.id)));
+  document.querySelectorAll(".select-candidate").forEach(input => { input.checked = event.target.checked; });
+  syncReviewControls();
+});
+for (const [selector, all] of [["#hide-selected", false], ["#hide-all-candidates", true]]) {
+  document.querySelector(selector)?.addEventListener("click", async event => {
+    const button = event.currentTarget;
+    const ids = visibleCandidates.filter(item => all || selectedCandidates.has(Number(item.id))).map(item => item.id);
+    if (!ids.length) return;
+    setBusy(button, true, "Скрываю…");
+    try { await hideCandidates({item_ids:ids}); }
+    catch (error) { notify(error.message, "error"); }
+    finally { setBusy(button, false, ""); syncReviewControls(); }
+  });
+}
+document.querySelector("#exclude-brand-form")?.addEventListener("submit", async event => {
+  event.preventDefault();
+  const input = document.querySelector("#excluded-brand");
+  const button = event.currentTarget.querySelector("button");
+  setBusy(button, true, "Скрываю…");
+  try { await hideCandidates({brand:input.value.trim()}); input.value = ""; }
+  catch (error) { notify(error.message, "error"); }
+  finally { setBusy(button, false, ""); }
+});
+document.querySelector("#exclusions-list")?.addEventListener("click", async event => {
+  const button = event.target.closest(".restore-exclusion");
+  if (!button) return;
+  setBusy(button, true, "Возвращаю…");
+  try {
+    await request(`/api/product-test/exclusions/${button.dataset.id}`, {method:"DELETE"});
+    await load();
+    notify("Исключение снято. Товар или бренд снова доступен для поиска.", "success");
+  } catch (error) { notify(error.message, "error"); }
+  finally { setBusy(button, false, ""); }
+});

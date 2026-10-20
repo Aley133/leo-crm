@@ -17,6 +17,7 @@ from tools.ozon_http.resolver import (
 from tools.ozon_http.session_client import OzonSessionHttpClient
 
 from .kaspi_search import KaspiProductSearch
+from .exclusions import normalize_brand
 
 if TYPE_CHECKING:
     from .kaspi_offer_creator import MerchantOfferApi
@@ -391,16 +392,19 @@ def discover_products(
     max_kaspi_scan: int,
     max_ozon_queries: int,
     image_verify: bool,
+    excluded_brands: set[str] | None = None,
     existing_kaspi_ids: set[str] | None = None,
     merchant_catalog: "MerchantOfferApi | None" = None,
 ) -> dict[str, Any]:
     existing = {str(value) for value in (existing_kaspi_ids or set())}
+    blocked_brands = {normalize_brand(value) for value in (excluded_brands or set()) if normalize_brand(value)}
     search = KaspiProductSearch(city_id)
     try:
         kaspi = search.search(query, sort="created-desc", limit=max_kaspi_scan, mode="brand")
     finally:
         search.close()
-    crm_new = [row for row in kaspi.get("products") or [] if str(row.get("master_sku")) not in existing]
+    crm_new = [row for row in kaspi.get("products") or [] if str(row.get("master_sku")) not in existing
+               and normalize_brand(row.get("brand")) not in blocked_brands]
     merchant_results = (
         merchant_catalog.check_many([str(row.get("master_sku") or "") for row in crm_new], workers=6)
         if merchant_catalog is not None and crm_new
@@ -529,6 +533,7 @@ def discover_popular_products(
     minimum_reviews: int = 50,
     minimum_price_kzt: int = 0,
     maximum_sellers: int = 5,
+    excluded_brands: set[str] | None = None,
     existing_kaspi_ids: set[str] | None = None,
     merchant_catalog: "MerchantOfferApi | None" = None,
     seller_count_resolver: SellerCountResolver | None = None,
@@ -543,6 +548,7 @@ def discover_popular_products(
     minimum_price_kzt = max(0, int(minimum_price_kzt))
     maximum_sellers = max(1, int(maximum_sellers))
     existing = {str(value) for value in (existing_kaspi_ids or set())}
+    blocked_brands = {normalize_brand(value) for value in (excluded_brands or set()) if normalize_brand(value)}
     resolver = seller_count_resolver or _resolve_kaspi_seller_count
     rows: list[dict[str, Any]] = []
     lookup_errors: list[dict[str, str]] = []
@@ -573,6 +579,8 @@ def discover_popular_products(
         reviewed: list[dict[str, Any]] = []
         for product in page_products:
             product_id = str(product.get("master_sku") or "")
+            if normalize_brand(product.get("brand")) in blocked_brands:
+                continue
             if product_id in existing:
                 excluded_existing_crm += 1
                 continue

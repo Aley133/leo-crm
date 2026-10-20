@@ -28,7 +28,8 @@ from .models import Product, ProductStatus
 from .monitoring import MonitorStatus, MonitorTarget, SupplierOfferObservation, SupplierOfferState
 from .offer_contracts import offer_fingerprint
 from .product_images import normalize_product_image_url
-from .product_test_models import ProductTestItem, ProductTestJob, ProductTestSettings
+from .product_test_models import ProductTestItem, ProductTestJob, ProductTestSettings, ProductTestExclusion
+from tools.product_discovery.exclusions import normalize_brand
 from .product_test_pricing import choose_initial_offer_price
 from .suppliers import ProductBinding, Supplier, SupplierProduct
 from .workspace_context import current_workspace_id, workspace_context
@@ -63,6 +64,22 @@ class ProductDiscoveryRequest(BaseModel):
     minimum_reviews: int = Field(default=50, ge=0, le=10_000_000)
     minimum_price_kzt: int = Field(default=20_000, ge=0, le=100_000_000)
     maximum_sellers: int = Field(default=5, ge=1, le=100)
+
+
+class ProductTestExcludeRequest(BaseModel):
+    item_ids: list[int] = Field(default_factory=list, max_length=1000)
+    brand: str | None = Field(default=None, min_length=1, max_length=255)
+
+
+def _exclusions(db: Session, workspace_id: int) -> list[ProductTestExclusion]:
+    return list(db.scalars(select(ProductTestExclusion).where(
+        ProductTestExclusion.workspace_id == workspace_id
+    ).order_by(ProductTestExclusion.id.desc())))
+
+
+def _exclusion_keys(exclusions):
+    return ({row.value for row in exclusions if row.kind == "product"},
+            {row.value for row in exclusions if row.kind == "brand"})
 
 
 class ProductTestSettingsUpdate(BaseModel):
@@ -674,11 +691,14 @@ def read_product_test_state(db: Session = Depends(get_db)) -> dict:
         .where(ProductTestItem.workspace_id == workspace_id)
         .order_by(ProductTestItem.updated_at.desc(), ProductTestItem.id.desc())
     ).all())
+    exclusions = _exclusions(db, workspace_id)
+    hidden_ids, hidden_brands = _exclusion_keys(exclusions)
     now = _now()
     items = [
         item
         for item in all_items
         if item.active and not _is_new_card_item(item) and not _kaspi_submission(item)
+        and item.kaspi_product_id not in hidden_ids and normalize_brand(item.brand) not in hidden_brands
     ]
     new_cards = [
         item
@@ -705,6 +725,7 @@ def read_product_test_state(db: Session = Depends(get_db)) -> dict:
     db.commit()
     return {
         "items": [_item_payload(item) for item in items],
+        "exclusions": [{"id": row.id, "kind": row.kind, "value": row.value, "label": row.label} for row in exclusions],
         "new_cards": [_item_payload(item) for item in new_cards],
         "submissions": [_item_payload(item) for item in submissions],
         "jobs": [_job_payload(job) for job in jobs],
@@ -1132,6 +1153,7 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
     settings = _settings(db, job.workspace_id)
     options = job.options_json or {}
     minimum_price = _money(options.get("minimum_price_kzt")) if job.job_type == "discover_popular" else None
+    hidden_ids, hidden_brands = _exclusion_keys(_exclusions(db, job.workspace_id))
     backend_excluded_below_min_price = 0
     for row in list(result.get("rows") or [])[:100]:
         if not isinstance(row, dict):
@@ -1147,6 +1169,8 @@ def _persist_discovery(db: Session, *, job: ProductTestJob, result: dict) -> dic
         name = str(row.get("product_name") or "").strip()[:500]
         kaspi_url = str(row.get("product_url") or "").strip()[:4000]
         if not kaspi_id or not name or not kaspi_url:
+            continue
+        if kaspi_id in hidden_ids or normalize_brand(row.get("brand")) in hidden_brands:
             continue
         existing_product = db.scalar(
             select(Product.id).where(
@@ -1637,6 +1661,54 @@ def inspect_product(payload: ProductTestInspectRequest, db: Session = Depends(ge
     return {"job": _job_payload(job), "queued": True}
 
 
+@router.post("/exclusions")
+def exclude_product_test_candidates(payload: ProductTestExcludeRequest, db: Session = Depends(get_db)) -> dict:
+    workspace_id = current_workspace_id()
+    values = {}
+    if payload.item_ids:
+        ids = set(payload.item_ids)
+        items = list(db.scalars(select(ProductTestItem).where(
+            ProductTestItem.workspace_id == workspace_id,
+            ProductTestItem.id.in_(ids),
+        )))
+        if len(items) != len(ids):
+            raise HTTPException(404, "Товар не найден в текущем магазине")
+        for item in items:
+            if _kaspi_submission(item) or _is_new_card_item(item) or item.product_id:
+                raise HTTPException(409, "Скрывать можно только кандидатов из поиска")
+            values[("product", item.kaspi_product_id)] = item.name
+    if payload.brand is not None:
+        brand = normalize_brand(payload.brand)
+        if not brand or len(brand) > 255:
+            raise HTTPException(422, "Введите название бренда")
+        values[("brand", brand)] = payload.brand.strip()
+    if not values:
+        raise HTTPException(422, "Выберите товары или укажите бренд")
+    # Serialize concurrent additions for this workspace; repeated clicks are idempotent.
+    settings = _settings(db, workspace_id)
+    db.execute(select(ProductTestSettings.id).where(
+        ProductTestSettings.id == settings.id).with_for_update()).all()
+    existing = {(row.kind, row.value) for row in _exclusions(db, workspace_id)}
+    for (kind, value), label in values.items():
+        if (kind, value) not in existing:
+            db.add(ProductTestExclusion(workspace_id=workspace_id, kind=kind, value=value, label=label))
+    db.commit()
+    return {"excluded": len(values)}
+
+
+@router.delete("/exclusions/{exclusion_id}")
+def restore_product_test_exclusion(exclusion_id: int, db: Session = Depends(get_db)) -> dict:
+    row = db.scalar(select(ProductTestExclusion).where(
+        ProductTestExclusion.workspace_id == current_workspace_id(),
+        ProductTestExclusion.id == exclusion_id,
+    ))
+    if row is None:
+        raise HTTPException(404, "Исключение не найдено")
+    db.delete(row)
+    db.commit()
+    return {"restored": True}
+
+
 @router.post("/discover")
 def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = Depends(get_db)) -> dict:
     workspace_id = current_workspace_id()
@@ -1655,12 +1727,14 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
             select(Product.kaspi_product_id).where(Product.workspace_id == workspace_id)
         ).all()
     )
+    hidden_ids, hidden_brands = _exclusion_keys(_exclusions(db, workspace_id))
+    existing_ids.update(hidden_ids)
     # Rows already handed to Kaspi are preserved by _persist_discovery and
     # therefore must not consume one of the requested result slots.
     for item in db.scalars(
         select(ProductTestItem).where(ProductTestItem.workspace_id == workspace_id)
     ):
-        if _kaspi_submission(item):
+        if _kaspi_submission(item) or normalize_brand(item.brand) in hidden_brands:
             existing_ids.add(item.kaspi_product_id)
     job = _queue_job(
         db,
@@ -1683,6 +1757,7 @@ def discover_product_candidates(payload: ProductDiscoveryRequest, db: Session = 
             # cannot be disabled for new discovery jobs.
             "image_verify": True,
             "existing_kaspi_ids": sorted(str(value) for value in existing_ids if value),
+            "excluded_brands": sorted(hidden_brands),
         },
     )
     # Starting a new scan replaces the visual-candidate batch immediately.

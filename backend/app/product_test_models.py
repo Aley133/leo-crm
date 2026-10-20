@@ -93,3 +93,16 @@ class ProductTestSettings(WorkspaceOwned, Base):
     zone_id: Mapped[str] = mapped_column(String(64), nullable=False, default="Magnum_ZONE1", server_default="Magnum_ZONE1")
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now(), onupdate=func.now())
+
+
+class ProductTestExclusion(WorkspaceOwned, Base):
+    __tablename__ = "product_test_exclusions"
+    __table_args__ = (
+        UniqueConstraint("workspace_id", "kind", "value", name="uq_product_test_exclusion"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(16), nullable=False)
+    value: Mapped[str] = mapped_column(String(255), nullable=False)
+    label: Mapped[str] = mapped_column(String(500), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False, server_default=func.now())
