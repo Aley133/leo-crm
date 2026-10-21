@@ -176,6 +176,42 @@ def confirmed(**changes):
     }
 
 
+@pytest.mark.parametrize("retry_failed", [False, True])
+@pytest.mark.parametrize("cabinet_found", [False, True])
+def test_public_test_candidate_is_not_assumed_to_be_an_archived_offer(
+    db_session, retry_failed, cabinet_found
+):
+    with workspace_context(1):
+        candidate = ProductTestItem(
+            workspace_id=1, input_reference="manual-preorder:123456789" if retry_failed else URL,
+            kaspi_product_id="123456789", merchant_sku="123456789",
+            name="Phone", kaspi_url=URL, status="error" if retry_failed else "candidate",
+            test_price_kzt=14000, preorder_days=7, stock_count=5,
+            offers_json={"existing_merchant_sku": "123456789", "source_sku": "123456789"}
+                if retry_failed else {},
+        )
+        db_session.add(candidate)
+        db_session.commit()
+        queued = (edit_preorder(candidate.id, PreorderEdit(price_kzt=14000, preorder_days=7), db_session)
+                  if retry_failed else queue(db_session))
+        assert queued["item"]["id"] == candidate.id
+        read_job = db_session.get(ProductTestJob, queued["job"]["id"])
+        result = {"kaspi_product_id": "123456789", "product_name": "Phone", "product_url": URL}
+        if cabinet_found:
+            result["catalog_state"] = {"found": True, "sku": "123456789",
+                                       "master_sku": "123456789"}
+        _persist_product_inspection(db_session, job=read_job, result=result)
+        write = db_session.scalar(select(ProductTestJob).where(ProductTestJob.job_type == "create_offer"))
+        assert write.options_json["merchant_sku"] == ("123456789" if cabinet_found else None)
+        completion = confirmed()
+        if cabinet_found:
+            completion["merchant_sku"] = completion["after"]["sku"] = "123456789"
+        done = _enroll_created_product(db_session, job=write, result=completion)
+        assert done["item"]["id"] == candidate.id
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 1
+        assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 1
+
+
 @pytest.mark.parametrize(
     "url",
     [
