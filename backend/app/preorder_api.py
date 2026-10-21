@@ -297,6 +297,14 @@ def _connect_preorder(payload: PreorderRequest, db: Session, *, item_id: int | N
     existing_sku = (item.offers_json or {}).get("existing_merchant_sku") if item else None
     if not existing_sku and item and not item.merchant_sku.startswith(PREFIX):
         existing_sku = item.merchant_sku
+    # Public Product Test discoveries use the master ID as a temporary SKU.
+    # It is not proof that an offer exists in this merchant's cabinet. Older
+    # attempts also copied this placeholder into existing_merchant_sku.
+    if (item and not item.product_id and not item.added_at
+            and existing_sku == item.kaspi_product_id):
+        existing_sku = None
+        item.offers_json = {key: value for key, value in (item.offers_json or {}).items()
+                            if key != "existing_merchant_sku"}
     product = _check_existing(
         db, workspace=workspace, kaspi_id=kaspi_id,
         merchant_sku=existing_sku or source_sku,
