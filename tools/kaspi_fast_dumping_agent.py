@@ -651,12 +651,29 @@ def _agent_payload(
 
 
 def _configured_concurrency() -> int:
-    raw = (os.getenv("KASPI_FAST_DUMPING_CONCURRENCY") or "1").strip()
+    raw = (os.getenv("KASPI_FAST_DUMPING_CONCURRENCY") or "2").strip()
     try:
         requested = int(raw)
     except ValueError:
-        requested = 1
+        requested = 2
     return max(1, min(2, requested))
+
+
+def _worker_lane(number: int, concurrency: int, *, once: bool = False) -> str:
+    if once or concurrency == 1:
+        return "all"
+    return "scan" if number == 1 else "offer"
+
+
+async def _run_workers(worker, concurrency: int) -> None:
+    tasks = [asyncio.create_task(worker(number), name=f"fast-worker-{number}")
+             for number in range(1, concurrency + 1)]
+    try:
+        await asyncio.gather(*tasks)
+    finally:
+        for task in tasks:
+            task.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
 
 
 def _market_payload(market: KaspiCompetitorSnapshot) -> dict:
@@ -1116,6 +1133,11 @@ async def main(
         workspace_id=selected_workspace,
     )
     _log(
+        "Асинхронный обход: рынок и Merchant работают отдельно; до 3 решений ожидают записи."
+        if concurrency == 2 else "Последовательный режим: один обработчик рынка и Merchant.",
+        workspace_id=selected_workspace,
+    )
+    _log(
         "Очереди: быстрый демпинг → фото. Тест товаров обслуживает отдельный Product Test Agent.",
         workspace_id=selected_workspace,
     )
@@ -1145,6 +1167,7 @@ async def main(
     async def worker_loop(number: int) -> None:
         idle_seconds = 2.0
         worker_id = f"{agent_id}-w{number}"
+        queue_lane = _worker_lane(number, concurrency, once=once)
         price_claim_not_before = 0.0
         photo_claim_not_before = 0.0
         price_idle_confirmed_until = 0.0
@@ -1156,12 +1179,12 @@ async def main(
                     claim = await _post_json_with_retry(
                         f"{api_url}/api/fast-dumping-agent/claim",
                         token,
-                        _agent_payload(
+                        {**_agent_payload(
                             worker_id,
                             selected_workspace,
                             concurrency,
                             merchant_uid,
-                        ),
+                        ), "queue_lane": queue_lane},
                         operation="Получение задания",
                     )
                     job = claim.get("job")
@@ -1171,13 +1194,10 @@ async def main(
                     else:
                         if once:
                             return
-                        idle_seconds = min(
-                            IDLE_POLL_MAX_SECONDS,
-                            max(
-                                2.0,
-                                float(claim.get("retry_after_seconds") or 2),
-                                idle_seconds * 1.5,
-                            ),
+                        idle_seconds = max(
+                            2.0, float(claim.get("retry_after_seconds") or 2),
+                            min(IDLE_POLL_MAX_SECONDS if queue_lane == "all" else 10.0,
+                                idle_seconds * 1.5),
                         )
                         price_claim_not_before = now + idle_seconds
                         if not claim.get("throttled"):
@@ -1265,9 +1285,7 @@ async def main(
         return 0
     heartbeat_task = asyncio.create_task(heartbeat())
     try:
-        await asyncio.gather(
-            *(worker(number) for number in range(1, concurrency + 1))
-        )
+        await _run_workers(worker, concurrency)
     finally:
         heartbeat_task.cancel()
         await asyncio.gather(heartbeat_task, return_exceptions=True)

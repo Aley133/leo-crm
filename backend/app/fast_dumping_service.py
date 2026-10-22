@@ -53,6 +53,7 @@ INVENTORY_RECOVERY_INTERVAL_SECONDS = 300
 _HISTORY_PRUNE_LOCK = Lock()
 _AUTO_SCAN_STREAK: dict[int, int] = {}
 _NON_SCAN_STREAK: dict[int, int] = {}
+_OFFER_APPLY_STREAK: dict[int, int] = {}
 _AUTO_QUEUE_LOCK = Lock()
 _HISTORY_PRUNE_NOT_BEFORE: dict[int, float] = {}
 _INVENTORY_RECOVERY_LOCK = Lock()
@@ -784,7 +785,10 @@ def claim_job(
     *,
     workspace_id: int,
     agent_id: str,
+    queue_lane: str = "all",
 ) -> FastDumpingJob | None:
+    if queue_lane not in {"all", "scan", "offer"}:
+        raise ValueError("Unknown Fast queue lane")
     from .preorder_modes import reconcile_preorder_policies
     reconcile_preorder_policies(db, workspace_id)
     if _reserve_supply_recovery(workspace_id):
@@ -800,10 +804,25 @@ def claim_job(
         recover_inventory_transitions=_reserve_inventory_recovery(workspace_id),
     )
     now = utcnow()
+    if queue_lane == "scan":
+        # Bound the handoff buffer so a fast reader cannot create hundreds of
+        # decisions that expire while the single Merchant writer catches up.
+        pending_applies = db.scalars(select(FastDumpingJob.id)
+            .join(FastDumpingState, FastDumpingState.active_job_id == FastDumpingJob.id)
+            .where(FastDumpingJob.workspace_id == workspace_id,
+                   FastDumpingState.workspace_id == workspace_id,
+                   FastDumpingJob.status.in_(("queued_apply", "leased_apply")))
+            .limit(3)).all()
+        if len(pending_applies) >= 3:
+            return None
+    queue_statuses = (("queued_scan",) if queue_lane == "scan" else
+                      ("queued_apply", "queued_verify") if queue_lane == "offer" else
+                      QUEUED_JOB_STATUSES)
     with _AUTO_QUEUE_LOCK:
         scan_streak = _AUTO_SCAN_STREAK.get(workspace_id, 0)
         prefer_auto = scan_streak % 5 != 4
         prefer_scan = _NON_SCAN_STREAK.get(workspace_id, 0) >= 3
+        prefer_verify = queue_lane == "offer" and _OFFER_APPLY_STREAK.get(workspace_id, 0) >= 2
     is_scan = FastDumpingJob.status == "queued_scan"
     interactive_scan = and_(is_scan, FastDumpingJob.reason.in_(
         ("policy_saved", "automation_mode_changed", "manual", "manual_resume", "preorder_monitoring_enabled", "product_test_auto_enroll")
@@ -818,6 +837,7 @@ def claim_job(
         (FastDumpingJob.reason.startswith("inventory_priority:"), -3),
         (interactive_scan, -2),
         (and_(is_scan, prefer_scan), -1),
+        (and_(FastDumpingJob.status == "queued_verify", prefer_verify), -1),
         (FastDumpingJob.status == "queued_apply", 0),
         (FastDumpingJob.status == "queued_verify", 1),
         (aged_scan, 2),
@@ -832,7 +852,7 @@ def claim_job(
             FastDumpingJob.workspace_id == workspace_id,
             FastDumpingPolicy.workspace_id == workspace_id,
             FastDumpingState.workspace_id == workspace_id,
-            FastDumpingJob.status.in_(QUEUED_JOB_STATUSES),
+            FastDumpingJob.status.in_(queue_statuses),
             or_(
                 FastDumpingJob.not_before_at.is_(None),
                 FastDumpingJob.not_before_at <= now,
@@ -854,6 +874,11 @@ def claim_job(
         return None
 
     with _AUTO_QUEUE_LOCK:
+        if queue_lane == "offer":
+            _OFFER_APPLY_STREAK[workspace_id] = (
+                _OFFER_APPLY_STREAK.get(workspace_id, 0) + 1
+                if job.status == "queued_apply" else 0
+            )
         _NON_SCAN_STREAK[workspace_id] = (
             0 if job.status == "queued_scan" else _NON_SCAN_STREAK.get(workspace_id, 0) + 1
         )

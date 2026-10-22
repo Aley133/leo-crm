@@ -28,6 +28,7 @@ def seed(db, suffix, status="queued_scan", reason="scheduled"):
 def isolated_counters(monkeypatch):
     monkeypatch.setattr(svc, "_AUTO_SCAN_STREAK", {})
     monkeypatch.setattr(svc, "_NON_SCAN_STREAK", {})
+    monkeypatch.setattr(svc, "_OFFER_APPLY_STREAK", {})
     monkeypatch.setattr(svc, "_reserve_inventory_recovery", lambda _: False)
     monkeypatch.setattr(svc, "_reserve_supply_recovery", lambda _: False)
 
@@ -93,3 +94,40 @@ def test_mode_switch_cancels_only_scan_and_queues_priority_refresh(db_session):
         assert old.status == "cancelled"
         assert fresh.reason == "automation_mode_changed"
         assert svc.claim_job(db_session, workspace_id=1, agent_id="worker").id == fresh.id
+
+
+def test_scan_and_offer_lanes_claim_only_their_stage(db_session):
+    with workspace_context(1):
+        scan, _, _ = seed(db_session, "scan")
+        verify, _, _ = seed(db_session, "verify", "queued_verify")
+        leased = svc.claim_job(db_session, workspace_id=1, agent_id="offer", queue_lane="offer")
+        assert leased.id == verify.id
+        assert scan.status == "queued_scan"
+        # The read lane keeps progressing while Merchant's job is still leased.
+        assert svc.claim_job(db_session, workspace_id=1, agent_id="scan", queue_lane="scan").id == scan.id
+
+
+def test_scan_lane_bounds_unapplied_buffer_and_ignores_orphans(db_session):
+    with workspace_context(1):
+        scan, _, _ = seed(db_session, "scan")
+        for i in range(3):
+            seed(db_session, f"apply-{i}", "queued_apply")
+        assert svc.claim_job(db_session, workspace_id=1, agent_id="scan", queue_lane="scan") is None
+        apply = svc.claim_job(db_session, workspace_id=1, agent_id="offer", queue_lane="offer")
+        apply.status = "queued_verify"
+        db_session.flush()
+        orphan, state, _ = seed(db_session, "orphan", "queued_apply")
+        state.active_job_id = None
+        state.next_scan_at = datetime.now(UTC) + timedelta(hours=1)
+        db_session.flush()
+        assert svc.claim_job(db_session, workspace_id=1, agent_id="scan", queue_lane="scan").id == scan.id
+
+
+def test_continuous_applies_cannot_starve_offer_verification(db_session):
+    with workspace_context(1):
+        for i in range(4):
+            seed(db_session, f"apply-{i}", "queued_apply")
+        verify, _, _ = seed(db_session, "verify", "queued_verify")
+        for _ in range(2):
+            assert svc.claim_job(db_session, workspace_id=1, agent_id="offer", queue_lane="offer").status == "leased_apply"
+        assert svc.claim_job(db_session, workspace_id=1, agent_id="offer", queue_lane="offer").id == verify.id

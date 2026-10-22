@@ -76,15 +76,72 @@ def test_fast_claim_does_not_prune_completed_history_inline() -> None:
     assert "recover_inventory_transitions=_reserve_inventory_recovery" in claim_source
 
 
-def test_agent_uses_one_worker_by_default_and_bounds_override(monkeypatch) -> None:
+def test_agent_uses_two_lanes_by_default_and_bounds_override(monkeypatch) -> None:
     monkeypatch.delenv("KASPI_FAST_DUMPING_CONCURRENCY", raising=False)
-    assert desktop_agent._configured_concurrency() == 1
+    assert desktop_agent._configured_concurrency() == 2
 
     monkeypatch.setenv("KASPI_FAST_DUMPING_CONCURRENCY", "8")
     assert desktop_agent._configured_concurrency() == 2
 
     monkeypatch.setenv("KASPI_FAST_DUMPING_CONCURRENCY", "invalid")
+    assert desktop_agent._configured_concurrency() == 2
+    monkeypatch.setenv("KASPI_FAST_DUMPING_CONCURRENCY", "1")
     assert desktop_agent._configured_concurrency() == 1
+
+
+def test_empty_lane_does_not_idle_the_other_lane():
+    workspace_id = 9014
+    try:
+        assert agent_api._reserve_claim_slot(workspace_id, queue_lane="offer", now=100) == 0
+        agent_api._defer_claims(workspace_id, queue_lane="offer", seconds=10, now=100)
+        assert agent_api._reserve_claim_slot(workspace_id, queue_lane="scan", now=100.1) == 2
+        assert agent_api._reserve_claim_slot(workspace_id, queue_lane="scan", now=102) == 0
+        assert agent_api._reserve_claim_slot(workspace_id, queue_lane="offer", now=105) == 5
+        assert agent_api._reserve_claim_slot(workspace_id, queue_lane="scan", now=105) == 0
+    finally:
+        agent_api._CLAIM_NOT_BEFORE.pop(workspace_id, None)
+        agent_api._LANE_IDLE_UNTIL.pop((workspace_id, "offer"), None)
+
+
+def test_waiting_merchant_lane_does_not_block_market_worker():
+    async def run():
+        market_done = asyncio.Event()
+        started = []
+        async def worker(number):
+            started.append(number)
+            if desktop_agent._worker_lane(number, 2) == "offer":
+                await market_done.wait()
+            else:
+                await asyncio.sleep(0)
+                market_done.set()
+        await asyncio.wait_for(desktop_agent._run_workers(worker, 2), timeout=1)
+        assert set(started) == {1, 2}
+    asyncio.run(run())
+    assert desktop_agent._worker_lane(1, 1) == "all"
+    assert desktop_agent._worker_lane(1, 2, once=True) == "all"
+
+
+def test_worker_failure_cancels_and_joins_other_lane():
+    async def run():
+        other_started = asyncio.Event()
+        stopped = asyncio.Event()
+        async def worker(number):
+            if number == 1:
+                await other_started.wait()
+                raise RuntimeError("reconfigure")
+            try:
+                other_started.set()
+                await asyncio.Event().wait()
+            finally:
+                stopped.set()
+        try:
+            await asyncio.wait_for(desktop_agent._run_workers(worker, 2), timeout=1)
+        except RuntimeError as exc:
+            assert str(exc) == "reconfigure"
+        else:
+            raise AssertionError("worker failure was swallowed")
+        assert stopped.is_set()
+    asyncio.run(run())
 
 
 def test_agent_treats_cloudflare_520_as_transient_and_shares_backoff() -> None:
