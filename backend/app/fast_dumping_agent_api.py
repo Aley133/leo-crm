@@ -21,6 +21,7 @@ from .fast_dumping_service import (
     prepare_apply,
     serialize_claimed_job,
 )
+from .fast_dumping_diagnostics import trace_fast_operation
 from .models import Product
 from .product_images import normalize_product_image_url
 from .workspace_context import LEGACY_WORKSPACE_ID, current_workspace_id, workspace_context
@@ -376,49 +377,52 @@ def claim(
             "throttled": True,
         }
     try:
-        try:
-            _validate_workspace_merchant(
-                db,
-                workspace_id=payload.workspace_id,
-                merchant_uid=payload.merchant_uid,
-            )
-        except ValueError as exc:
-            raise _conflict(exc) from exc
-        _touch_agent(payload)
-        try:
-            with workspace_context(payload.workspace_id):
-                job = claim_job(
+        with trace_fast_operation("claim", payload.workspace_id, lane=payload.queue_lane) as trace:
+            try:
+                _validate_workspace_merchant(
                     db,
                     workspace_id=payload.workspace_id,
-                    agent_id=payload.agent_id,
+                    merchant_uid=payload.merchant_uid,
+                )
+            except ValueError as exc:
+                raise _conflict(exc) from exc
+            _touch_agent(payload)
+            try:
+                with workspace_context(payload.workspace_id):
+                    job = claim_job(
+                        db,
+                        workspace_id=payload.workspace_id,
+                        agent_id=payload.agent_id,
+                        queue_lane=payload.queue_lane,
+                    )
+                    result = (
+                        None
+                        if job is None
+                        else serialize_claimed_job(
+                            db,
+                            job=job,
+                            workspace_id=payload.workspace_id,
+                        )
+                    )
+                    db.commit()
+                    trace.job_id = None if job is None else job.id
+                    trace.outcome = "empty" if job is None else job.status
+            except ValueError as exc:
+                db.rollback()
+                raise _conflict(exc) from exc
+            idle_seconds = _IDLE_CLAIM_INTERVAL_SECONDS if payload.queue_lane == "all" else _LANE_IDLE_SECONDS
+            if result is None:
+                _defer_claims(
+                    payload.workspace_id,
+                    seconds=idle_seconds,
                     queue_lane=payload.queue_lane,
                 )
-                result = (
-                    None
-                    if job is None
-                    else serialize_claimed_job(
-                        db,
-                        job=job,
-                        workspace_id=payload.workspace_id,
-                    )
-                )
-                db.commit()
-        except ValueError as exc:
-            db.rollback()
-            raise _conflict(exc) from exc
-        idle_seconds = _IDLE_CLAIM_INTERVAL_SECONDS if payload.queue_lane == "all" else _LANE_IDLE_SECONDS
-        if result is None:
-            _defer_claims(
-                payload.workspace_id,
-                seconds=idle_seconds,
-                queue_lane=payload.queue_lane,
-            )
-        return {
-            "job": result,
-            "retry_after_seconds": (
-                int(idle_seconds) if result is None else 0
-            ),
-        }
+            return {
+                "job": result,
+                "retry_after_seconds": (
+                    int(idle_seconds) if result is None else 0
+                ),
+            }
     finally:
         _release_claim_execution(payload.workspace_id)
 
@@ -524,7 +528,9 @@ def scan_complete(
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
     try:
-        with workspace_context(payload.workspace_id):
+        with workspace_context(payload.workspace_id), trace_fast_operation(
+            "scan_complete", payload.workspace_id, job_id=job_id,
+        ) as trace:
             result = complete_scan(
                 db,
                 workspace_id=payload.workspace_id,
@@ -537,6 +543,7 @@ def scan_complete(
                 error_message=payload.error_message,
             )
             db.commit()
+            trace.outcome = str(result.get("status") or "completed")[:64]
             return result
     except ValueError as exc:
         db.rollback()
@@ -550,7 +557,9 @@ def prepare_job_apply(
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
     try:
-        with workspace_context(payload.workspace_id):
+        with workspace_context(payload.workspace_id), trace_fast_operation(
+            "prepare_apply", payload.workspace_id, job_id=job_id,
+        ) as trace:
             result = prepare_apply(
                 db,
                 workspace_id=payload.workspace_id,
@@ -559,6 +568,7 @@ def prepare_job_apply(
                 lease_token=payload.lease_token,
             )
             db.commit()
+            trace.outcome = "ready" if result.get("ready") else "skipped"
             return result
     except ValueError as exc:
         db.rollback()
@@ -572,7 +582,10 @@ def apply_complete(
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
     try:
-        with workspace_context(payload.workspace_id):
+        with workspace_context(payload.workspace_id), trace_fast_operation(
+            "apply_complete", payload.workspace_id, job_id=job_id,
+        ) as trace:
+            trace.client_ms = round(payload.latency_seconds * 1000, 1)
             result = complete_apply(
                 db,
                 workspace_id=payload.workspace_id,
@@ -584,6 +597,7 @@ def apply_complete(
                 ),
             )
             db.commit()
+            trace.outcome = str(result.get("status") or "completed")[:64]
             return result
     except ValueError as exc:
         db.rollback()
@@ -597,7 +611,9 @@ def verify_complete(
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
     try:
-        with workspace_context(payload.workspace_id):
+        with workspace_context(payload.workspace_id), trace_fast_operation(
+            "verify_complete", payload.workspace_id, job_id=job_id,
+        ) as trace:
             result = complete_verification(
                 db,
                 workspace_id=payload.workspace_id,
@@ -610,6 +626,7 @@ def verify_complete(
                 error_message=payload.error_message,
             )
             db.commit()
+            trace.outcome = str(result.get("status") or "completed")[:64]
             return result
     except ValueError as exc:
         db.rollback()
