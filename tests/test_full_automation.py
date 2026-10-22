@@ -70,6 +70,36 @@ def test_raise_2381_to_2549_when_only_cheapest_seller_is_slower():
     assert decision.write_allowed
 
 
+def test_slower_cheapest_seller_does_not_pin_price_below_second_and_third():
+    # LeoXpress field: the old per-seller minimum stopped at 4510 despite
+    # enough delivery advantage to remain competitive in the first three.
+    decision = decide_automated_price(
+        own_price_kzt=3993, safe_floor_kzt=3158, unit_cost_kzt=1953,
+        offers_complete=True,
+        market_offers=[{"is_own": True, "price_kzt": 3993, "delivery_days": 1}]
+            + [{"price_kzt": price, "delivery_days": days}
+               for price, days in [(4100, 3), (4899, 4), (4900, 3), (4950, 2),
+                                   (6600, 5), (6775, 2), (6780, 6)]],
+    )
+    assert decision.target_price_kzt == 4899
+    assert decision.write_allowed
+    assert 1 + sum(price <= decision.target_price_kzt
+                   for price in (4100, 4899, 4900, 4950, 6600, 6775, 6780)) == 3
+
+
+@pytest.mark.parametrize("own_price", [3999, 4998])
+def test_user_3999_example_raises_once_and_stays_stable(own_price):
+    decision = decide_automated_price(
+        own_price_kzt=own_price, safe_floor_kzt=3000, unit_cost_kzt=1500,
+        offers_complete=True,
+        market_offers=[{"is_own": True, "price_kzt": own_price, "delivery_days": 1},
+                       {"price_kzt": 4599, "delivery_days": 4},
+                       {"price_kzt": 4999, "delivery_days": 1}],
+    )
+    assert decision.target_price_kzt == 4998
+    assert decision.write_allowed == (own_price != 4998)
+
+
 def test_profit_raise_stops_before_fourth_place_in_large_field():
     decision = decide_automated_price(own_price_kzt=2381, safe_floor_kzt=2000,
         unit_cost_kzt=1000, offers_complete=True,
@@ -257,6 +287,37 @@ def test_complete_scan_auto_uses_fresh_full_market(db_session):
         assert result["queued_apply"]
         assert state.target_price_kzt == 15999
         assert state.automation_json["offers_complete"]
+
+
+def test_slower_seller_raise_survives_scan_and_inventory_apply_recheck(db_session):
+    _, batch, policy, state = _seed_fast_product(db_session)
+    policy.pricing_mode = "automation"
+    policy.minimum_profit_kzt = 500
+    batch.unit_cost = 1953
+    with workspace_context(1):
+        db_session.flush()
+        job, _ = svc.queue_scan(db_session, policy=policy, workspace_id=1, reason="test")
+        job = svc.claim_job(db_session, workspace_id=1, agent_id="test")
+        result = runtime._complete_scan_v2(
+            db_session, workspace_id=1, job_id=job.id, agent_id="test",
+            lease_token=job.lease_token, succeeded=True,
+            market_payload={
+                "own_price_kzt": "3993", "competitor_price_kzt": "4100",
+                "market_context_ok": True, "page_visible_price_kzt": "3993",
+                "offers_complete": True, "seller_count": 4,
+                "offers": [{"is_own": True, "price_kzt": "3993", "delivery_days": 1},
+                           {"price_kzt": "4100", "delivery_days": 3},
+                           {"price_kzt": "4899", "delivery_days": 4},
+                           {"price_kzt": "4900", "delivery_days": 3}],
+            },
+        )
+        assert result["queued_apply"]
+        assert state.target_price_kzt == 4899
+        job = svc.claim_job(db_session, workspace_id=1, agent_id="test")
+        prepared = runtime._prepare_apply_v2(
+            db_session, workspace_id=1, job_id=job.id, agent_id="test", lease_token=job.lease_token)
+        assert prepared["ready"]
+        assert Decimal(prepared["target_price_kzt"]) == 4899
 
 
 def test_pending_verification_blocks_mode_transition(db_session):

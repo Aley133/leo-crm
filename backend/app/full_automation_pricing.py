@@ -80,6 +80,7 @@ def decide_automated_price(
     percent_day = Decimal(str(config.get("delivery_premium_percent_per_day", 5))) / 100
     percent_cap = Decimal(str(config.get("delivery_premium_percent_cap", 15))) / 100
     ceilings = []
+    competitive_ceilings = []
     for rival in external:
         days = rival.get("delivery_days")
         gap = (
@@ -93,11 +94,19 @@ def decide_automated_price(
         ceilings.append(
             rival_price + premium - (Decimal(0) if premium else Decimal(1))
         )
+        if not premium:
+            # Equal, faster or unknown delivery still requires a one-tenge
+            # advantage. Disabling delivery premiums keeps this protection too.
+            competitive_ceilings.append(ceilings[-1])
     rank = max(1, min(3, int(target_position)))
-    # TOP-N is a safety limit, not permission to give up a competitive offer.
-    # Remain cheaper than every equally fast/faster/unknown-delivery competitor;
-    # pass a slower seller only within the bounded delivery premium.
-    ceiling = min(ceilings)
+    # A cheaper but slower seller may remain ahead within TOP-N. Its personal
+    # delivery premium must not pin every higher rank to that seller's price.
+    # Anchor to the Nth external price (last observed in a short field), while
+    # remaining cheaper than equally fast/faster/unknown-delivery rivals.
+    # The coordinated shops retain their shared bounded price corridor.
+    ceiling = min(ceilings) if coordinated else ceilings[min(rank, len(ceilings)) - 1]
+    if not coordinated and competitive_ceilings:
+        ceiling = min(ceiling, min(competitive_ceilings))
     rank_rivals = external if coordinated else rivals
     if len(rank_rivals) >= rank:
         ceiling = min(ceiling, Decimal(str(rank_rivals[rank - 1]["price_kzt"])) - 1)
@@ -147,7 +156,9 @@ def decide_automated_price(
     estimated = 1 + sum(Decimal(str(r["price_kzt"])) <= target for r in rivals)
     reason = (
         f"Максимальная расчётная прибыль {profit(target):.2f} ₸; место по цене ≈{estimated}, "
-        f"ограничение TOP-{rank}. Надбавка за день более быстрой доставки до {percent_day * 100}% "
+        f"ограничение TOP-{rank}. Более медленные продавцы могут остаться впереди по цене; "
+        f"ориентир — следующий продавец в пределах TOP-{rank}. "
+        f"Надбавка к цене ориентира за день более быстрой доставки до {percent_day * 100}% "
         f"(всего до {percent_cap * 100}% и {premium_cap} ₸); при одинаковой или неизвестной доставке дешевле на 1 ₸. "
         "Позиция зависит также от сортировки Kaspi и адреса покупателя."
     )
