@@ -131,3 +131,30 @@ def test_continuous_applies_cannot_starve_offer_verification(db_session):
         for _ in range(2):
             assert svc.claim_job(db_session, workspace_id=1, agent_id="offer", queue_lane="offer").status == "leased_apply"
         assert svc.claim_job(db_session, workspace_id=1, agent_id="offer", queue_lane="offer").id == verify.id
+
+
+def test_claim_reuses_state_locked_by_queue_query_and_loaded_policy(db_session):
+    from sqlalchemy import event
+    from backend.app.fast_dumping_uow import fast_unit_of_work
+    with workspace_context(1):
+        job, _, _ = seed(db_session, "cold-claim")
+        job_id = job.id
+        db_session.commit()
+        db_session.expunge_all()
+        reads = []
+        def record(_conn, _cursor, statement, *_args):
+            if statement.lstrip().upper().startswith("SELECT"):
+                reads.append(statement)
+        event.listen(db_session.bind, "before_cursor_execute", record)
+        try:
+            with fast_unit_of_work(db_session, 1):
+                claimed = svc.claim_job(db_session, workspace_id=1, agent_id="worker")
+                payload = svc.serialize_claimed_job(db_session, job=claimed, workspace_id=1)
+                assert payload["id"] == job_id
+                assert payload["stage"] == "scan"
+                db_session.commit()
+        finally:
+            event.remove(db_session.bind, "before_cursor_execute", record)
+        assert not any("FROM fast_dumping_policies " in sql for sql in reads)
+        state_reads = [sql for sql in reads if "FROM fast_dumping_states " in sql]
+        assert len(state_reads) == 1  # Due scheduler only, no redundant lock SELECT.
