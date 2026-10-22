@@ -585,6 +585,7 @@ def apply_complete(
         with workspace_context(payload.workspace_id), trace_fast_operation(
             "apply_complete", payload.workspace_id, job_id=job_id,
         ) as trace:
+            trace.client_ms = round(payload.latency_seconds * 1000, 1)
             result = complete_apply(
                 db,
                 workspace_id=payload.workspace_id,

@@ -26,6 +26,7 @@ class FastTrace:
     outcome: str | None = None
     queries: int = 0
     sql_seconds: float = 0
+    client_ms: float | None = None
     tables: dict = field(default_factory=dict)
 
 
@@ -77,6 +78,7 @@ def trace_fast_operation(stage: str, workspace_id: int, *, job_id=None, lane="al
             "job": trace.job_id, "lane": trace.lane,
             "outcome": "error" if failed else trace.outcome,
             "elapsed_ms": round((perf_counter() - started) * 1000, 1),
+            "client_ms": trace.client_ms,
             "sql_ms": round(trace.sql_seconds * 1000, 1), "queries": trace.queries,
             "tables": {k: {"count": v[0], "ms": round(v[1] * 1000, 1)}
                        for k, v in trace.tables.items()},
