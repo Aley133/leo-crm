@@ -78,10 +78,18 @@ def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_
     candidates = [upper] + [b - 1 for b in LOGISTICS_PRICE_BREAKS if max(base, floor) <= b - 1 <= upper]
     upper = max(candidates, key=lambda p: (profit(p), p))
     boundary = max(base, floor)
+    market_choices = [ceiling] + [b - 1 for b in LOGISTICS_PRICE_BREAKS if floor <= b - 1 <= ceiling]
+    market_target = max(market_choices, key=lambda p: (profit(p), p))
     if upper <= boundary:
         # External pressure or floor leaves no profitable corridor. Never follow a peer below it.
-        target = max(floor, min(own, ceiling))
-        return result(target, 'owned_peer_guard', 'Коридор +100 ₸ ограничен внешним рынком или floor; взаимное снижение остановлено.', target != own)
+        # An old/high peer anchor may sit above today's external ceiling. The
+        # lower shop must still catch up to the profitable external market;
+        # min(own, ceiling) previously froze it indefinitely at its low price.
+        target = market_target
+        if floor <= own <= ceiling and profit(target) <= profit(own):
+            target = own
+        return result(target, 'owned_peer_guard',
+                      f'Общий коридор ограничен внешним рынком или floor; цена по внешним продавцам {target} ₸, без снижения вслед за своим магазином.', target != own)
     expected = {}
     for i, identity in enumerate(cycle['participants']):
         top = min(base + 100 + i, ceiling)
@@ -99,8 +107,14 @@ def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_
                          and _optional_money(r.get('price_kzt')) is not None
                          and _optional_money(r['price_kzt']) <= own for r in offers)
     if not external_ahead:
+        # No peer-driven descent, but a market increase must not freeze both
+        # shops at a historical +100 edge. Reprice upward to the profitable
+        # external ceiling, retaining floor, tariff and TOP-N bounds.
         target = max(floor, min(own, ceiling))
-        return result(target, 'owned_peer_guard', 'Чужие продавцы не требуют шага вниз; сохраняем маржу собственных магазинов.', target != own)
+        if market_target > target and profit(market_target) > profit(target):
+            target = market_target
+        return result(target, 'owned_peer_guard',
+                      f'Чужие продавцы дороже; взаимное снижение остановлено. Выгодная цена по внешнему рынку {target} ₸.', target != own)
     target = max(boundary, min(upper, own, peer_price - 1)) if own >= peer_price else max(boundary, min(own, ceiling))
     return result(target, 'owned_group_band',
                   f'Борьба с внешними продавцами: шаг 1 ₸ между своими магазинами внутри {base}–{base + 100} ₸. На нижней границе общий возврат вверх.', target != own)

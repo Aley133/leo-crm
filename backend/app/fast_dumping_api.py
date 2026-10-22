@@ -422,6 +422,9 @@ def read_fast_dumping_offers(
         write = job.write_json or {}
         decision = job.decision_json or {}
         diagnostic = {
+            "decision_status": state.decision_status,
+            "plan_reason": (state.automation_json or {}).get("plan_reason"),
+            "owned_cycle": (state.automation_json or {}).get("owned_cycle"),
             "job_id": job.id, "status": job.status, "reason": job.reason,
             "created_at": job.created_at, "not_before_at": job.not_before_at,
             "scan_attempts": job.scan_attempts, "apply_attempts": job.apply_attempts,
@@ -479,16 +482,21 @@ def run_fast_dumping_now(
                 "product_id": product_id,
                 "next_scan_at": next_scan_at,
             }
+    previous = db.get(FastDumpingJob, state.active_job_id) if state.active_job_id else None
+    previous_reason = previous.reason if previous is not None else None
     _job, queued = queue_scan(
         db,
         policy=policy,
         workspace_id=workspace_id,
         reason="manual",
     )
+    promoted = bool(not queued and _job is not None and _job.status == "queued_scan"
+                    and _job.reason == "manual" and previous_reason != "manual")
     db.commit()
     return {
-        "status": "queued" if queued else "already_active",
-        "queued": queued,
+        "status": "queued" if queued or promoted else "already_active",
+        "queued": queued or promoted,
+        "promoted": promoted,
         "product_id": product_id,
     }
 

@@ -153,7 +153,7 @@ const card = (row) => {
   const view = statusView(row);
   const source = row.current_source || {};
   const scanDue = !state.next_scan_at || new Date(state.next_scan_at).getTime() <= Date.now();
-  const canRun = row.policy.enabled && !state.automatic_writes_paused && !workingStatuses.has(view.status) && scanDue;
+  const canRun = row.policy.enabled && !state.automatic_writes_paused && (!workingStatuses.has(view.status) || view.status === "queued") && scanDue;
   const positionMode = (source.kind || state.source_kind) === "supplier";
   return `<article class="fast-card ${view.kind}" data-product-id="${row.product_id}">
     <div class="fast-card-head">
@@ -175,7 +175,7 @@ const card = (row) => {
       <div><span>Преимущество доставки</span><strong>до ${money(row.policy.delivery_price_premium_kzt)}</strong><small>для физического FIFO</small></div>
       <div><span>Цикл BARWORK ↔ LeoXpress</span><strong>${money(row.policy.owned_price_band_kzt)}</strong><small>якорь ${money(state.owned_cycle_anchor_price_kzt)}</small></div>
       <div><span>Agent / версия решения</span><strong>${escapeHtml(state.last_agent_id || "—")}</strong><small>state v${Number(state.state_version || 0)}</small></div>
-      <div><span>Канал</span><strong>Realtime API</strong><small>XML — страховочное зеркало</small></div>
+      <div><span>Канал</span><strong>Realtime API</strong><small>Прямая запись через HTTP</small></div>
     </div>
     <div class="fast-card-reason"><strong>${escapeHtml(view.label)}.</strong> ${escapeHtml(state.pause_reason || state.status_reason || "Первая проверка ещё не выполнялась.")}${state.last_error_message ? ` · ${escapeHtml(state.last_error_message)}` : ""}</div>
     <details class="fast-details" data-product-id="${row.product_id}" data-state-version="${Number(state.state_version || 0)}"><summary>Офферы и проверка buyer-context · ${Number(state.offers_count || 0)}</summary><div class="offers-container"><p class="fast-card-reason">Раскройте блок — CRM загрузит диагностику только этого товара.</p></div></details>
