@@ -35,6 +35,7 @@ from backend.app.fast_dumping_service import (
     recover_expired_leases,
     serialize_claimed_job,
 )
+from backend.app.product_test_models import ProductTestItem  # register tables before fixture
 from backend.app.inventory_models import InventoryBatch
 from backend.app.models import MarketplaceAccount, Product
 from backend.app.workspace_context import workspace_context
@@ -1660,3 +1661,58 @@ def test_pending_mutations_back_off_with_wall_clock_limit(db_session, attempts, 
             assert delay - 1 <= seconds <= delay + 1
             assert job.status == "queued_verify"
             assert job.write_json["last_offer_verify"] == '{"price": 20000}'
+
+
+@pytest.mark.parametrize("competitor", ["18000", "20010"])
+def test_scan_reuses_rows_only_within_one_operation(db_session, competitor):
+    from backend.app.fast_dumping_uow import fast_unit_of_work
+    from backend.app import fast_dumping_service as svc
+    product, _, policy, _ = _seed_fast_product(db_session)
+    with workspace_context(1):
+        job, _ = queue_scan(db_session, policy=policy, workspace_id=1, reason="test")
+        db_session.commit()
+    leased = _claim(db_session, 1)
+    job_id, token = job.id, leased.lease_token
+    db_session.expunge_all()
+    reads = []
+    def record(_conn, _cursor, statement, *_args):
+        if statement.lstrip().upper().startswith("SELECT"):
+            reads.append(statement)
+    event.listen(db_session.bind, "before_cursor_execute", record)
+    try:
+        with workspace_context(1), fast_unit_of_work(db_session, 1):
+            result = svc.complete_scan(db_session, workspace_id=1, job_id=job_id,
+                agent_id="fast-agent", lease_token=token, succeeded=True,
+                market_payload=_market(own="20000", competitor=competitor))
+            db_session.commit()
+    finally:
+        event.remove(db_session.bind, "before_cursor_execute", record)
+    assert result["status"] in {"queued_apply", "watching", "floor_limited"}
+    assert sum("FROM products " in sql for sql in reads) == 1
+    assert sum("FROM fast_dumping_states " in sql for sql in reads) == 1
+    assert sum("FROM fast_dumping_policies " in sql for sql in reads) == 1
+
+
+def test_inventory_recovery_batches_latest_modes_and_ignores_failed_history(db_session):
+    from backend.app.fast_dumping_service import _schedule_inventory_transitions
+    from backend.app.fast_dumping_uow import fast_unit_of_work
+    product, _, policy, state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        state.inventory_on_hand = 4
+        for mode, status in [("preorder", "applied"), ("inventory", "applied"),
+                             ("preorder", "failed")]:
+            db_session.add(FastDumpingJob(workspace_id=1, product_id=product.id,
+                policy_id=policy.id, status=status, decision_json={"fulfillment_mode": mode}))
+        db_session.commit()
+        reads = []
+        def record(_conn, _cursor, statement, *_args):
+            if statement.lstrip().upper().startswith("SELECT"):
+                reads.append(statement)
+        event.listen(db_session.bind, "before_cursor_execute", record)
+        try:
+            with fast_unit_of_work(db_session, 1):
+                assert _schedule_inventory_transitions(db_session, 1, 20) == 0
+        finally:
+            event.remove(db_session.bind, "before_cursor_execute", record)
+        assert len(reads) == 2
+        assert state.active_job_id is None

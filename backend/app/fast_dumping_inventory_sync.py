@@ -11,6 +11,7 @@ from . import fast_dumping_service as svc
 from .dumping_service import physical_stock_count, resolve_cost_source
 from .fast_dumping_models import FastDumpingJob, FastDumpingPolicy, FastDumpingState
 from .models import Product
+from .fast_dumping_uow import workspace_row
 
 
 _INSTALLED = False
@@ -35,12 +36,7 @@ def _complete_scan(
     before_state = None
     previous_desired_stock = None
     if before_job is not None:
-        before_state = db.scalar(
-            select(FastDumpingState).where(
-                FastDumpingState.workspace_id == workspace_id,
-                FastDumpingState.product_id == before_job.product_id,
-            )
-        )
+        before_state = svc._lock_state(db, workspace_id=workspace_id, product_id=before_job.product_id)
         if before_state is not None:
             previous_desired_stock = before_state.desired_stock_count
 
@@ -61,24 +57,9 @@ def _complete_scan(
     job = db.get(FastDumpingJob, job_id)
     if job is None:
         return result
-    state = db.scalar(
-        select(FastDumpingState).where(
-            FastDumpingState.workspace_id == workspace_id,
-            FastDumpingState.product_id == job.product_id,
-        )
-    )
-    policy = db.scalar(
-        select(FastDumpingPolicy).where(
-            FastDumpingPolicy.id == job.policy_id,
-            FastDumpingPolicy.workspace_id == workspace_id,
-        )
-    )
-    product = db.scalar(
-        select(Product).where(
-            Product.id == job.product_id,
-            Product.workspace_id == workspace_id,
-        )
-    )
+    state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
+    policy = workspace_row(db, FastDumpingPolicy, job.policy_id, workspace_id)
+    product = workspace_row(db, Product, job.product_id, workspace_id)
     if state is None or policy is None or product is None:
         return result
     if previous_desired_stock is None:
@@ -153,18 +134,8 @@ def _complete_apply(
     job = db.get(FastDumpingJob, job_id)
     if job is None:
         return result
-    state = db.scalar(
-        select(FastDumpingState).where(
-            FastDumpingState.workspace_id == workspace_id,
-            FastDumpingState.product_id == job.product_id,
-        )
-    )
-    policy = db.scalar(
-        select(FastDumpingPolicy).where(
-            FastDumpingPolicy.id == job.policy_id,
-            FastDumpingPolicy.workspace_id == workspace_id,
-        )
-    )
+    state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
+    policy = workspace_row(db, FastDumpingPolicy, job.policy_id, workspace_id)
     if state is None or policy is None or state.last_applied_at is None:
         return result
     legacy_verify_at = state.last_applied_at + timedelta(

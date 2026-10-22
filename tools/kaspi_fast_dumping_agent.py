@@ -22,6 +22,10 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
 from urllib.request import Request, urlopen
 
+import httpx
+
+from tools.kaspi_fast_http_runtime import httpx_runtime_options
+
 from tools.kaspi_fast_dumping_scanner import (
     KaspiCompetitorSnapshot,
     scan_kaspi_competitors,
@@ -31,7 +35,7 @@ from tools.kaspi_fast_dumping_http_auth import (
     HttpOtpKaspiMerchantSession as KaspiMerchantSession,
 )
 
-VERSION = "1.2.9"
+VERSION = "1.2.10"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60
@@ -65,6 +69,8 @@ TRANSIENT_HTTP_STATUSES = {
 CRM_BACKOFF_MAX_SECONDS = 60.0
 _WRITE_LOCK = asyncio.Lock()
 _CRM_REQUEST_LOCK = asyncio.Lock()
+_CRM_TRANSPORT_LOCK = Lock()
+_CRM_CLIENT: httpx.Client | None = None
 _RUNTIME_SID: dict[int, str] = {}
 _RUNTIME_HTTP_COOKIE_STATE: dict[int, str] = {}
 _CRM_GATE_LOCK = Lock()
@@ -471,38 +477,60 @@ def _prompt_kaspi_otp(recipient: str) -> str:
     )
 
 
-def _post_json(url: str, token: str, payload: dict) -> dict:
-    request = Request(
-        url,
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json",
-        },
-        method="POST",
+def _new_crm_client() -> httpx.Client:
+    return httpx.Client(
+        timeout=httpx.Timeout(CRM_HTTP_TIMEOUT_SECONDS, connect=10.0, pool=5.0),
+        limits=httpx.Limits(max_connections=1, max_keepalive_connections=1, keepalive_expiry=60),
+        follow_redirects=False,
+        **httpx_runtime_options(),
     )
-    try:
-        with urlopen(request, timeout=CRM_HTTP_TIMEOUT_SECONDS) as response:
-            body = response.read().decode("utf-8")
-            return json.loads(body) if body else {}
-    except HTTPError as exc:
-        body = exc.read().decode("utf-8", errors="replace")
-        retry_after = None
+
+
+def _close_crm_client() -> None:
+    global _CRM_CLIENT
+    with _CRM_TRANSPORT_LOCK:
+        if _CRM_CLIENT is not None:
+            _CRM_CLIENT.close()
+            _CRM_CLIENT = None
+
+
+def _post_json(url: str, token: str, payload: dict) -> dict:
+    global _CRM_CLIENT
+    # Retain one TCP/TLS connection across claim, completion and heartbeat.
+    # Tokens stay request-local; the client never stores an Authorization default.
+    with _CRM_TRANSPORT_LOCK:
+        if _CRM_CLIENT is None:
+            _CRM_CLIENT = _new_crm_client()
         try:
-            raw = exc.headers.get("Retry-After") if exc.headers else None
-            retry_after = float(raw) if raw else None
-        except (TypeError, ValueError):
-            retry_after = None
-        raise CRMRequestError(
-            f"CRM returned HTTP {exc.code}: {body}",
-            retryable=exc.code in TRANSIENT_HTTP_STATUSES,
-            retry_after=retry_after,
-        ) from exc
-    except (URLError, TimeoutError) as exc:
-        raise CRMRequestError(
-            f"CRM is unavailable: {exc}",
-            retryable=True,
-        ) from exc
+            response = _CRM_CLIENT.post(url, json=payload, headers={
+                "Authorization": f"Bearer {token}", "Content-Type": "application/json",
+            })
+        except httpx.TransportError as exc:
+            _CRM_CLIENT.close()
+            _CRM_CLIENT = None
+            # Retry remains in the existing shared circuit, never here. A
+            # transport failure must not immediately replay a POST in a loop.
+            raise CRMRequestError(f"CRM is unavailable: {type(exc).__name__}", retryable=True) from exc
+        if not response.is_success:
+            try:
+                raw = response.headers.get("Retry-After")
+                retry_after = float(raw) if raw else None
+            except (TypeError, ValueError):
+                retry_after = None
+            raise CRMRequestError(
+                f"CRM returned HTTP {response.status_code}: {response.text[:2000]}",
+                retryable=response.status_code in TRANSIENT_HTTP_STATUSES,
+                retry_after=retry_after,
+            )
+        if not response.content:
+            return {}
+        try:
+            result = response.json()
+        except ValueError as exc:
+            raise CRMRequestError("CRM returned non-JSON response", retryable=True) from exc
+        if not isinstance(result, dict):
+            raise CRMRequestError("CRM returned unexpected JSON response", retryable=True)
+        return result
 
 
 def _fetch_kaspi_photo(kaspi_product_id: str, city_id: str) -> str:
@@ -995,7 +1023,7 @@ async def _process_photo(
     )
 
 
-async def main(
+async def _main(
     *,
     once: bool = False,
     workspace_id: int | None = None,
@@ -1290,6 +1318,13 @@ async def main(
         heartbeat_task.cancel()
         await asyncio.gather(heartbeat_task, return_exceptions=True)
     return 0
+
+
+async def main(*, once: bool = False, workspace_id: int | None = None, reconfigure: bool = False) -> int:
+    try:
+        return await _main(once=once, workspace_id=workspace_id, reconfigure=reconfigure)
+    finally:
+        await asyncio.to_thread(_close_crm_client)
 
 
 def _parse_args() -> argparse.Namespace:

@@ -4,6 +4,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from .models import Product
+from .fast_dumping_uow import current_fast_unit, workspace_row
 
 
 def inventory_owner_product(
@@ -77,7 +78,12 @@ def inventory_owner_ids_for_products(
 ) -> dict[int, int]:
     if not product_ids:
         return {}
-    products = db.scalars(select(Product).where(Product.id.in_(product_ids))).all()
+    unit = current_fast_unit(db)
+    if unit is not None and len(product_ids) == 1:
+        product = workspace_row(db, Product, next(iter(product_ids)), unit.workspace_id)
+        products = [product] if product is not None else []
+    else:
+        products = db.scalars(select(Product).where(Product.id.in_(product_ids))).all()
     return {
         int(product.id): inventory_owner_product_id(db, product)
         for product in products

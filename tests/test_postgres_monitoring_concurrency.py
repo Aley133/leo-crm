@@ -472,3 +472,38 @@ def test_source_replacement_uses_ingestion_lock_order_and_production_flush(postg
     finally:
         ingestion.rollback()
         ingestion.close()
+
+
+def test_fast_batch_recovery_and_operation_lock_reuse_on_postgres(postgres_factory):
+    from backend.app.fast_dumping_models import FastDumpingJob, FastDumpingPolicy, FastDumpingState
+    from backend.app.fast_dumping_service import _lock_state, _schedule_inventory_transitions
+    from backend.app.fast_dumping_uow import fast_unit_of_work
+    with postgres_factory() as first, postgres_factory() as second:
+        product = Product(name="Recovery", kaspi_product_id="PG-RECOVERY", sale_enabled=True)
+        first.add(product)
+        first.flush()
+        policy = FastDumpingPolicy(product_id=product.id, enabled=True)
+        first.add(policy)
+        first.flush()
+        state = FastDumpingState(product_id=product.id, policy_id=policy.id, inventory_on_hand=2)
+        first.add(state)
+        for mode, status in [("preorder", "applied"), ("inventory", "applied"), ("preorder", "failed")]:
+            first.add(FastDumpingJob(product_id=product.id, policy_id=policy.id, status=status,
+                                    decision_json={"fulfillment_mode": mode}))
+        first.commit()
+        with fast_unit_of_work(first, 1):
+            assert _schedule_inventory_transitions(first, 1, 20) == 0
+            assert _lock_state(first, workspace_id=1, product_id=product.id) is state
+            assert _lock_state(first, workspace_id=1, product_id=product.id) is state
+            assert second.scalar(select(FastDumpingState).where(FastDumpingState.id == state.id)
+                                 .with_for_update(skip_locked=True)) is None
+            second.rollback()
+            first.commit()
+            locked = second.scalar(select(FastDumpingState).where(FastDumpingState.id == state.id)
+                                   .with_for_update(skip_locked=True))
+            assert locked is not None
+            locked.status_reason = "fresh transaction"
+            second.commit()
+            # The original UOW is still open, but its former lock expired.
+            assert _lock_state(first, workspace_id=1, product_id=product.id) is state
+            first.commit()

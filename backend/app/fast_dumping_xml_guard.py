@@ -11,6 +11,7 @@ from . import fast_dumping_service as svc
 from .dumping_service import physical_stock_count
 from .fast_dumping_models import FastDumpingJob, FastDumpingPolicy, FastDumpingState
 from .models import Product
+from .fast_dumping_uow import workspace_row
 
 
 _INSTALLED = False
@@ -123,18 +124,8 @@ def _mirror_verified_offer(db: Session, *, job: FastDumpingJob) -> bool:
     Kaspi catalog pull cannot resurrect an older price/stock/preOrder state.
     """
 
-    policy = db.scalar(
-        select(FastDumpingPolicy).where(
-            FastDumpingPolicy.id == job.policy_id,
-            FastDumpingPolicy.workspace_id == job.workspace_id,
-        )
-    )
-    product = db.scalar(
-        select(Product).where(
-            Product.id == job.product_id,
-            Product.workspace_id == job.workspace_id,
-        )
-    )
+    policy = workspace_row(db, FastDumpingPolicy, job.policy_id, job.workspace_id)
+    product = workspace_row(db, Product, job.product_id, job.workspace_id)
     if policy is None or product is None or not policy.enabled:
         return False
 
@@ -161,12 +152,7 @@ def _mirror_verified_offer(db: Session, *, job: FastDumpingJob) -> bool:
         else:
             target_raw = decision.get("target_price_kzt")
             if target_raw in (None, ""):
-                state = db.scalar(
-                    select(FastDumpingState).where(
-                        FastDumpingState.workspace_id == job.workspace_id,
-                        FastDumpingState.product_id == job.product_id,
-                    )
-                )
+                state = svc._lock_state(db, workspace_id=job.workspace_id, product_id=job.product_id)
                 target_raw = (
                     state.own_price_kzt
                     if state is not None and state.own_price_kzt is not None
@@ -233,12 +219,7 @@ def _complete_apply(
     if bool(write_payload.get("accepted")) and bool(write_payload.get("verified")):
         job = db.get(FastDumpingJob, job_id)
         if job is not None and _mirror_verified_offer(db, job=job):
-            state = db.scalar(
-                select(FastDumpingState).where(
-                    FastDumpingState.workspace_id == workspace_id,
-                    FastDumpingState.product_id == job.product_id,
-                )
-            )
+            state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
             if state is not None:
                 state.status_reason = (
                     f"{state.status_reason or ''} XML safety mirror обновлён после realtime verify."
@@ -273,12 +254,7 @@ def _complete_verification(
     if verification_succeeded:
         job = db.get(FastDumpingJob, job_id)
         if job is not None and job.status == "applied" and _mirror_verified_offer(db, job=job):
-            state = db.scalar(
-                select(FastDumpingState).where(
-                    FastDumpingState.workspace_id == workspace_id,
-                    FastDumpingState.product_id == job.product_id,
-                )
-            )
+            state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
             if state is not None:
                 state.status_reason = (
                     f"{state.status_reason or ''} XML safety mirror синхронизирован с подтверждённым Kaspi state."
