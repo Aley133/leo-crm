@@ -27,7 +27,7 @@ from .fast_dumping_pricing import (
     external_anchor_price,
 )
 from .models import MarketplaceAccount, Product
-from .fast_dumping_uow import locked_state, remember_locked_state
+from .fast_dumping_uow import locked_state, remember_locked_state, workspace_row
 from .product_images import normalize_product_image_url
 from .workspace_models import KaspiAccountCredential, Workspace
 
@@ -852,8 +852,8 @@ def claim_job(
         (FastDumpingPolicy.pricing_mode == "automation", 3 if prefer_auto else 4),
         else_=4 if prefer_auto else 3,
     )
-    job = db.scalar(
-        select(FastDumpingJob)
+    claimed = db.execute(
+        select(FastDumpingJob, FastDumpingState, FastDumpingPolicy)
         .join(FastDumpingPolicy, FastDumpingPolicy.id == FastDumpingJob.policy_id)
         .join(FastDumpingState, FastDumpingState.active_job_id == FastDumpingJob.id)
         .where(
@@ -872,11 +872,13 @@ def claim_job(
                   FastDumpingJob.id)
         .limit(1)
         .with_for_update(skip_locked=True, of=(FastDumpingJob, FastDumpingState))
-    )
-    if job is None:
+    ).first()
+    if claimed is None:
         return None
-    state = _lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
-    if state is None or state.active_job_id != job.id:
+    job, state, _policy = claimed
+    # The queue SELECT already locked this exact state with SKIP LOCKED.
+    remember_locked_state(db, state)
+    if state.active_job_id != job.id:
         job.status = "cancelled"
         job.completed_at = utcnow()
         return None
@@ -923,18 +925,8 @@ def serialize_claimed_job(
     job: FastDumpingJob,
     workspace_id: int,
 ) -> dict[str, Any]:
-    product = db.scalar(
-        select(Product).where(
-            Product.id == job.product_id,
-            Product.workspace_id == workspace_id,
-        )
-    )
-    policy = db.scalar(
-        select(FastDumpingPolicy).where(
-            FastDumpingPolicy.id == job.policy_id,
-            FastDumpingPolicy.workspace_id == workspace_id,
-        )
-    )
+    product = workspace_row(db, Product, job.product_id, workspace_id)
+    policy = workspace_row(db, FastDumpingPolicy, job.policy_id, workspace_id)
     if product is None or policy is None:
         raise ValueError("Fast dumping job ownership is inconsistent")
     if job.status == "leased_scan":
