@@ -55,11 +55,11 @@ def test_full_cycle_steps_one_tenge_and_resets_without_anchor_drift():
     raise AssertionError('cycle never returned to its upper edge')
 
 
-def test_no_external_pressure_does_not_create_pointless_price_descent():
+def test_no_external_pressure_raises_to_market_instead_of_freezing_old_cycle():
     cycle = {}
     rows = market(0, external=(17000, 17500, 18000))
     choose(0, cycle, rows=rows)
-    assert choose(0, cycle, (14599, 14600), rows=market(0, (14599,14600), external=(17000,17500,18000))).target_price_kzt == 14599
+    assert choose(0, cycle, (14599, 14600), rows=market(0, (14599,14600), external=(17000,17500,18000))).target_price_kzt == 17999
 
 
 def test_external_delivery_price_cap_and_floor_remain_authoritative():
@@ -84,7 +84,11 @@ def test_phase_changed_by_peer_rejects_older_scan():
 def test_logistics_jump_does_not_make_raise_unprofitable():
     cycle = {}
     result = choose(0, cycle, (4999,5000), floor=4000, rows=market(0, (4999,5000), external=(6000,7000,8000)))
-    assert result.target_price_kzt == 4999
+    from backend.app.commerce.profit_calculator import kaspi_logistics_per_unit, KASPI_COMMISSION_RATE, TAX_RATE
+    def margin(price):
+        return Decimal(price) * (1 - KASPI_COMMISSION_RATE - TAX_RATE) - kaspi_logistics_per_unit(price)
+    assert margin(result.target_price_kzt) >= margin(4999)
+    assert result.target_price_kzt <= 6900
 
 
 def test_shared_phase_is_read_across_workspaces_only_for_same_card_and_context(db_session):
@@ -122,3 +126,25 @@ def test_genuine_market_raise_keeps_new_margin_and_rebases_cycle():
     result = choose(0, cycle, (15000,15001))
     assert result.target_price_kzt == 15100
     assert Decimal(cycle['base_kzt']) == 15000
+
+
+def test_barwork_omega_catches_up_to_external_market_with_high_peer():
+    for cycle in ({}, {"version": 1, "participants": ["bar", "leo"], "base_kzt": "6077",
+                       "phase": "step", "phase_changed_at": datetime.now(UTC).isoformat()}):
+        rows = market(0, (6177, 7952), external=(7297, 7297, 7297), delivery=(2, 2))
+        for row in rows[2:]:
+            row["delivery_days"] = 2
+        decision = decide_automated_price(own_price_kzt=6177, safe_floor_kzt=5940,
+            unit_cost_kzt=3422, market_offers=rows, offers_complete=True, owned_cycle=cycle)
+        assert decision.target_price_kzt == 7296
+        assert decision.write_allowed
+
+
+def test_market_raise_still_avoids_unprofitable_tariff_crossing():
+    rows = market(0, (4999, 5000), external=(5001, 5002, 5003), delivery=(2, 2))
+    for row in rows[2:]:
+        row["delivery_days"] = 2
+    decision = decide_automated_price(own_price_kzt=4999, safe_floor_kzt=4000,
+        unit_cost_kzt=3000, market_offers=rows, offers_complete=True, owned_cycle={})
+    assert decision.target_price_kzt == 4999
+    assert not decision.write_allowed

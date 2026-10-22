@@ -158,3 +158,19 @@ def test_claim_reuses_state_locked_by_queue_query_and_loaded_policy(db_session):
         assert not any("FROM fast_dumping_policies " in sql for sql in reads)
         state_reads = [sql for sql in reads if "FROM fast_dumping_states " in sql]
         assert len(state_reads) == 1  # Due scheduler only, no redundant lock SELECT.
+
+
+def test_run_now_promotes_existing_scan_without_duplicate_or_second_write(db_session):
+    from backend.app.fast_dumping_api import run_fast_dumping_now
+    from sqlalchemy import func, select
+    with workspace_context(1):
+        job, state, _ = seed(db_session, "expedite")
+        job_id = job.id
+        db_session.commit()
+        result = run_fast_dumping_now(job.product_id, db_session)
+        assert result["queued"] and result["promoted"]
+        assert state.active_job_id == job_id
+        assert job.status == "queued_scan" and job.reason == "manual"
+        assert db_session.scalar(select(func.count()).select_from(FastDumpingJob)) == 1
+        again = run_fast_dumping_now(job.product_id, db_session)
+        assert not again["promoted"] and not again["queued"]
