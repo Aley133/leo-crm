@@ -22,6 +22,7 @@ from .fast_dumping_service import (
     serialize_claimed_job,
 )
 from .fast_dumping_diagnostics import trace_fast_operation
+from .fast_dumping_uow import fast_unit_of_work
 from .models import Product
 from .product_images import normalize_product_image_url
 from .workspace_context import LEGACY_WORKSPACE_ID, current_workspace_id, workspace_context
@@ -377,7 +378,7 @@ def claim(
             "throttled": True,
         }
     try:
-        with trace_fast_operation("claim", payload.workspace_id, lane=payload.queue_lane) as trace:
+        with fast_unit_of_work(db, payload.workspace_id), trace_fast_operation("claim", payload.workspace_id, lane=payload.queue_lane) as trace:
             try:
                 _validate_workspace_merchant(
                     db,
@@ -528,7 +529,7 @@ def scan_complete(
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
     try:
-        with workspace_context(payload.workspace_id), trace_fast_operation(
+        with workspace_context(payload.workspace_id), fast_unit_of_work(db, payload.workspace_id), trace_fast_operation(
             "scan_complete", payload.workspace_id, job_id=job_id,
         ) as trace:
             result = complete_scan(
@@ -557,7 +558,7 @@ def prepare_job_apply(
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
     try:
-        with workspace_context(payload.workspace_id), trace_fast_operation(
+        with workspace_context(payload.workspace_id), fast_unit_of_work(db, payload.workspace_id), trace_fast_operation(
             "prepare_apply", payload.workspace_id, job_id=job_id,
         ) as trace:
             result = prepare_apply(
@@ -582,7 +583,7 @@ def apply_complete(
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
     try:
-        with workspace_context(payload.workspace_id), trace_fast_operation(
+        with workspace_context(payload.workspace_id), fast_unit_of_work(db, payload.workspace_id), trace_fast_operation(
             "apply_complete", payload.workspace_id, job_id=job_id,
         ) as trace:
             trace.client_ms = round(payload.latency_seconds * 1000, 1)
@@ -611,7 +612,7 @@ def verify_complete(
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
     try:
-        with workspace_context(payload.workspace_id), trace_fast_operation(
+        with workspace_context(payload.workspace_id), fast_unit_of_work(db, payload.workspace_id), trace_fast_operation(
             "verify_complete", payload.workspace_id, job_id=job_id,
         ) as trace:
             result = complete_verification(

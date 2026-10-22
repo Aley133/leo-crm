@@ -123,7 +123,7 @@ jobs:
           git tag -f kaspi-fast-dumping-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/kaspi-fast-dumping-agent-latest --force
           gh release view kaspi-fast-dumping-agent-latest *> $null
-          $notes = "LEO Agent 1.2.9: два асинхронных обработчика — рынок отдельно от последовательных записей Merchant, буфер до 3 решений. Общий лимит обращений к CRM и single-flight сохранены. Изменение цены при меньшем положительном остатке Kaspi без увеличения этого остатка; фактическое количество передаётся CRM для проверки. Нулевой и неизвестный остаток защищены; переход с предзаказа на FIFO сохранён. Ответы pending явно передаются CRM для короткой первой проверки."
+          $notes = "LEO Agent 1.2.10: постоянное TCP/TLS-соединение с CRM вместо нового соединения на каждый claim, результат и heartbeat. Один запрос CRM за раз; общий backoff, лимиты очереди и single-flight сохранены. После сетевого разрыва соединение пересоздаётся через существующий механизм повторов. Включает все исправления 1.2.9."
           if ($LASTEXITCODE -ne 0) {
             gh release create kaspi-fast-dumping-agent-latest `
               --target "$env:GITHUB_SHA" `

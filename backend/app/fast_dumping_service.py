@@ -8,7 +8,7 @@ from time import monotonic
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, case, delete, or_, select, update
+from sqlalchemy import and_, case, delete, func, or_, select, update
 from sqlalchemy.orm import Session
 
 from .dumping_service import (
@@ -27,6 +27,7 @@ from .fast_dumping_pricing import (
     external_anchor_price,
 )
 from .models import MarketplaceAccount, Product
+from .fast_dumping_uow import locked_state, remember_locked_state
 from .product_images import normalize_product_image_url
 from .workspace_models import KaspiAccountCredential, Workspace
 
@@ -345,7 +346,10 @@ def _lock_state(
     workspace_id: int,
     product_id: int,
 ) -> FastDumpingState | None:
-    return db.scalar(
+    cached = locked_state(db, workspace_id, product_id)
+    if cached is not None:
+        return cached
+    state = db.scalar(
         select(FastDumpingState)
         .where(
             FastDumpingState.workspace_id == workspace_id,
@@ -353,6 +357,8 @@ def _lock_state(
         )
         .with_for_update()
     )
+    remember_locked_state(db, state)
+    return state
 
 
 def _clear_active_job(state: FastDumpingState, job: FastDumpingJob) -> None:
@@ -656,8 +662,8 @@ def _schedule_inventory_transitions(db: Session, workspace_id: int, limit: int) 
     # Recover arrivals missed by an older deployment; do not wait for the
     # regular price deadline, and never interrupt an in-flight SKU operation.
     # First select the small durable state table, then use the established
-    # product/status/id job index for each candidate. This avoids a correlated
-    # JSON/history scan over every row in fast_dumping_jobs on every claim.
+    # product/status/id job index for a bounded batch of candidates, rather than
+    # one round trip per candidate or a correlated full history scan.
     states = db.scalars(
         select(FastDumpingState)
         .join(FastDumpingPolicy, FastDumpingPolicy.id == FastDumpingState.policy_id)
@@ -675,18 +681,20 @@ def _schedule_inventory_transitions(db: Session, workspace_id: int, limit: int) 
         .limit(max(1, min(100, int(limit))))
         .with_for_update(skip_locked=True, of=FastDumpingState)
     ).all()
+    if not states:
+        return 0
+    latest = (select(FastDumpingJob.product_id, func.max(FastDumpingJob.id).label("job_id"))
+        .where(FastDumpingJob.workspace_id == workspace_id,
+               FastDumpingJob.product_id.in_([s.product_id for s in states]),
+               FastDumpingJob.status == "applied")
+        .group_by(FastDumpingJob.product_id).subquery())
+    applied_modes = dict(db.execute(select(FastDumpingJob.product_id,
+        FastDumpingJob.decision_json["fulfillment_mode"].as_string())
+        .join(latest, latest.c.job_id == FastDumpingJob.id)
+        .where(FastDumpingJob.workspace_id == workspace_id)).all())
     created_count = 0
     for state in states:
-        last_applied_mode = db.scalar(
-            select(FastDumpingJob.decision_json["fulfillment_mode"].as_string())
-            .where(
-                FastDumpingJob.workspace_id == workspace_id,
-                FastDumpingJob.product_id == state.product_id,
-                FastDumpingJob.status == "applied",
-            )
-            .order_by(FastDumpingJob.id.desc())
-            .limit(1)
-        )
+        last_applied_mode = applied_modes.get(state.product_id)
         if last_applied_mode != "preorder":
             continue
 

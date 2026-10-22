@@ -18,6 +18,7 @@ from .dumping_service import (
 )
 from .fast_dumping_models import FastDumpingJob, FastDumpingPolicy, FastDumpingState
 from .models import Product
+from .fast_dumping_uow import workspace_row
 
 
 OFFER_VERIFY_DELAY_SECONDS = 15
@@ -179,24 +180,9 @@ def _complete_scan_v2(
     job = db.get(FastDumpingJob, job_id)
     if job is None or job.workspace_id != workspace_id:
         return result
-    state = db.scalar(
-        select(FastDumpingState).where(
-            FastDumpingState.workspace_id == workspace_id,
-            FastDumpingState.product_id == job.product_id,
-        )
-    )
-    policy = db.scalar(
-        select(FastDumpingPolicy).where(
-            FastDumpingPolicy.id == job.policy_id,
-            FastDumpingPolicy.workspace_id == workspace_id,
-        )
-    )
-    product = db.scalar(
-        select(Product).where(
-            Product.id == job.product_id,
-            Product.workspace_id == workspace_id,
-        )
-    )
+    state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
+    policy = workspace_row(db, FastDumpingPolicy, job.policy_id, workspace_id)
+    product = workspace_row(db, Product, job.product_id, workspace_id)
     if state is None or policy is None or product is None or not policy.enabled or not product.sale_enabled:
         return result
 
@@ -381,18 +367,8 @@ def _prepare_apply_v2(
         expected_status="leased_apply",
     )
     state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
-    policy = db.scalar(
-        select(FastDumpingPolicy).where(
-            FastDumpingPolicy.id == job.policy_id,
-            FastDumpingPolicy.workspace_id == workspace_id,
-        )
-    )
-    product = db.scalar(
-        select(Product).where(
-            Product.id == job.product_id,
-            Product.workspace_id == workspace_id,
-        )
-    )
+    policy = workspace_row(db, FastDumpingPolicy, job.policy_id, workspace_id)
+    product = workspace_row(db, Product, job.product_id, workspace_id)
     if state is None or policy is None or product is None:
         raise ValueError("Fast dumping product state is inconsistent")
     if state.active_job_id != job.id or state.state_version != job.state_version:
@@ -543,12 +519,7 @@ def _complete_apply_v2(
         write_payload=write_payload,
     )
     job = db.get(FastDumpingJob, job_id)
-    state = db.scalar(
-        select(FastDumpingState).where(
-            FastDumpingState.workspace_id == workspace_id,
-            FastDumpingState.product_id == (job.product_id if job else -1),
-        )
-    )
+    state = svc._lock_state(db, workspace_id=workspace_id, product_id=(job.product_id if job else -1))
     if job is None or state is None:
         return result
     if bool(write_payload.get("accepted")) and not bool(write_payload.get("verified")):
@@ -672,12 +643,7 @@ def _complete_verification_v2(
     )
     job = db.get(FastDumpingJob, job_id)
     if job is not None:
-        state = db.scalar(
-            select(FastDumpingState).where(
-                FastDumpingState.workspace_id == workspace_id,
-                FastDumpingState.product_id == job.product_id,
-            )
-        )
+        state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
         if state is not None:
             # Preserve the normal interval after success; persistent mismatches
             # must not immediately reclaim the worker ahead of other products.
