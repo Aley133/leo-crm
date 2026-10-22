@@ -507,3 +507,37 @@ def test_fast_batch_recovery_and_operation_lock_reuse_on_postgres(postgres_facto
             # The original UOW is still open, but its former lock expired.
             assert _lock_state(first, workspace_id=1, product_id=product.id) is state
             first.commit()
+
+
+def test_fast_maintenance_commits_durable_queues_before_http_claim(postgres_factory, monkeypatch):
+    from backend.app import fast_dumping_maintenance as maintenance
+    from backend.app.fast_dumping_models import FastDumpingPolicy
+    from backend.app.fast_dumping_service import claim_job, ensure_state
+    from backend.app.inventory_models import InventoryBatch
+    from backend.app.workspace_context import workspace_context
+    from backend.app.workspace_models import Workspace
+    with postgres_factory() as seed:
+        for workspace_id in (1, 3):
+            with workspace_context(workspace_id):
+                seed.add(Workspace(id=workspace_id, name=f"Shop {workspace_id}", slug=f"pg-shop-{workspace_id}", is_active=True))
+                product = Product(workspace_id=workspace_id, name="Background", kaspi_product_id=f"BG-{workspace_id}", sale_enabled=True)
+                seed.add(product)
+                seed.flush()
+                seed.add(InventoryBatch(workspace_id=workspace_id, product_id=product.id, received_at=datetime.now(UTC),
+                    quantity_received=2, quantity_remaining=2, unit_cost=10))
+                policy = FastDumpingPolicy(workspace_id=workspace_id, product_id=product.id, enabled=True)
+                seed.add(policy)
+                seed.flush()
+                ensure_state(seed, policy=policy, workspace_id=workspace_id)
+                seed.commit()
+    monkeypatch.setattr(maintenance, "SessionLocal", postgres_factory)
+    monkeypatch.setattr(maintenance, "_pool_has_room", lambda: True)
+    maintenance.run_maintenance_cycle()
+    assert maintenance.STATUS["workspaces"] == 2
+    assert maintenance.STATUS["failed_workspaces"] == 0
+    for workspace_id in (1, 3):
+        with postgres_factory() as db, workspace_context(workspace_id):
+            db.execute(text("SET LOCAL lock_timeout = '1s'"))
+            job = claim_job(db, workspace_id=workspace_id, agent_id="agent", maintain_queue=False)
+            assert job is not None and job.workspace_id == workspace_id
+            db.commit()

@@ -1,4 +1,5 @@
 import os
+import re
 from typing import Any
 
 from sqlalchemy import create_engine
@@ -113,6 +114,13 @@ def _engine_options(database_url: str) -> dict[str, Any]:
 
 DATABASE_URL = _database_url()
 engine = create_engine(DATABASE_URL, **_engine_options(DATABASE_URL))
+
+
+def database_region_hint() -> str | None:
+    # Region only: never expose the host, project reference, user or password.
+    match = re.fullmatch(r"aws-\d+-([a-z]+-[a-z]+-\d+)\.pooler\.supabase\.com", engine.url.host or "")
+    return match.group(1) if match else None
+
 
 SessionLocal = sessionmaker(
     bind=engine,

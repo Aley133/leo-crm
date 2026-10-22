@@ -7,7 +7,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.exc import OperationalError, ProgrammingError
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, load_only
 
 from .auth import require_service_token
 from .db import get_db
@@ -364,7 +364,9 @@ def list_dumping_products(db: Session = Depends(get_db)) -> list[dict]:
 @router.get("/feed-status")
 def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
     feed = db.scalar(
-        select(KaspiXmlFeed)
+        select(KaspiXmlFeed).options(load_only(
+            KaspiXmlFeed.id, KaspiXmlFeed.merchant_id, KaspiXmlFeed.source_filename,
+            KaspiXmlFeed.imported_at, KaspiXmlFeed.generated_at))
         .where(KaspiXmlFeed.active.is_(True))
         .order_by(KaspiXmlFeed.id.desc())
         .limit(1)
@@ -380,18 +382,20 @@ def read_dumping_feed_status(db: Session = Depends(get_db)) -> dict:
             "merchant_id": None,
             "imported_at": None,
             "generated_at": None,
-            "feed_url": _feed_url(db),
+            "feed_url": None,
+            "publication_enabled": False,
         }
     return {
         "configured": True,
-        "ready": bool(feed.merchant_id and feed.generated_xml),
+        "ready": False,
         "legacy_catalog_detected": False,
         "product_count": int(db.scalar(select(func.count(Product.id))) or 0),
         "source_filename": feed.source_filename,
         "merchant_id": feed.merchant_id,
         "imported_at": feed.imported_at,
         "generated_at": feed.generated_at,
-        "feed_url": _feed_url(db),
+        "feed_url": None,
+            "publication_enabled": False,
     }
 
 
@@ -583,39 +587,14 @@ def queue_dumping_run(product_id: int, db: Session = Depends(get_db)) -> dict:
 
 
 @public_router.get("/feeds/kaspi/catalog.xml", response_class=Response)
-def read_public_kaspi_feed(db: Session = Depends(get_db)) -> Response:
-    with workspace_context(LEGACY_WORKSPACE_ID):
-        feed = db.scalar(
-            select(KaspiXmlFeed)
-            .where(KaspiXmlFeed.active.is_(True))
-            .order_by(KaspiXmlFeed.id.desc())
-            .limit(1)
-        )
-    if feed is None or not feed.generated_xml:
-        raise HTTPException(status_code=404, detail="Kaspi XML feed is not configured")
-    return Response(content=feed.generated_xml, media_type="application/xml; charset=utf-8")
+def read_public_kaspi_feed() -> Response:
+    # Retire the former automatic publication source together with removal of
+    # the Fast safety mirror. Never return an empty catalog (which could remove
+    # offers) or stale XML (which could overwrite direct HTTP mutations).
+    raise HTTPException(status_code=410, detail="Automatic XML feed retired; offers are managed by HTTP",
+                        headers={"Cache-Control": "no-store"})
 
 
 @public_router.get("/feeds/kaspi/{workspace_slug}/catalog.xml", response_class=Response)
-def read_workspace_kaspi_feed(
-    workspace_slug: str,
-    db: Session = Depends(get_db),
-) -> Response:
-    workspace = db.scalar(
-        select(Workspace).where(
-            Workspace.slug == workspace_slug,
-            Workspace.is_active.is_(True),
-        )
-    )
-    if workspace is None:
-        raise HTTPException(status_code=404, detail="Kaspi XML feed is not configured")
-    with workspace_context(workspace.id):
-        feed = db.scalar(
-            select(KaspiXmlFeed)
-            .where(KaspiXmlFeed.active.is_(True))
-            .order_by(KaspiXmlFeed.id.desc())
-            .limit(1)
-        )
-    if feed is None or not feed.generated_xml:
-        raise HTTPException(status_code=404, detail="Kaspi XML feed is not configured")
-    return Response(content=feed.generated_xml, media_type="application/xml; charset=utf-8")
+def read_workspace_kaspi_feed(workspace_slug: str) -> Response:
+    return read_public_kaspi_feed()

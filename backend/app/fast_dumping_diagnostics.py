@@ -27,6 +27,9 @@ class FastTrace:
     queries: int = 0
     sql_seconds: float = 0
     client_ms: float | None = None
+    agent_version: str | None = None
+    concurrency: int | None = None
+    slowest_sql: dict | None = None
     tables: dict = field(default_factory=dict)
 
 
@@ -54,6 +57,9 @@ def _after_sql(_conn, _cursor, _statement, _parameters, context, _many):
     trace, table, started = timing
     elapsed = perf_counter() - started
     trace.sql_seconds += elapsed
+    if trace.slowest_sql is None or elapsed * 1000 > trace.slowest_sql["ms"]:
+        verb = str(_statement).lstrip().split(None, 1)[0].upper()
+        trace.slowest_sql = {"table": table, "verb": verb if verb in {"SELECT", "UPDATE", "INSERT", "DELETE"} else "other", "ms": elapsed * 1000}
     count, seconds = trace.tables.get(table, (0, 0))
     trace.tables[table] = (count + 1, seconds + elapsed)
 
@@ -79,6 +85,8 @@ def trace_fast_operation(stage: str, workspace_id: int, *, job_id=None, lane="al
             "outcome": "error" if failed else trace.outcome,
             "elapsed_ms": round((perf_counter() - started) * 1000, 1),
             "client_ms": trace.client_ms,
+            "agent_version": trace.agent_version, "concurrency": trace.concurrency,
+            "slowest_sql": ({**trace.slowest_sql, "ms": round(trace.slowest_sql["ms"], 1)} if trace.slowest_sql else None),
             "sql_ms": round(trace.sql_seconds * 1000, 1), "queries": trace.queries,
             "tables": {k: {"count": v[0], "ms": round(v[1] * 1000, 1)}
                        for k, v in trace.tables.items()},

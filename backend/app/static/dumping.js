@@ -185,21 +185,13 @@ const scanMeta = (row) => {
 const renderFeedStatus = (feed) => {
   const feedLink = document.querySelector("#public-feed-link");
   const feedPath = document.querySelector("#public-feed-path");
-  if (feedLink && feed.feed_url) feedLink.href = feed.feed_url;
-  if (feedPath && feed.feed_url) feedPath.textContent = feed.feed_url;
-  xmlSource.classList.toggle("ready", Boolean(feed.ready));
+  if (feedLink) feedLink.hidden = true;
+  if (feedPath) feedPath.textContent = "Цена, остаток и предзаказ через Fast Agent";
+  xmlSource.classList.toggle("ready", Boolean(feed.configured));
   xmlSource.classList.toggle("missing", !feed.configured);
-  if (!feed.configured) {
-    xmlSourceTitle.textContent = "XML ещё не импортирован";
-    xmlSourceMeta.innerHTML = 'Демпинг использует XML из раздела «Товары». <a href="/crm/products">Перейти к товарам</a>';
-    xmlSourceStatus.textContent = "Нет источника";
-    return;
-  }
-  xmlSourceTitle.textContent = feed.source_filename || "Последний XML каталога";
-  const merchant = feed.merchant_id ? `merchantId ${feed.merchant_id}` : "merchantId не найден";
-  const imported = feed.imported_at ? `импортирован ${dateTime(feed.imported_at)}` : "дата импорта неизвестна";
-  xmlSourceMeta.textContent = `${merchant} · ${imported} · используется Pricing Engine`;
-  xmlSourceStatus.textContent = feed.ready ? "Готов к публикации" : "Нужен merchantId";
+  xmlSourceTitle.textContent = feed.source_filename || "Каталог CRM";
+  xmlSourceMeta.textContent = "Автоматическая выдача XML отключена. Предложения обновляет Fast Agent через HTTP.";
+  xmlSourceStatus.textContent = feed.configured ? "Каталог сохранён" : "Нет архива";
 };
 
 const renderDumpingRuntime = (snapshot) => {

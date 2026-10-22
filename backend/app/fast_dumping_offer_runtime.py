@@ -614,7 +614,7 @@ def _complete_verification_v2(
         started = svc._aware(state.last_applied_at) or svc._aware(job.created_at) or now
         elapsed = max(0, (now - started).total_seconds())
         if attempts <= OFFER_VERIFY_MAX_ATTEMPTS and elapsed < OFFER_VERIFY_MAX_SECONDS:
-            delay = 15 if attempts < 4 else 30 if attempts < 8 else 60 if attempts < 16 else 120
+            delay = 30 if attempts == 1 else 60 if attempts == 2 else 120 if attempts < 6 else 180
             delay = min(delay, max(1, int(OFFER_VERIFY_MAX_SECONDS - elapsed)))
             verify_at = now + timedelta(seconds=delay)
             job.status = "queued_verify"

@@ -8,7 +8,7 @@ from time import monotonic
 from typing import Any
 from uuid import uuid4
 
-from sqlalchemy import and_, case, delete, func, or_, select, update
+from sqlalchemy import and_, case, delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from .dumping_service import (
@@ -683,15 +683,15 @@ def _schedule_inventory_transitions(db: Session, workspace_id: int, limit: int) 
     ).all()
     if not states:
         return 0
-    latest = (select(FastDumpingJob.product_id, func.max(FastDumpingJob.id).label("job_id"))
+    latest_mode = (select(FastDumpingJob.decision_json["fulfillment_mode"].as_string())
         .where(FastDumpingJob.workspace_id == workspace_id,
-               FastDumpingJob.product_id.in_([s.product_id for s in states]),
+               FastDumpingJob.product_id == FastDumpingState.product_id,
                FastDumpingJob.status == "applied")
-        .group_by(FastDumpingJob.product_id).subquery())
-    applied_modes = dict(db.execute(select(FastDumpingJob.product_id,
-        FastDumpingJob.decision_json["fulfillment_mode"].as_string())
-        .join(latest, latest.c.job_id == FastDumpingJob.id)
-        .where(FastDumpingJob.workspace_id == workspace_id)).all())
+        .order_by(FastDumpingJob.id.desc()).limit(1).correlate(FastDumpingState)
+        .scalar_subquery())
+    applied_modes = dict(db.execute(select(FastDumpingState.product_id, latest_mode)
+        .where(FastDumpingState.workspace_id == workspace_id,
+               FastDumpingState.id.in_([state.id for state in states]))).all())
     created_count = 0
     for state in states:
         last_applied_mode = applied_modes.get(state.product_id)
@@ -788,15 +788,8 @@ def schedule_due_scans(
     return priority_queued + len(pending)
 
 
-def claim_job(
-    db: Session,
-    *,
-    workspace_id: int,
-    agent_id: str,
-    queue_lane: str = "all",
-) -> FastDumpingJob | None:
-    if queue_lane not in {"all", "scan", "offer"}:
-        raise ValueError("Unknown Fast queue lane")
+def maintain_workspace_queue(db: Session, *, workspace_id: int) -> None:
+    """Queue preparation/recovery; production runs it outside the claim request."""
     from .preorder_modes import reconcile_preorder_policies
     reconcile_preorder_policies(db, workspace_id)
     if _reserve_supply_recovery(workspace_id):
@@ -811,6 +804,20 @@ def claim_job(
         workspace_id=workspace_id,
         recover_inventory_transitions=_reserve_inventory_recovery(workspace_id),
     )
+
+
+def claim_job(
+    db: Session,
+    *,
+    workspace_id: int,
+    agent_id: str,
+    queue_lane: str = "all",
+    maintain_queue: bool = True,
+) -> FastDumpingJob | None:
+    if queue_lane not in {"all", "scan", "offer"}:
+        raise ValueError("Unknown Fast queue lane")
+    if maintain_queue:
+        maintain_workspace_queue(db, workspace_id=workspace_id)
     now = utcnow()
     if queue_lane == "scan":
         # Bound the handoff buffer so a fast reader cannot create hundreds of

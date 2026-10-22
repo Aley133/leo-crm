@@ -1634,7 +1634,7 @@ def test_reprice_preserves_lower_positive_kaspi_stock(db_session, effective):
         assert payload["target_stock_count"] == 2
 
 
-@pytest.mark.parametrize("attempts,elapsed,delay", [(0, 0, 15), (3, 100, 30), (7, 300, 60), (15, 600, 120), (15, 1195, 5), (15, 1201, None)])
+@pytest.mark.parametrize("attempts,elapsed,delay", [(0, 0, 30), (1, 100, 60), (3, 300, 120), (7, 600, 180), (15, 1195, 5), (15, 1201, None)])
 def test_pending_mutations_back_off_with_wall_clock_limit(db_session, attempts, elapsed, delay):
     from backend.app import fast_dumping_offer_runtime as runtime
     _product, _batch, policy, state = _seed_fast_product(db_session)
@@ -1716,3 +1716,47 @@ def test_inventory_recovery_batches_latest_modes_and_ignores_failed_history(db_s
             event.remove(db_session.bind, "before_cursor_execute", record)
         assert len(reads) == 2
         assert state.active_job_id is None
+
+
+@pytest.mark.parametrize("immediate", [True, False])
+def test_fast_completion_never_reads_or_updates_legacy_xml(db_session, immediate):
+    from backend.app.dumping_models import KaspiXmlFeed
+    product, _, policy, _ = _seed_fast_product(db_session)
+    with workspace_context(1):
+        feed = KaspiXmlFeed(source_xml="legacy-source", generated_xml="legacy-generated", active=True)
+        db_session.add(feed)
+        job, _ = queue_scan(db_session, policy=policy, workspace_id=1, reason="test")
+        db_session.commit()
+    leased = _claim(db_session, 1)
+    with workspace_context(1):
+        complete_scan(db_session, workspace_id=1, job_id=job.id, agent_id="fast-agent",
+            lease_token=leased.lease_token, succeeded=True,
+            market_payload=_market(own="20000", competitor="18000"))
+        db_session.commit()
+    leased = _claim(db_session, 1)
+    with workspace_context(1):
+        prepared = prepare_apply(db_session, workspace_id=1, job_id=job.id,
+            agent_id="fast-agent", lease_token=leased.lease_token)
+        assert prepared["ready"]
+        db_session.commit()
+        def reject_xml(_conn, _cursor, statement, *_args):
+            assert "kaspi_xml_feeds" not in statement.lower()
+        event.listen(db_session.bind, "before_cursor_execute", reject_xml)
+        try:
+            complete_apply(db_session, workspace_id=1, job_id=job.id, agent_id="fast-agent",
+                lease_token=leased.lease_token, write_payload={"accepted": True, "verified": immediate,
+                    "error_code": None if immediate else "offer_state_pending",
+                    "observed_own_price_kzt": prepared["target_price_kzt"]})
+            db_session.commit()
+            if not immediate:
+                job.not_before_at = datetime.now(UTC) - timedelta(seconds=1)
+                db_session.commit()
+                leased = _claim(db_session, 1)
+                complete_verification(db_session, workspace_id=1, job_id=job.id, agent_id="fast-agent",
+                    lease_token=leased.lease_token, verification_succeeded=True,
+                    observed_own_price_kzt=prepared["target_price_kzt"])
+                db_session.commit()
+        finally:
+            event.remove(db_session.bind, "before_cursor_execute", reject_xml)
+        assert job.status == "applied"
+        assert feed.generated_xml == "legacy-generated"

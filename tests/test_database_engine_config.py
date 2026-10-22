@@ -83,3 +83,14 @@ def test_unrelated_postgresql_url_is_not_rewritten(monkeypatch) -> None:
     monkeypatch.delenv("SUPABASE_TRANSACTION_POOLER_ENABLED", raising=False)
 
     assert _database_url() == source
+
+
+def test_database_region_hint_exposes_only_region(monkeypatch):
+    from types import SimpleNamespace
+    from sqlalchemy.engine import make_url
+    from backend.app import db
+    monkeypatch.setattr(db, "engine", SimpleNamespace(url=make_url(
+        "postgresql://private-user:private-password@aws-0-eu-central-1.pooler.supabase.com/private-db")))
+    assert db.database_region_hint() == "eu-central-1"
+    monkeypatch.setattr(db, "engine", SimpleNamespace(url=make_url("sqlite://")))
+    assert db.database_region_hint() is None
