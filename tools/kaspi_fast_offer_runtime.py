@@ -421,11 +421,16 @@ async def process_apply(
                 elif live.stock_count < crm_stock and not (
                     isinstance(live.preorder_days, int) and live.preorder_days > 0
                 ):
-                    error_code = "kaspi_zero_vs_crm_stock" if live.stock_count == 0 else "kaspi_stock_lower_than_crm"
-                    error_message = (
-                        f"Защитная блокировка: CRM FIFO={crm_stock}, Kaspi stock={live.stock_count}. "
-                        "Fast Agent не увеличивает остаток поверх более низкого Kaspi, чтобы не воскресить проданную единицу."
-                    )
+                    if live.stock_count > 0 and live.preorder_days == 0:
+                        # A sale/reservation can reach Kaspi before the CRM import.
+                        # Reprice the remaining units without restoring sold stock.
+                        crm_stock = live.stock_count
+                    else:
+                        error_code = "kaspi_zero_vs_crm_stock" if live.stock_count == 0 else "kaspi_stock_lower_than_crm"
+                        error_message = (
+                            f"Защитная блокировка: CRM FIFO={crm_stock}, Kaspi stock={live.stock_count}. "
+                            "Fast Agent не увеличивает остаток поверх более низкого Kaspi, чтобы не воскресить проданную единицу."
+                        )
             if error_code is None and live.pending and not _matches(
                 live,
                 mode=mode,
@@ -478,6 +483,9 @@ async def process_apply(
                     )
                     if verified:
                         observed_price = Decimal(target_price)
+                    else:
+                        error_code = "offer_state_pending"
+                        error_message = json.dumps(_state_summary(after), ensure_ascii=False)
                 else:
                     error_code = "merchant_write_failed"
                     error_message = str(write_result.get("error_message") or "Kaspi отклонил realtime write")
@@ -490,6 +498,7 @@ async def process_apply(
             "operation_id": write_result.get("operation_id") if write_result else None,
             "latency_seconds": round(time.monotonic() - write_started, 1),
             "observed_own_price_kzt": None if observed_price is None else format(observed_price, "f"),
+            "effective_stock_count": crm_stock if mode == "inventory" and accepted and crm_stock > 0 else None,
             "session_refreshed": refreshed,
             "error_code": error_code,
             "error_message": error_message,

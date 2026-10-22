@@ -22,6 +22,7 @@ from .models import Product
 
 OFFER_VERIFY_DELAY_SECONDS = 15
 OFFER_VERIFY_MAX_ATTEMPTS = 80
+OFFER_VERIFY_MAX_SECONDS = 20 * 60
 SAFE_INVENTORY_SYNC_STATUSES = {
     "watching",
     "floor_limited",
@@ -518,6 +519,21 @@ def _complete_apply_v2(
     lease_token: str,
     write_payload: dict[str, Any],
 ) -> dict[str, Any]:
+    effective_stock = write_payload.get("effective_stock_count")
+    if effective_stock is not None:
+        job = svc._validate_lease(
+            db.get(FastDumpingJob, job_id), workspace_id=workspace_id,
+            agent_id=agent_id, lease_token=lease_token, expected_status="leased_apply",
+        )
+        decision = dict(job.decision_json or {})
+        requested_stock = int(decision.get("stock_count") or 0)
+        if (decision.get("fulfillment_mode", "inventory") != "inventory"
+                or not isinstance(effective_stock, int) or isinstance(effective_stock, bool)
+                or not 0 < effective_stock <= requested_stock):
+            raise ValueError("Invalid effective inventory stock")
+        decision["crm_stock_count"] = requested_stock
+        decision["stock_count"] = effective_stock
+        job.decision_json = decision
     result = _ORIGINALS["complete_apply"](
         db,
         workspace_id=workspace_id,
@@ -621,8 +637,15 @@ def _complete_verification_v2(
         if error_message:
             write_json["last_offer_verify"] = str(error_message)[:2000]
         job.write_json = write_json
-        if attempts <= OFFER_VERIFY_MAX_ATTEMPTS:
-            verify_at = svc.utcnow() + timedelta(seconds=OFFER_VERIFY_DELAY_SECONDS)
+        # Long-running Kaspi mutations must not consume the single Agent on
+        # a fixed 15-second loop. Keep the original wall-clock safety limit.
+        now = svc.utcnow()
+        started = svc._aware(state.last_applied_at) or svc._aware(job.created_at) or now
+        elapsed = max(0, (now - started).total_seconds())
+        if attempts <= OFFER_VERIFY_MAX_ATTEMPTS and elapsed < OFFER_VERIFY_MAX_SECONDS:
+            delay = 15 if attempts < 4 else 30 if attempts < 8 else 60 if attempts < 16 else 120
+            delay = min(delay, max(1, int(OFFER_VERIFY_MAX_SECONDS - elapsed)))
+            verify_at = now + timedelta(seconds=delay)
             job.status = "queued_verify"
             job.agent_id = None
             job.lease_until = None
@@ -630,8 +653,8 @@ def _complete_verification_v2(
             job.not_before_at = verify_at
             state.status = "verifying"
             state.status_reason = (
-                f"Kaspi mutation IN_PROGRESS (проверка {attempts}/{OFFER_VERIFY_MAX_ATTEMPTS}). "
-                "Новый write по SKU заблокирован до завершения."
+                f"Kaspi mutation IN_PROGRESS (проверка {attempts}, ожидание {int(elapsed)} с). "
+                f"Следующая проверка через {delay} с; новый write по SKU заблокирован."
             )
             state.next_scan_at = verify_at
             return {"status": state.status, "verified": False, "pending": True, "verify_at": verify_at}

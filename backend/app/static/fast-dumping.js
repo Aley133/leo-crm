@@ -28,7 +28,6 @@ let rows = [];
 let searchTimer = null;
 let searchController = null;
 let loading = false;
-const offersCache = new Map();
 
 const attentionStatuses = new Set(["price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error","apply_failed","merchant_write_failed","automation_market_incomplete","automation_market_stale"]);
 const workingStatuses = new Set(["queued","scanning","queued_apply","preparing_apply","applying","verifying"]);
@@ -103,6 +102,8 @@ const offersTable = (offers) => {
     return `<tr class="${rowClass}"><td>${escapeHtml(offer.merchant_name || offer.merchant_id || "—")}</td><td>${money(offer.price_kzt)}</td><td>${role}</td><td>${escapeHtml(delivery)}</td><td>${offer.is_owned_group ? "—" : offer.used_for_dumping ? "Да" : "Нет"}</td><td>${escapeHtml(decision)}</td></tr>`;
   }).join("")}</tbody></table></div>`;
 };
+
+const diagnosticView = (payload) => `${offersTable(payload.offers || [])}${payload.diagnostic ? `<h4>Последнее задание и ответ Kaspi</h4><pre class="fast-job-diagnostic">${escapeHtml(JSON.stringify(payload.diagnostic, null, 2))}</pre>` : ""}`;
 
 const renderFloor = () => {
   const limited = rows.filter(isFloor);
@@ -194,7 +195,9 @@ const render = (payload) => {
   renderAttention();
   renderDisabled();
   const visible = rows.filter(rowMatches);
+  const openDetails = new Set(Array.from(list.querySelectorAll(".fast-details[open]")).map(el => el.dataset.productId));
   list.innerHTML = visible.map(card).join("");
+  list.querySelectorAll(".fast-details").forEach(el => { if (openDetails.has(el.dataset.productId)) el.open = true; });
   empty.classList.toggle("hidden", rows.length > 0);
   document.querySelector("#rows-label").textContent = `${visible.length} из ${rows.length} · обновлено ${dateTime(payload.checked_at)}`;
 };
@@ -412,7 +415,6 @@ editRemove.addEventListener("click", async () => {
   try {
     await request(`/api/fast-dumping/products/${productId}`, {method:"DELETE"});
     editDialog.close();
-    offersCache.delete(productId);
     message.textContent = "Товар удалён из Fast Dumping. Карточка, остатки и текущий offer Kaspi не изменялись.";
     await loadPage();
   } catch (error) {
@@ -446,19 +448,12 @@ list.addEventListener("toggle", async (event) => {
   const details = event.target.closest(".fast-details");
   if (!details || !details.open || details.dataset.loading === "true") return;
   const productId = Number(details.dataset.productId);
-  const version = Number(details.dataset.stateVersion || 0);
   const container = details.querySelector(".offers-container");
-  const cached = offersCache.get(productId);
-  if (cached?.version === version) {
-    container.innerHTML = offersTable(cached.offers);
-    return;
-  }
   details.dataset.loading = "true";
   container.innerHTML = '<p class="fast-card-reason">Загружаю офферы…</p>';
   try {
     const payload = await request(`/api/fast-dumping/products/${productId}/offers`);
-    offersCache.set(productId, {version:Number(payload.state_version || 0), offers:payload.offers || []});
-    container.innerHTML = offersTable(payload.offers || []);
+    container.innerHTML = diagnosticView(payload);
   } catch (error) {
     container.innerHTML = `<p class="fast-card-reason">${escapeHtml(error.message || "Не удалось загрузить офферы")}</p>`;
   } finally {

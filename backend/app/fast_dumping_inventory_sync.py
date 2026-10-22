@@ -98,7 +98,8 @@ def _complete_scan(
     needs_confirmation = confirmed_decision is not None and (
         confirmed_decision.get("fulfillment_mode", "inventory") != "inventory"
         or int(confirmed_decision.get("preorder_days") or 0) != 0
-        or int(confirmed_decision.get("stock_count") or 0) != stock
+        or (int(confirmed_decision.get("stock_count") or 0) != stock
+            and int(confirmed_decision.get("crm_stock_count") or 0) != stock)
     )
     if int(previous_desired_stock) == int(stock) and not needs_confirmation:
         return result

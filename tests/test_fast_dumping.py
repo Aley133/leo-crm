@@ -1596,3 +1596,67 @@ def test_attention_error_takes_priority_over_previous_floor_decision(db_session)
         payload = list_fast_dumping_products(db_session)
     assert payload["summary"]["attention"] == 1
     assert payload["summary"]["floor_limited"] == 0
+
+
+@pytest.mark.parametrize("effective", [2, 0, 6])
+def test_reprice_preserves_lower_positive_kaspi_stock(db_session, effective):
+    from backend.app import fast_dumping_offer_runtime as runtime
+    _product, _batch, policy, state = _seed_fast_product(db_session, quantity=5)
+    with workspace_context(1):
+        job, _ = queue_scan(db_session, policy=policy, workspace_id=1, reason="test")
+        db_session.commit()
+    scan = _claim(db_session, 1)
+    with workspace_context(1):
+        complete_scan(db_session, workspace_id=1, job_id=job.id, agent_id="fast-agent",
+            lease_token=scan.lease_token, succeeded=True,
+            market_payload=_market(own="20000", competitor="19800"))
+        db_session.commit()
+    apply = _claim(db_session, 1)
+    with workspace_context(1):
+        prepare_apply(db_session, workspace_id=1, job_id=job.id, agent_id="fast-agent",
+            lease_token=apply.lease_token)
+        args = dict(workspace_id=1, job_id=job.id, agent_id="fast-agent",
+            lease_token=apply.lease_token, write_payload={"accepted": True,
+                "verified": False, "effective_stock_count": effective,
+                "error_code": "offer_state_pending"})
+        if effective != 2:
+            with pytest.raises(ValueError, match="Invalid effective inventory stock"):
+                runtime._complete_apply_v2(db_session, **args)
+            assert job.decision_json["stock_count"] == 5
+            return
+        runtime._complete_apply_v2(db_session, **args)
+        assert state.inventory_on_hand == 5  # Physical FIFO is not rewritten.
+        assert job.decision_json["crm_stock_count"] == 5
+        assert job.decision_json["stock_count"] == 2
+        job.status = "leased_verify"
+        payload = runtime._serialize_claimed_job_v2(db_session, job=job, workspace_id=1)
+        assert payload["target_stock_count"] == 2
+
+
+@pytest.mark.parametrize("attempts,elapsed,delay", [(0, 0, 15), (3, 100, 30), (7, 300, 60), (15, 600, 120), (15, 1195, 5), (15, 1201, None)])
+def test_pending_mutations_back_off_with_wall_clock_limit(db_session, attempts, elapsed, delay):
+    from backend.app import fast_dumping_offer_runtime as runtime
+    _product, _batch, policy, state = _seed_fast_product(db_session)
+    with workspace_context(1):
+        job, _ = queue_scan(db_session, policy=policy, workspace_id=1, reason="test")
+        job.status = "leased_verify"
+        job.agent_id = "fast-agent"
+        job.lease_token = "lease-token"
+        job.lease_until = datetime.now(UTC) + timedelta(minutes=5)
+        job.write_json = {"accepted": True, "offer_verify_attempts": attempts}
+        state.last_applied_at = datetime.now(UTC) - timedelta(seconds=elapsed)
+        db_session.commit()
+        now = datetime.now(UTC)
+        result = runtime._complete_verification_v2(db_session, workspace_id=1,
+            job_id=job.id, agent_id="fast-agent", lease_token="lease-token",
+            verification_succeeded=False, observed_own_price_kzt=None,
+            error_code="kaspi_operation_in_progress", error_message='{"price": 20000}')
+        if delay is None:
+            assert not result.get("pending")
+            assert state.active_job_id is None
+        else:
+            assert result["pending"]
+            seconds = (job.not_before_at - now).total_seconds()
+            assert delay - 1 <= seconds <= delay + 1
+            assert job.status == "queued_verify"
+            assert job.write_json["last_offer_verify"] == '{"price": 20000}'

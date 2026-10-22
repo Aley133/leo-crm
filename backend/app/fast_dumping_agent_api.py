@@ -64,6 +64,7 @@ class FastApplyComplete(FastPrepareApply):
     operation_id: str | None = Field(default=None, max_length=255)
     latency_seconds: float = Field(default=0, ge=0, le=3600)
     observed_own_price_kzt: str | None = Field(default=None, max_length=64)
+    effective_stock_count: int | None = Field(default=None, ge=1)
     session_refreshed: bool = False
     error_code: str | None = Field(default=None, max_length=128)
     error_message: str | None = Field(default=None, max_length=2000)
