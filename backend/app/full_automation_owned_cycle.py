@@ -103,10 +103,12 @@ def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_
         target = max(floor, min(ceiling, max(own, upper)))
         return result(target, 'owned_group_reset',
                       f'Общий цикл BARWORK/LeoXpress: старт {base} ₸, подъём на 100 ₸; цель {target} ₸. Ждём оба магазина наверху.', target != own)
-    external_ahead = any(not (r.get('is_own') or r.get('is_owned_group') or r.get('is_owned_peer'))
-                         and _optional_money(r.get('price_kzt')) is not None
-                         and _optional_money(r['price_kzt']) <= own for r in offers)
-    if not external_ahead:
+    # Raw price ordering is not competitive pressure when our delivery is
+    # faster. Reuse the pricing engine's delivery-adjusted ceiling, including
+    # TOP-N and configured price bounds, rather than starting a peer race
+    # merely because a slower external seller is cheaper.
+    needs_market_reduction = own > ceiling
+    if not needs_market_reduction:
         # No peer-driven descent, but a market increase must not freeze both
         # shops at a historical +100 edge. Reprice upward to the profitable
         # external ceiling, retaining floor, tariff and TOP-N bounds.
@@ -114,7 +116,7 @@ def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_
         if market_target > target and profit(market_target) > profit(target):
             target = market_target
         return result(target, 'owned_peer_guard',
-                      f'Чужие продавцы дороже; взаимное снижение остановлено. Выгодная цена по внешнему рынку {target} ₸.', target != own)
+                      f'Цена допустима с учётом доставки и ограничений; взаимное снижение остановлено. Выгодная цена по внешнему рынку {target} ₸.', target != own)
     target = max(boundary, min(upper, own, peer_price - 1)) if own >= peer_price else max(boundary, min(own, ceiling))
     return result(target, 'owned_group_band',
                   f'Борьба с внешними продавцами: шаг 1 ₸ между своими магазинами внутри {base}–{base + 100} ₸. На нижней границе общий возврат вверх.', target != own)
