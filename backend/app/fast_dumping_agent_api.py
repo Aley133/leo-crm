@@ -35,6 +35,7 @@ class FastAgentIdentity(BaseModel):
     version: str | None = Field(default=None, max_length=64)
     concurrency: int = Field(default=1, ge=1, le=8)
     merchant_uid: str = Field(min_length=1, max_length=128)
+    queue_lane: Literal["all", "scan", "offer"] = "all"
 
 
 class FastAgentHeartbeat(FastAgentIdentity):
@@ -64,6 +65,7 @@ class FastApplyComplete(FastPrepareApply):
     operation_id: str | None = Field(default=None, max_length=255)
     latency_seconds: float = Field(default=0, ge=0, le=3600)
     observed_own_price_kzt: str | None = Field(default=None, max_length=64)
+    effective_stock_count: int | None = Field(default=None, ge=1)
     session_refreshed: bool = False
     error_code: str | None = Field(default=None, max_length=128)
     error_message: str | None = Field(default=None, max_length=2000)
@@ -101,6 +103,8 @@ _AGENT_GUARD_LOCK = Lock()
 _MIN_CLAIM_INTERVAL_SECONDS = 2.0
 _IDLE_CLAIM_INTERVAL_SECONDS = 60.0
 _CLAIM_NOT_BEFORE: dict[int, float] = {}
+_LANE_IDLE_UNTIL: dict[tuple[int, str], float] = {}
+_LANE_IDLE_SECONDS = 10.0
 _CLAIMS_IN_FLIGHT: set[int] = set()
 _PHOTO_LEASE_SECONDS = 30 * 60
 _PHOTO_CACHE_REUSE_LIMIT = 100
@@ -177,12 +181,13 @@ def _validate_workspace_merchant(
         )
 
 
-def _reserve_claim_slot(workspace_id: int, *, now: float | None = None) -> int:
+def _reserve_claim_slot(workspace_id: int, *, queue_lane: str = "all", now: float | None = None) -> int:
     """Allow one bounded claim stream per workspace, including old agents."""
 
     checked_at = monotonic() if now is None else now
     with _AGENT_GUARD_LOCK:
-        not_before = _CLAIM_NOT_BEFORE.get(workspace_id, 0.0)
+        not_before = max(_CLAIM_NOT_BEFORE.get(workspace_id, 0.0),
+                         _LANE_IDLE_UNTIL.get((workspace_id, queue_lane), 0.0))
         if not_before > checked_at:
             return max(1, int(not_before - checked_at + 0.999))
         _CLAIM_NOT_BEFORE[workspace_id] = checked_at + _MIN_CLAIM_INTERVAL_SECONDS
@@ -193,10 +198,14 @@ def _defer_claims(
     workspace_id: int,
     *,
     seconds: float,
+    queue_lane: str = "all",
     now: float | None = None,
 ) -> None:
     checked_at = monotonic() if now is None else now
     with _AGENT_GUARD_LOCK:
+        if queue_lane != "all":
+            _LANE_IDLE_UNTIL[(workspace_id, queue_lane)] = checked_at + seconds
+            return
         _CLAIM_NOT_BEFORE[workspace_id] = max(
             _CLAIM_NOT_BEFORE.get(workspace_id, 0.0),
             checked_at + max(_MIN_CLAIM_INTERVAL_SECONDS, seconds),
@@ -353,7 +362,7 @@ def claim(
     payload: FastAgentIdentity,
     db: Session = Depends(get_unscoped_db),
 ) -> dict:
-    retry_after = _reserve_claim_slot(payload.workspace_id)
+    retry_after = _reserve_claim_slot(payload.workspace_id, queue_lane=payload.queue_lane)
     if retry_after:
         return {
             "job": None,
@@ -382,6 +391,7 @@ def claim(
                     db,
                     workspace_id=payload.workspace_id,
                     agent_id=payload.agent_id,
+                    queue_lane=payload.queue_lane,
                 )
                 result = (
                     None
@@ -396,15 +406,17 @@ def claim(
         except ValueError as exc:
             db.rollback()
             raise _conflict(exc) from exc
+        idle_seconds = _IDLE_CLAIM_INTERVAL_SECONDS if payload.queue_lane == "all" else _LANE_IDLE_SECONDS
         if result is None:
             _defer_claims(
                 payload.workspace_id,
-                seconds=_IDLE_CLAIM_INTERVAL_SECONDS,
+                seconds=idle_seconds,
+                queue_lane=payload.queue_lane,
             )
         return {
             "job": result,
             "retry_after_seconds": (
-                int(_IDLE_CLAIM_INTERVAL_SECONDS) if result is None else 0
+                int(idle_seconds) if result is None else 0
             ),
         }
     finally:

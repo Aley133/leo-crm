@@ -413,12 +413,35 @@ def read_fast_dumping_offers(
     )
     if state is None:
         raise HTTPException(status_code=404, detail="Fast dumping state not found")
+    job = db.scalar(select(FastDumpingJob).where(
+        FastDumpingJob.workspace_id == workspace_id,
+        FastDumpingJob.product_id == product_id,
+    ).order_by(FastDumpingJob.id.desc()).limit(1))
+    diagnostic = None
+    if job is not None:
+        write = job.write_json or {}
+        decision = job.decision_json or {}
+        diagnostic = {
+            "job_id": job.id, "status": job.status, "reason": job.reason,
+            "created_at": job.created_at, "not_before_at": job.not_before_at,
+            "scan_attempts": job.scan_attempts, "apply_attempts": job.apply_attempts,
+            "target_price_kzt": decision.get("target_price_kzt"),
+            "stock_count": decision.get("stock_count"),
+            "crm_stock_count": decision.get("crm_stock_count"),
+            "write_accepted": write.get("accepted"), "write_verified": write.get("verified"),
+            "write_error_code": write.get("error_code"),
+            "write_error_message": write.get("error_message"),
+            "verify_attempts": write.get("offer_verify_attempts", 0),
+            "last_offer_verify": write.get("last_offer_verify"),
+            "error_code": job.error_code, "error_message": job.error_message,
+        }
     return {
         "product_id": product_id,
         "state_version": state.state_version,
         "market_context_ok": state.market_context_ok,
         "market_context_reason": state.market_context_reason,
         "offers": state.offers_json or [],
+        "diagnostic": diagnostic,
     }
 
 

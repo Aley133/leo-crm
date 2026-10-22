@@ -59,7 +59,10 @@ def test_fast_agent_release_no_longer_owns_product_discovery_dependencies() -> N
         ROOT / ".github/workflows/kaspi-fast-dumping-agent-release.yml"
     ).read_text(encoding="utf-8")
     source = (ROOT / "tools/kaspi_fast_dumping_agent.py").read_text(encoding="utf-8")
-    assert 'VERSION = "1.2.8"' in source
+    assert 'VERSION = "1.2.9"' in source
+    launcher = (ROOT / "tools/kaspi_fast_dumping_agent_v2.py").read_text(encoding="utf-8")
+    assert "VERSION = base.VERSION" in launcher
+    assert "base.VERSION = VERSION" not in launcher
     assert "tools/product_discovery/**" not in workflow
     assert "tools/ozon_http/**" not in workflow
     assert "/api/product-test-agent/claim" not in source

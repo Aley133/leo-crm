@@ -9,7 +9,7 @@ from tools import kaspi_fast_dumping_agent as base
 from tools import kaspi_fast_offer_runtime as offer_runtime
 
 
-VERSION = "1.2.8"
+VERSION = base.VERSION
 _RUNTIME_SESSION = None
 _RUNTIME_STORE_ID: str | None = None
 
@@ -92,7 +92,6 @@ async def _verify_proxy(
     )
 
 
-base.VERSION = VERSION
 base._plain_setting = _tracked_plain_setting
 base.KaspiMerchantSession = TrackedMerchantSession
 base._post_json_with_retry = _post_json_with_offer_marker
