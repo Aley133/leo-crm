@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+import pytest
 from backend.app.full_automation_pricing import decide_automated_price
 from backend.app.full_automation_owned_cycle import read_shared_cycle
 from backend.app.fast_dumping_models import FastDumpingPolicy, FastDumpingState
@@ -34,25 +35,53 @@ def test_user_example_raises_both_prices_without_consuming_peer_rank_slot():
     assert choose(0, cycle, (14599, 14500)).target_price_kzt == 14599
 
 
-def test_full_cycle_steps_one_tenge_and_resets_without_anchor_drift():
+def test_slower_external_sellers_do_not_restart_peer_price_race():
     cycle = {}
     prices = [14499, 14500]
-    for shop in (0, 1):
-        prices[shop] = choose(shop, cycle, prices).target_price_kzt
-    for _ in range(120):
+    for _ in range(8):
         for shop in (0, 1):
             before = prices[shop]
             decision = choose(shop, cycle, prices)
             prices[shop] = decision.target_price_kzt
-            assert min(prices) >= 14499
-            if decision.status == 'owned_group_reset' and prices[shop] > before:
-                assert prices[shop] == 14599 + shop
-                assert cycle['base_kzt'] == '14499.00'
-                return
-            if prices[shop] < before:
-                peer = prices[1-shop]
-                assert prices[shop] == peer - 1
-    raise AssertionError('cycle never returned to its upper edge')
+            assert prices[shop] >= before
+    # The 16000 logistics tariff makes 15999 more profitable than 16098.
+    assert prices == [15999, 15999]
+    for shop in (0, 1):
+        assert not choose(shop, cycle, prices).write_allowed
+
+
+@pytest.mark.parametrize("shop", [0, 1])
+@pytest.mark.parametrize("own_days,rival_days,config,position,expected", [
+    (1, 2, {}, 3, 6508),       # One day faster: do not follow the owned peer down.
+    (2, 2, {}, 3, 6198),       # Equal delivery still requires price competition.
+    (3, 2, {}, 3, 6198),       # Faster competitor.
+    (None, 2, {}, 3, 6198),    # No unconfirmed delivery advantage.
+    (1, None, {}, 3, 6198),
+    (1, 2, {"delivery_premium_percent_per_day": 0}, 3, 6198),
+    (1, 2, {"maximum_price_kzt": 6250}, 3, 6250),
+    (1, 2, {"maximum_price_kzt": 6200}, 3, 6200),
+    (1, 2, {}, 1, 6198),       # Explicit TOP-1 leaves no cheaper rival ahead.
+])
+def test_shared_step_uses_delivery_adjusted_market_limit(shop, own_days, rival_days, config, position, expected):
+    prices = (6200, 6199) if shop == 0 else (6199, 6200)
+    rows = market(shop, prices, external=(6199, 6500, 7000), delivery=(own_days, own_days))
+    for row in rows[2:]:
+        row['delivery_days'] = rival_days
+    cycle = {"version": 1, "participants": ["bar", "leo"], "base_kzt": "6099",
+             "phase": "step", "phase_changed_at": datetime.now(UTC).isoformat()}
+    decision = choose(shop, cycle, prices, floor=4000, rows=rows, config=config, target_position=position)
+    assert decision.target_price_kzt == expected
+    assert decision.write_allowed == (expected != 6200)
+
+
+def test_one_day_advantage_cannot_override_another_equally_fast_rival():
+    rows = market(0, (6200, 6199), external=(6199, 6200, 7000))
+    rows[2]['delivery_days'] = 2
+    rows[3]['delivery_days'] = 1
+    cycle = {"version": 1, "participants": ["bar", "leo"], "base_kzt": "6099",
+             "phase": "step", "phase_changed_at": datetime.now(UTC).isoformat()}
+    decision = choose(0, cycle, (6200, 6199), floor=4000, rows=rows)
+    assert decision.target_price_kzt <= 6199
 
 
 def test_no_external_pressure_raises_to_market_instead_of_freezing_old_cycle():
