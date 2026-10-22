@@ -73,7 +73,8 @@ def test_fast_claim_does_not_prune_completed_history_inline() -> None:
     )[0]
 
     assert "_maybe_prune_fast_dumping_history" not in claim_source
-    assert "recover_inventory_transitions=_reserve_inventory_recovery" in claim_source
+    assert "maintain_workspace_queue" in claim_source
+    assert "maintain_queue=False" in Path(agent_api.__file__).read_text(encoding="utf-8")
 
 
 def test_agent_uses_two_lanes_by_default_and_bounds_override(monkeypatch) -> None:

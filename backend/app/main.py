@@ -22,7 +22,7 @@ from .browser_agent_registry_api import router as browser_agent_registry_router
 from .catalog_api import router as catalog_router
 from .commerce.api import router as commerce_router
 from .dashboard_api import router as dashboard_router
-from .db import SessionLocal, engine
+from .db import SessionLocal, engine, database_region_hint
 from .dumping_api import public_router as dumping_public_router
 from .dumping_api import router as dumping_router
 from .dumping_competitor_worker import (
@@ -34,6 +34,7 @@ from .dumping_run_compat_api import router as dumping_run_compat_router
 from .fixed_procurement_source_api import router as fixed_procurement_source_router
 from .fast_dumping_agent_api import router as fast_dumping_agent_router
 from .fast_dumping_api import router as fast_dumping_router
+from .fast_dumping_maintenance import maintenance_loop as fast_queue_loop, STATUS as FAST_QUEUE_STATUS
 from .full_automation_api import router as full_automation_router
 from .preorder_api import router as preorder_router
 from .inventory_api import router as inventory_router
@@ -235,6 +236,7 @@ async def start_background_services() -> None:
 
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
+    app.state.fast_queue_task = asyncio.create_task(fast_queue_loop(stop_event))
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
     app.state.kaspi_enrichment_task = asyncio.create_task(enrichment_polling_loop(stop_event))
     app.state.kaspi_maintenance_task = asyncio.create_task(maintenance_polling_loop(stop_event))
@@ -262,6 +264,7 @@ async def stop_background_services() -> None:
 
     stop_event = getattr(app.state, "kaspi_poll_stop_event", None)
     tasks = [
+        getattr(app.state, "fast_queue_task", None),
         getattr(app.state, "kaspi_poll_task", None),
         getattr(app.state, "kaspi_enrichment_task", None),
         getattr(app.state, "kaspi_maintenance_task", None),
@@ -309,11 +312,12 @@ async def root() -> dict[str, object]:
         "docs": "/docs",
         "crm": "/crm",
         "accounting": "/crm/accounting",
-        "kaspi_feed": "/feeds/kaspi/catalog.xml",
+        "kaspi_feed": None,
         "kaspi_polling": dict(KASPI_POLL_STATUS),
         "kaspi_order_enrichment": dict(KASPI_ENRICHMENT_STATUS),
         "kaspi_order_maintenance": dict(KASPI_MAINTENANCE_STATUS),
         "dumping_scheduler": dict(DUMPING_SCHEDULER_STATUS),
+        "fast_queue_maintenance": dict(FAST_QUEUE_STATUS),
         "data_retention": dict(RETENTION_CLEANUP_STATUS),
         "telegram_price_alerts": price_alert_runtime_status(),
     }
@@ -326,6 +330,7 @@ async def health() -> dict[str, object]:
         "database": "not_checked",
         "memory_rss_mb": _process_rss_mb(),
         "database_pool": _database_pool_snapshot(),
+        "database_region_hint": database_region_hint(),
         "thread_pool_limit": getattr(app.state, "thread_pool_limit", None),
         "version": APP_VERSION,
         "deployment_marker": DEPLOYMENT_MARKER,
@@ -334,6 +339,7 @@ async def health() -> dict[str, object]:
         "kaspi_order_enrichment": dict(KASPI_ENRICHMENT_STATUS),
         "kaspi_order_maintenance": dict(KASPI_MAINTENANCE_STATUS),
         "dumping_scheduler": dict(DUMPING_SCHEDULER_STATUS),
+        "fast_queue_maintenance": dict(FAST_QUEUE_STATUS),
         "data_retention": dict(RETENTION_CLEANUP_STATUS),
         "telegram_price_alerts": price_alert_runtime_status(),
     }

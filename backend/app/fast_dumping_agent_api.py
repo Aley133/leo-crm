@@ -379,6 +379,8 @@ def claim(
         }
     try:
         with fast_unit_of_work(db, payload.workspace_id), trace_fast_operation("claim", payload.workspace_id, lane=payload.queue_lane) as trace:
+            trace.agent_version = payload.version
+            trace.concurrency = payload.concurrency
             try:
                 _validate_workspace_merchant(
                     db,
@@ -395,6 +397,7 @@ def claim(
                         workspace_id=payload.workspace_id,
                         agent_id=payload.agent_id,
                         queue_lane=payload.queue_lane,
+                        maintain_queue=False,
                     )
                     result = (
                         None

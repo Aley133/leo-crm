@@ -242,16 +242,16 @@ def test_cross_workspace_write_is_rejected(db_session) -> None:
         db_session.rollback()
 
 
-def test_public_xml_has_one_stable_url_per_workspace(db_session) -> None:
+def test_public_xml_is_retired_for_every_workspace(db_session) -> None:
+    from fastapi import HTTPException
     _seed_workspace(db_session, 1, "barwork")
     _seed_workspace(db_session, 2, "second-shop")
     db_session.commit()
-
-    legacy = read_public_kaspi_feed(db_session)
-    second = read_workspace_kaspi_feed("second-shop", db_session)
-
-    assert legacy.body == b"<catalog>1</catalog>"
-    assert second.body == b"<catalog>2</catalog>"
+    for read in (read_public_kaspi_feed, lambda: read_workspace_kaspi_feed("second-shop")):
+        with pytest.raises(HTTPException) as error:
+            read()
+        assert error.value.status_code == 410
+        assert error.value.headers["Cache-Control"] == "no-store"
 
 
 def test_unscoped_competitor_completion_updates_only_job_workspace_xml(

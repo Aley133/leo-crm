@@ -1,17 +1,15 @@
 from __future__ import annotations
 
-from decimal import Decimal
 from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from . import dumping_service
 from . import fast_dumping_service as svc
 from .dumping_service import physical_stock_count
-from .fast_dumping_models import FastDumpingJob, FastDumpingPolicy, FastDumpingState
+from .fast_dumping_models import FastDumpingJob, FastDumpingPolicy
 from .models import Product
-from .fast_dumping_uow import workspace_row
 
 
 _INSTALLED = False
@@ -117,70 +115,6 @@ def _publish_decision(db: Session, *, product: Product, policy: Any, decision: A
     return run
 
 
-def _mirror_verified_offer(db: Session, *, job: FastDumpingJob) -> bool:
-    """Mirror a verified Fast offer into generated XML as a rollback guard.
-
-    Fast realtime remains the owner. XML is only kept consistent so a scheduled
-    Kaspi catalog pull cannot resurrect an older price/stock/preOrder state.
-    """
-
-    policy = workspace_row(db, FastDumpingPolicy, job.policy_id, job.workspace_id)
-    product = workspace_row(db, Product, job.product_id, job.workspace_id)
-    if policy is None or product is None or not policy.enabled:
-        return False
-
-    feed = dumping_service._latest_feed_for_update(db)
-    if feed is None:
-        return False
-
-    decision = dict(job.decision_json or {})
-    mode = str(decision.get("fulfillment_mode") or "inventory")
-    stock = int(decision.get("stock_count") or 0)
-    preorder = int(decision.get("preorder_days") or 0)
-    current_xml = feed.generated_xml or feed.source_xml
-    sku_candidates = dumping_service._sku_candidates(product)
-
-    try:
-        if mode == "off":
-            mirrored = dumping_service.set_feed_offer_availability(
-                current_xml,
-                sku_candidates=sku_candidates,
-                available=False,
-                stock_count=0,
-                preorder_days=0,
-            )
-        else:
-            target_raw = decision.get("target_price_kzt")
-            if target_raw in (None, ""):
-                state = svc._lock_state(db, workspace_id=job.workspace_id, product_id=job.product_id)
-                target_raw = (
-                    state.own_price_kzt
-                    if state is not None and state.own_price_kzt is not None
-                    else None
-                )
-            if target_raw in (None, ""):
-                return False
-            mirrored = dumping_service.update_feed_xml(
-                current_xml,
-                sku_candidates=sku_candidates,
-                price_kzt=Decimal(str(target_raw)),
-                preorder_days=preorder,
-                stock_count=stock,
-                product=product,
-                city_id=policy.city_id,
-            )
-        feed.generated_xml = mirrored
-        feed.active = True
-        feed.generated_at = func.now()
-        return True
-    except ValueError as exc:
-        # If the SKU is absent from XML there is nothing stale for an hourly
-        # XML pull to overwrite. Realtime ownership can continue safely.
-        if str(exc) == "Товар не найден в сохранённом XML по SKU/Kaspi ID":
-            return False
-        raise
-
-
 def _resume_inventory_transition(db: Session, job_id: int, workspace_id: int) -> None:
     job = db.get(FastDumpingJob, job_id)
     if job is None or job.workspace_id != workspace_id or not str(job.reason or "").startswith("inventory_priority:"):
@@ -216,14 +150,6 @@ def _complete_apply(
         lease_token=lease_token,
         write_payload=write_payload,
     )
-    if bool(write_payload.get("accepted")) and bool(write_payload.get("verified")):
-        job = db.get(FastDumpingJob, job_id)
-        if job is not None and _mirror_verified_offer(db, job=job):
-            state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
-            if state is not None:
-                state.status_reason = (
-                    f"{state.status_reason or ''} XML safety mirror обновлён после realtime verify."
-                ).strip()
     _resume_inventory_transition(db, job_id, workspace_id)
     return result
 
@@ -251,14 +177,6 @@ def _complete_verification(
         error_code=error_code,
         error_message=error_message,
     )
-    if verification_succeeded:
-        job = db.get(FastDumpingJob, job_id)
-        if job is not None and job.status == "applied" and _mirror_verified_offer(db, job=job):
-            state = svc._lock_state(db, workspace_id=workspace_id, product_id=job.product_id)
-            if state is not None:
-                state.status_reason = (
-                    f"{state.status_reason or ''} XML safety mirror синхронизирован с подтверждённым Kaspi state."
-                ).strip()
     _resume_inventory_transition(db, job_id, workspace_id)
     return result
 
