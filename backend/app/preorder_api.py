@@ -437,11 +437,14 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
                                   merchant_sku=catalog.get("sku"), product_id=item.product_id)
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
-    if unresolved:
+    # A legacy Test item may still store the merchant SKU as its master ID.
+    # Reuse it after cabinet confirmation even when the new manual item already
+    # has the correct master. Otherwise enrollment hits the unique SKU guard.
+    if unresolved or (catalog.get("found") and catalog.get("sku")):
         existing = db.scalars(select(ProductTestItem).where(
             ProductTestItem.workspace_id == job.workspace_id,
             ProductTestItem.id != item.id,
-            or_(ProductTestItem.kaspi_product_id == master,
+            or_(ProductTestItem.kaspi_product_id == master if unresolved else False,
                 ProductTestItem.merchant_sku == catalog["sku"]),
         ).with_for_update()).all()
         exact_items = [i for i in existing if i.merchant_sku == catalog["sku"]]
@@ -451,6 +454,12 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
             raise ValueError("В CRM несколько записей выбранной карточки")
         if existing:
             target = existing[0]
+            if (target.product_id is not None
+                    and (product is None or target.product_id != product.id)):
+                raise ValueError("Merchant SKU связан с другим товаром CRM")
+            if (target.kaspi_product_id != master
+                    and not (product and target.product_id == product.id)):
+                raise ValueError("Merchant SKU связан с другой карточкой Kaspi")
             if db.scalar(select(ProductTestJob.id).where(
                 ProductTestJob.workspace_id == job.workspace_id,
                 ProductTestJob.item_id == target.id,
