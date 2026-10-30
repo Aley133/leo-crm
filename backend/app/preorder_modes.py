@@ -27,6 +27,8 @@ def pricing_locked(db, product):
 
 def pause_pricing(db, product, item):
     from .fast_dumping_service import cancel_active_job
+    if not (item.offers_json or {}).get("dump_enabled"):
+        detach_preorder_ozon(db, product)
     policy = db.scalar(select(FastDumpingPolicy).where(
         FastDumpingPolicy.workspace_id == product.workspace_id,
         FastDumpingPolicy.product_id == product.id).with_for_update())
@@ -51,6 +53,42 @@ def pause_pricing(db, product, item):
     if classic is not None:
         classic.enabled = False
     item.offers_json = details
+
+
+def detach_preorder_ozon(db, product):
+    """Disable this product's Ozon sources without deleting supplier history."""
+    from .suppliers import ProductBinding, SupplierProduct, Supplier
+    from .monitoring import MonitorTarget
+    from .product_supplier_binding_api import _cancel_stale_browser_jobs
+
+    binding_ids = select(ProductBinding.id).join(
+        SupplierProduct, SupplierProduct.id == ProductBinding.supplier_product_id
+    ).join(Supplier, Supplier.id == SupplierProduct.supplier_id).where(
+        ProductBinding.workspace_id == product.workspace_id,
+        ProductBinding.product_id == product.id,
+        SupplierProduct.workspace_id == product.workspace_id,
+        Supplier.workspace_id == product.workspace_id,
+        Supplier.code == "ozon",
+    )
+    # Match the target-before-binding lock order used by browser ingestion.
+    targets = db.scalars(select(MonitorTarget).where(
+        MonitorTarget.workspace_id == product.workspace_id,
+        MonitorTarget.product_binding_id.in_(binding_ids),
+    ).with_for_update()).all()
+    bindings = db.scalars(select(ProductBinding).where(
+        ProductBinding.id.in_(binding_ids),
+    ).with_for_update()).all()
+    for binding in bindings:
+        binding.status = "disabled"
+        binding.is_primary = False
+    for target in targets:
+        target.status = "disabled"
+        target.lease_owner = None
+        target.lease_token = None
+        target.lease_until = None
+        _cancel_stale_browser_jobs(
+            db, monitor_target_id=target.id, supplier_product_id=None, url=None,
+        )
 
 
 def configure_rocket(db, policy, enabled):

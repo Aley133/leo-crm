@@ -691,6 +691,94 @@ def _snapshot(row):
     return {column.key: getattr(row, column.key) for column in row.__table__.columns}
 
 
+@pytest.mark.parametrize("autoflush", [False, True])
+def test_confirmed_preorder_adopts_legacy_test_sku_with_same_product(db_session, autoflush):
+    db_session.autoflush = autoflush
+    product, batch, policy, _ = _seed_fast_product(db_session)
+    with workspace_context(1):
+        batch.quantity_remaining = 0
+        product.kaspi_product_id = "123456789"
+        product.merchant_sku = "actual-merchant-sku"
+        legacy = ProductTestItem(workspace_id=1, input_reference="legacy-test",
+            kaspi_product_id="actual-merchant-sku", merchant_sku="actual-merchant-sku",
+            name="Old test", kaspi_url=URL, product_id=product.id,
+            offers_json={"history_marker": "preserved"})
+        db_session.add(legacy)
+        db_session.flush()
+        history = ProductTestJob(workspace_id=1, item_id=legacy.id,
+            input_reference=URL, job_type="create_offer", status="succeeded")
+        db_session.add(history)
+        db_session.commit()
+        queued = queue(db_session)
+        assert queued["item"]["id"] != legacy.id
+        inspection = db_session.get(ProductTestJob, queued["job"]["id"])
+        _persist_product_inspection(db_session, job=inspection, result={
+            "kaspi_product_id": "123456789", "product_name": "Phone",
+            "catalog_state": {"found": True, "sku": product.merchant_sku,
+                              "master_sku": "123456789"}})
+        write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer", ProductTestJob.status == "queued"))
+        done = _enroll_created_product(db_session, job=write, result=confirmed())
+        assert done["item"]["id"] == legacy.id
+        assert done["product_id"] == product.id
+        assert inspection.item_id == history.item_id == legacy.id
+        assert legacy.offers_json["history_marker"] == "preserved"
+        assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 1
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 1
+        assert not policy.enabled
+
+
+@pytest.mark.parametrize("pending_status", ["queued", "leased"])
+def test_plain_preorder_detaches_ozon_and_cancels_jobs_only_for_selected_product(db_session, pending_status):
+    from backend.app.product_supplier_binding_api import attach_manual_supplier_binding, ManualSupplierBindingCreate
+    from backend.app.suppliers import ProductBinding, SupplierProduct
+    from backend.app.monitoring import MonitorTarget
+    from backend.app.browser_agent_models import BrowserAgentJob
+    with workspace_context(1):
+        product = Product(workspace_id=1, name="Selected", kaspi_product_id="123456789",
+                          merchant_sku="actual-merchant-sku")
+        other = Product(workspace_id=1, name="Other", kaspi_product_id="987654321", merchant_sku="other")
+        db_session.add_all([product, other])
+        db_session.flush()
+        sources = [attach_manual_supplier_binding(p.id, ManualSupplierBindingCreate(
+            url="https://www.ozon.kz/product/example-123456789/", is_primary=True,
+            run_initial_check=False), db_session) for p in (product, other)]
+        jobs = [BrowserAgentJob(workspace_id=1, monitor_target_id=s.monitor_target_id,
+            supplier_product_id=s.supplier_product_id, url="https://www.ozon.kz/product/example-123456789/",
+            status=pending_status, lease_owner="agent", lease_token=f"lease-{s.binding_id}") for s in sources]
+        db_session.add_all(jobs)
+        db_session.commit()
+        queued = queue(db_session)
+        selected_binding = db_session.get(ProductBinding, sources[0].binding_id)
+        selected_target = db_session.get(MonitorTarget, sources[0].monitor_target_id)
+        assert selected_binding.status == selected_target.status == "disabled"
+        assert not selected_binding.is_primary
+        assert jobs[0].status == "failed" and jobs[0].lease_token is None
+        assert jobs[0].error_code == "supplier_source_removed"
+        assert db_session.get(ProductBinding, sources[1].binding_id).status == "active"
+        assert db_session.get(MonitorTarget, sources[1].monitor_target_id).status == "active"
+        assert jobs[1].status == pending_status
+        assert db_session.get(SupplierProduct, sources[0].supplier_product_id) is not None
+        assert queued["item"]["product_id"] == product.id
+        inspect(db_session, db_session.get(ProductTestJob, queued["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer", ProductTestJob.status == "queued"))
+        done = _enroll_created_product(db_session, job=write, result=confirmed())
+        edited = edit_preorder(done["item"]["id"], PreorderEdit(price_kzt=14000,
+            preorder_days=7, dump_enabled=True,
+            ozon_url="https://www.ozon.kz/product/example-123456789/"), db_session)
+        # Monitoring resumes only after the new mode is confirmed by Kaspi.
+        assert selected_target.status == "disabled"
+        inspect(db_session, db_session.get(ProductTestJob, edited["job"]["id"]))
+        write = db_session.scalar(select(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer", ProductTestJob.status == "queued"))
+        _enroll_created_product(db_session, job=write, result=confirmed())
+        assert selected_binding.status == selected_target.status == "active"
+        assert db_session.scalar(select(FastDumpingPolicy).where(
+            FastDumpingPolicy.product_id == product.id)).enabled
+        assert db_session.scalar(select(func.count()).select_from(ProductBinding)) == 2
+
+
 @pytest.mark.parametrize("pricing_mode", ["manual", "automation"])
 def test_preorder_connect_and_edit_pause_only_same_product_pricing(db_session, pricing_mode):
     from backend.app.dumping_models import DumpingPolicy, DumpingRun
