@@ -177,6 +177,53 @@ const newCardStatus = (item, mappingBusy = false) => ({
 
 const newCardAttributeKey = (row, index = 0) => String(row?.code || `index:${index}`).trim().toLowerCase();
 
+// Display-only explanations: keep Kaspi codes, values and saved drafts intact.
+const newCardAttributeHelp = (row) => {
+  const labels = {
+    "drug name": ["Название препарата", "Название продукта с упаковки, без цены и рекламных фраз."],
+    "purpose": ["Назначение", "Для чего предназначен продукт — по описанию производителя."],
+    "range of applications": ["Область применения", "Укажите область применения из описания или с упаковки."],
+    "main component": ["Основной компонент", "Главное действующее вещество, указанное производителем."],
+    "registration status": ["Регистрационный статус", "Статус продукта по документам: например, БАД, не является лекарственным средством. Если есть список, выберите подходящий вариант."],
+    "sgr number": ["Номер СГР", "Номер свидетельства о государственной регистрации из документа на этот продукт."],
+    "recommended age": ["Рекомендуемый возраст", "Возраст, с которого разрешён продукт, — с упаковки или из инструкции."],
+    "gender": ["Для кого", "Мужской, женский или универсальный продукт — по данным производителя."],
+    "taste": ["Вкус", "Вкус, указанный на упаковке; при наличии списка выберите вариант из него."],
+    "indications for use": ["Показания к применению", "Для каких целей применяется продукт — перепишите из инструкции производителя."],
+    "features": ["Особенности", "Особенности продукта с упаковки: например, без сахара или без глютена, если это указано производителем."],
+    "contraindications": ["Противопоказания", "Ограничения из инструкции производителя. Фраза «не является лекарством» не заменяет противопоказания."],
+    "liquid volume": ["Объём жидкости, мл", "Общий объём жидкости в продаваемой упаковке, а не разовая порция. Введите число в мл, например: 100."],
+    "dosage form": ["Форма выпуска", "Например: капсулы, таблетки, порошок или раствор. Если есть список, выберите вариант из него."],
+    "release form": ["Форма выпуска", "Форма продукта с упаковки: капсулы, таблетки, порошок, раствор и т. п."],
+    "number of packages": ["Количество упаковок", "Сколько упаковок входит в продаваемый комплект — по комплектации производителя."],
+    "number of servings": ["Количество порций", "На сколько порций рассчитана вся упаковка. Смотрите число порций на этикетке; это не всегда число таблеток или саше."],
+    "amount per serving": ["Размер одной порции", "Количество продукта в одной порции по этикетке, например: 10 мл или 2 капсулы."],
+    "amount": ["Количество в упаковке", "Сколько единиц продукта в упаковке, например: 60 таблеток или 30 капсул. Учитывайте единицу измерения поля."],
+    "country": ["Страна-производитель", "Страна изготовления с упаковки, а не страна продавца или отправки."],
+    "recommendations": ["Рекомендации по применению", "Способ применения и дозировка из инструкции производителя."],
+    "special instructions": ["Особые указания", "Особые условия применения из инструкции производителя."],
+    "additional information": ["Дополнительная информация", "Дополнительные сведения о продукте с упаковки или из описания производителя."],
+    "composition": ["Состав", "Ингредиенты и их содержание с этикетки, с сохранением единиц измерения."],
+    "brand": ["Бренд", "Торговая марка на упаковке."],
+    "manufacturer": ["Производитель", "Название компании-изготовителя с упаковки."],
+    "model": ["Модель", "Модель или серия, указанная производителем."],
+    "type": ["Тип товара", "Вид продукта; если есть список, выберите подходящий вариант."],
+    "volume": ["Объём", "Объём продукта с упаковки в единицах, указанных для поля Kaspi."],
+    "weight": ["Вес", "Вес продукта в единицах, указанных для поля Kaspi."],
+    "shelf life": ["Срок годности", "Срок хранения с упаковки, например: 24 месяца. Это не дата изготовления."],
+    "storage conditions": ["Условия хранения", "Температура и другие условия хранения с упаковки."],
+    "skin type": ["Тип кожи", "Для какого типа кожи предназначено средство — по описанию производителя."],
+    "hair type": ["Тип волос", "Для какого типа волос предназначено средство — по описанию производителя."],
+    "spf": ["Солнцезащитный фактор SPF", "Значение SPF с упаковки, например: 30 или 50."],
+  };
+  const key = String(row.code || row.title || "").split("*").pop().trim().toLowerCase();
+  const known = labels[key];
+  return {
+    title: known?.[0] || row.title || row.code,
+    hint: known?.[1] || "Характеристика товара по упаковке или описанию производителя.",
+  };
+};
+
 const withLocalNewCardDraft = (item) => {
   const local = localNewCardDrafts.get(String(item.id));
   if (!local) return item;
@@ -213,7 +260,8 @@ const newCardRow = (item, activeJobTypes = new Set()) => {
     const listId = `new-card-attr-${item.id}-${index}`;
     const options = allowed.map((value) => `<option value="${escapeHtml(value.code || value.name || "")}">${escapeHtml(value.name || value.code || "")}</option>`).join("");
     const sourceText = row.manual_override ? "Введено вручную — автоподстановка не перезапишет" : ([row.source_name, row.source_value].filter(Boolean).join(": ") || "нет источника Ozon");
-    return `<tr data-index="${index}"><td><strong>${escapeHtml(row.title || row.code)}</strong>${row.required ? '<span class="required-pill">обязательно</span>' : ""}<small>${escapeHtml(row.code || "")}${row.multi_valued ? " · несколько через ;" : ""}</small></td><td><input class="new-card-attr" ${allowed.length ? `list="${listId}"` : ""} value="${escapeHtml(row.value || "")}" ${editingLocked ? "disabled" : ""}>${allowed.length ? `<datalist id="${listId}">${options}</datalist>` : ""}</td><td><small>${escapeHtml(sourceText)}</small></td></tr>`;
+    const help = newCardAttributeHelp(row);
+    return `<tr data-index="${index}"><td><strong>${escapeHtml(help.title)}</strong>${row.required ? '<span class="required-pill">обязательно</span>' : ""}<small>${escapeHtml(help.hint)}</small><small>${escapeHtml(row.code || "")}${row.multi_valued ? " · несколько через ;" : ""}</small></td><td><input class="new-card-attr" ${allowed.length ? `list="${listId}"` : ""} value="${escapeHtml(row.value || "")}" ${editingLocked ? "disabled" : ""}>${allowed.length ? `<datalist id="${listId}">${options}</datalist>` : ""}</td><td><small>${escapeHtml(sourceText)}</small></td></tr>`;
   }).join("");
   return `<article class="new-card-editor" data-id="${item.id}" data-category="${escapeHtml(draft.category || "")}" data-dirty="${localNewCardDrafts.has(String(item.id)) ? "1" : "0"}">
     <div class="new-card-summary">
