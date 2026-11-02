@@ -1,6 +1,7 @@
 """A shared, bounded price cycle for the owner's shops in rocket mode."""
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from zoneinfo import ZoneInfo
 from sqlalchemy import select
 from .fast_dumping_pricing import _optional_money
 
@@ -43,11 +44,24 @@ def read_shared_cycle(db, *, policy, state):
     return dict(max(valid, key=lambda c: c.get('phase_changed_at', ''))) if valid else {}
 
 
-def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_at=None, now=None):
+def daily_priority(ids, now):
+    """One clock for both agents, stable across restarts and cycle resets."""
+    local = now.astimezone(ZoneInfo('Asia/Qyzylorda'))
+    start = local.replace(hour=0, minute=0, second=0, microsecond=0)
+    ordered = sorted(ids)
+    if local.date().toordinal() % 2:
+        ordered.reverse()
+    return ordered, start, start + timedelta(days=1)
+
+
+def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_at=None, now=None,
+                rotate_priority=True):
     ids = participants(offers)
     if not ids:
         return None
     now = now or datetime.now(UTC)
+    if now.tzinfo is None:
+        now = now.replace(tzinfo=UTC)
     phase_time = observed_at or now
     if phase_time.tzinfo is None:
         phase_time = phase_time.replace(tzinfo=UTC)
@@ -55,6 +69,9 @@ def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_
     own_row = next(r for r in rows if r.get('is_own'))
     peer = next(r for r in rows if not r.get('is_own'))
     peer_price = _optional_money(peer['price_kzt'])
+    priority, day_start, day_end = daily_priority(ids, now)
+    if rotate_priority and observed_at is not None and phase_time < day_start:
+        return result(own, 'owned_cycle_sync', 'Сменился суточный приоритет магазинов; ждём свежий рынок.')
     if cycle.get('version') != 1 or set(cycle.get('participants', [])) != set(ids):
         ordered = sorted(rows, key=lambda r: (_optional_money(r['price_kzt']), str(r['merchant_id'])))
         cycle.clear()
@@ -66,12 +83,29 @@ def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_
             observed_at = observed_at.replace(tzinfo=UTC)
         if observed_at < changed:
             return result(own, 'owned_cycle_sync', 'Соседний магазин сменил фазу цикла; ждём свежий рынок.')
+    order = priority if rotate_priority else cycle['participants']
+    is_leader = str(own_row['merchant_id']) == order[0]
+    market_ceiling = ceiling
+    if rotate_priority:
+        cycle.update(priority_merchant_id=order[0], priority_until=day_end.isoformat())
+        # Reserve just one tenge for today's leader, inside all existing bounds.
+        # Each shop still computes its own delivery, profit and tariff limits.
+        if is_leader and ceiling > floor:
+            ceiling -= 1
+        original_result = result
+        leader = next(r for r in rows if str(r['merchant_id']) == order[0])
+        leader_name = leader.get('merchant_name') or order[0]
+
+        def result(target, status, reason, allowed=False):
+            return original_result(target, status,
+                f'{reason} Суточный приоритет: {leader_name}, до {day_end:%d.%m %H:%M} (Казахстан).',
+                target != own)
     base = Decimal(cycle['base_kzt'])
     if min(own, peer_price) > base + 101:
         # Genuine market increases become a new start; reset itself cannot drift it.
         base = max(min(own, peer_price), max(own, peer_price) - 1)
         cycle.update(base_kzt=str(base), phase='raise', phase_changed_at=phase_time.isoformat())
-    slot = cycle['participants'].index(str(own_row['merchant_id']))
+    slot = order.index(str(own_row['merchant_id']))
     upper = min(base + 100 + slot, ceiling)
     # A logistics tariff jump must not turn a 100-tenge raise into lower net profit.
     from .fast_dumping_pricing import LOGISTICS_PRICE_BREAKS
@@ -91,8 +125,9 @@ def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_
         return result(target, 'owned_peer_guard',
                       f'Общий коридор ограничен внешним рынком или floor; цена по внешним продавцам {target} ₸, без снижения вслед за своим магазином.', target != own)
     expected = {}
-    for i, identity in enumerate(cycle['participants']):
-        top = min(base + 100 + i, ceiling)
+    for i, identity in enumerate(order):
+        cap = max(floor, market_ceiling - (1 if rotate_priority and i == 0 else 0))
+        top = min(base + 100 + i, cap)
         choices = [top] + [b - 1 for b in LOGISTICS_PRICE_BREAKS if max(base, floor) <= b - 1 <= top]
         expected[identity] = max(choices, key=lambda p: (profit(p), p))
     if cycle['phase'] == 'raise' and all(_optional_money(r['price_kzt']) >= expected[str(r['merchant_id'])] for r in rows):
@@ -118,5 +153,11 @@ def cycle_price(*, offers, own, floor, ceiling, cycle, result, profit, observed_
         return result(target, 'owned_peer_guard',
                       f'Цена допустима с учётом доставки и ограничений; взаимное снижение остановлено. Выгодная цена по внешнему рынку {target} ₸.', target != own)
     target = max(boundary, min(upper, own, peer_price - 1)) if own >= peer_price else max(boundary, min(own, ceiling))
+    if rotate_priority and not is_leader and target <= peer_price:
+        # The yielding shop never starts a one-tenge race with today's leader.
+        # External pressure and tariff profitability can still prevent a swap.
+        yielding_target = max(target, min(upper, peer_price + 1))
+        if profit(yielding_target) >= profit(target):
+            target = yielding_target
     return result(target, 'owned_group_band',
                   f'Борьба с внешними продавцами: шаг 1 ₸ между своими магазинами внутри {base}–{base + 100} ₸. На нижней границе общий возврат вверх.', target != own)
