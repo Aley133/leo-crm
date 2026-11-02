@@ -134,7 +134,8 @@ def decide_automated_price(
     if coordinated:
         cycle_decision = cycle_price(offers=market_offers, own=own, floor=floor, ceiling=ceiling,
                                      cycle=owned_cycle if owned_cycle is not None else {},
-                                     result=result, profit=profit, observed_at=observed_at, now=now)
+                                     result=result, profit=profit, observed_at=observed_at, now=now,
+                                     rotate_priority=config.get("owned_shop_daily_rotation", True))
         if cycle_decision is not None:
             return cycle_decision
     target = max(candidates, key=lambda p: (profit(p), p))

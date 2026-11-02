@@ -18,11 +18,13 @@ def _supplier_decision(*, state: Any, policy: Any, source: Any) -> dict[str, Any
     )
     if getattr(policy, "pricing_mode", "manual") == "automation":
         from .full_automation_pricing import decide_automated_price
+        owned_cycle = dict((state.automation_json or {}).get("owned_cycle") or {})
         decision = decide_automated_price(own_price_kzt=state.own_price_kzt, safe_floor_kzt=floor,
             market_offers=state.offers_json or [], unit_cost_kzt=source.unit_cost_kzt,
             config=policy.automation_config, offers_complete=(state.automation_json or {}).get("offers_complete", False),
-            target_position=(state.automation_json or {}).get("target_position", 3))
-        state.automation_json = {**(state.automation_json or {}), "plan_reason":decision.reason,
+            target_position=(state.automation_json or {}).get("target_position", 3),
+            observed_at=getattr(state, "last_scanned_at", None), owned_cycle=owned_cycle)
+        state.automation_json = {**(state.automation_json or {}), "owned_cycle":owned_cycle, "plan_reason":decision.reason,
                                  "planned_price_kzt":str(decision.target_price_kzt), "plan_status":decision.status}
         return {"safe_floor_kzt":str(floor), "own_price_kzt":offer_runtime._money(state.own_price_kzt),
                 "target_price_kzt":offer_runtime._money(decision.target_price_kzt), "status":decision.status,

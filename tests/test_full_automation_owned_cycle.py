@@ -20,9 +20,10 @@ def market(shop, prices=(14499, 14500), external=(13999, 14000, 18000), delivery
 
 
 def choose(shop, cycle, prices=(14499, 14500), **kwargs):
+    config = {"owned_shop_daily_rotation": False, **kwargs.pop('config', {})}
     return decide_automated_price(own_price_kzt=prices[shop], safe_floor_kzt=kwargs.pop('floor', 13000),
                                   market_offers=kwargs.pop('rows', market(shop, prices)), unit_cost_kzt=9000,
-                                  owned_cycle=cycle, offers_complete=True, **kwargs)
+                                  owned_cycle=cycle, offers_complete=True, config=config, **kwargs)
 
 
 def test_user_example_raises_both_prices_without_consuming_peer_rank_slot():
@@ -164,7 +165,8 @@ def test_barwork_omega_catches_up_to_external_market_with_high_peer():
         for row in rows[2:]:
             row["delivery_days"] = 2
         decision = decide_automated_price(own_price_kzt=6177, safe_floor_kzt=5940,
-            unit_cost_kzt=3422, market_offers=rows, offers_complete=True, owned_cycle=cycle)
+            unit_cost_kzt=3422, market_offers=rows, offers_complete=True, owned_cycle=cycle,
+            config={"owned_shop_daily_rotation": False})
         assert decision.target_price_kzt == 7296
         assert decision.write_allowed
 
@@ -174,6 +176,98 @@ def test_market_raise_still_avoids_unprofitable_tariff_crossing():
     for row in rows[2:]:
         row["delivery_days"] = 2
     decision = decide_automated_price(own_price_kzt=4999, safe_floor_kzt=4000,
-        unit_cost_kzt=3000, market_offers=rows, offers_complete=True, owned_cycle={})
+        unit_cost_kzt=3000, market_offers=rows, offers_complete=True, owned_cycle={},
+        config={"owned_shop_daily_rotation": False})
     assert decision.target_price_kzt == 4999
     assert not decision.write_allowed
+
+
+def settle_rotation(prices, cycles, now, order=(0, 1), rounds=12):
+    for _ in range(rounds):
+        for shop in order:
+            decision = choose(shop, cycles[shop], prices,
+                config={"owned_shop_daily_rotation": True}, now=now)
+            prices[shop] = decision.target_price_kzt
+            assert 13000 <= prices[shop] <= 16098
+    return prices
+
+
+@pytest.mark.parametrize('order', [(0, 1), (1, 0)])
+def test_daily_rotation_swaps_leader_and_stays_stable_for_three_days(order):
+    from backend.app.full_automation_owned_cycle import daily_priority
+    now = datetime(2026, 11, 2, 10, tzinfo=UTC)
+    prices, cycles = [Decimal(14499), Decimal(14500)], [{}, {}]
+    leaders = []
+    for day in range(3):
+        moment = now + timedelta(days=day)
+        settle_rotation(prices, cycles, moment, order)
+        expected = daily_priority(['bar', 'leo'], moment)[0][0]
+        leader = 0 if expected == 'bar' else 1
+        leaders.append(leader)
+        assert prices[leader] == 15998
+        assert prices[1 - leader] == 15999
+        settled = list(prices)
+        settle_rotation(prices, cycles, moment + timedelta(hours=2), order, rounds=50)
+        assert prices == settled  # No recurring one-tenge descent or anchor drift.
+        assert all(c['priority_merchant_id'] == expected for c in cycles)
+    assert leaders[0] != leaders[1] and leaders[0] == leaders[2]
+
+
+def test_rotation_uses_kazakhstan_midnight_and_survives_lost_local_state():
+    from backend.app.full_automation_owned_cycle import daily_priority
+    before = datetime(2026, 11, 2, 18, 59, 59, tzinfo=UTC)
+    after = before + timedelta(seconds=1)
+    assert daily_priority(['bar', 'leo'], before)[0] != daily_priority(['leo', 'bar'], after)[0]
+    assert daily_priority(['bar', 'leo'], before)[2].astimezone(UTC) == after
+    prices, cycles = [Decimal(14499), Decimal(14500)], [{}, {}]
+    settle_rotation(prices, cycles, after)
+    settled = list(prices)
+    settle_rotation(prices, [{}, {}], after + timedelta(hours=4))
+    assert prices == settled
+
+
+def test_rotation_blocks_a_scan_from_previous_day():
+    now = datetime(2026, 11, 2, 19, tzinfo=UTC)
+    result = choose(0, {}, now=now, observed_at=now - timedelta(seconds=1),
+        config={"owned_shop_daily_rotation": True})
+    assert result.status == 'owned_cycle_sync'
+    assert not result.write_allowed
+
+
+@pytest.mark.parametrize('shop', [0, 1])
+@pytest.mark.parametrize('floor,cap', [(14520, 14520), (14000, 14520), (16000, 17000)])
+def test_rotation_keeps_profit_floor_and_configured_ceiling(shop, floor, cap):
+    for day in range(2):
+        result = choose(shop, {}, floor=floor, now=datetime(2026, 11, 2 + day, 10, tzinfo=UTC),
+            config={"owned_shop_daily_rotation": True, "maximum_price_kzt": cap})
+        assert result.target_price_kzt >= floor
+        assert result.target_price_kzt <= cap
+
+
+def test_daily_rotation_is_enabled_by_default_for_automation():
+    cycle = {}
+    result = decide_automated_price(own_price_kzt=14499, safe_floor_kzt=13000,
+        market_offers=market(0), unit_cost_kzt=9000, offers_complete=True, owned_cycle=cycle,
+        now=datetime(2026, 11, 2, 10, tzinfo=UTC))
+    assert 'priority_merchant_id' in cycle
+    assert 'Суточный приоритет' in result.reason
+
+
+def test_supplier_preorder_preserves_the_shared_cycle_and_daily_priority():
+    from types import SimpleNamespace
+    from backend.app.fast_dumping_supplier_pricing import _supplier_decision
+    state = SimpleNamespace(own_price_kzt=Decimal(14499), offers_json=market(0),
+        last_scanned_at=datetime.now(UTC), automation_json={'offers_complete': True})
+    policy = SimpleNamespace(minimum_profit_kzt=Decimal(1000), pricing_mode='automation',
+                             automation_config={})
+    source = SimpleNamespace(unit_cost_kzt=Decimal(9000), delivery_days=5, name='Ozon')
+    result = _supplier_decision(state=state, policy=policy, source=source)
+    first = dict(state.automation_json['owned_cycle'])
+    assert first['priority_merchant_id'] in ('bar', 'leo')
+    assert result['fulfillment_mode'] == 'preorder'
+    assert 'Суточный приоритет' in result['reason']
+    state.own_price_kzt = Decimal(result['target_price_kzt'])
+    state.offers_json[0]['price_kzt'] = state.own_price_kzt
+    _supplier_decision(state=state, policy=policy, source=source)
+    assert state.automation_json['owned_cycle']['base_kzt'] == first['base_kzt']
+    assert state.automation_json['owned_cycle']['priority_merchant_id'] == first['priority_merchant_id']
