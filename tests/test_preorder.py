@@ -30,6 +30,82 @@ URL = "https://kaspi.kz/shop/p/phone-123456789/"
 
 
 @pytest.mark.parametrize("autoflush", [False, True])
+def test_repeat_preorder_with_explicit_shared_legacy_product(db_session, monkeypatch, autoflush):
+    from backend.app.preorder_modes import pricing_locked
+    db_session.autoflush = autoflush
+    product, batch, policy, _ = _seed_fast_product(db_session)
+    batch.quantity_remaining = 0
+    with workspace_context(1):
+        product.kaspi_product_id, product.merchant_sku = "178890185", "4671307561"
+        alias = Product(workspace_id=1, name=product.name, merchant_sku=product.merchant_sku,
+            kaspi_product_id=product.merchant_sku, inventory_owner_product_id=product.id)
+        db_session.add(alias)
+        db_session.flush()
+        alias_policy = FastDumpingPolicy(workspace_id=1, product_id=alias.id, enabled=True)
+        item = ProductTestItem(workspace_id=1, input_reference="manual-preorder:178890185",
+            kaspi_product_id="178890185", merchant_sku="4671307561", name=product.name,
+            kaspi_url=URL, product_id=product.id, status="error")
+        db_session.add_all([alias_policy, item])
+        db_session.commit()
+        from backend.app import product_test_api as api
+        monkeypatch.setattr(api, "_validate_workspace_merchant", lambda *a, **k: None)
+        monkeypatch.setattr(api, "_touch_product_test_agent", lambda *a, **k: None)
+        for days, stock in [(8, 5), (5, 10)]:
+            queued = edit_preorder(item.id, PreorderEdit(price_kzt=23500,
+                preorder_days=days, stock_count=stock), db_session)
+            inspection = db_session.get(ProductTestJob, queued["job"]["id"])
+            _persist_product_inspection(db_session, job=inspection, result={
+                "kaspi_product_id": "178890185", "product_name": product.name,
+                "catalog_state": {"found": True, "sku": "4671307561", "master_sku": "178890185"}})
+            claimed = api.claim_product_test_job(api.ProductTestAgentIdentity(
+                agent_id="preorder-repair", version="1.1.25", workspace_id=1,
+                merchant_uid="merchant", agent_kind="product_test"), db_session)
+            write = db_session.get(ProductTestJob, claimed["job"]["id"])
+            done = _enroll_created_product(db_session, job=write, result={
+                "merchant_sku": "4671307561", "master_sku": "178890185",
+                "after": {"found": True, "sku": "4671307561", "master_sku": "178890185",
+                    "price_kzt": 23500, "preorder_days": days, "stock_count": stock}})
+            assert done["product_id"] == product.id and done["item"]["id"] == item.id
+            assert not policy.enabled and not alias_policy.enabled
+            assert pricing_locked(db_session, alias)
+        assert alias.kaspi_product_id == "4671307561"
+        assert batch.product_id == product.id and batch.quantity_remaining == 0
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 2
+
+
+@pytest.mark.parametrize("shared,confirmed,alias_master,stock,pending", [
+    (False, True, "4671307561", 0, False),
+    (True, False, "4671307561", 0, False),
+    (True, True, "999999999", 0, False),
+    (True, True, "4671307561", 1, False),
+    (True, True, "4671307561", 0, True),
+])
+def test_shared_alias_never_bypasses_preorder_guards(
+    db_session, shared, confirmed, alias_master, stock, pending
+):
+    from backend.app.preorder_api import _check_existing
+    from backend.app.fast_dumping_models import FastDumpingJob
+    product, batch, _, _ = _seed_fast_product(db_session)
+    batch.quantity_remaining = stock
+    with workspace_context(1):
+        product.kaspi_product_id, product.merchant_sku = "178890185", "4671307561"
+        alias = Product(workspace_id=1, name=product.name, merchant_sku=product.merchant_sku,
+            kaspi_product_id=alias_master, inventory_owner_product_id=product.id if shared else None)
+        db_session.add(alias)
+        db_session.flush()
+        if pending:
+            alias_policy = FastDumpingPolicy(workspace_id=1, product_id=alias.id, enabled=True)
+            db_session.add(alias_policy)
+            db_session.flush()
+            db_session.add(FastDumpingJob(workspace_id=1, product_id=alias.id,
+                policy_id=alias_policy.id, status="leased_verify"))
+        db_session.commit()
+        with pytest.raises(HTTPException):
+            _check_existing(db_session, workspace=1, kaspi_id="178890185",
+                merchant_sku="4671307561", product_id=product.id, cabinet_confirmed=confirmed)
+
+
+@pytest.mark.parametrize("autoflush", [False, True])
 @pytest.mark.parametrize("legacy_product", [False, True])
 @pytest.mark.parametrize("failed_draft", [False, True])
 def test_conflicting_sku_history_is_resolved_in_cabinet_without_duplicates(

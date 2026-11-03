@@ -10,9 +10,13 @@ PREFIX = "manual-preorder:"
 
 
 def preorder_item(db, product):
+    product_ids = {product.id}
+    if (product.inventory_owner_product_id is not None
+            and product.kaspi_product_id == product.merchant_sku):
+        product_ids.update(p.id for p in _offer_products(db, product))
     return db.scalar(select(ProductTestItem).where(
         ProductTestItem.workspace_id == product.workspace_id,
-        ProductTestItem.product_id == product.id,
+        ProductTestItem.product_id.in_(product_ids),
         ProductTestItem.input_reference.startswith(PREFIX),
     ).order_by(ProductTestItem.id.desc()).limit(1))
 
@@ -25,7 +29,23 @@ def pricing_locked(db, product):
     return physical_stock_count(db, product_id=product.id) <= 0 and not (item.offers_json or {}).get("dump_enabled", False)
 
 
+def _offer_products(db, product):
+    from .product_inventory_group import inventory_group_products
+    if not product.merchant_sku:
+        return (product,)
+    return tuple(p for p in inventory_group_products(db, product)
+        if p.merchant_sku == product.merchant_sku and (
+            p.kaspi_product_id == product.kaspi_product_id
+            or p.kaspi_product_id == product.merchant_sku
+            or product.kaspi_product_id == product.merchant_sku))
+
+
 def pause_pricing(db, product, item):
+    for member in _offer_products(db, product):
+        _pause_product_pricing(db, member, item)
+
+
+def _pause_product_pricing(db, product, item):
     from .fast_dumping_service import cancel_active_job
     if not (item.offers_json or {}).get("dump_enabled"):
         detach_preorder_ozon(db, product)

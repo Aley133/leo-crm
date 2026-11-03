@@ -29,6 +29,25 @@ PREFIX = "manual-preorder:"
 ARCHIVE_AGENT_VERSION = "1.1.25"
 
 
+def _confirmed_legacy_alias_ids(db, products, *, kaspi_id, merchant_sku, cabinet_confirmed):
+    """Only explicitly shared stock plus exact cabinet proof can identify aliases.
+
+    A shared physical product alone does not make different Kaspi cards the
+    same offer. The tolerated alias is specifically the old XML SKU-as-master.
+    """
+    if not cabinet_confirmed or not merchant_sku or kaspi_id.startswith("sku:"):
+        return set()
+    canonical = [p for p in products if p.kaspi_product_id == kaspi_id
+                 or str(p.kaspi_product_id or "").startswith(kaspi_id + "_")]
+    if len(canonical) != 1:
+        return set()
+    from .product_inventory_group import inventory_owner_ids_for_products
+    owners = inventory_owner_ids_for_products(db, {p.id for p in products})
+    owner = owners[canonical[0].id]
+    return {p.id for p in products if p.kaspi_product_id == merchant_sku
+            and owners.get(p.id) == owner and p.id != canonical[0].id}
+
+
 def supports_archive_preorder(version: str | None) -> bool:
     return bool(version and re.fullmatch(r"\d+\.\d+\.\d+", version)
                 and tuple(map(int, version.split("."))) >= (1, 1, 25))
@@ -179,8 +198,10 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
     # A master card can have several merchant offers/history rows. Select the
     # exact offer first; never treat all rows of a master as interchangeable.
     exact = [p for p in products if merchant_sku and p.merchant_sku == merchant_sku]
+    alias_ids = _confirmed_legacy_alias_ids(db, exact, kaspi_id=kaspi_id,
+        merchant_sku=merchant_sku, cabinet_confirmed=cabinet_confirmed)
     if exact:
-        products = exact
+        products = [p for p in exact if p.id not in alias_ids]
     if product_id is not None:
         linked = [p for p in products if p.id == product_id]
         if not linked:
@@ -209,7 +230,7 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
     ):
         raise HTTPException(409, "Merchant SKU связан с другой карточкой Kaspi")
     if not kaspi_id.startswith("sku:"):
-        conflicting = [p for p in exact if p.id != product.id
+        conflicting = [p for p in exact if p.id != product.id and p.id not in alias_ids
             and p.kaspi_product_id != kaspi_id
             and not str(p.kaspi_product_id or "").startswith(kaspi_id + "_")]
         if conflicting:
@@ -217,7 +238,8 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
                 f"Merchant SKU {merchant_sku} занят другой записью товара CRM: "
                 + ", ".join(f"ID {p.id} / Kaspi {p.kaspi_product_id}" for p in conflicting)
                 + ". Нужна сверка привязок; запись в Kaspi не отправлена.")
-    owners = inventory_owner_ids_for_products(db, {product.id})
+    guarded_ids = {product.id} | alias_ids
+    owners = inventory_owner_ids_for_products(db, guarded_ids)
     if (
         physical_stock_counts(
             db, product_ids={product.id}, owner_by_product=owners
@@ -231,7 +253,7 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
         select(FastDumpingJob.id)
         .where(
             FastDumpingJob.workspace_id == workspace,
-            FastDumpingJob.product_id == product.id,
+            FastDumpingJob.product_id.in_(guarded_ids),
             FastDumpingJob.status.in_(
                 ("queued_apply", "leased_apply", "queued_verify", "leased_verify")
             ),
@@ -242,7 +264,7 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
         select(DumpingRun.id)
         .where(
             DumpingRun.workspace_id == workspace,
-            DumpingRun.product_id == product.id,
+            DumpingRun.product_id.in_(guarded_ids),
             DumpingRun.status.in_(("queued_local", "leased_local")),
         )
         .limit(1)
@@ -409,7 +431,9 @@ def edit_preorder(
     # existing offer confirmation pipeline. XML waits for Kaspi confirmation.
     return _connect_preorder(
         PreorderRequest(
-            reference=(item.offers_json or {}).get("source_sku") or item.kaspi_url,
+            reference=(item.offers_json or {}).get("source_sku")
+                or (item.merchant_sku if not item.merchant_sku.startswith(PREFIX) else None)
+                or item.kaspi_url,
             price_kzt=payload.price_kzt,
             preorder_days=payload.preorder_days,
             stock_count=payload.stock_count if payload.stock_count is not None else item.stock_count,
@@ -612,8 +636,8 @@ def enroll_preorder(db: Session, *, job: ProductTestJob, result: dict):
         )
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
-    collision = db.scalar(
-        select(Product.id)
+    collision_products = db.scalars(
+        select(Product)
         .where(
             Product.workspace_id == job.workspace_id,
             Product.merchant_sku == sku,
@@ -621,8 +645,15 @@ def enroll_preorder(db: Session, *, job: ProductTestJob, result: dict):
             ~Product.kaspi_product_id.startswith(item.kaspi_product_id + "_", autoescape=True),
             Product.id != product.id if product else True,
         )
-        .limit(1)
-    )
+        .with_for_update()
+    ).all()
+    alias_ids = _confirmed_legacy_alias_ids(db,
+        ([product] if product else []) + collision_products,
+        kaspi_id=item.kaspi_product_id, merchant_sku=sku,
+        cabinet_confirmed=bool((job.options_json or {}).get("cabinet_sku_confirmed")
+            and job.options_json.get("merchant_sku") == sku
+            and job.options_json.get("master_sku") == item.kaspi_product_id))
+    collision = any(p.id not in alias_ids for p in collision_products)
     item_collision = db.scalar(
         select(ProductTestItem.id)
         .where(
