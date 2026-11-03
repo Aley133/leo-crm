@@ -29,6 +29,140 @@ from tests.test_fast_dumping import _seed_fast_product
 URL = "https://kaspi.kz/shop/p/phone-123456789/"
 
 
+@pytest.mark.parametrize("autoflush", [False, True])
+@pytest.mark.parametrize("legacy_product", [False, True])
+@pytest.mark.parametrize("failed_draft", [False, True])
+def test_conflicting_sku_history_is_resolved_in_cabinet_without_duplicates(
+    db_session, monkeypatch, autoflush, legacy_product, failed_draft
+):
+    sku, master = "4671307561", "178890185"
+    db_session.autoflush = autoflush
+    product, batch, policy, _ = _seed_fast_product(db_session)
+    with workspace_context(1):
+        batch.quantity_remaining = 0
+        product.merchant_sku = sku
+        product.kaspi_product_id = sku if legacy_product else master
+        old_item = ProductTestItem(workspace_id=1, input_reference="old-test",
+            kaspi_product_id=master if legacy_product else sku, merchant_sku=sku,
+            name="Existing offer", kaspi_url=f"https://kaspi.kz/shop/p/item-{master}/",
+            product_id=product.id, offers_json={"old_history": True})
+        db_session.add(old_item)
+        db_session.flush()
+        history = ProductTestJob(workspace_id=1, item_id=old_item.id,
+            input_reference=sku, status="succeeded")
+        db_session.add(history)
+        failed_job = None
+        if failed_draft:
+            draft = ProductTestItem(workspace_id=1, input_reference="manual-preorder:" + master,
+                kaspi_product_id=master, merchant_sku="manual-preorder:" + master,
+                name="Failed draft", kaspi_url=old_item.kaspi_url,
+                product_id=product.id, status="error")
+            db_session.add(draft)
+            db_session.flush()
+            failed_job = ProductTestJob(workspace_id=1, item_id=draft.id,
+                input_reference=sku, status="failed")
+            db_session.add(failed_job)
+        db_session.commit()
+        product_id, old_item_id = product.id, old_item.id
+        queued = connect_preorder(PreorderRequest(reference=sku,
+            price_kzt=23500, preorder_days=5, stock_count=10), db_session)
+        inspection = db_session.get(ProductTestJob, queued["job"]["id"])
+        assert inspection.options_json["master_sku"] is None
+        assert inspection.options_json["source_sku"] == sku
+        assert product.kaspi_product_id == (sku if legacy_product else master)
+        mapped = _persist_product_inspection(db_session, job=inspection, result={
+            "kaspi_product_id": master, "product_name": "Existing offer",
+            "catalog_state": {"found": True, "sku": sku, "master_sku": master}})
+        assert mapped["item"]["id"] == old_item_id
+        assert product.kaspi_product_id == (sku if legacy_product else master)
+        from backend.app import product_test_api as api
+        monkeypatch.setattr(api, "_validate_workspace_merchant", lambda *a, **k: None)
+        monkeypatch.setattr(api, "_touch_product_test_agent", lambda *a, **k: None)
+        claimed = api.claim_product_test_job(api.ProductTestAgentIdentity(
+            agent_id="preorder-repair", version="1.1.25", workspace_id=1,
+            merchant_uid="merchant", agent_kind="product_test"), db_session)
+        assert claimed["job"]["options"]["merchant_sku"] == sku
+        write = db_session.get(ProductTestJob, claimed["job"]["id"])
+        done = _enroll_created_product(db_session, job=write, result={
+            "merchant_sku": sku, "master_sku": master,
+            "after": {"found": True, "sku": sku, "master_sku": master,
+                      "price_kzt": 23500, "preorder_days": 5, "stock_count": 10}})
+        assert done["product_id"] == product_id
+        assert done["item"]["id"] == old_item_id
+        assert product.kaspi_product_id == master
+        assert old_item.offers_json["old_history"]
+        assert history.item_id == old_item_id
+        if failed_job:
+            db_session.refresh(failed_job)
+            assert failed_job.item_id == old_item_id and failed_job.status == "failed"
+        assert batch.product_id == product_id and batch.quantity_remaining == 0
+        assert not policy.enabled
+        assert db_session.scalar(select(func.count()).select_from(Product)) == 1
+        assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 1
+
+
+def test_conflicting_real_product_mapping_is_not_repaired_without_legacy_identity(db_session):
+    with workspace_context(1):
+        product = Product(workspace_id=1, name="Another card", merchant_sku="4671307561",
+                          kaspi_product_id="999999999")
+        item = ProductTestItem(workspace_id=1, input_reference="old-test",
+            kaspi_product_id="178890185", merchant_sku="4671307561", name="Offer", kaspi_url=URL)
+        db_session.add_all([product, item])
+        db_session.commit()
+        queued = connect_preorder(PreorderRequest(reference="4671307561",
+            price_kzt=23500, preorder_days=5), db_session)
+        with pytest.raises(ValueError, match="другой карточкой"):
+            _persist_product_inspection(db_session,
+                job=db_session.get(ProductTestJob, queued["job"]["id"]), result={
+                "kaspi_product_id": "178890185", "product_name": "Offer",
+                "catalog_state": {"found": True, "sku": "4671307561", "master_sku": "178890185"}})
+        assert product.kaspi_product_id == "999999999"
+        assert db_session.scalar(select(func.count()).select_from(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer")) == 0
+
+
+def test_resolved_sku_does_not_merge_another_real_offer_of_same_master(db_session):
+    with workspace_context(1):
+        other = ProductTestItem(workspace_id=1, input_reference="old-test", kaspi_product_id="178890185",
+            merchant_sku="other-offer", name="Other offer", kaspi_url=URL)
+        db_session.add(other)
+        db_session.commit()
+        queued = connect_preorder(PreorderRequest(reference="4671307561",
+            price_kzt=23500, preorder_days=5), db_session)
+        mapped = _persist_product_inspection(db_session,
+            job=db_session.get(ProductTestJob, queued["job"]["id"]), result={
+            "kaspi_product_id": "178890185", "product_name": "Selected offer",
+            "catalog_state": {"found": True, "sku": "4671307561", "master_sku": "178890185"}})
+        assert mapped["item"]["id"] != other.id
+        assert other.name == "Other offer" and other.merchant_sku == "other-offer"
+        assert db_session.scalar(select(func.count()).select_from(ProductTestItem)) == 2
+
+
+def test_linked_product_conflict_is_reported_before_kaspi_write(db_session):
+    with workspace_context(1):
+        selected = Product(workspace_id=1, name="Selected", merchant_sku="4671307561",
+                           kaspi_product_id="178890185")
+        other = Product(workspace_id=1, name="Other", merchant_sku="4671307561",
+                        kaspi_product_id="999999999")
+        db_session.add_all([selected, other])
+        db_session.flush()
+        item = ProductTestItem(workspace_id=1, input_reference="old-test",
+            kaspi_product_id="178890185", merchant_sku="4671307561", name="Selected",
+            kaspi_url=URL, product_id=selected.id)
+        db_session.add(item)
+        db_session.commit()
+        queued = connect_preorder(PreorderRequest(reference="4671307561",
+            price_kzt=23500, preorder_days=5), db_session)
+        with pytest.raises(ValueError, match=f"ID {other.id} / Kaspi 999999999"):
+            _persist_product_inspection(db_session,
+                job=db_session.get(ProductTestJob, queued["job"]["id"]), result={
+                "kaspi_product_id": "178890185", "product_name": "Selected",
+                "catalog_state": {"found": True, "sku": "4671307561", "master_sku": "178890185"}})
+        assert db_session.scalar(select(func.count()).select_from(ProductTestJob).where(
+            ProductTestJob.job_type == "create_offer")) == 0
+        assert other.kaspi_product_id == "999999999"
+
+
 @pytest.mark.parametrize("duplicate_sku", ["another-offer", "actual-merchant-sku"])
 @pytest.mark.parametrize("duplicate_master", ["123456789", "123456789_legacy"])
 def test_edit_targets_linked_product_even_with_same_master_history(db_session, monkeypatch, duplicate_sku, duplicate_master):

@@ -2258,7 +2258,8 @@ def claim_product_test_job(
                     _check_existing(db, workspace=payload.workspace_id,
                         kaspi_id=str(job.options_json["master_sku"]),
                         merchant_sku=job.options_json.get("merchant_sku"),
-                        product_id=preorder_item.product_id if preorder_item else None)
+                        product_id=preorder_item.product_id if preorder_item else None,
+                        cabinet_confirmed=bool(job.options_json.get("cabinet_sku_confirmed")))
                 except HTTPException as exc:
                     job.status = "failed"
                     job.completed_at = now

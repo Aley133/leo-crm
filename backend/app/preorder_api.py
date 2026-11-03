@@ -85,7 +85,10 @@ def resolve_reference(db: Session, *, workspace: int, reference: str) -> tuple[s
     )).all())
     ids = {re.sub(r"^(\d{5,18})_[^\s/]+$", r"\1", str(value)) for value in ids if value}
     if len(ids) > 1:
-        raise HTTPException(409, "SKU связан с несколькими карточками; устраните дубликаты")
+        # Old Test/import rows can contain the merchant SKU instead of a
+        # master ID. Resolve the exact offer read-only in the cabinet rather
+        # than rejecting it or picking an arbitrary historical mapping.
+        return "sku:" + sha256(reference.encode()).hexdigest()[:32], reference
     master = next(iter(ids), None)
     # Older XML imports stored the entire merchant SKU in kaspi_product_id.
     # Keep its product/history, but resolve the actual master in the cabinet.
@@ -159,7 +162,8 @@ def assert_no_preorder_write(db: Session, *, product: Product, classic: bool = F
 
 def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
                     merchant_sku: str | None = None, product_id: int | None = None,
-                    allow_unresolved: bool = False) -> Product | None:
+                    allow_unresolved: bool = False,
+                    cabinet_confirmed: bool = False) -> Product | None:
     from .dumping_service import physical_stock_counts
     from .product_inventory_group import inventory_owner_ids_for_products
 
@@ -183,9 +187,14 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
             raise HTTPException(409, "Привязка предзаказа не совпадает с выбранным офером Kaspi")
         products = linked
     if len(products) > 1:
-        if allow_unresolved and not exact and product_id is None:
+        if allow_unresolved and product_id is None:
             # Inspection will supply the actual merchant SKU before any write.
             return None
+        if exact:
+            raise HTTPException(409,
+                f"В CRM несколько товаров с Merchant SKU {merchant_sku}: "
+                + ", ".join(f"ID {p.id} / Kaspi {p.kaspi_product_id}" for p in products)
+                + ". Нужна сверка привязок товаров; запись в Kaspi не отправлена.")
         raise HTTPException(
             409, "Не удалось однозначно выбрать офер. Укажите его точный Merchant SKU"
         )
@@ -196,8 +205,18 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
         product.kaspi_product_id == kaspi_id
         or str(product.kaspi_product_id or "").startswith(kaspi_id + "_")
         or kaspi_id.startswith("sku:")
+        or (cabinet_confirmed and product.kaspi_product_id == merchant_sku)
     ):
         raise HTTPException(409, "Merchant SKU связан с другой карточкой Kaspi")
+    if not kaspi_id.startswith("sku:"):
+        conflicting = [p for p in exact if p.id != product.id
+            and p.kaspi_product_id != kaspi_id
+            and not str(p.kaspi_product_id or "").startswith(kaspi_id + "_")]
+        if conflicting:
+            raise HTTPException(409,
+                f"Merchant SKU {merchant_sku} занят другой записью товара CRM: "
+                + ", ".join(f"ID {p.id} / Kaspi {p.kaspi_product_id}" for p in conflicting)
+                + ". Нужна сверка привязок; запись в Kaspi не отправлена.")
     owners = inventory_owner_ids_for_products(db, {product.id})
     if (
         physical_stock_counts(
@@ -432,9 +451,13 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
         or (source_sku and source_sku != master and catalog.get("sku") != source_sku)
     ):
         raise ValueError("Agent не подтвердил точный офер выбранного предзаказа")
+    exact_cabinet_proof = bool(catalog.get("found")
+        and str(catalog.get("master_sku")) == master
+        and source_sku == catalog.get("sku"))
     try:
         product = _check_existing(db, workspace=job.workspace_id, kaspi_id=master,
-                                  merchant_sku=catalog.get("sku"), product_id=item.product_id)
+                                  merchant_sku=catalog.get("sku"), product_id=item.product_id,
+                                  cabinet_confirmed=exact_cabinet_proof)
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
     # A legacy Test item may still store the merchant SKU as its master ID.
@@ -450,6 +473,11 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
         exact_items = [i for i in existing if i.merchant_sku == catalog["sku"]]
         if exact_items:
             existing = exact_items
+        else:
+            # A different real offer of this master is not a duplicate.
+            existing = [i for i in existing if i.merchant_sku.startswith(PREFIX)
+                        or (not i.product_id and not i.added_at
+                            and i.merchant_sku == i.kaspi_product_id)]
         if len(existing) > 1:
             raise ValueError("В CRM несколько записей выбранной карточки")
         if existing:
@@ -466,15 +494,18 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
                 ProductTestJob.status.in_(("queued", "leased")),
             ).limit(1)):
                 raise ValueError("Эта карточка уже подключается. Дождитесь результата")
+            # Keep the real SKU row when retrying alongside a failed temporary
+            # preorder; move all jobs, including the current one, to its ID.
+            winner, loser = (item, target) if item.merchant_sku == catalog["sku"] else (target, item)
             for field in ("test_price_kzt", "preorder_days", "stock_count", "city_id", "zone_id"):
-                setattr(target, field, getattr(item, field))
-            target.offers_json = {**(target.offers_json or {}), **item.offers_json}
+                setattr(winner, field, getattr(item, field))
+            winner.offers_json = {**(target.offers_json or {}), **item.offers_json}
             db.execute(update(ProductTestJob).where(
-                ProductTestJob.workspace_id == job.workspace_id, ProductTestJob.item_id == item.id
-            ).values(item_id=target.id))
-            db.delete(item)
+                ProductTestJob.workspace_id == job.workspace_id, ProductTestJob.item_id == loser.id
+            ).values(item_id=winner.id))
+            db.delete(loser)
             db.flush()
-            item = target
+            item = winner
     item.kaspi_product_id = master
     item.input_reference = PREFIX + master
     item.active = False
@@ -508,6 +539,7 @@ def persist_preorder_inspection(db: Session, *, job: ProductTestJob, result: dic
             "preorder_archive": bool((job.options_json or {}).get("preorder_archive")),
             "master_sku": item.kaspi_product_id,
             "merchant_sku": (item.offers_json or {}).get("existing_merchant_sku"),
+            "cabinet_sku_confirmed": exact_cabinet_proof,
             "model": item.name,
             "initial_price_kzt": int(item.test_price_kzt),
             "stock_count": item.stock_count,
@@ -574,6 +606,9 @@ def enroll_preorder(db: Session, *, job: ProductTestJob, result: dict):
         product = _check_existing(
             db, workspace=job.workspace_id, kaspi_id=item.kaspi_product_id, merchant_sku=sku,
             product_id=item.product_id,
+            cabinet_confirmed=bool((job.options_json or {}).get("cabinet_sku_confirmed")
+                and job.options_json.get("merchant_sku") == sku
+                and job.options_json.get("master_sku") == item.kaspi_product_id),
         )
     except HTTPException as exc:
         raise ValueError(exc.detail) from exc
