@@ -1217,7 +1217,8 @@ def complete_scan(
         owned_price_band_kzt=policy.owned_price_band_kzt,
         owned_cycle_anchor_price_kzt=state.owned_cycle_anchor_price_kzt,
     )
-    delivery_selection_reason = market.get("delivery_selection_reason")
+    delivery_selection_reason = (market.get("delivery_selection_reason")
+        if not (state.automation_json or {}).get("server_delivery_filter") else None)
     if delivery_selection_reason:
         decision = replace(
             decision,
@@ -1672,6 +1673,25 @@ def resume_automatic_writes(
 
 def _decide_policy_price(*, db, policy, state, source, **kwargs):
     if getattr(policy, "pricing_mode", "manual") != "automation":
+        from .fast_dumping_delivery_filter import select_delivery_market
+        selection = select_delivery_market(kwargs.get("market_offers") or [],
+            own_price=kwargs["own_price_kzt"], page_price=kwargs.get("page_visible_price_kzt"),
+            complete=(state.automation_json or {}).get("offers_complete", False),
+            selected_price=kwargs.get("competitor_price_kzt"))
+        if selection is not None:
+            selected = selection["selected"]
+            price = _decimal(selected.get("price_kzt"), field="offer.price_kzt") if selected else None
+            state.competitor_price_kzt = price
+            state.competitor_name = selected.get("merchant_name") if selected else None
+            state.offers_json = selection["diagnostics"]
+            state.automation_json = {**(state.automation_json or {}), "server_delivery_filter": True}
+            kwargs.update(market_offers=selection["offers"], competitor_price_kzt=price,
+                delivery_price_premium_kzt=None, delivery_advantage_days=None)
+            decision = decide_fast_price(**kwargs)
+            return replace(decision, reason=decision.reason + " " + selection["reason"],
+                status="delivery_advantage" if price is None and selection["ignored_count"]
+                    and decision.status == "no_competitor" else decision.status)
+        state.automation_json = {**(state.automation_json or {}), "server_delivery_filter": False}
         return decide_fast_price(**kwargs)
     from .full_automation_service import observe_sales
     from .full_automation_pricing import decide_automated_price
