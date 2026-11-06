@@ -793,8 +793,9 @@ def maintain_workspace_queue(db: Session, *, workspace_id: int) -> None:
     from .preorder_modes import reconcile_preorder_policies
     reconcile_preorder_policies(db, workspace_id)
     if _reserve_supply_recovery(workspace_id):
-        from .fast_dumping_supply_guard import disable_empty_products
+        from .fast_dumping_supply_guard import disable_empty_products, resume_stock_products
         disable_empty_products(db, workspace_id)
+        resume_stock_products(db, workspace_id)
     recover_expired_leases(db, workspace_id=workspace_id)
     # Retention over completed JSON history must never run inside the agent's
     # latency-sensitive claim transaction. The callable is kept for controlled
