@@ -9,6 +9,68 @@ from backend.app import fast_dumping_service as svc
 from tests.test_fast_dumping import _seed_fast_product
 
 
+def test_received_stock_resumes_only_an_automatic_empty_supply_stop(db_session):
+    from backend.app.fast_dumping_supply_guard import resume_stock_products
+    product, batch, policy, state = empty_product(db_session)
+    with workspace_context(1):
+        disable_empty_products(db_session, 1)
+        assert not policy.enabled
+        batch.quantity_remaining = 1
+        assert resume_stock_products(db_session, 1) == 1
+        assert policy.enabled
+        job = db_session.get(FastDumpingJob, state.active_job_id)
+        assert job.status == "queued_scan" and job.reason.startswith("inventory_priority:")
+        assert resume_stock_products(db_session, 1) == 0
+
+
+@pytest.mark.parametrize("protection", ["manual", "sale_override", "paused", "empty", "workspace"])
+def test_stock_recovery_respects_explicit_stops_and_missing_stock(db_session, protection):
+    from backend.app.fast_dumping_supply_guard import resume_stock_products
+    product, batch, policy, state = empty_product(db_session)
+    with workspace_context(1):
+        disable_empty_products(db_session, 1)
+        batch.quantity_remaining = 0 if protection == "empty" else 1
+        if protection == "manual":
+            state.status_reason = "Быстрый демпинг выключен пользователем."
+        elif protection == "sale_override":
+            product.sale_state_overridden = True
+        elif protection == "paused":
+            state.automatic_writes_paused = True
+        assert resume_stock_products(db_session, 3 if protection == "workspace" else 1) == 0
+        assert not policy.enabled
+
+
+def test_stock_recovery_never_reissues_an_inflight_mutation(db_session):
+    from backend.app.fast_dumping_supply_guard import resume_stock_products
+    product, batch, policy, state = empty_product(db_session)
+    with workspace_context(1):
+        job, _ = svc.queue_scan(db_session, policy=policy, workspace_id=1, reason="test")
+        job.status = "leased_apply"
+        job.lease_token = "existing-lease"
+        db_session.flush()
+        disable_empty_products(db_session, 1)
+        batch.quantity_remaining = 1
+        assert resume_stock_products(db_session, 1) == 1
+        assert state.active_job_id == job.id
+        assert job.status == "leased_apply" and job.lease_token == "existing-lease"
+
+
+def test_legacy_fixed_preorder_returns_to_physical_stock_queue(db_session):
+    from backend.app.fast_dumping_supply_guard import resume_stock_products, PREORDER_PAUSE
+    product, batch, policy, state = _seed_fast_product(db_session, quantity=2)
+    with workspace_context(1):
+        policy.enabled = False
+        state.status_reason = PREORDER_PAUSE
+        item = ProductTestItem(workspace_id=1, product_id=product.id,
+            kaspi_product_id=product.kaspi_product_id, merchant_sku=product.merchant_sku,
+            input_reference="manual-preorder:legacy", name=product.name, kaspi_url="https://kaspi.kz/",
+            offers_json={"dump_enabled": False, "stock_mode": True})
+        db_session.add(item)
+        db_session.flush()
+        assert resume_stock_products(db_session, 1) == 1
+        assert policy.enabled and state.active_job_id is not None
+
+
 def empty_product(db_session, workspace_id=1):
     product, batch, policy, state = _seed_fast_product(db_session, quantity=1, workspace_id=workspace_id)
     with workspace_context(workspace_id):

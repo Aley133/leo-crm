@@ -28,6 +28,7 @@ let rows = [];
 let searchTimer = null;
 let searchController = null;
 let loading = false;
+const cardMarkup = new WeakMap();
 
 const attentionStatuses = new Set(["price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error","apply_failed","merchant_write_failed","automation_market_incomplete","automation_market_stale"]);
 const workingStatuses = new Set(["queued","scanning","queued_apply","preparing_apply","applying","verifying"]);
@@ -108,6 +109,7 @@ const diagnosticView = (payload) => `${offersTable(payload.offers || [])}${paylo
 const renderFloor = () => {
   const limited = rows.filter(isFloor);
   if (!floorSection.classList.contains("is-open")) return;
+  if (floorList.matches(":hover") || floorList.contains(document.activeElement)) return;
   document.querySelector("#floor-count").textContent = limited.length;
   floorList.innerHTML = limited.map((row) => `<article class="floor-item" data-product-id="${row.product_id}">
     <div><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")} · ${escapeHtml(row.state?.status_reason || "Конкурент ниже безопасного floor")}</small></div>
@@ -121,6 +123,7 @@ const renderFloor = () => {
 
 const renderAttention = () => {
   if (!attentionSection.classList.contains("is-open")) return;
+  if (attentionList.matches(":hover") || attentionList.contains(document.activeElement)) return;
   const needingAttention = rows.filter((row) => attentionStatuses.has(statusOf(row)));
   document.querySelector("#attention-count").textContent = needingAttention.length;
   attentionList.innerHTML = needingAttention.map((row) => `<article class="attention-item" data-product-id="${row.product_id}">
@@ -143,6 +146,7 @@ const rowMatches = (row) => {
 
 const renderDisabled = () => {
   if (!disabledSection.classList.contains("is-open")) return;
+  if (disabledList.matches(":hover") || disabledList.contains(document.activeElement)) return;
   const disabled = rows.filter((row) => !row.policy.enabled);
   document.querySelector("#disabled-count").textContent = disabled.length;
   disabledList.innerHTML = disabled.map((row) => `<article class="attention-item" data-product-id="${row.product_id}"><div><span class="fast-status off">Отключена</span><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")}</small><p>${escapeHtml(row.state?.status_reason || "Демпинг выключен")}</p></div><div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button></div></article>`).join("") || '<p class="fast-card-reason">Отключённых карточек нет.</p>';
@@ -195,9 +199,24 @@ const render = (payload) => {
   renderAttention();
   renderDisabled();
   const visible = rows.filter(rowMatches);
-  const openDetails = new Set(Array.from(list.querySelectorAll(".fast-details[open]")).map(el => el.dataset.productId));
-  list.innerHTML = visible.map(card).join("");
-  list.querySelectorAll(".fast-details").forEach(el => { if (openDetails.has(el.dataset.productId)) el.open = true; });
+  const existing = new Map(Array.from(list.children).map(el => [el.dataset.productId, el]));
+  visible.forEach((row, index) => {
+    const key = String(row.product_id);
+    let element = existing.get(key);
+    const markup = card(row);
+    const interacting = element && (element.matches(":hover") || element.contains(document.activeElement) || element.querySelector(".fast-details[open]"));
+    if (!element || (cardMarkup.get(element) !== markup && !interacting)) {
+      const template = document.createElement("template");
+      template.innerHTML = markup;
+      const replacement = template.content.firstElementChild;
+      if (element) element.replaceWith(replacement);
+      element = replacement;
+      cardMarkup.set(element, markup);
+    }
+    if (list.children[index] !== element) list.insertBefore(element, list.children[index] || null);
+    existing.delete(key);
+  });
+  for (const element of existing.values()) element.remove();
   empty.classList.toggle("hidden", rows.length > 0);
   document.querySelector("#rows-label").textContent = `${visible.length} из ${rows.length} · обновлено ${dateTime(payload.checked_at)}`;
 };
@@ -223,6 +242,7 @@ const renderAgent = (payload) => {
 };
 
 const loadPage = async ({silent=false}={}) => {
+  if (silent && editDialog.open) return;
   if (!localStorage.getItem(storageKey)) {
     authPanel.classList.remove("hidden");
     page.classList.add("hidden");
@@ -319,7 +339,7 @@ const setAutomation = (prefix, active) => {
   for (const name of manualControls) {
     const input = document.querySelector(`#${prefix}${name}`);
     input.disabled = active;
-    input.closest("label").classList.toggle("hidden", active);
+    input.closest("label")?.classList.toggle("hidden", active);
   }
 };
 for (const prefix of ["", "edit-"]) {
