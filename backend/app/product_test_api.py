@@ -13,7 +13,7 @@ from fastapi import APIRouter, Depends, HTTPException, Response, Request
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import delete, or_, select, update
+from sqlalchemy import case, delete, or_, select, update
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -203,6 +203,7 @@ def _touch_product_test_agent(
         "merchant_uid": payload.merchant_uid,
         "status": status,
         "last_seen_at": _now(),
+        "job_id": getattr(payload, "job_id", None),
     }
     with _PRODUCT_TEST_HEARTBEATS_LOCK:
         _PRODUCT_TEST_HEARTBEATS[(payload.workspace_id, payload.agent_id)] = record
@@ -2187,6 +2188,40 @@ def download_product_test_xml(db: Session = Depends(get_db)) -> Response:
     )
 
 
+def recover_preorder_inspections(db, workspace_id, *, now=None):
+    """Recover only abandoned read-only inspections, with a bounded retry count.
+
+    Never replay create_offer/withdraw or moderation writes from maintenance.
+    An invalidated inspection lease cannot persist a follow-up write.
+    """
+    current = now or _now()
+    jobs = db.scalars(select(ProductTestJob).where(
+        ProductTestJob.workspace_id == workspace_id,
+        ProductTestJob.job_type == "inspect",
+        ProductTestJob.options_json["manual_preorder"].as_boolean().is_(True),
+        ProductTestJob.status == "leased",
+        or_(ProductTestJob.lease_until <= current,
+            ProductTestJob.updated_at < current - timedelta(minutes=5)),
+    ).order_by(ProductTestJob.id).limit(10).with_for_update(skip_locked=True)).all()
+    for job in jobs:
+        details = dict(job.options_json or {})
+        attempts = int(details.get("inspection_recoveries") or 0)
+        exhausted = attempts >= 3
+        job.status = "failed" if exhausted else "queued"
+        job.agent_id = job.lease_token = job.lease_until = None
+        job.options_json = {**details, "inspection_recoveries": attempts + 1}
+        if exhausted:
+            job.error_code = "inspection_recovery_exhausted"
+            job.error_message = "Агент трижды не завершил проверку карточки. Проверьте агент и повторите подключение. Запись в Kaspi не выполнялась."
+            job.completed_at = current
+            item = db.get(ProductTestItem, job.item_id) if job.item_id else None
+            if item is not None and item.workspace_id == workspace_id:
+                item.status = "error"
+                item.last_error = job.error_message
+    db.flush()
+    return len(jobs)
+
+
 @agent_router.post("/claim")
 def claim_product_test_job(
     payload: ProductTestAgentIdentity,
@@ -2212,6 +2247,7 @@ def claim_product_test_job(
         archive_capable = supports_archive_preorder(payload.version)
         with workspace_context(payload.workspace_id):
             _touch_product_test_agent(payload)
+            recover_preorder_inspections(db, payload.workspace_id, now=now)
             db.execute(
                 update(ProductTestJob)
                 .where(
@@ -2241,7 +2277,8 @@ def claim_product_test_job(
                         ProductTestJob.lease_until <= now,
                     ),
                 )
-                .order_by(ProductTestJob.id)
+                .order_by(case((ProductTestJob.options_json["manual_preorder"].as_boolean().is_(True), 0), else_=1),
+                    ProductTestJob.id)
                 .limit(1)
                 .with_for_update(skip_locked=True)
             )
@@ -2328,7 +2365,12 @@ def heartbeat_product_test_agent(
                 ProductTestJob.agent_id == payload.agent_id,
                 ProductTestJob.lease_token == payload.lease_token,
                 ProductTestJob.status == "leased",
-            ).values(lease_until=_now() + timedelta(seconds=7200))
+            ).values(lease_until=case(
+                (ProductTestJob.job_type == "discover_popular", _now() + timedelta(seconds=7200)),
+                (ProductTestJob.job_type.in_(("create_offer", "create_new_card", "confirm_new_card", "discover")),
+                    _now() + timedelta(seconds=1800)),
+                else_=_now() + timedelta(seconds=PRODUCT_TEST_LEASE_SECONDS),
+            ))
         )
         record = {**record, "lease_renewed": renewed.rowcount == 1}
         db.commit()

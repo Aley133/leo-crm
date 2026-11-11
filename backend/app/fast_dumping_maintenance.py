@@ -7,13 +7,14 @@ from datetime import UTC, datetime
 
 from sqlalchemy import func, select, text
 
-from .db import SessionLocal, engine
+from .db import SessionLocal, background_database_available
 from .fast_dumping_diagnostics import trace_fast_operation
 from .fast_dumping_models import FastDumpingPolicy
 from .fast_dumping_service import maintain_workspace_queue
 from .fast_dumping_uow import fast_unit_of_work
 from .workspace_context import workspace_context
 from .workspace_models import Workspace
+from .product_test_models import ProductTestJob
 
 _LOGGER = logging.getLogger("uvicorn.error")
 INTERVAL_SECONDS = 10
@@ -22,9 +23,7 @@ _LAST_WORKSPACE = 0
 
 
 def _pool_has_room() -> bool:
-    pool = engine.pool
-    return not (hasattr(pool, "checkedout") and hasattr(pool, "size")
-                and pool.checkedout() >= max(1, pool.size() - 1))
+    return background_database_available()
 
 
 def run_maintenance_cycle() -> None:
@@ -34,9 +33,12 @@ def run_maintenance_cycle() -> None:
         return
     with SessionLocal() as db:
         db.info["include_all_workspaces"] = True
-        workspace_ids = db.scalars(select(FastDumpingPolicy.workspace_id)
-            .join(Workspace, Workspace.id == FastDumpingPolicy.workspace_id)
-            .where(Workspace.is_active.is_(True)).distinct().order_by(FastDumpingPolicy.workspace_id)).all()
+        workspace_query = select(FastDumpingPolicy.workspace_id).union(select(ProductTestJob.workspace_id).where(
+            ProductTestJob.job_type == "inspect", ProductTestJob.status == "leased"))
+        candidates = workspace_query.subquery()
+        workspace_ids = db.scalars(select(candidates.c.workspace_id).join(Workspace,
+            Workspace.id == candidates.c.workspace_id).where(Workspace.is_active.is_(True))
+            .order_by(candidates.c.workspace_id)).all()
     workspace_ids = ([w for w in workspace_ids if w > _LAST_WORKSPACE]
                      + [w for w in workspace_ids if w <= _LAST_WORKSPACE])
     completed = 0
@@ -55,6 +57,8 @@ def run_maintenance_cycle() -> None:
                     db.execute(text("SET LOCAL statement_timeout = '5s'"))
                 with trace_fast_operation("queue_maintenance", workspace_id) as trace:
                     maintain_workspace_queue(db, workspace_id=workspace_id)
+                    from .product_test_api import recover_preorder_inspections
+                    recover_preorder_inspections(db, workspace_id)
                     db.commit()
                     trace.outcome = "completed"
                 completed += 1

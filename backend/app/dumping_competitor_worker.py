@@ -9,7 +9,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.exc import OperationalError, ProgrammingError
 from sqlalchemy.orm import Session, aliased
 
-from .db import SessionLocal
+from .db import SessionLocal, background_database_available
 from .dumping_models import DumpingPolicy, DumpingRun
 from .dumping_service import resolve_cost_source
 from .models import Product
@@ -553,6 +553,10 @@ def recovery_job_diagnostics(
 
 def dispatch_due_competitor_jobs() -> tuple[int, ...]:
     """Run one short queue-only scheduling transaction."""
+    if not background_database_available():
+        SCHEDULER_LAST_RUN.update(status="deferred_pool_busy", finished_at=datetime.now(UTC).isoformat(),
+            message="Фоновая очередь уступает соединения интерфейсу и агентам; повтор через 30 секунд.")
+        return ()
     with SessionLocal() as db:
         db.info["include_all_workspaces"] = True
         try:
