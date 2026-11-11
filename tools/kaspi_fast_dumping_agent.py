@@ -35,7 +35,7 @@ from tools.kaspi_fast_dumping_http_auth import (
     HttpOtpKaspiMerchantSession as KaspiMerchantSession,
 )
 
-VERSION = "1.2.10"
+VERSION = "1.2.11"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 30
 IDLE_POLL_MAX_SECONDS = 60

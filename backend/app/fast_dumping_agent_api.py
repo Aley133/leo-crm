@@ -55,6 +55,7 @@ class FastScanComplete(BaseModel):
 
 
 class FastPrepareApply(BaseModel):
+    respects_removed_offer: bool = False
     agent_id: str = Field(min_length=1, max_length=255)
     workspace_id: int = Field(ge=1)
     lease_token: str = Field(min_length=16, max_length=64)
@@ -571,6 +572,21 @@ def prepare_job_apply(
                 agent_id=payload.agent_id,
                 lease_token=payload.lease_token,
             )
+            if result.get("ready"):
+                from .fast_dumping_models import FastDumpingJob, FastDumpingState
+                from .preorder_modes import preorder_item
+                job = db.get(FastDumpingJob, job_id)
+                product = db.get(Product, job.product_id)
+                if preorder_item(db, product) is not None:
+                    result["respect_removed_offer"] = True
+                    if not payload.respects_removed_offer:
+                        from .fast_dumping_offer_runtime import _stale_offer_job
+                        state = db.scalar(select(FastDumpingState).where(
+                            FastDumpingState.workspace_id == payload.workspace_id,
+                            FastDumpingState.product_id == job.product_id).with_for_update())
+                        result = _stale_offer_job(state=state, job=job,
+                            reason="Обновите Fast Agent до 1.2.11 для защиты предзаказа от восстановления снятой продажи.")
+                        state.next_scan_at = datetime.now(UTC) + timedelta(minutes=5)
             db.commit()
             trace.outcome = "ready" if result.get("ready") else "skipped"
             return result

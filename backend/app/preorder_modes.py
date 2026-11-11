@@ -14,11 +14,12 @@ def preorder_item(db, product):
     if (product.inventory_owner_product_id is not None
             and product.kaspi_product_id == product.merchant_sku):
         product_ids.update(p.id for p in _offer_products(db, product))
-    return db.scalar(select(ProductTestItem).where(
+    item = db.scalar(select(ProductTestItem).where(
         ProductTestItem.workspace_id == product.workspace_id,
         ProductTestItem.product_id.in_(product_ids),
         ProductTestItem.input_reference.startswith(PREFIX),
     ).order_by(ProductTestItem.id.desc()).limit(1))
+    return None if item is not None and (item.offers_json or {}).get("management_disabled") else item
 
 
 def pricing_locked(db, product):

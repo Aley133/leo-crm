@@ -330,6 +330,33 @@ class MerchantOfferApi:
             "body": body,
         }
 
+    def withdraw_offer(self, *, sku: str, master_sku: str, attempts: int = 8,
+                       poll_seconds: float = 2) -> dict[str, Any]:
+        """Withdraw only a cabinet-confirmed exact offer; verify the result."""
+        before = self.read_offer(sku)
+        if not before.found or before.sku != sku or before.master_sku != master_sku:
+            raise ValueError("Kaspi не подтвердил точный SKU и карточку для снятия")
+        def removed(state):
+            return (state.found and state.sku == sku and state.master_sku == master_sku
+                and (state.row_available is False or state.nested_available in {"no", "false", "0"}
+                     or state.query_mode == "inactive"))
+        if removed(before):
+            return {"before": before.dict(), "after": before.dict()}
+        if before.price_kzt is None or not before.model:
+            raise ValueError("Kaspi не вернул цену и название точного офера")
+        self.config.assert_live_allowed(True)
+        payload = self.process_payload(sku=sku, model=before.model, price=before.price_kzt,
+            stock=0, preorder=0)
+        payload["availabilities"][0]["available"] = "no"
+        self._request_json("POST", PROCESS_URL, json_body=payload).raise_for_status()
+        for attempt in range(attempts):
+            after = self.read_offer(sku)
+            if removed(after):
+                return {"before": before.dict(), "after": after.dict()}
+            if attempt + 1 < attempts:
+                time.sleep(poll_seconds)
+        raise RuntimeError("Kaspi ещё не подтвердил снятие с продажи; проверьте кабинет и повторите")
+
     def create_flow_preview(self, *, master_sku: str, model: str, price: int, stock: int, preorder: int) -> dict[str, Any]:
         generated = f"{master_sku}_<new-code>"
         return {

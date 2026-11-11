@@ -2232,6 +2232,8 @@ def claim_product_test_job(
                 .where(
                     ProductTestJob.workspace_id == payload.workspace_id,
                     ProductTestJob.status == "queued",
+                    or_(archive_capable and tuple(map(int, payload.version.split("."))) >= (1, 1, 28),
+                        ProductTestJob.job_type != "withdraw_preorder"),
                     or_(archive_capable,
                         ProductTestJob.options_json["manual_preorder"].as_boolean().is_not(True)),
                     or_(
@@ -2427,6 +2429,9 @@ def complete_product_test_job(job_id: int, payload: ProductTestAgentResult, db: 
         try:
             if job.job_type in {"discover", "discover_popular"}:
                 return _persist_discovery(db, job=job, result=payload.result)
+            if job.job_type == "withdraw_preorder":
+                from .preorder_api import complete_preorder_withdrawal
+                return complete_preorder_withdrawal(db, job=job, result=payload.result)
             if job.job_type == "validate_supplier":
                 return _persist_supplier_validation(db, job=job, result=payload.result)
             if job.job_type == "create_offer":

@@ -12,6 +12,13 @@
   let items = new Map();
   let editingId = null;
   let loading = false;
+  let inventoryData = null;
+  let editingReference = null;
+  let editingRow = null;
+  let loadVersion = 0;
+  let catalogOffset = 0;
+  let catalogVersion = 0;
+  let catalogItems = new Map();
   const escape = value => String(value ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
   const request = async (url, options={}) => {
     const response = await fetch(url, {cache:"no-store", ...options, headers:{Authorization:`Bearer ${localStorage.getItem(tokenKey) || ""}`, "Content-Type":"application/json"}});
@@ -44,22 +51,49 @@
     sync();
   }
   const render = data => {
-    items = new Map(data.items.map(item => [Number(item.id), item]));
-    const archiveReady = (data.agent?.agents || []).some(agent => agent.online && /^\d+\.\d+\.\d+$/.test(agent.version || "") && agent.version.split(".").map(Number).reduce((value, part) => value * 1000 + part, 0) >= 1001025);
-    document.querySelector("#agent-status").textContent = data.required_agent_version && data.agent?.online && !archiveReady ? "Обновите «Тест товара» до 1.1.25: задания восстановления дождутся нового агента." : data.agent?.online ? "Агент «Тест товара» онлайн." : "Агент «Тест товара» офлайн. Задание дождётся его подключения.";
-    const labels = {preorder_inspecting:"Чтение карточки",adding_to_kaspi:"Подключение к Kaspi",stock_trading:"Обычная торговля — предзаказ заблокирован",preorder_connected:"Подключён",enrolled_fast_dumping:"Подключён",error:"Ошибка"};
-    list.innerHTML = data.items.map(item => `<article class="fast-card"><div class="fast-card-head"><div><h3>${escape(item.name)}</h3><span>${escape(labels[item.status] || item.status)}</span></div>${item.product_id && ["preorder_connected", "enrolled_fast_dumping"].includes(item.status) ? `<div class="fast-card-actions"><button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button><a class="button secondary" href="/crm/products/${Number(item.product_id)}">Товар</a></div>` : item.status === "error" ? `<button class="button secondary" type="button" data-edit-preorder="${Number(item.id)}">Редактировать</button>` : ""}</div><div class="fast-card-reason">${Number(item.test_price_kzt).toLocaleString("ru-RU")} ₸ · предзаказ ${Number(item.preorder_days)} дн. · ${Number(item.stock_count)} шт. · ${item.offers?.dump_enabled ? item.offers?.rocket_enabled ? "🚀 Автоматизация" : "Демпинг включён" : "Фиксированная цена"} · физический остаток ${Number(item.physical_stock || 0)} · SKU ${escape(item.merchant_sku)} · Kaspi ${escape(item.kaspi_product_id)}${item.last_error ? `<p>${escape(item.last_error)}</p>` : ""}</div></article>`).join("") || '<p>Пока нет подключений.</p>';
+    inventoryData = data;
+    items = new Map(data.items.map(item => [item.row_key, item]));
+    const required = data.required_agent_version || "1.1.28";
+    const versionNumber = value => /^\d+\.\d+\.\d+$/.test(value || "") ? value.split(".").map(Number).reduce((n, part) => n * 1000 + part, 0) : 0;
+    const archiveReady = (data.agent?.agents || []).some(agent => agent.online && versionNumber(agent.version) >= versionNumber(required));
+    document.querySelector("#agent-status").textContent = data.agent?.online && !archiveReady ? `Обновите «Тест товара» до ${required} для снятия с продажи. Задания сохраняются в очереди.` : data.agent?.online ? "Агент «Тест товара» онлайн." : "Агент «Тест товара» офлайн. Задание дождётся его подключения.";
+    const groups = {all:"Все",active:"Активные",working:"В работе",attention:"Требуют внимания",stock:"Физический остаток",disabled:"Отключены / закончились"};
+    const selected = document.querySelector("#preorder-filter").value;
+    const query = document.querySelector("#connection-search").value.trim().toLocaleLowerCase("ru-RU");
+    const rows = data.items.filter(item => (selected === "all" || item.group === selected) && (!query || [item.name,item.merchant_sku,item.kaspi_product_id].join(" ").toLocaleLowerCase("ru-RU").includes(query)));
+    const labels = {preorder_inspecting:"Чтение карточки",adding_to_kaspi:"Подключение к Kaspi",stock_trading:"Обычная торговля",ready_to_resume:"Можно выставить снова",preorder_connected:"Предзаказ",enrolled_fast_dumping:"Предзаказ",error:"Ошибка",preorder_disabled:"Управление отключено",preorder_withdrawing:"Снимается с продажи",sale_removed:"Снят с продажи"};
+    const when = value => { const date = value ? new Date(value) : null; return date && !Number.isNaN(date.valueOf()) ? date.toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : ""; };
+    const money = value => value == null ? "—" : `${Number(value).toLocaleString("ru-RU")} ₸`;
+    document.querySelector("#preorder-summary").innerHTML = Object.entries(groups).map(([key,label]) => `<button type="button" data-filter="${key}" aria-pressed="${selected === key}"><span>${label}</span><strong>${Number(data.summary[key === "all" ? "total" : key] || 0)}</strong></button>`).join("");
+    list.innerHTML = rows.length ? `<table class="preorder-table"><thead><tr><th scope="col">Товар</th><th scope="col">Цена</th><th scope="col">Предзаказ</th><th scope="col">Количество</th><th scope="col">Физ. остаток</th><th scope="col">Режим</th><th scope="col">Статус</th><th scope="col">Действия</th></tr></thead><tbody>${rows.map(item => `<tr class="preorder-row group-${escape(item.group)}"><td><div class="preorder-product">${item.image_url && /^https:\/\//.test(item.image_url) ? `<img src="${escape(item.image_url)}" alt="" loading="lazy" width="44" height="44">` : ""}<div><strong>${escape(item.name)}</strong><small>SKU ${escape(item.merchant_sku || "—")} · Kaspi ${escape(item.kaspi_product_id || "—")}</small><small>${escape(item.source_label)}${item.confirmed ? " · подтверждено" : " · требуется сверка"}${item.observed_at ? ` · ${escape(when(item.observed_at))}` : ""}</small></div></div></td><td class="preorder-number">${money(item.test_price_kzt)}</td><td class="preorder-number">${Number(item.preorder_days) > 0 ? `${Number(item.preorder_days)} дн.` : "—"}</td><td class="preorder-number">${item.stock_count == null ? "—" : `${Number(item.stock_count)} шт.`}</td><td class="preorder-number">${Number(item.physical_stock || 0)} шт.</td><td>${item.automation_mode === "rocket" ? "🚀 Автоматизация" : item.automation_enabled ? "Демпинг" : "Фиксированная цена"}</td><td><span class="preorder-badge">${escape(item.group === "working" ? "Ожидается подтверждение" : item.group === "attention" ? "Требует внимания" : labels[item.status] || groups[item.group])}</span>${item.last_error ? `<small class="preorder-error">${escape(item.last_error)}</small>` : ""}</td><td><div class="preorder-actions">${item.can_connect ? `<button class="button secondary" type="button" data-edit-preorder="${escape(item.row_key)}">${!item.id ? "Настроить" : ["ready_to_resume","sale_removed","preorder_disabled","error"].includes(item.status) ? "Выставить снова" : "Редактировать"}</button>` : ""}${item.id && !item.pending && item.status !== "preorder_disabled" ? `<button class="button secondary" type="button" data-action="disable" data-item="${Number(item.id)}">Отключить управление</button>` : ""}${item.id && item.product_id && !item.pending && item.status !== "sale_removed" ? `<button class="button secondary" type="button" data-action="withdraw" data-item="${Number(item.id)}">Снять с продажи</button>` : ""}${item.product_id ? `<a href="/crm/products/${Number(item.product_id)}">Открыть товар</a>` : ""}</div></td></tr>`).join("")}</tbody></table>` : '<p class="preorder-empty">Товары не найдены. Измените поиск или подключите карточку.</p>';
+    document.querySelector("#connection-count").textContent = `Всего товаров: ${data.summary.total} · показано: ${rows.length}`;
+    const warnings = data.warnings || [];
+    document.querySelector("#inventory-warning").textContent = warnings.join(" ");
+    document.querySelector("#inventory-warning").classList.toggle("hidden", !warnings.length);
   };
-  list.addEventListener("click", event => {
+  list.addEventListener("click", async event => {
+    const actionButton = event.target.closest("[data-action]");
+    if (actionButton) {
+      actionButton.disabled = true;
+      try {
+        const data = await request(`/api/preorder/${Number(actionButton.dataset.item)}/actions`, {method:"POST", body:JSON.stringify({action:actionButton.dataset.action})});
+        message.textContent = data.job ? "Снятие отправлено агенту. Ожидается подтверждение Kaspi." : "Управление отключено. Товар остаётся в Kaspi до отдельного снятия с продажи.";
+        await load();
+      } catch (error) { message.textContent = error.message; }
+      finally { actionButton.disabled = false; }
+      return;
+    }
     const editButton = event.target.closest("[data-edit-preorder]");
     if (!editButton) return;
-    const item = items.get(Number(editButton.dataset.editPreorder));
+    const item = items.get(editButton.dataset.editPreorder);
     if (!item) return;
-    editingId = Number(item.id);
+    editingId = item.id ? Number(item.id) : null;
+    editingReference = item.merchant_sku || item.kaspi_url || item.kaspi_product_id;
+    editingRow = item;
     document.querySelector("#edit-name").textContent = item.name;
-    document.querySelector("#edit-price").value = Number(item.test_price_kzt);
-    document.querySelector("#edit-days").value = Number(item.preorder_days);
-    document.querySelector("#edit-stock").value = Number(item.stock_count);
+    document.querySelector("#edit-price").value = item.test_price_kzt == null ? "" : Number(item.test_price_kzt);
+    document.querySelector("#edit-days").value = Number(item.preorder_days) > 0 ? Number(item.preorder_days) : "";
+    document.querySelector("#edit-stock").value = item.stock_count == null ? "" : Number(item.stock_count);
     const pricing = item.offers || {};
     document.querySelector("#edit-dump").checked = Boolean(pricing.dump_enabled);
     document.querySelector("#edit-rocket").checked = Boolean(pricing.rocket_enabled);
@@ -70,18 +104,23 @@
     editMessage.classList.add("hidden");
     editDialog.showModal();
   });
-  editDialog.addEventListener("close", () => { editingId = null; });
+  editDialog.addEventListener("close", () => { editingId = null; editingReference = null; editingRow = null; });
   document.querySelector("#edit-cancel").addEventListener("click", () => editDialog.close());
   document.querySelector("#edit-form").addEventListener("submit", async event => {
     event.preventDefault();
-    if (editingId === null || editSave.disabled) return;
+    if (!editingReference || editSave.disabled) return;
     const submittedId = editingId;
     editSave.disabled = true;
     editSave.textContent = "Отправляю…";
     editMessage.classList.add("hidden");
     try {
-      await request(`/api/preorder/${submittedId}`, {method:"PATCH", body:JSON.stringify({...pricingPayload("edit-"), price_kzt:Number(document.querySelector("#edit-price").value), preorder_days:Number(document.querySelector("#edit-days").value), stock_count:Number(document.querySelector("#edit-stock").value)})});
-      if (editingId === submittedId) editDialog.close();
+      const payload = {...pricingPayload("edit-"), price_kzt:Number(document.querySelector("#edit-price").value), preorder_days:Number(document.querySelector("#edit-days").value), stock_count:Number(document.querySelector("#edit-stock").value)};
+      if (submittedId === null) {
+        await request("/api/preorder", {method:"POST", body:JSON.stringify({...payload, reference:editingReference, city_id:editingRow.city_id || "196220100", zone_id:editingRow.zone_id || "Magnum_ZONE1"})});
+      } else {
+        await request(`/api/preorder/${submittedId}`, {method:"PATCH", body:JSON.stringify(payload)});
+      }
+      editDialog.close();
       message.textContent = "Изменения цены, срока и количества переданы агенту. Дождитесь подтверждения Kaspi.";
       await load();
     } catch(error) { if (editingId === submittedId) showFeedback(editMessage, error.message, error); }
@@ -91,9 +130,13 @@
     const authorized = Boolean(localStorage.getItem(tokenKey));
     document.querySelector("#auth-panel").classList.toggle("hidden", authorized);
     document.querySelector("#preorder-page").classList.toggle("hidden", !authorized);
-    if (!authorized || loading) return;
+    if (!authorized) return;
+    const version = ++loadVersion;
     loading = true;
-    try { render(await request("/api/preorder")); }
+    try {
+      const data = await request("/api/preorder/offers");
+      if (version === loadVersion) render(data);
+    }
     catch(error) { message.textContent = error.message; if (!localStorage.getItem(tokenKey)) { document.querySelector("#auth-panel").classList.remove("hidden"); document.querySelector("#preorder-page").classList.add("hidden"); } }
     finally { loading = false; }
   };
@@ -111,10 +154,52 @@
     } catch(error) { message.textContent = error.message; showFeedback(connectMessage, error.message, error); }
     finally { button.disabled = false; button.textContent = "Подключить к карточке"; }
   });
-  document.querySelector("#token-form").addEventListener("submit", async event => { event.preventDefault();localStorage.setItem(tokenKey, document.querySelector("#token").value.trim());document.querySelector("#token").value="";await load(); });
+  document.querySelector("#token-form").addEventListener("submit", async event => { event.preventDefault();localStorage.setItem(tokenKey, document.querySelector("#token").value.trim());document.querySelector("#token").value="";await load();await searchCatalog(); });
   document.querySelector("#refresh").addEventListener("click", load);
   document.addEventListener("visibilitychange", ()=>{if(!document.hidden)load();});
-  window.addEventListener("leo:workspace-changed", () => { editDialog.close(); items.clear(); load(); });
-  setInterval(()=>{if(!document.hidden)load();},10000);
+  window.addEventListener("leo:workspace-changed", () => {
+    editDialog.close(); items.clear(); inventoryData = null; catalogItems.clear(); catalogOffset = 0;
+    document.querySelector("#catalog-results").replaceChildren(); ++catalogVersion;
+    load(); searchCatalog();
+  });
+  const debounce = callback => { let timer; return () => { clearTimeout(timer); timer = setTimeout(callback, 250); }; };
+  const renderCached = () => { if (inventoryData) render(inventoryData); };
+  document.querySelector("#connection-search").addEventListener("input", debounce(renderCached));
+  document.querySelector("#preorder-filter").addEventListener("change", renderCached);
+  document.querySelector("#preorder-summary").addEventListener("click", event => {
+    const selected = event.target.closest("[data-filter]");
+    if (selected) { document.querySelector("#preorder-filter").value = selected.dataset.filter; renderCached(); }
+  });
+  document.querySelector("#open-connect").addEventListener("click", () => {
+    const panel = document.querySelector("#connect-panel"); panel.open = true;
+    panel.scrollIntoView({block:"start", behavior:"smooth"});
+  });
+  document.querySelector("#connect-panel").addEventListener("toggle", () => {
+    if (document.querySelector("#connect-panel").open && !catalogItems.size) searchCatalog();
+  });
+  const searchCatalog = async (append=false) => {
+    if (!localStorage.getItem(tokenKey)) return;
+    const version = ++catalogVersion;
+    if (!append) { catalogOffset = 0; catalogItems.clear(); }
+    try {
+      const data = await request(`/api/preorder/catalog?q=${encodeURIComponent(document.querySelector("#catalog-search").value.trim())}&offset=${catalogOffset}&limit=30`);
+      if (version !== catalogVersion) return;
+      data.items.forEach(item => catalogItems.set(Number(item.product_id), item));
+      document.querySelector("#catalog-results").innerHTML = [...catalogItems.values()].map(item => `<article class="fast-card"><h3>${escape(item.name)}</h3><p>SKU ${escape(item.merchant_sku)} · Kaspi ${escape(item.kaspi_product_id)} · остаток ${Number(item.physical_stock)} · ${item.sale_enabled ? "В продаже" : "Снят с продажи"}</p><button class="button secondary" type="button" data-catalog-product="${Number(item.product_id)}" ${item.physical_stock > 0 ? "disabled" : ""}>${item.physical_stock > 0 ? "Есть физический остаток" : "Выбрать для предзаказа"}</button></article>`).join("") || "<p>В каталоге не найдено. Подключите новую карточку по ссылке или ID ниже.</p>";
+      catalogOffset = catalogItems.size;
+      document.querySelector("#catalog-more").classList.toggle("hidden", catalogOffset >= data.total);
+    } catch(error) { if (version === catalogVersion) message.textContent = error.message; }
+  };
+  document.querySelector("#catalog-search").addEventListener("input", debounce(() => searchCatalog()));
+  document.querySelector("#catalog-more").addEventListener("click", () => searchCatalog(true));
+  document.querySelector("#catalog-results").addEventListener("click", event => {
+    const selected = event.target.closest("[data-catalog-product]");
+    const item = selected && catalogItems.get(Number(selected.dataset.catalogProduct));
+    if (!item) return;
+    document.querySelector("#reference").value = item.merchant_sku || item.kaspi_product_id;
+    form.scrollIntoView({block:"start", behavior:"smooth"});
+    document.querySelector("#price").focus({preventScroll:true});
+  });
+  setInterval(()=>{if(!document.hidden && !loading)load();},5000);
   load();
 })();
