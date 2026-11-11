@@ -15,6 +15,7 @@
   let inventoryData = null;
   let editingReference = null;
   let editingRow = null;
+  let lastRefresh = 0;
   let loadVersion = 0;
   let catalogOffset = 0;
   let catalogVersion = 0;
@@ -52,6 +53,7 @@
   }
   const render = data => {
     inventoryData = data;
+    lastRefresh = Date.now();
     items = new Map(data.items.map(item => [item.row_key, item]));
     const required = data.required_agent_version || "1.1.28";
     const versionNumber = value => /^\d+\.\d+\.\d+$/.test(value || "") ? value.split(".").map(Number).reduce((n, part) => n * 1000 + part, 0) : 0;
@@ -63,9 +65,21 @@
     const rows = data.items.filter(item => (selected === "all" || item.group === selected) && (!query || [item.name,item.merchant_sku,item.kaspi_product_id].join(" ").toLocaleLowerCase("ru-RU").includes(query)));
     const labels = {preorder_inspecting:"Чтение карточки",adding_to_kaspi:"Подключение к Kaspi",stock_trading:"Обычная торговля",ready_to_resume:"Можно выставить снова",preorder_connected:"Предзаказ",enrolled_fast_dumping:"Предзаказ",error:"Ошибка",preorder_disabled:"Управление отключено",preorder_withdrawing:"Снимается с продажи",sale_removed:"Снят с продажи"};
     const when = value => { const date = value ? new Date(value) : null; return date && !Number.isNaN(date.valueOf()) ? date.toLocaleString("ru-RU", {day:"2-digit",month:"2-digit",hour:"2-digit",minute:"2-digit"}) : ""; };
+    const operationText = item => {
+      const operation = item.operation;
+      if (!item.pending || !operation) return "";
+      const minutes = Math.max(0, Math.floor((Date.now() - new Date(operation.created_at).valueOf()) / 60000));
+      if (operation.status === "leased") return `${operation.job_type === "inspect" ? "Агент проверяет карточку" : "Агент выполняет задание Kaspi"} · ${minutes} мин.`;
+      const online = (data.agent?.agents || []).filter(agent => agent.online);
+      const needed = operation.job_type === "withdraw_preorder" ? "1.1.28" : "1.1.25";
+      if (!online.length) return `Агент «Тест товара» офлайн · ожидание ${minutes} мин.`;
+      if (!online.some(agent => versionNumber(agent.version) >= versionNumber(needed))) return `Нужен «Тест товара» ${needed} · ожидание ${minutes} мин.`;
+      if (online.some(agent => agent.job_id)) return `Агент занят другим заданием · ожидание ${minutes} мин.`;
+      return `В приоритетной очереди · ожидание ${minutes} мин.`;
+    };
     const money = value => value == null ? "—" : `${Number(value).toLocaleString("ru-RU")} ₸`;
     document.querySelector("#preorder-summary").innerHTML = Object.entries(groups).map(([key,label]) => `<button type="button" data-filter="${key}" aria-pressed="${selected === key}"><span>${label}</span><strong>${Number(data.summary[key === "all" ? "total" : key] || 0)}</strong></button>`).join("");
-    list.innerHTML = rows.length ? `<table class="preorder-table"><thead><tr><th scope="col">Товар</th><th scope="col">Цена</th><th scope="col">Предзаказ</th><th scope="col">Количество</th><th scope="col">Физ. остаток</th><th scope="col">Режим</th><th scope="col">Статус</th><th scope="col">Действия</th></tr></thead><tbody>${rows.map(item => `<tr class="preorder-row group-${escape(item.group)}"><td><div class="preorder-product">${item.image_url && /^https:\/\//.test(item.image_url) ? `<img src="${escape(item.image_url)}" alt="" loading="lazy" width="44" height="44">` : ""}<div><strong>${escape(item.name)}</strong><small>SKU ${escape(item.merchant_sku || "—")} · Kaspi ${escape(item.kaspi_product_id || "—")}</small><small>${escape(item.source_label)}${item.confirmed ? " · подтверждено" : " · требуется сверка"}${item.observed_at ? ` · ${escape(when(item.observed_at))}` : ""}</small></div></div></td><td class="preorder-number">${money(item.test_price_kzt)}</td><td class="preorder-number">${Number(item.preorder_days) > 0 ? `${Number(item.preorder_days)} дн.` : "—"}</td><td class="preorder-number">${item.stock_count == null ? "—" : `${Number(item.stock_count)} шт.`}</td><td class="preorder-number">${Number(item.physical_stock || 0)} шт.</td><td>${item.automation_mode === "rocket" ? "🚀 Автоматизация" : item.automation_enabled ? "Демпинг" : "Фиксированная цена"}</td><td><span class="preorder-badge">${escape(item.group === "working" ? "Ожидается подтверждение" : item.group === "attention" ? "Требует внимания" : labels[item.status] || groups[item.group])}</span>${item.last_error ? `<small class="preorder-error">${escape(item.last_error)}</small>` : ""}</td><td><div class="preorder-actions">${item.can_connect ? `<button class="button secondary" type="button" data-edit-preorder="${escape(item.row_key)}">${!item.id ? "Настроить" : ["ready_to_resume","sale_removed","preorder_disabled","error"].includes(item.status) ? "Выставить снова" : "Редактировать"}</button>` : ""}${item.id && !item.pending && item.status !== "preorder_disabled" ? `<button class="button secondary" type="button" data-action="disable" data-item="${Number(item.id)}">Отключить управление</button>` : ""}${item.id && item.product_id && !item.pending && item.status !== "sale_removed" ? `<button class="button secondary" type="button" data-action="withdraw" data-item="${Number(item.id)}">Снять с продажи</button>` : ""}${item.product_id ? `<a href="/crm/products/${Number(item.product_id)}">Открыть товар</a>` : ""}</div></td></tr>`).join("")}</tbody></table>` : '<p class="preorder-empty">Товары не найдены. Измените поиск или подключите карточку.</p>';
+    list.innerHTML = rows.length ? `<table class="preorder-table"><thead><tr><th scope="col">Товар</th><th scope="col">Цена</th><th scope="col">Предзаказ</th><th scope="col">Количество</th><th scope="col">Физ. остаток</th><th scope="col">Режим</th><th scope="col">Статус</th><th scope="col">Действия</th></tr></thead><tbody>${rows.map(item => `<tr class="preorder-row group-${escape(item.group)}"><td><div class="preorder-product">${item.image_url && /^https:\/\//.test(item.image_url) ? `<img src="${escape(item.image_url)}" alt="" loading="lazy" width="44" height="44">` : ""}<div><strong>${escape(item.name)}</strong><small>SKU ${escape(item.merchant_sku || "—")} · Kaspi ${escape(item.kaspi_product_id || "—")}</small><small>${escape(item.source_label)}${item.confirmed ? " · подтверждено" : " · требуется сверка"}${item.observed_at ? ` · ${escape(when(item.observed_at))}` : ""}</small></div></div></td><td class="preorder-number">${money(item.test_price_kzt)}</td><td class="preorder-number">${Number(item.preorder_days) > 0 ? `${Number(item.preorder_days)} дн.` : "—"}</td><td class="preorder-number">${item.stock_count == null ? "—" : `${Number(item.stock_count)} шт.`}</td><td class="preorder-number">${Number(item.physical_stock || 0)} шт.</td><td>${item.automation_mode === "rocket" ? "🚀 Автоматизация" : item.automation_enabled ? "Демпинг" : "Фиксированная цена"}</td><td><span class="preorder-badge">${escape(item.group === "working" ? "Ожидается подтверждение" : item.group === "attention" ? "Требует внимания" : labels[item.status] || groups[item.group])}</span>${item.pending ? `<small>${escape(operationText(item))}</small>` : ""}${item.last_error ? `<small class="preorder-error">${escape(item.last_error)}</small>` : ""}</td><td><div class="preorder-actions">${item.can_connect ? `<button class="button secondary" type="button" data-edit-preorder="${escape(item.row_key)}">${!item.id ? "Настроить" : ["ready_to_resume","sale_removed","preorder_disabled","error"].includes(item.status) ? "Выставить снова" : "Редактировать"}</button>` : ""}${item.id && !item.pending && item.status !== "preorder_disabled" ? `<button class="button secondary" type="button" data-action="disable" data-item="${Number(item.id)}">Отключить управление</button>` : ""}${item.id && item.product_id && !item.pending && item.status !== "sale_removed" ? `<button class="button secondary" type="button" data-action="withdraw" data-item="${Number(item.id)}">Снять с продажи</button>` : ""}${item.product_id ? `<a href="/crm/products/${Number(item.product_id)}">Открыть товар</a>` : ""}</div></td></tr>`).join("")}</tbody></table>` : '<p class="preorder-empty">Товары не найдены. Измените поиск или подключите карточку.</p>';
     document.querySelector("#connection-count").textContent = `Всего товаров: ${data.summary.total} · показано: ${rows.length}`;
     const warnings = data.warnings || [];
     document.querySelector("#inventory-warning").textContent = warnings.join(" ");
@@ -78,7 +92,7 @@
       try {
         const data = await request(`/api/preorder/${Number(actionButton.dataset.item)}/actions`, {method:"POST", body:JSON.stringify({action:actionButton.dataset.action})});
         message.textContent = data.job ? "Снятие отправлено агенту. Ожидается подтверждение Kaspi." : "Управление отключено. Товар остаётся в Kaspi до отдельного снятия с продажи.";
-        await load();
+        await load(true);
       } catch (error) { message.textContent = error.message; }
       finally { actionButton.disabled = false; }
       return;
@@ -122,11 +136,11 @@
       }
       editDialog.close();
       message.textContent = "Изменения цены, срока и количества переданы агенту. Дождитесь подтверждения Kaspi.";
-      await load();
+      await load(true);
     } catch(error) { if (editingId === submittedId) showFeedback(editMessage, error.message, error); }
     finally { editSave.disabled = false; editSave.textContent = "Сохранить"; }
   });
-  const load = async () => {
+  const load = async (fresh=false) => {
     const authorized = Boolean(localStorage.getItem(tokenKey));
     document.querySelector("#auth-panel").classList.toggle("hidden", authorized);
     document.querySelector("#preorder-page").classList.toggle("hidden", !authorized);
@@ -134,7 +148,7 @@
     const version = ++loadVersion;
     loading = true;
     try {
-      const data = await request("/api/preorder/offers");
+      const data = await request(`/api/preorder/offers${fresh === true ? "?fresh=true" : ""}`);
       if (version === loadVersion) render(data);
     }
     catch(error) { message.textContent = error.message; if (!localStorage.getItem(tokenKey)) { document.querySelector("#auth-panel").classList.remove("hidden"); document.querySelector("#preorder-page").classList.add("hidden"); } }
@@ -150,11 +164,11 @@
       await request("/api/preorder", {method:"POST", body:JSON.stringify({...pricingPayload(), reference:document.querySelector("#reference").value.trim(), price_kzt:Number(document.querySelector("#price").value), preorder_days:Number(document.querySelector("#days").value), stock_count:Number(document.querySelector("#stock").value), city_id:document.querySelector("#city").value.trim(), zone_id:document.querySelector("#zone").value.trim()})});
       message.textContent = "Задание передано агенту «Тест товара». Здесь появится результат подключения.";
       showFeedback(connectMessage, message.textContent);
-      await load();
+      await load(true);
     } catch(error) { message.textContent = error.message; showFeedback(connectMessage, error.message, error); }
     finally { button.disabled = false; button.textContent = "Подключить к карточке"; }
   });
-  document.querySelector("#token-form").addEventListener("submit", async event => { event.preventDefault();localStorage.setItem(tokenKey, document.querySelector("#token").value.trim());document.querySelector("#token").value="";await load();await searchCatalog(); });
+  document.querySelector("#token-form").addEventListener("submit", async event => { event.preventDefault();localStorage.setItem(tokenKey, document.querySelector("#token").value.trim());document.querySelector("#token").value="";await load(true);await searchCatalog(); });
   document.querySelector("#refresh").addEventListener("click", load);
   document.addEventListener("visibilitychange", ()=>{if(!document.hidden)load();});
   window.addEventListener("leo:workspace-changed", () => {
@@ -200,6 +214,9 @@
     form.scrollIntoView({block:"start", behavior:"smooth"});
     document.querySelector("#price").focus({preventScroll:true});
   });
-  setInterval(()=>{if(!document.hidden && !loading)load();},5000);
+  setInterval(()=>{
+    const interval = inventoryData?.items.some(item => item.pending) ? 5000 : 15000;
+    if (!document.hidden && !loading && Date.now() - lastRefresh >= interval) load();
+  },1000);
   load();
 })();

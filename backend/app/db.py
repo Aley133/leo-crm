@@ -150,3 +150,11 @@ def get_unscoped_db():
         yield db
     finally:
         db.close()
+
+
+def background_database_available(*, reserve: int = 1) -> bool:
+    """Let low-priority schedulers yield local pool capacity to API/agents."""
+    pool = engine.pool
+    if not hasattr(pool, "checkedout") or not hasattr(pool, "size"):
+        return True
+    return pool.checkedout() < max(1, pool.size() - reserve)

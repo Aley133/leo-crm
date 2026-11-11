@@ -2,8 +2,10 @@
 from datetime import datetime, UTC
 from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree
+from types import SimpleNamespace
 
 from sqlalchemy import select, func
+from sqlalchemy.orm import load_only
 
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
 from .fast_dumping_models import FastDumpingJob, FastDumpingState, FastDumpingPolicy
@@ -55,10 +57,10 @@ def _xml_offers(feed):
     return offers, []
 
 
-def _latest_rows(db, model, workspace, condition):
+def _latest_rows(db, model, workspace, condition, fields):
     latest = select(func.max(model.id).label("id")).where(
         model.workspace_id == workspace, condition).group_by(model.product_id).subquery()
-    return db.scalars(select(model).join(latest, latest.c.id == model.id)
+    return db.scalars(select(model).options(load_only(*fields, raiseload=True)).join(latest, latest.c.id == model.id)
         .where(model.workspace_id == workspace)).all()
 
 
@@ -68,16 +70,30 @@ def read_inventory(db, workspace):
     products = db.scalars(select(Product).where(Product.workspace_id == workspace).order_by(Product.id)).all()
     by_id = {p.id: p for p in products}
     product_skus = {p.merchant_sku for p in products if p.merchant_sku}
-    items = db.scalars(select(ProductTestItem).where(ProductTestItem.workspace_id == workspace,
-        _preorder_visibility()).order_by(ProductTestItem.id.desc())).all()
-    manual_rows = _preorder_rows(db, items, workspace)
+    stock = physical_stock_counts(db, product_ids=set(by_id))
+    # Project pricing controls in SQL. Test history may contain megabytes of
+    # market snapshots in offers_json; none belong in the inventory table.
+    flags = ("stock_mode", "dump_enabled", "rocket_enabled", "management_disabled")
+    texts = ("ozon_url", "minimum_profit_kzt")
+    columns = [c for c in ProductTestItem.__table__.columns if c.name != "offers_json"]
+    statement = select(*columns,
+        *(ProductTestItem.offers_json[key].as_boolean().label("pricing_"+key) for key in flags),
+        *(ProductTestItem.offers_json[key].as_string().label("pricing_"+key) for key in texts)
+    ).where(ProductTestItem.workspace_id == workspace, _preorder_visibility()).order_by(ProductTestItem.id.desc())
+    items = []
+    for record in db.execute(statement).mappings():
+        values = dict(record)
+        values["offers_json"] = {key: values.pop("pricing_"+key) for key in (*flags, *texts)}
+        items.append(SimpleNamespace(**values))
+    manual_rows = _preorder_rows(db, items, workspace, products=by_id, counts=stock)
     feed = db.scalar(select(KaspiXmlFeed).where(KaspiXmlFeed.workspace_id == workspace,
         KaspiXmlFeed.active.is_(True)).order_by(KaspiXmlFeed.id.desc()).limit(1))
     catalog, warnings = _xml_offers(feed)
     fast = {j.product_id: j for j in _latest_rows(db, FastDumpingJob, workspace,
-        FastDumpingJob.status == "applied")}
+        FastDumpingJob.status == "applied", (FastDumpingJob.product_id, FastDumpingJob.decision_json, FastDumpingJob.completed_at))}
     classic = {r.product_id: r for r in _latest_rows(db, DumpingRun, workspace,
-        DumpingRun.published.is_(True))}
+        DumpingRun.published.is_(True), (DumpingRun.product_id, DumpingRun.preorder_days,
+            DumpingRun.target_price_kzt, DumpingRun.own_price_kzt, DumpingRun.created_at))}
     states = {s.product_id: s for s in db.scalars(select(FastDumpingState).where(
         FastDumpingState.workspace_id == workspace)).all()}
     policies = {p.product_id: p for p in db.scalars(select(FastDumpingPolicy).where(
@@ -85,7 +101,6 @@ def read_inventory(db, workspace):
     classic_policies = {p.product_id: p for p in db.scalars(select(DumpingPolicy).where(
         DumpingPolicy.workspace_id == workspace)).all()}
     rows, seen_products, seen_skus = [], set(), set()
-    stock = physical_stock_counts(db, product_ids=set(by_id))
 
     def finish(row, product=None):
         product_id = product.id if product else None

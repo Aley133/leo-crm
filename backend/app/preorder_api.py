@@ -6,10 +6,11 @@ from decimal import Decimal
 from urllib.parse import urlsplit
 from xml.etree import ElementTree
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Request
 from pydantic import BaseModel, Field, model_validator
 from sqlalchemy import select, or_, and_, update, func
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import SQLAlchemyError
 
 from .auth import require_service_token
 from .db import get_db
@@ -323,16 +324,22 @@ def read_preorders(db: Session = Depends(get_db), q: str = "", limit: int = 100,
             "agent": _product_test_agent_status(workspace), "required_agent_version": ARCHIVE_AGENT_VERSION}
 
 
-def _preorder_rows(db, items, workspace):
+def _preorder_rows(db, items, workspace, *, products=None, counts=None):
     from .product_test_api import _item_payload
     from .dumping_service import physical_stock_counts
     ids = {i.product_id for i in items if i.product_id}
-    products = {p.id: p for p in db.scalars(select(Product).where(
-        Product.workspace_id == workspace, Product.id.in_(ids))).all()}
-    counts = physical_stock_counts(db, product_ids=ids)
-    pending = set(db.scalars(select(ProductTestJob.item_id).where(
+    if products is None:
+        products = {p.id: p for p in db.scalars(select(Product).where(
+            Product.workspace_id == workspace, Product.id.in_(ids))).all()}
+    if counts is None:
+        counts = physical_stock_counts(db, product_ids=ids)
+    operations = db.execute(select(ProductTestJob.id, ProductTestJob.item_id, ProductTestJob.status,
+        ProductTestJob.job_type, ProductTestJob.created_at, ProductTestJob.lease_until).where(
         ProductTestJob.workspace_id == workspace, ProductTestJob.item_id.in_([i.id for i in items]),
-        ProductTestJob.status.in_(("queued", "leased")))).all())
+        ProductTestJob.status.in_(("queued", "leased"))).order_by(ProductTestJob.id)).mappings().all()
+    pending = {}
+    for operation in operations:
+        pending.setdefault(operation["item_id"], dict(operation))
     rows = []
     for item in items:
         stock = counts.get(item.product_id, 0)
@@ -348,16 +355,40 @@ def _preorder_rows(db, items, workspace):
             elif (item.offers_json or {}).get("stock_mode"):
                 status = "ready_to_resume"
         rows.append({**_item_payload(item), "physical_stock": stock, "status": status,
-            "pending": item.id in pending, "can_connect": stock <= 0 and item.id not in pending})
+            "pending": item.id in pending, "operation": pending.get(item.id),
+            "can_connect": stock <= 0 and item.id not in pending})
     return rows
 
 
 @router.get("/offers")
-def list_all_preorder_offers(db: Session = Depends(get_db)):
+def list_all_preorder_offers(db: Session = Depends(get_db), request: Request = None, fresh: bool = False):
     from .preorder_inventory import read_inventory
     from .product_test_api import _product_test_agent_status
     workspace = current_workspace_id()
-    return {**read_inventory(db, workspace), "agent": _product_test_agent_status(workspace),
+    def build():
+        from sqlalchemy import text
+        from .fast_dumping_diagnostics import trace_fast_operation
+        with trace_fast_operation("preorder_inventory", workspace) as trace:
+            try:
+                if db.bind.dialect.name == "postgresql":
+                    db.execute(text("SELECT set_config('statement_timeout', '10000', true), set_config('lock_timeout', '1000', true)"))
+                snapshot = read_inventory(db, workspace)
+                db.commit()
+                trace.outcome = "completed"
+                return snapshot
+            except SQLAlchemyError:
+                db.rollback()
+                raise HTTPException(503, "База не завершила обновление списка. Повторите через несколько секунд.",
+                    headers={"Retry-After": "3"})
+            except BaseException:
+                db.rollback()
+                raise
+    if request is None:  # Direct service callers do not share HTTP snapshots.
+        result = build()
+    else:
+        from .preorder_snapshot_cache import inventory_snapshot
+        result = inventory_snapshot(db, workspace, build, fresh=fresh)
+    return {**result, "agent": _product_test_agent_status(workspace),
         "required_agent_version": ARCHIVE_AGENT_VERSION}
 
 
