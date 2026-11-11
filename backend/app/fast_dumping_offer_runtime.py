@@ -190,6 +190,15 @@ def _complete_scan_v2(
     source = resolve_cost_source(db, product_id=product.id, inventory_first=True)
     from .preorder_modes import preorder_item, monitored_preorder_source
     manual_item = preorder_item(db, product)
+    if succeeded and state.market_context_ok and manual_item is not None and state.own_price_kzt is None:
+        # Absence can be a manual cabinet removal. Never recreate an offer
+        # from a supplier snapshot; only an explicit preorder command may do it.
+        svc._finish_without_write(state=state, job=job, policy=policy, status="own_offer_missing",
+            reason="Наша продажа не найдена. Для восстановления используйте «Выставить снова» в предзаказе.", now=svc.utcnow())
+        state.automatic_writes_paused = True
+        state.pause_reason = state.status_reason
+        state.next_scan_at = None
+        return {"status": state.status, "queued_apply": False}
     if stock <= 0 and manual_item is not None and not (manual_item.offers_json or {}).get("stock_mode"):
         source = monitored_preorder_source(db, product, source)
 
@@ -521,6 +530,16 @@ def _complete_apply_v2(
     job = db.get(FastDumpingJob, job_id)
     state = svc._lock_state(db, workspace_id=workspace_id, product_id=(job.product_id if job else -1))
     if job is None or state is None:
+        return result
+    if write_payload.get("error_code") == "manual_offer_removed":
+        state.automatic_writes_paused = True
+        state.pause_reason = str(write_payload.get("error_message"))
+        state.status = "paused"
+        state.status_reason = state.pause_reason
+        state.next_scan_at = None
+        product = db.get(Product, job.product_id)
+        product.sale_enabled = False
+        product.sale_state_overridden = True
         return result
     if bool(write_payload.get("accepted")) and not bool(write_payload.get("verified")):
         verify_at = svc.utcnow() + timedelta(seconds=OFFER_VERIFY_DELAY_SECONDS)

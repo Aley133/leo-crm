@@ -40,7 +40,7 @@ from tools.product_test_new_card import (
 )
 
 
-VERSION = "1.1.27"
+VERSION = "1.1.28"
 AGENT_KIND = "product_test"
 DEFAULT_API_URL = "https://leo-crm-api.onrender.com"
 HEARTBEAT_SECONDS = 20
@@ -708,6 +708,11 @@ async def _execute_job(
         result["new_card_master_sku"] = state.master_sku
         result["official_sku"] = official_sku
         return result
+    if job_type == "withdraw_preorder":
+        creator = MerchantOfferApi(merchant_session, store_id=store_id,
+            city_id=str(job.get("city_id") or "196220100"))
+        return await asyncio.to_thread(creator.withdraw_offer,
+            sku=str(options["merchant_sku"]), master_sku=str(options["master_sku"]))
     if job_type == "create_offer":
         creator = MerchantOfferApi(
             merchant_session,

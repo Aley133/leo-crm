@@ -131,7 +131,7 @@ jobs:
           git tag -f product-test-agent-latest $env:GITHUB_SHA
           git push origin refs/tags/product-test-agent-latest --force
           gh release view product-test-agent-latest *> $null
-          $notes = "LEO Product Test Agent 1.1.25: восстановление предзаказа по SKU из архива Kaspi. Чтение активных и архивных офферов, сохранение merchant SKU, подтверждение доступности перед регистрацией в CRM. Новый агент и отдельный процесс не нужны."
+          $notes = "LEO Product Test Agent 1.1.28: снятие предзаказа с продажи через HTTP с подтверждением точного Merchant SKU. Поиск и повторное подключение находятся во вкладке Предзаказ CRM."
           if ($LASTEXITCODE -ne 0) {
             gh release create product-test-agent-latest `
               --target "$env:GITHUB_SHA" `

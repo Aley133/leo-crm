@@ -4,6 +4,7 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>LEO CRM — Предзаказ</title>
+  <link rel="stylesheet" href="/static/preorder.css?v=20261111-1">
   <link rel="stylesheet" href="/static/dashboard.css?v=20260725-1">
   <link rel="stylesheet" href="/static/fast-dumping.css?v=20261006-3">
   <link rel="stylesheet" href="/static/product-images.css?v=20260819-2">
@@ -21,11 +22,25 @@
       <div class="runtime-status"><span class="dot"></span><span>Realtime Pricing</span></div>
     </aside>
     <main>
-      <header class="page-header"><div><span class="fast-kicker">KASPI</span><h1>Предзаказ</h1><p>Подключите магазин к выбранной карточке Kaspi по SKU или ссылке, со своей ценой, сроком и количеством.</p></div><button id="refresh" class="button secondary" type="button">Обновить</button></header>
+      <header class="page-header"><div><span class="fast-kicker">KASPI</span><h1>Предзаказ</h1><p>Все товары по предзаказу: цена, срок, количество и управление в одном списке.</p></div><button id="refresh" class="button secondary" type="button">Обновить</button></header>
       <p id="message" role="status"></p>
       <section id="auth-panel" class="panel hidden"><h2>Подключение к LEO CRM</h2><form id="token-form"><input id="token" type="password" placeholder="SERVICE_API_TOKEN" required><button class="button">Подключить</button></form></section>
       <section id="preorder-page" class="hidden">
-        <section class="fast-section"><h2>Подключить карточку</h2><p id="agent-status">Проверяю связь с агентом «Тест товара»…</p><a class="button secondary" href="https://github.com/Aley133/leo-crm/releases/download/product-test-agent-latest/LEO-Product-Test-Agent.exe">Скачать «Тест товара» 1.1.25</a>
+        <section class="fast-section preorder-inventory" aria-labelledby="preorder-list-title">
+          <div class="fast-section-head"><div><h2 id="preorder-list-title">Все товары по предзаказу</h2><p id="connection-count" role="status">Загружаем список…</p></div><button id="open-connect" class="button" type="button">+ Подключить товар</button></div>
+          <div id="preorder-summary" class="preorder-summary" aria-label="Статусы предзаказов"></div>
+          <div class="preorder-toolbar"><label>Поиск по списку<input id="connection-search" type="search" maxlength="200" placeholder="Название, SKU или Kaspi ID"></label><label>Показать<select id="preorder-filter"><option value="all">Все товары</option><option value="active">Активные предзаказы</option><option value="working">В работе</option><option value="attention">Требуют внимания</option><option value="stock">Физический остаток</option><option value="disabled">Отключённые / закончились</option></select></label></div>
+          <div id="inventory-warning" class="fast-dialog-note hidden" role="status"></div>
+          <div id="preorder-list" class="preorder-table-wrap"></div>
+        </section>
+        <details id="connect-panel" class="preorder-connect"><summary>Подключить или найти товар в каталоге</summary>
+        <section class="fast-section"><h2>Найти в нашем каталоге</h2>
+          <label>Название, Merchant SKU или Kaspi ID<input id="catalog-search" type="search" maxlength="200" placeholder="Например, Фертилипан"></label>
+          <p>Все товары магазина, включая снятые с продажи. Для новой карточки используйте форму ниже.</p>
+          <div id="catalog-results" class="fast-list"></div><button id="catalog-more" class="button secondary hidden" type="button">Показать ещё</button>
+        </section>
+        <section class="fast-section"><h2>Подключить карточку</h2><p id="agent-status">Проверяю связь с агентом «Тест товара»…</p><a class="button secondary" href="https://github.com/Aley133/leo-crm/releases/download/product-test-agent-latest/LEO-Product-Test-Agent.exe">Скачать «Тест товара» 1.1.28</a>
+          <a class="button secondary" href="https://github.com/Aley133/leo-crm/releases/download/kaspi-fast-dumping-agent-latest/LEO-Kaspi-Fast-Dumping-Agent.exe">Скачать Fast Agent 1.2.11</a>
           <form id="preorder-form" class="fast-policy-form">
             <label class="wide"><span>SKU или ссылка на карточку Kaspi</span><input id="reference" type="text" placeholder="SKU ранее продававшегося товара или https://kaspi.kz/shop/p/…" required></label>
             <label><span>Цена продажи, ₸</span><input id="price" type="number" min="1" max="100000000" step="1" required></label>
@@ -40,9 +55,9 @@
             <button id="connect" class="button" type="submit">Подключить к карточке</button>
             <div id="connect-message" class="wide fast-dialog-note hidden" role="alert" tabindex="-1"></div>
           </form>
-          <p class="fast-dialog-note">Используется уже подключённый агент «Тест товара». После подтверждения Kaspi товар появится в CRM. Без тумблера цена фиксирована, демпинг заблокирован. С тумблером мониторинг Ozon передаёт цену и доставку в Fast Dumping. Физический остаток переводит товар в обычную торговлю.</p>
+          <p class="fast-dialog-note">Используется уже подключённый агент «Тест товара». После подтверждения Kaspi товар появится в CRM. Без тумблера цена фиксирована, демпинг заблокирован. С тумблером мониторинг Ozon передаёт цену и доставку в Fast Dumping. Физический остаток переводит товар в обычную торговлю. После его окончания нажмите «Выставить снова». При включённом демпинге нужен Fast Agent 1.2.11: он проверяет, не снят ли товар через Kaspi, перед каждой записью. «Отключить управление» останавливает автоматику, сохраняя продажу в Kaspi. «Снять с продажи» отправляет отдельное задание в Kaspi. Подключение и восстановление выполняются только по вашей команде.</p>
         </section>
-        <section class="fast-section"><h2>Подключения</h2><div id="preorder-list" class="fast-list"></div></section>
+        </details>
       </section>
     </main>
   </div>
@@ -64,5 +79,5 @@
     </form>
   </dialog>
   <script src="/static/workspace-context.js?v=20260731-1"></script>
-  <script src="/static/preorder.js?v=20261007-7" defer></script>
+  <script src="/static/preorder.js?v=20261111-1" defer></script>
 </body></html>

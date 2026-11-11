@@ -8,7 +8,7 @@ from xml.etree import ElementTree
 
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field, model_validator
-from sqlalchemy import select, or_, update
+from sqlalchemy import select, or_, and_, update, func
 from sqlalchemy.orm import Session
 
 from .auth import require_service_token
@@ -26,7 +26,7 @@ router = APIRouter(
     dependencies=[Depends(require_service_token)],
 )
 PREFIX = "manual-preorder:"
-ARCHIVE_AGENT_VERSION = "1.1.25"
+ARCHIVE_AGENT_VERSION = "1.1.28"
 
 
 def _confirmed_legacy_alias_ids(db, products, *, kaspi_id, merchant_sku, cabinet_confirmed):
@@ -279,28 +279,162 @@ def _check_existing(db: Session, *, workspace: int, kaspi_id: str,
     return product
 
 
-@router.get("")
-def read_preorders(db: Session = Depends(get_db)):
-    from .product_test_api import _item_payload, _product_test_agent_status
+def _preorder_visibility():
+    # Include earlier confirmed Test-product preorders, without exposing public
+    # discoveries or incomplete enrollment as managed offers.
+    return or_(ProductTestItem.input_reference.startswith(PREFIX), and_(
+        ProductTestItem.product_id.is_not(None), ProductTestItem.added_at.is_not(None),
+        ProductTestItem.preorder_days > 0))
 
-    workspace = current_workspace_id()
-    items = db.scalars(
-        select(ProductTestItem)
-        .where(
-            ProductTestItem.workspace_id == workspace,
-            ProductTestItem.input_reference.startswith(PREFIX),
-        )
-        .order_by(ProductTestItem.updated_at.desc(), ProductTestItem.id.desc())
-        .limit(100)
-    ).all()
+
+def _search(statement, model, q):
+    if q.strip():
+        pattern = "%" + q.strip().replace("\\", "\\\\").replace("%", "\\%").replace("_", "\\_") + "%"
+        statement = statement.where(or_(*(column.ilike(pattern, escape="\\") for column in
+            (model.name, model.merchant_sku, model.kaspi_product_id))))
+    return statement
+
+
+@router.get("/catalog")
+def search_preorder_catalog(q: str = "", limit: int = 30, offset: int = 0,
+                           db: Session = Depends(get_db)):
     from .dumping_service import physical_stock_counts
-    counts = physical_stock_counts(db, product_ids={i.product_id for i in items if i.product_id})
-    return {
-        "items": [{**_item_payload(i), "physical_stock": counts.get(i.product_id, 0),
-                   "status": "stock_trading" if counts.get(i.product_id, 0) > 0 else i.status} for i in items],
-        "agent": _product_test_agent_status(workspace),
-        "required_agent_version": ARCHIVE_AGENT_VERSION,
-    }
+    statement = _search(select(Product).where(Product.workspace_id == current_workspace_id()), Product, q)
+    total = db.scalar(select(func.count()).select_from(statement.subquery()))
+    products = db.scalars(statement.order_by(Product.id.desc()).offset(max(0, offset)).limit(min(100, max(1, limit)))).all()
+    counts = physical_stock_counts(db, product_ids={p.id for p in products})
+    return {"total": total, "items": [{"product_id": p.id, "name": p.name,
+        "merchant_sku": p.merchant_sku, "kaspi_product_id": p.kaspi_product_id,
+        "sale_enabled": p.sale_enabled, "physical_stock": counts.get(p.id, 0)} for p in products]}
+
+
+@router.get("")
+def read_preorders(db: Session = Depends(get_db), q: str = "", limit: int = 100, offset: int = 0):
+    from .product_test_api import _item_payload, _product_test_agent_status
+    from .dumping_service import physical_stock_counts
+    workspace = current_workspace_id()
+    statement = _search(select(ProductTestItem).where(
+        ProductTestItem.workspace_id == workspace,
+        _preorder_visibility()), ProductTestItem, q)
+    total = db.scalar(select(func.count()).select_from(statement.subquery()))
+    items = db.scalars(statement.order_by(ProductTestItem.updated_at.desc(), ProductTestItem.id.desc())
+        .offset(max(0, offset)).limit(min(200, max(1, limit)))).all()
+    return {"items": _preorder_rows(db, items, workspace), "total": total,
+            "agent": _product_test_agent_status(workspace), "required_agent_version": ARCHIVE_AGENT_VERSION}
+
+
+def _preorder_rows(db, items, workspace):
+    from .product_test_api import _item_payload
+    from .dumping_service import physical_stock_counts
+    ids = {i.product_id for i in items if i.product_id}
+    products = {p.id: p for p in db.scalars(select(Product).where(
+        Product.workspace_id == workspace, Product.id.in_(ids))).all()}
+    counts = physical_stock_counts(db, product_ids=ids)
+    pending = set(db.scalars(select(ProductTestJob.item_id).where(
+        ProductTestJob.workspace_id == workspace, ProductTestJob.item_id.in_([i.id for i in items]),
+        ProductTestJob.status.in_(("queued", "leased")))).all())
+    rows = []
+    for item in items:
+        stock = counts.get(item.product_id, 0)
+        product = products.get(item.product_id)
+        status = item.status
+        if item.id not in pending:
+            if status in {"preorder_disabled", "error", "preorder_withdrawing"}:
+                pass
+            elif product and not product.sale_enabled:
+                status = "sale_removed"
+            elif stock > 0:
+                status = "stock_trading"
+            elif (item.offers_json or {}).get("stock_mode"):
+                status = "ready_to_resume"
+        rows.append({**_item_payload(item), "physical_stock": stock, "status": status,
+            "pending": item.id in pending, "can_connect": stock <= 0 and item.id not in pending})
+    return rows
+
+
+@router.get("/offers")
+def list_all_preorder_offers(db: Session = Depends(get_db)):
+    from .preorder_inventory import read_inventory
+    from .product_test_api import _product_test_agent_status
+    workspace = current_workspace_id()
+    return {**read_inventory(db, workspace), "agent": _product_test_agent_status(workspace),
+        "required_agent_version": ARCHIVE_AGENT_VERSION}
+
+
+class PreorderAction(BaseModel):
+    action: str = Field(pattern="^(disable|withdraw)$")
+
+
+@router.post("/{item_id}/actions")
+def manage_preorder(item_id: int, payload: PreorderAction, db: Session = Depends(get_db)):
+    from .product_test_api import _queue_job, _job_payload, _item_payload
+    from .preorder_modes import pause_pricing
+    workspace = current_workspace_id()
+    db.scalar(select(Workspace).where(Workspace.id == workspace).with_for_update())
+    item = db.scalar(select(ProductTestItem).where(ProductTestItem.workspace_id == workspace,
+        ProductTestItem.id == item_id, _preorder_visibility()).with_for_update())
+    if item is None:
+        raise HTTPException(404, "Предзаказ не найден в текущем магазине")
+    if db.scalar(select(ProductTestJob.id).where(ProductTestJob.workspace_id == workspace,
+        ProductTestJob.item_id == item_id, ProductTestJob.status.in_(("queued", "leased"))).limit(1)):
+        raise HTTPException(409, "Дождитесь завершения текущей операции Kaspi")
+    product = db.scalar(select(Product).where(Product.workspace_id == workspace,
+        Product.id == item.product_id).with_for_update()) if item.product_id else None
+    if product:
+        # Block competing writes before pausing, including aliases and verification.
+        _check_existing_writes(db, workspace, product.id)
+        original = dict(item.offers_json or {})
+        item.offers_json = {**original, "dump_enabled": False}
+        pause_pricing(db, product, item)
+        item.offers_json = {**item.offers_json, "dump_enabled": original.get("dump_enabled", False)}
+    item.active = False
+    item.last_error = None
+    if payload.action == "disable":
+        item.offers_json = {**(item.offers_json or {}), "management_disabled": True}
+        item.status = "preorder_disabled"
+        db.commit()
+        return {"item": _item_payload(item)}
+    if not product or item.merchant_sku.startswith(PREFIX):
+        raise HTTPException(409, "Сначала подтвердите привязку товара к Kaspi")
+    product.sale_enabled = False
+    product.sale_state_overridden = True
+    item.status = "preorder_withdrawing"
+    job = _queue_job(db, workspace_id=workspace, job_type="withdraw_preorder", reference=item.merchant_sku,
+        item_id=item.id, city_id=item.city_id, zone_id=item.zone_id,
+        options={"manual_preorder": True, "minimum_agent_version": "1.1.28",
+            "merchant_sku": item.merchant_sku, "master_sku": item.kaspi_product_id})
+    db.commit()
+    return {"item": _item_payload(item), "job": _job_payload(job)}
+
+
+def _check_existing_writes(db, workspace, product_id):
+    from .preorder_modes import _offer_products
+    product = db.get(Product, product_id)
+    ids = {p.id for p in _offer_products(db, product)}
+    if (db.scalar(select(FastDumpingJob.id).where(FastDumpingJob.workspace_id == workspace,
+            FastDumpingJob.product_id.in_(ids), FastDumpingJob.status.in_(
+                ("queued_apply", "leased_apply", "queued_verify", "leased_verify"))).limit(1))
+        or db.scalar(select(DumpingRun.id).where(DumpingRun.workspace_id == workspace,
+            DumpingRun.product_id.in_(ids), DumpingRun.status.in_(("queued_local", "leased_local"))).limit(1))):
+        raise HTTPException(409, "Kaspi ещё подтверждает предыдущую запись. Повторите после её завершения.")
+
+
+def complete_preorder_withdrawal(db, *, job, result):
+    from .product_test_api import _finish_job, _job_payload
+    state = result.get("after") or {}
+    if (not state.get("found") or state.get("sku") != job.options_json["merchant_sku"]
+            or str(state.get("master_sku")) != job.options_json["master_sku"]
+            or not (state.get("row_available") is False or state.get("nested_available") in ("no", "false", "0")
+                    or state.get("query_mode") == "inactive")):
+        raise ValueError("Kaspi не подтвердил снятие точного SKU с продажи")
+    item = db.scalar(select(ProductTestItem).where(ProductTestItem.id == job.item_id,
+        ProductTestItem.workspace_id == job.workspace_id).with_for_update())
+    item.status = "sale_removed"
+    item.active = False
+    item.last_error = None
+    _finish_job(job, result)
+    db.commit()
+    return {"job": _job_payload(job)}
 
 
 @router.post("")
@@ -393,7 +527,7 @@ def _connect_preorder(payload: PreorderRequest, db: Session, *, item_id: int | N
     item.offers_json = {**(item.offers_json or {}), "mode": "manual_preorder", "manual_preorder": True,
                         "source_sku": inspection_sku, "dump_enabled": payload.dump_enabled,
                         "ozon_url": payload.ozon_url, "rocket_enabled": payload.rocket_enabled,
-                        "minimum_profit_kzt": payload.minimum_profit_kzt, "stock_mode": False}
+                        "minimum_profit_kzt": payload.minimum_profit_kzt, "stock_mode": False, "management_disabled": False}
     if existing_sku:
         item.offers_json = {**item.offers_json, "existing_merchant_sku": existing_sku}
     if product:
@@ -422,7 +556,7 @@ def edit_preorder(
         select(ProductTestItem).where(
             ProductTestItem.id == item_id,
             ProductTestItem.workspace_id == current_workspace_id(),
-            ProductTestItem.input_reference.startswith(PREFIX),
+            _preorder_visibility(),
         )
     )
     if item is None:

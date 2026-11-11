@@ -363,6 +363,7 @@ async def process_apply(
         "agent_id": agent_id,
         "workspace_id": workspace_id,
         "lease_token": job["lease_token"],
+        "respects_removed_offer": True,
     }
     prepared = await base._post_json_with_retry(
         f"{api_url}/api/fast-dumping-agent/jobs/{job['id']}/prepare-apply",
@@ -404,6 +405,10 @@ async def process_apply(
             )
             if not live.found:
                 raise RuntimeError("Merchant BFF не вернул точный SKU/store")
+            if prepared.get("respect_removed_offer") and (live.query_mode == "inactive"
+                    or live.row_available is False or live.nested_available in {"no", "false", "0"}):
+                error_code = "manual_offer_removed"
+                error_message = "Продажа снята в Kaspi. Восстановление доступно только через «Выставить снова» в предзаказе."
 
             target_price_raw = prepared.get("target_price_kzt")
             target_price = (
@@ -411,10 +416,10 @@ async def process_apply(
                 if target_price_raw not in (None, "")
                 else live.price_kzt
             )
-            if target_price is None:
+            if target_price is None and error_code is None:
                 raise RuntimeError("Не удалось определить текущую/целевую цену Kaspi")
 
-            if mode == "inventory":
+            if mode == "inventory" and error_code is None:
                 if live.stock_count is None:
                     error_code = "kaspi_offer_read_failed"
                     error_message = "Kaspi не вернул stockCount для точного SKU/store. Write заблокирован."
