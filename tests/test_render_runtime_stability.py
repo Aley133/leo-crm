@@ -84,7 +84,7 @@ def test_automatic_polling_waits_for_api_startup_grace_period(monkeypatch) -> No
         {
             "days": 1,
             "mode": "fast",
-            "lookback_minutes": kaspi_order_polling.FAST_LOOKBACK_MINUTES,
+            "lookback_minutes": kaspi_order_polling.CATCHUP_LOOKBACK_MINUTES,
             "enrich_products": False,
         }
     ]
