@@ -47,6 +47,7 @@ def test_fast_polling_never_runs_maintenance_inline(
 
     async def run_cycle(**options):
         calls.append(options)
+        kaspi_order_polling.LAST_RUN["status"] = "completed"
         if len(calls) == 10:
             stop_event.set()
 
@@ -59,7 +60,8 @@ def test_fast_polling_never_runs_maintenance_inline(
 
     assert len(calls) == 10
     assert all(call["mode"] == "fast" for call in calls)
-    assert all(call["lookback_minutes"] == 20 for call in calls)
+    assert calls[0]["lookback_minutes"] == 1440
+    assert all(call["lookback_minutes"] == 20 for call in calls[1:])
     assert all(call["enrich_products"] is False for call in calls)
 
 
@@ -256,3 +258,27 @@ def test_orders_ui_stops_loading_once_orders_are_persisted() -> None:
     source = Path(__file__).resolve().parents[1] / "backend" / "app" / "static" / "orders.js"
     script = source.read_text(encoding="utf-8")
     assert "job.orders_ready === true" in script
+
+
+def test_catchup_retries_failure_and_repeats_after_interval(monkeypatch):
+    stop = asyncio.Event()
+    clock = [0.0]
+    windows = []
+
+    async def run_cycle(**options):
+        windows.append(options['lookback_minutes'])
+        kaspi_order_polling.LAST_RUN['status'] = 'failed' if len(windows) == 1 else 'completed'
+
+    async def wait(_stop, _seconds):
+        clock[0] += 60 if len(windows) == 1 else 901
+        if len(windows) == 3:
+            stop.set()
+        return stop.is_set()
+
+    monkeypatch.setattr(kaspi_order_polling, 'polling_enabled', lambda: True)
+    monkeypatch.setattr(kaspi_order_polling, 'polling_startup_delay_seconds', lambda: 0)
+    monkeypatch.setattr(kaspi_order_polling, 'monotonic', lambda: clock[0])
+    monkeypatch.setattr(kaspi_order_polling, '_wait_or_stop', wait)
+    monkeypatch.setattr(kaspi_order_polling, 'run_poll_cycle', run_cycle)
+    asyncio.run(kaspi_order_polling.polling_loop(stop))
+    assert windows == [1440, 1440, 1440]
