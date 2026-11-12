@@ -28,6 +28,9 @@ from .workspace_kaspi import (
 POLL_INTERVAL_SECONDS = 60
 STARTUP_DELAY_SECONDS = 30
 FAST_LOOKBACK_MINUTES = 20
+CATCHUP_LOOKBACK_MINUTES = 24 * 60
+CATCHUP_INTERVAL_SECONDS = 15 * 60
+CATCHUP_ACCOUNT_TIMEOUT_SECONDS = 300
 FAST_ACCOUNT_TIMEOUT_SECONDS = 90
 ENRICHMENT_LOOKBACK_DAYS = 31
 ENRICHMENT_STARTUP_OFFSET_SECONDS = 15
@@ -330,7 +333,9 @@ async def run_poll_cycle(
             if mode == "fast":
                 result = await asyncio.wait_for(
                     operation,
-                    timeout=fast_account_timeout_seconds(),
+                    timeout=(CATCHUP_ACCOUNT_TIMEOUT_SECONDS
+                        if (lookback_minutes or 0) > FAST_LOOKBACK_MINUTES
+                        else fast_account_timeout_seconds()),
                 )
             else:
                 result = await operation
@@ -407,18 +412,22 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
             return
 
     cycle = 0
+    last_catchup_at = None
     while not stop_event.is_set():
         cycle_started = monotonic()
         cycle += 1
         LAST_RUN["cycle"] = cycle
+        catchup_due = last_catchup_at is None or cycle_started - last_catchup_at >= CATCHUP_INTERVAL_SECONDS
         try:
             async with order_sync_lock():
                 await run_poll_cycle(
                     days=1,
                     mode="fast",
-                    lookback_minutes=FAST_LOOKBACK_MINUTES,
+                    lookback_minutes=CATCHUP_LOOKBACK_MINUTES if catchup_due else FAST_LOOKBACK_MINUTES,
                     enrich_products=False,
                 )
+                if catchup_due and LAST_RUN.get("status") == "completed":
+                    last_catchup_at = cycle_started
         except asyncio.CancelledError:
             raise
         except Exception as exc:
