@@ -4,6 +4,7 @@ from datetime import datetime
 from decimal import Decimal
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, Index, Integer, JSON, Numeric, String, Text, UniqueConstraint, func
+from sqlalchemy import text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -45,6 +46,8 @@ class DumpingPolicy(WorkspaceOwned, Base):
 class DumpingRun(WorkspaceOwned, Base):
     __tablename__ = "dumping_runs"
     __table_args__ = (
+        Index("ix_dumping_runs_preorder_latest", "workspace_id", "product_id", text("id DESC"),
+            postgresql_where=text("published IS TRUE"), sqlite_where=text("published IS TRUE")),
         Index(
             "ix_dumping_runs_workspace_status_id",
             "workspace_id",
