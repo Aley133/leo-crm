@@ -4,7 +4,7 @@ from decimal import Decimal, InvalidOperation
 from xml.etree import ElementTree
 from types import SimpleNamespace
 
-from sqlalchemy import select, func
+from sqlalchemy import select
 from sqlalchemy.orm import load_only
 
 from .dumping_models import DumpingPolicy, DumpingRun, KaspiXmlFeed
@@ -58,9 +58,14 @@ def _xml_offers(feed):
 
 
 def _latest_rows(db, model, workspace, condition, fields):
-    latest = select(func.max(model.id).label("id")).where(
-        model.workspace_id == workspace, condition).group_by(model.product_id).subquery()
-    return db.scalars(select(model).options(load_only(*fields, raiseload=True)).join(latest, latest.c.id == model.id)
+    # Probe the latest row for each catalog product instead of aggregating the
+    # entire, ever-growing job history on every inventory refresh.
+    latest_id = (select(model.id).where(model.workspace_id == workspace,
+        condition, model.product_id == Product.id)
+        .order_by(model.id.desc()).limit(1).correlate(Product).scalar_subquery())
+    latest = select(latest_id.label("id")).where(Product.workspace_id == workspace).subquery()
+    return db.scalars(select(model).options(load_only(*fields, raiseload=True))
+        .join(latest, latest.c.id == model.id)
         .where(model.workspace_id == workspace)).all()
 
 

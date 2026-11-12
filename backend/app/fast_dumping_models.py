@@ -16,6 +16,7 @@ from sqlalchemy import (
     UniqueConstraint,
     func,
 )
+from sqlalchemy import text
 from sqlalchemy.orm import Mapped, mapped_column
 
 from .db import Base
@@ -245,6 +246,8 @@ class FastDumpingJob(WorkspaceOwned, Base):
 
     __tablename__ = "fast_dumping_jobs"
     __table_args__ = (
+        Index("ix_fast_jobs_preorder_latest", "workspace_id", "product_id", text("id DESC"),
+            postgresql_where=text("status = 'applied'"), sqlite_where=text("status = 'applied'")),
         Index(
             "ix_fast_dumping_jobs_workspace_status_id",
             "workspace_id",
