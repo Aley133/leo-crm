@@ -363,7 +363,7 @@ def import_kaspi_order(
         select(MarketplaceOrder).where(
             MarketplaceOrder.marketplace_account_id == marketplace_account_id,
             MarketplaceOrder.external_order_id == normalized.external_order_id,
-        )
+        ).with_for_update()
     )
     created = order is None
     previous_status: str | None = None
@@ -501,6 +501,10 @@ def import_kaspi_order(
                     metadata_json={"original_status": normalized.original_status},
                 )
             )
+
+    from .cancelled_returns import observe_return
+
+    observe_return(session, order, payload, backfill=normalized.status == "cancelled")
 
     # A confirmed cancellation before courier handoff is also a warehouse
     # event. Keep status persistence and the reverse FIFO movement in the same

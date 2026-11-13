@@ -130,7 +130,8 @@ def test_price_alert_publisher_keeps_database_work_off_event_loop() -> None:
     source = inspect.getsource(telegram_price_alerts.publish_pending_price_alerts)
 
     assert "events = await asyncio.to_thread(" in source
-    assert source.count("await asyncio.to_thread(") == 3
+    assert source.count("await asyncio.to_thread(") >= 3
+    assert "with session_factory()" not in source
 
 
 def test_idle_supplier_agent_claim_is_read_only(db_session, monkeypatch) -> None:

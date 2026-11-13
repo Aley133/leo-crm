@@ -89,3 +89,8 @@ def full_automation_page():
 @router.get("/crm/preorder", response_class=FileResponse)
 def preorder_page():
     return FileResponse(STATIC_DIR / "preorder.html", headers={"Cache-Control": "no-store"})
+
+
+@router.get("/crm/cancelled", response_class=FileResponse)
+def crm_cancelled_returns() -> FileResponse:
+    return FileResponse(STATIC_DIR / "cancelled.html", headers={"Cache-Control": "no-store"})

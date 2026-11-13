@@ -14,6 +14,8 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError, TimeoutError as SQLAlchemyTimeoutError
 
 from . import legacy_workspace_scope as _legacy_workspace_scope  # noqa: F401
+from .cancelled_returns_api import router as cancelled_returns_router
+from .cancelled_returns import returns_loop
 from .accounting_api import router as accounting_router
 from .action_api import router as action_router
 from .browser_agent_api import router as browser_agent_router
@@ -119,6 +121,7 @@ async def select_workspace(request: Request, call_next):
 
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.include_router(ui_router)
+app.include_router(cancelled_returns_router)
 app.include_router(accounting_router)
 app.include_router(products_router)
 app.include_router(product_detail_router)
@@ -236,6 +239,7 @@ async def start_background_services() -> None:
 
     stop_event = asyncio.Event()
     app.state.kaspi_poll_stop_event = stop_event
+    app.state.cancelled_returns_task = asyncio.create_task(returns_loop(stop_event))
     app.state.fast_queue_task = asyncio.create_task(fast_queue_loop(stop_event))
     app.state.kaspi_poll_task = asyncio.create_task(polling_loop(stop_event))
     app.state.kaspi_enrichment_task = asyncio.create_task(enrichment_polling_loop(stop_event))
@@ -264,6 +268,7 @@ async def stop_background_services() -> None:
 
     stop_event = getattr(app.state, "kaspi_poll_stop_event", None)
     tasks = [
+        getattr(app.state, "cancelled_returns_task", None),
         getattr(app.state, "fast_queue_task", None),
         getattr(app.state, "kaspi_poll_task", None),
         getattr(app.state, "kaspi_enrichment_task", None),

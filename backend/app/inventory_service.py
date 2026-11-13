@@ -6,7 +6,7 @@ from datetime import UTC, datetime
 from decimal import Decimal
 
 from sqlalchemy import delete, func, or_, select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from .inventory_models import InventoryAllocation, InventoryBatch, InventoryBatchType
 from .models import (
@@ -141,16 +141,20 @@ def release_cancelled_order_inventory(
 ) -> InventoryReleaseResult:
     """Return pre-handover cancellation allocations to their original batches.
 
-    Kaspi's final ``CANCELLED`` state means the order did not complete the
-    warehouse-to-courier handoff. Post-handoff returns use the separate
-    ``RETURNED`` state and deliberately remain allocated until a physical return
-    is accepted by the warehouse.
+    Confirmed post-handoff cancellations remain allocated until physical
+    receipt is recorded. Orders cancelled before dispatch release allocations.
 
     Deleting the allocation and restoring ``quantity_remaining`` in one caller-
     owned transaction makes the operation idempotent: a repeated observation of
     the same cancelled order finds no allocations and cannot add stock twice.
     """
     if not force and order.status != MarketplaceOrderStatus.CANCELLED.value:
+        return InventoryReleaseResult(0, ())
+
+    from .cancelled_returns import HANDOFF, RECEIVED, find_event
+
+    # A cancellation after confirmed dispatch does not mean a physical return.
+    if find_event(order, HANDOFF) and not find_event(order, RECEIVED):
         return InventoryReleaseResult(0, ())
 
     rows = session.execute(
@@ -534,16 +538,20 @@ def rebuild_product_fifo(
         .join(MarketplaceOrderLine, MarketplaceOrderLine.id == InventoryAllocation.marketplace_order_line_id)
         .join(MarketplaceOrder, MarketplaceOrder.id == MarketplaceOrderLine.marketplace_order_id)
         .where(InventoryAllocation.inventory_batch_id.in_(purchase_ids))
+        .options(selectinload(MarketplaceOrder.events))
     ).all()
     for allocation, line, order in allocations:
         cancelled = (order.status == MarketplaceOrderStatus.CANCELLED.value
                      or order.manual_stage == "cancelled")
-        preserve = not cancelled and (
+        from .cancelled_returns import HANDOFF, RECEIVED, find_event
+
+        awaiting_physical_return = bool(find_event(order, HANDOFF) and not find_event(order, RECEIVED))
+        preserve = (cancelled and awaiting_physical_return) or (not cancelled and (
             (line.product_id not in group_ids
              and line.product_id not in (detached_product_ids or set()))
             or order.status == MarketplaceOrderStatus.RETURNED.value
             or order.manual_stage == "returned"
-        )
+        ))
         if preserve:
             preserved_by_batch[allocation.inventory_batch_id] += int(allocation.quantity)
         else:

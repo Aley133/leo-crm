@@ -1,6 +1,16 @@
 (() => {
   "use strict";
 
+  const nav = document.querySelector('nav[aria-label="Основная навигация"]');
+  if (nav && !nav.querySelector('a[href="/crm/cancelled"]')) {
+    const link = document.createElement("a");
+    link.href = "/crm/cancelled";
+    link.textContent = "Отменённые";
+    if (window.location.pathname === "/crm/cancelled") link.className = "active";
+    const orders = nav.querySelector('a[href="/crm/orders"]');
+    if (orders) orders.after(link); else nav.append(link);
+  }
+
   const workspaceStorageKey = "leo_crm_workspace_id";
   const tokenStorageKey = "leo_crm_service_token";
   const workspaceHeader = "X-Workspace-ID";

@@ -13,6 +13,7 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from .cancelled_returns import ALERT as RETURN_ALERT, current_alert, alert_message
 from .db import SessionLocal
 from .market_recovery import EVENT_TYPE as MARKET_RECOVERY_EVENT, market_event_current, format_market_message
 from .models import OutboxEvent, Product
@@ -241,7 +242,7 @@ def _pending_events(
         events = session.scalars(
             select(OutboxEvent)
             .where(
-                OutboxEvent.event_type.in_([PRICE_DROP_EVENT_TYPE, MARKET_RECOVERY_EVENT]),
+                OutboxEvent.event_type.in_([PRICE_DROP_EVENT_TYPE, MARKET_RECOVERY_EVENT, RETURN_ALERT]),
                 OutboxEvent.published_at.is_(None),
             )
             .order_by(OutboxEvent.created_at.desc(), OutboxEvent.id.desc())
@@ -251,6 +252,14 @@ def _pending_events(
         suppressed = False
         for event in events:
             payload = dict(event.payload_json)
+            if event.event_type == RETURN_ALERT:
+                if current_alert(session, payload):
+                    pending.append((event.id, {**payload, "cancelled_return": True}))
+                else:
+                    event.published_at = datetime.now(UTC)
+                    event.last_error = "suppressed: return already received or no longer cancelled"
+                    suppressed = True
+                continue
             if event.event_type == MARKET_RECOVERY_EVENT:
                 if market_event_current(session, payload):
                     pending.append((event.id, {**payload, "market_recovery": True}))
@@ -301,6 +310,13 @@ def _pending_events(
         return pending
 
 
+def _return_alert_current(session_factory, payload, include_all_workspaces):
+    with session_factory() as session:
+        if include_all_workspaces:
+            session.info["include_all_workspaces"] = True
+        return current_alert(session, payload)
+
+
 def _record_publish_result(
     session_factory: SessionFactory,
     *,
@@ -342,7 +358,19 @@ async def publish_pending_price_alerts(
     try:
         for event_id, payload in events:
             try:
-                if payload.get("market_recovery"):
+                if payload.get("cancelled_return"):
+                    # Recheck immediately before delivery, after any earlier
+                    # notifications in this batch have been sent.
+                    valid = await asyncio.to_thread(
+                        _return_alert_current, session_factory, payload, include_all_workspaces,
+                    )
+                    if not valid:
+                        await asyncio.to_thread(_record_publish_result, session_factory,
+                                                event_id=event_id, error=None,
+                                                include_all_workspaces=include_all_workspaces)
+                        continue
+                    await _send_telegram_message(active_client, settings=settings, text=alert_message(payload))
+                elif payload.get("market_recovery"):
                     await _send_telegram_message(active_client, settings=settings, text=format_market_message(payload))
                 else:
                     await send_price_drop_message(active_client, settings=settings, payload=payload)
