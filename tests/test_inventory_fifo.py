@@ -335,3 +335,26 @@ def test_fifo_rebuild_never_restores_stock_after_identity_change(db_session, new
     order.status = "cancelled"
     release_cancelled_order_inventory(db_session, order=order)
     assert batch.quantity_remaining == 3
+
+
+def test_dispatched_cancellation_keeps_fifo_until_physical_receipt(db_session):
+    from backend.app.cancelled_returns import HANDOFF, RECEIVED, add_event
+    product = _product(db_session)
+    batch, _ = create_inventory_batch(
+        db_session, product=product, quantity=2, unit_cost=Decimal("500"),
+        received_at=datetime(2026, 7, 23, tzinfo=UTC), reconcile_existing_orders=False,
+    )
+    order, line = _order_line(db_session, product, code="shipped-cancel",
+                             ordered_at=datetime(2026, 7, 24, tzinfo=UTC))
+    allocate_order_line_fifo(db_session, order_line=line, order=order)
+    order.status = "cancelled"
+    add_event(order, HANDOFF, datetime(2026, 7, 24, tzinfo=UTC))
+    assert release_cancelled_order_inventory(db_session, order=order).released_quantity == 0
+    assert batch.quantity_remaining == 1
+    from backend.app.inventory_service import rebuild_product_fifo
+    rebuild_product_fifo(db_session, product_id=product.id)
+    assert batch.quantity_remaining == 1
+    add_event(order, RECEIVED, datetime(2026, 7, 28, tzinfo=UTC))
+    assert release_cancelled_order_inventory(db_session, order=order).released_quantity == 1
+    assert release_cancelled_order_inventory(db_session, order=order).released_quantity == 0
+    assert batch.quantity_remaining == 2

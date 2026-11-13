@@ -1,0 +1,18 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>LEO CRM — Отменённые</title>
+<link rel="stylesheet" href="/static/dashboard.css"><link rel="stylesheet" href="/static/orders.css">
+<link rel="stylesheet" href="/static/responsive-ui.css"><link id="light-theme-stylesheet" rel="stylesheet" href="/static/light-theme.css" media="not all"><script src="/static/theme.js"></script>
+<style>.return-card{padding:22px;margin:14px 0;border:1px solid #52617b;border-radius:14px}.return-head{display:flex;justify-content:space-between;gap:16px;flex-wrap:wrap}.return-meta{display:flex;gap:24px;flex-wrap:wrap;margin:16px 0;color:#94a3b8}.return-lines{line-height:1.8}.return-state{font-weight:700}.overdue{color:#ef6464}.waiting{color:#e6b557}.received{color:#33b98a}.return-foot{display:flex;gap:12px;align-items:center;justify-content:space-between;margin-top:16px}.pager{display:flex;gap:16px;align-items:center}#filters{display:flex;gap:16px;flex-wrap:wrap;margin:24px 0}#query{min-width:240px}</style></head>
+<body><div class="shell"><aside class="sidebar"><div class="brand"><span>LEO</span><small>CRM</small></div>      <nav aria-label="Основная навигация">
+        <a href="/crm">Обзор</a><a href="/crm/products">Товары</a><a href="/crm/product-test">Тест товара</a><a href="/crm/preorder">Предзаказ</a><a href="/crm/add-product">Добавить товар</a><a href="/crm/orders">Заказы</a><a href="/crm/revenue">Выручка</a><a href="/crm/accounting">Бух учёт</a><a href="/crm/fast-dumping">Быстрый демпинг</a><a href="/crm/suppliers">Поставщики</a><a href="/crm/monitoring">Мониторинг</a>
+      </nav></aside>
+<main><header class="topbar"><div><p class="eyebrow">КОНТРОЛЬ ВОЗВРАТОВ</p><h1>Отменённые</h1><p class="subtitle">Заказы, отменённые после подтверждённой передачи курьеру.</p></div><button class="button secondary" id="refresh">Обновить</button></header>
+<section class="auth-panel hidden" id="auth-panel"><form id="token-form"><label>Сервисный токен <input id="token" type="password" required></label><button class="button">Подключить</button></form></section>
+<div id="message" class="message" role="status"></div>
+<p>Ждём возврат 10 дней с даты отмены. Затем отправляем напоминание в Telegram. Отмечайте «Получил» только после проверки всей посылки.</p>
+<form id="filters"><label>Показать <select id="view"><option value="pending">Ожидают возврата</option><option value="overdue">Просроченные · 10+ дней</option><option value="received">Полученные</option><option value="all">Вся история</option></select></label><input id="query" type="search" placeholder="Номер заказа, товар или SKU"><button class="button">Найти</button></form>
+<div id="summary" role="status"></div><section id="returns-list" aria-live="polite"></section>
+<div class="pager"><button id="prev" class="button secondary">Назад</button><span id="page"></span><button id="next" class="button secondary">Далее</button></div>
+<p class="subtitle">Старые отмены добавляются постепенно по сохранённым подтверждениям отправки. Плановая дата доставки и подготовка к передаче не считаются отправкой. Сумма — стоимость заказов, а не подтверждённая компенсация.</p>
+</main></div><script src="/static/workspace-context.js?v=20261113-1"></script><script src="/static/cancelled.js?v=20261113-1" defer></script></body></html>
