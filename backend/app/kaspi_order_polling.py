@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 from time import monotonic
 from datetime import UTC, datetime
 from typing import Any
@@ -184,6 +185,16 @@ def _workspace_connections() -> list[WorkspaceKaspiConnection]:
         return list_workspace_kaspi_connections(session)
 
 
+def _raw_error_categories(errors):
+    categories = set()
+    for error in errors:
+        kind = str(error.get("kind") or "unknown")
+        # Publish a status category only, never request URLs or credentials.
+        match = re.search(r"(?:error|status)[^0-9]{0,12}([45][0-9]{2})", str(error.get("error") or ""), re.I)
+        categories.add("http_" + match.group(1) if match else kind)
+    return sorted(categories)
+
+
 async def _run_account_cycle(
     connection: WorkspaceKaspiConnection,
     *,
@@ -275,6 +286,7 @@ async def _run_account_cycle(
                 if active_reconciliation is not None
                 else 0
             ),
+            "error_categories": _raw_error_categories(raw_errors),
             "errors": (
                 len(raw_errors)
                 + len(enrichment_errors)
