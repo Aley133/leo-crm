@@ -289,3 +289,11 @@ def test_failed_catchup_does_not_replace_fast_intake_or_retry_immediately(monkey
     assert windows == [20, 1440, 20, 20, 1440]
     assert kaspi_order_polling.LAST_RUN['status'] == 'completed'
     assert kaspi_order_polling.LAST_RUN['catchup']['status'] == 'failed'
+
+
+def test_order_error_categories_do_not_expose_request_details():
+    errors = [
+        {"kind":"http_or_json_error", "error":"Client error '403 Forbidden' for url 'https://example/orders?secret=hidden'"},
+        {"kind":"timeout", "error":"ReadTimeout"},
+    ]
+    assert kaspi_order_polling._raw_error_categories(errors) == ['http_403', 'timeout']
