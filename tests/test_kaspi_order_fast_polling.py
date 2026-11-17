@@ -60,8 +60,9 @@ def test_fast_polling_never_runs_maintenance_inline(
 
     assert len(calls) == 10
     assert all(call["mode"] == "fast" for call in calls)
-    assert calls[0]["lookback_minutes"] == 1440
-    assert all(call["lookback_minutes"] == 20 for call in calls[1:])
+    assert calls[0]["lookback_minutes"] == 20
+    assert calls[1]["lookback_minutes"] == 1440
+    assert all(call["lookback_minutes"] == 20 for call in calls[2:])
     assert all(call["enrich_products"] is False for call in calls)
 
 
@@ -260,18 +261,22 @@ def test_orders_ui_stops_loading_once_orders_are_persisted() -> None:
     assert "job.orders_ready === true" in script
 
 
-def test_catchup_retries_failure_and_repeats_after_interval(monkeypatch):
+def test_failed_catchup_does_not_replace_fast_intake_or_retry_immediately(monkeypatch):
     stop = asyncio.Event()
     clock = [0.0]
     windows = []
+    fast_count = [0]
 
     async def run_cycle(**options):
         windows.append(options['lookback_minutes'])
-        kaspi_order_polling.LAST_RUN['status'] = 'failed' if len(windows) == 1 else 'completed'
+        status = options.get('status_store', kaspi_order_polling.LAST_RUN)
+        status['status'] = 'failed' if options['lookback_minutes'] == 1440 else 'completed'
+        if options['lookback_minutes'] == 20:
+            fast_count[0] += 1
 
     async def wait(_stop, _seconds):
-        clock[0] += 60 if len(windows) == 1 else 901
-        if len(windows) == 3:
+        clock[0] += 60 if fast_count[0] == 1 else 901
+        if fast_count[0] == 3:
             stop.set()
         return stop.is_set()
 
@@ -281,4 +286,6 @@ def test_catchup_retries_failure_and_repeats_after_interval(monkeypatch):
     monkeypatch.setattr(kaspi_order_polling, '_wait_or_stop', wait)
     monkeypatch.setattr(kaspi_order_polling, 'run_poll_cycle', run_cycle)
     asyncio.run(kaspi_order_polling.polling_loop(stop))
-    assert windows == [1440, 1440, 1440]
+    assert windows == [20, 1440, 20, 20, 1440]
+    assert kaspi_order_polling.LAST_RUN['status'] == 'completed'
+    assert kaspi_order_polling.LAST_RUN['catchup']['status'] == 'failed'
