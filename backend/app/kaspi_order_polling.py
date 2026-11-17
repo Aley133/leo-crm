@@ -30,7 +30,7 @@ STARTUP_DELAY_SECONDS = 30
 FAST_LOOKBACK_MINUTES = 20
 CATCHUP_LOOKBACK_MINUTES = 24 * 60
 CATCHUP_INTERVAL_SECONDS = 15 * 60
-CATCHUP_ACCOUNT_TIMEOUT_SECONDS = 300
+CATCHUP_ACCOUNT_TIMEOUT_SECONDS = 90
 FAST_ACCOUNT_TIMEOUT_SECONDS = 90
 ENRICHMENT_LOOKBACK_DAYS = 31
 ENRICHMENT_STARTUP_OFFSET_SECONDS = 15
@@ -301,6 +301,7 @@ async def run_poll_cycle(
             "mode": mode,
             "lookback_minutes": lookback_minutes,
             "poll_interval_seconds": polling_interval_seconds(),
+            "accounts": [],
             "message": (
                 f"Kaspi order polling started: mode={mode}, "
                 f"lookback={lookback_minutes or days * 24 * 60} minute(s)"
@@ -353,7 +354,8 @@ async def run_poll_cycle(
                     "mode": mode,
                     "status": "failed",
                     "errors": 1,
-                    "message": f"{type(exc).__name__}: {str(exc)[:500]}",
+                    "message": ("Kaspi account request timed out" if isinstance(exc, TimeoutError)
+                        else f"{type(exc).__name__}: {str(exc)[:500]}"),
                 }
             )
     has_failures = any(item["status"] == "failed" for item in results)
@@ -412,22 +414,31 @@ async def polling_loop(stop_event: asyncio.Event) -> None:
             return
 
     cycle = 0
-    last_catchup_at = None
+    last_catchup_attempt = None
+    catchup_status: dict[str, Any] = {}
     while not stop_event.is_set():
         cycle_started = monotonic()
         cycle += 1
         LAST_RUN["cycle"] = cycle
-        catchup_due = last_catchup_at is None or cycle_started - last_catchup_at >= CATCHUP_INTERVAL_SECONDS
         try:
             async with order_sync_lock():
+                # New orders always take priority, even after a failed catchup.
                 await run_poll_cycle(
-                    days=1,
-                    mode="fast",
-                    lookback_minutes=CATCHUP_LOOKBACK_MINUTES if catchup_due else FAST_LOOKBACK_MINUTES,
+                    days=1, mode="fast", lookback_minutes=FAST_LOOKBACK_MINUTES,
                     enrich_products=False,
                 )
-                if catchup_due and LAST_RUN.get("status") == "completed":
-                    last_catchup_at = cycle_started
+                catchup_due = (last_catchup_attempt is None
+                    or monotonic() - last_catchup_attempt >= CATCHUP_INTERVAL_SECONDS)
+                if (not stop_event.is_set() and catchup_due
+                        and LAST_RUN.get("status") == "completed"):
+                    # Throttle attempts, including failures, so an upstream
+                    # outage cannot turn every minute poll into a full-day scan.
+                    last_catchup_attempt = monotonic()
+                    LAST_RUN["catchup"] = catchup_status
+                    await run_poll_cycle(
+                        days=1, mode="fast", lookback_minutes=CATCHUP_LOOKBACK_MINUTES,
+                        enrich_products=False, status_store=catchup_status,
+                    )
         except asyncio.CancelledError:
             raise
         except Exception as exc:
@@ -499,7 +510,8 @@ async def run_enrichment_cycle() -> None:
                     "account_id": connection.account_id,
                     "status": "failed",
                     "errors": 1,
-                    "message": f"{type(exc).__name__}: {str(exc)[:500]}",
+                    "message": ("Kaspi account request timed out" if isinstance(exc, TimeoutError)
+                        else f"{type(exc).__name__}: {str(exc)[:500]}"),
                 }
             )
     error_count = sum(int(item["errors"]) for item in results)
@@ -599,7 +611,8 @@ async def run_maintenance_cycle() -> None:
                     "account_id": connection.account_id,
                     "status": "failed",
                     "errors": 1,
-                    "message": f"{type(exc).__name__}: {str(exc)[:500]}",
+                    "message": ("Kaspi account request timed out" if isinstance(exc, TimeoutError)
+                        else f"{type(exc).__name__}: {str(exc)[:500]}"),
                 }
             )
     error_count = sum(int(item["errors"]) for item in results)
