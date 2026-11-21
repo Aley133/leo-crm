@@ -22,8 +22,9 @@ from .browser_agent_presence import record_browser_agent_heartbeat
 from .db import get_db, get_unscoped_db
 from .lease_engine import utc_now
 from .monitoring import MonitorTarget
-from .suppliers import SupplierProduct
+from .suppliers import Supplier, SupplierProduct
 from .workspace_context import workspace_context
+from .workspace_models import Workspace
 
 
 class BrowserAgentJobCreate(BaseModel):
@@ -168,7 +169,7 @@ def _expired_browser_job_id_statement(*, now):
     )
 
 
-def _claimable_browser_job(db: Session, *, now) -> BrowserAgentJob | None:
+def _claimable_browser_job(db: Session, *, now, hostname: str | None) -> BrowserAgentJob | None:
     """Lock one queued job without forcing PostgreSQL through a wide OR scan.
 
     ``status, id`` is the established runtime index. Keeping the normal queue
@@ -177,9 +178,29 @@ def _claimable_browser_job(db: Session, *, now) -> BrowserAgentJob | None:
     Only the winning row is then loaded with its JSON payload.
     """
 
-    job_id = db.scalar(_queued_browser_job_id_statement())
+    queued = _queued_browser_job_id_statement()
+    expired = _expired_browser_job_id_statement(now=now)
+    if (hostname or "").strip().casefold() != "barwork":
+        # The Ozon session for BARWORK lives on its Windows host. A failed
+        # check on another machine would back off the target for both agents.
+        barwork_ozon = (
+            select(SupplierProduct.id)
+            .join(Supplier, Supplier.id == SupplierProduct.supplier_id)
+            .join(Workspace, Workspace.id == Supplier.workspace_id)
+            .where(
+                SupplierProduct.id == BrowserAgentJob.supplier_product_id,
+                Workspace.id == BrowserAgentJob.workspace_id,
+                Workspace.slug == "barwork",
+                Supplier.code == "ozon",
+            )
+            .exists()
+        )
+        queued = queued.where(~barwork_ozon)
+        expired = expired.where(~barwork_ozon)
+
+    job_id = db.scalar(queued)
     if job_id is None:
-        job_id = db.scalar(_expired_browser_job_id_statement(now=now))
+        job_id = db.scalar(expired)
     return None if job_id is None else db.get(BrowserAgentJob, job_id)
 
 
@@ -419,7 +440,7 @@ def claim_browser_agent_job(payload: BrowserAgentClaim, db: Session = Depends(ge
 
     try:
         now = utc_now()
-        job = _claimable_browser_job(db, now=now)
+        job = _claimable_browser_job(db, now=now, hostname=payload.hostname)
         if job is None:
             # Empty queue polling is intentionally read-only. The agent sends a
             # separate bounded heartbeat, so idle workers no longer create a

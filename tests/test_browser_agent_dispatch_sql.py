@@ -1,5 +1,6 @@
 from datetime import UTC, datetime, timedelta
 
+import pytest
 from sqlalchemy.dialects import postgresql
 
 from backend.app import browser_agent_api
@@ -7,9 +8,11 @@ from backend.app.browser_agent_dispatch import (
     build_due_browser_targets_statement,
     dispatch_due_browser_targets,
 )
+from backend.app.browser_agent_models import BrowserAgentJob
 from backend.app.models import Product
 from backend.app.monitoring import MonitorTarget
 from backend.app.suppliers import ProductBinding, Supplier, SupplierProduct
+from backend.app.workspace_models import Workspace
 
 
 def test_due_browser_dispatch_compiles_for_postgresql_skip_locked() -> None:
@@ -128,3 +131,40 @@ def test_duplicate_dispatchers_share_one_short_database_scan_window() -> None:
     assert duplicate_retry_after > 0
     assert other_supplier is True
     assert next_window is True
+
+
+@pytest.mark.parametrize("status", ["queued", "leased"])
+def test_barwork_ozon_claims_are_reserved_for_its_host(db_session, status) -> None:
+    db_session.info["include_all_workspaces"] = True
+    now = datetime.now(UTC)
+    jobs = []
+    for workspace_id, slug in [(7, "barwork"), (8, "other")]:
+        db_session.add(Workspace(id=workspace_id, name=slug, slug=slug))
+    for workspace_id, code in [(7, "ozon"), (7, "wb"), (8, "ozon")]:
+        supplier = Supplier(workspace_id=workspace_id, code=code, name=code)
+        db_session.add(supplier)
+        db_session.flush()
+        source = SupplierProduct(
+            workspace_id=workspace_id, supplier_id=supplier.id, external_id="123",
+            title="Test", url=f"https://{code}.ru/product/123/",
+        )
+        db_session.add(source)
+        db_session.flush()
+        job = BrowserAgentJob(
+            workspace_id=workspace_id, supplier_product_id=source.id, url=source.url,
+            status=status, lease_until=now - timedelta(seconds=1) if status == "leased" else None,
+        )
+        db_session.add(job)
+        db_session.flush()
+        jobs.append(job)
+
+    def claim(host):
+        payload = browser_agent_api.BrowserAgentClaim(
+            agent_id=f"agent-{host}", runtime_kind="ozon_http", hostname=host,
+        )
+        return browser_agent_api.claim_browser_agent_job(payload, db_session)["job"]
+
+    assert claim("DESKTOP-TUOUKD9")["id"] == jobs[1].id
+    assert claim(None)["id"] == jobs[2].id
+    assert claim("OTHER") is None
+    assert claim("BARWORK")["id"] == jobs[0].id
