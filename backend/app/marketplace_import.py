@@ -502,9 +502,9 @@ def import_kaspi_order(
                 )
             )
 
-    from .cancelled_returns import observe_return
+    from .cancelled_returns import RETURN_STATUSES, observe_return
 
-    observe_return(session, order, payload, backfill=normalized.status == "cancelled")
+    observe_return(session, order, payload, backfill=normalized.status in RETURN_STATUSES)
 
     # A confirmed cancellation before courier handoff is also a warehouse
     # event. Keep status persistence and the reverse FIFO movement in the same

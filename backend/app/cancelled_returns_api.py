@@ -6,7 +6,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import selectinload
 
 from .auth import require_service_token
-from .cancelled_returns import RECEIVED, TRACKED, WAIT, add_event, event_exists, find_event, utc
+from .cancelled_returns import RECEIVED, RETURN_STATUSES, TRACKED, WAIT, add_event, event_exists, find_event, utc
 from .db import SessionLocal
 from .models import MarketplaceOrder, MarketplaceOrderEvent, MarketplaceOrderLine
 
@@ -28,7 +28,7 @@ def list_returns(view: Literal["pending", "overdue", "received", "all"] = "pendi
     if view == "received":
         filters.append(event_exists(RECEIVED))
     elif view in {"pending", "overdue"}:
-        filters.extend([~event_exists(RECEIVED), MarketplaceOrder.status == "cancelled"])
+        filters.extend([~event_exists(RECEIVED), MarketplaceOrder.status.in_(RETURN_STATUSES)])
     if view == "overdue":
         filters.append(cancelled_at <= now - WAIT)
     if account_id is not None:
@@ -58,7 +58,7 @@ def list_returns(view: Literal["pending", "overdue", "received", "all"] = "pendi
                 "handoff_at": (tracked.metadata_json or {}).get("handoff_at"),
                 "received_at": received.occurred_at if received else None,
                 "state": "received" if received else "overdue" if now >= start + WAIT else "waiting",
-                "can_receive": order.status == "cancelled" and not received,
+                "can_receive": order.status in RETURN_STATUSES and not received,
                 "lines": [{"title": line.title, "quantity": line.quantity, "sku": line.merchant_sku,
                            "product_id": line.product_id} for line in order.lines],
             })
@@ -76,13 +76,14 @@ def receive_return(order_id: int):
             received = find_event(order, RECEIVED)
             if received:
                 return {"received_at": received.occurred_at, "already_received": True}
-            if order.status != "cancelled" or not find_event(order, TRACKED):
+            if order.status not in RETURN_STATUSES or not find_event(order, TRACKED):
                 raise HTTPException(409, "Заказ не ожидает возврата после отмены в доставке")
             now = datetime.now(UTC)
             add_event(order, RECEIVED, now, {"source": "operator_confirmation"})
             from .inventory_service import release_cancelled_order_inventory
             release_cancelled_order_inventory(
                 session, order=order, released_at=now,
+                force=True,
                 reason="cancelled_return_physically_received",
             )
     return {"received_at": now, "already_received": False}
