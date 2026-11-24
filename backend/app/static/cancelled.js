@@ -3,6 +3,7 @@
   const escape = (s) => String(s ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const date = s => s ? new Date(s).toLocaleDateString('ru-RU', {timeZone:'Asia/Qyzylorda'}) : '—';
   const money = n => `${Number(n).toLocaleString('ru-RU')} ₸`;
+  const stateLabels = {received:'Товар получен', compensated:'Компенсация получена', overdue:'Просрочен', waiting:'Ожидаем возврат'};
   let offset = 0, busy = false;
   const limit = 50;
   async function api(path, options = {}) {
@@ -21,21 +22,35 @@
       $('auth-panel').classList.add('hidden');
       $('summary').textContent = `${data.total} заказов · ${money(data.total_amount)}`;
       $('returns-list').innerHTML = data.items.length ? data.items.map(o => `<article class="return-card">
-        <div class="return-head"><div><strong>Заказ №${escape(o.code)}</strong> · ${escape(o.account)}</div><span class="return-state ${o.state}">${o.state === 'received' ? 'Получен' : o.state === 'overdue' ? 'Просрочен' : 'Ожидаем возврат'}</span></div>
+        <div class="return-head"><div><strong>Заказ №${escape(o.code)}</strong> · ${escape(o.account)}</div><span class="return-state ${o.state}">${stateLabels[o.state]}</span></div>
         <div class="return-meta"><span>Передан курьеру: ${date(o.handoff_at)}</span><span>Отменён: ${date(o.cancelled_at)}</span><span>Контроль: ${date(o.due_at)}</span></div>
         <div class="return-lines">${o.lines.map(l => `<div>${l.product_id ? `<a href="/crm/products/${Number(l.product_id)}">${escape(l.title)}</a>` : escape(l.title)} × <strong>${Number(l.quantity)}</strong>${l.sku ? ` · SKU ${escape(l.sku)}` : ''}</div>`).join('') || 'Состав заказа пока не загружен'}</div>
-        <div class="return-foot"><span>${money(o.amount)} · ${o.received_at ? `Получен ${date(o.received_at)}` : `Ожидание ${o.days_waiting} дн.`}</span>${o.can_receive ? `<button class="button" data-receive="${o.id}" data-code="${escape(o.code)}">Получил</button>` : ''}</div></article>`).join('') : '<div class="empty">Заказов в этой группе нет.</div>';
+        <div class="return-foot"><span>${money(o.amount)} · ${o.received_at ? `Товар получен ${date(o.received_at)}` : o.compensated_at ? `Компенсация получена ${date(o.compensated_at)}` : `Ожидание ${o.days_waiting} дн.`}</span>${o.can_receive ? `<div class="return-actions" data-order-id="${o.id}" data-code="${escape(o.code)}">
+          <button class="button" data-outcome="received">Получил товар</button>
+          <button class="button secondary" data-outcome="compensated">Получил компенсацию</button>
+        </div>` : ''}</div></article>`).join('') : '<div class="empty">Заказов в этой группе нет.</div>';
       $('prev').disabled = offset === 0; $('next').disabled = offset + limit >= data.total;
       $('page').textContent = data.total ? `${offset + 1}–${Math.min(offset + limit,data.total)} из ${data.total}` : '0 заказов';
     } catch (e) { $('message').textContent = e.message; }
     finally { busy = false; $('refresh').disabled = false; $('returns-list').setAttribute('aria-busy','false'); }
   }
   $('returns-list').addEventListener('click', async e => {
-    const button = e.target.closest('[data-receive]');
+    const button = e.target.closest('[data-outcome]');
     if (!button || busy) return;
-    if (!window.confirm(`Подтверждаете физическое получение ВСЕХ товаров заказа №${button.dataset.code}? Оставшиеся списания FIFO будут возвращены в исходные партии.`)) return;
+    const {orderId, code} = button.closest('.return-actions').dataset;
+    const outcome = button.dataset.outcome;
+    const confirmation = outcome === 'received'
+      ? `Подтверждаете получение всех товаров заказа №${code}? CRM вернёт на склад товары, которые ещё числятся за заказом.`
+      : `Подтверждаете, что получили компенсацию за утрату товара по заказу №${code}?`;
+    if (!window.confirm(confirmation)) return;
     button.disabled = true; busy = true;
-    try { await api(`/${button.dataset.receive}/received`, {method:'POST'}); busy = false; await load(); }
+    try {
+      await api(`/${orderId}/${outcome}`, {method:'POST'});
+      if (offset && ['pending', 'overdue'].includes($('view').value)
+          && $('returns-list').querySelectorAll('.return-card').length === 1) offset -= limit;
+      busy = false;
+      await load();
+    }
     catch (error) { $('message').textContent = error.message; }
     finally { busy = false; button.disabled = false; }
   });

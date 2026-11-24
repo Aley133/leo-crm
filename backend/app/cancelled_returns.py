@@ -17,6 +17,8 @@ from .models import MarketplaceOrder, MarketplaceOrderEvent, MarketplaceRawPaylo
 HANDOFF = "courier_handoff_confirmed"
 TRACKED = "cancelled_return_tracked"
 RECEIVED = "cancelled_return_received"
+COMPENSATED = "cancelled_return_compensated"
+RESOLVED_EVENTS = (RECEIVED, COMPENSATED)
 ALERT = "cancelled_return_overdue"
 # Revisit snapshots checked before the nested Kaspi Delivery fields were read.
 CHECKED = "cancelled_return_evidence_checked_v2"
@@ -56,15 +58,15 @@ def handoff_time(payload: dict, observed_at: datetime) -> datetime | None:
     return None
 
 
-def event_exists(kind: str):
+def event_exists(*kinds: str):
     return exists().where(
         MarketplaceOrderEvent.marketplace_order_id == MarketplaceOrder.id,
-        MarketplaceOrderEvent.event_type == kind,
+        MarketplaceOrderEvent.event_type.in_(kinds),
     )
 
 
-def find_event(order: MarketplaceOrder, kind: str):
-    return next((event for event in order.events if event.event_type == kind), None)
+def find_event(order: MarketplaceOrder, *kinds: str):
+    return next((event for event in order.events if event.event_type in kinds), None)
 
 
 def add_event(order: MarketplaceOrder, kind: str, when: datetime, metadata=None):
@@ -114,7 +116,7 @@ def observe_return(session: Session, order: MarketplaceOrder, payload: dict | No
 def current_alert(session: Session, payload: dict) -> bool:
     order = session.get(MarketplaceOrder, int(payload["order_id"]))
     return bool(order and order.status in RETURN_STATUSES and find_event(order, TRACKED)
-                and not find_event(order, RECEIVED))
+                and not find_event(order, *RESOLVED_EVENTS))
 
 
 def alert_message(payload: dict) -> str:
@@ -125,7 +127,7 @@ def alert_message(payload: dict) -> str:
             f"Сумма заказа: {escape(str(payload['amount']))} ₸\n"
             f"Дата отмены: {escape(str(payload['cancelled_date']))}\n"
             "Прошло 10 дней или больше. Проверьте возврат; если товар не получен, обратитесь в Kaspi Гид.\n"
-            "После физического получения нажмите «Получил» во вкладке «Отменённые».")
+            "Когда товар или компенсация получены, отметьте исход во вкладке «Отменённые».")
 
 
 def scan_returns(session: Session, *, after_id: int = 0, limit: int = 50,
@@ -133,7 +135,7 @@ def scan_returns(session: Session, *, after_id: int = 0, limit: int = 50,
     now = utc(now or datetime.now(UTC))
     orders = session.scalars(select(MarketplaceOrder).where(
         MarketplaceOrder.status.in_(RETURN_STATUSES), MarketplaceOrder.id > after_id,
-        ~event_exists(RECEIVED),
+        ~event_exists(*RESOLVED_EVENTS),
         event_exists(TRACKED) | ~event_exists(CHECKED),
     ).options(selectinload(MarketplaceOrder.events), selectinload(MarketplaceOrder.lines),
               selectinload(MarketplaceOrder.account))
