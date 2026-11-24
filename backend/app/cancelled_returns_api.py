@@ -7,7 +7,7 @@ from sqlalchemy.orm import selectinload
 
 from .auth import require_service_token
 from .cancelled_returns import (
-    COMPENSATED, RECEIVED, RESOLVED_EVENTS, RETURN_STATUSES, TRACKED, WAIT,
+    COMPENSATED, RECEIVED, RESOLVED_EVENTS, RETURN_STATUSES, TRACKED, TRACKING_START, WAIT,
     add_event, event_exists, find_event, utc,
 )
 from .db import SessionLocal
@@ -23,11 +23,9 @@ def list_returns(view: Literal["pending", "overdue", "received", "compensated", 
                  account_id: int | None = None,
                  limit: int = Query(50, ge=1, le=200), offset: int = Query(0, ge=0)):
     now = datetime.now(UTC)
-    cancelled_at = select(func.min(MarketplaceOrderEvent.occurred_at)).where(
-        MarketplaceOrderEvent.marketplace_order_id == MarketplaceOrder.id,
-        MarketplaceOrderEvent.event_type == TRACKED,
-    ).correlate(MarketplaceOrder).scalar_subquery()
-    filters = [event_exists(TRACKED)]
+    cancelled_at = MarketplaceOrderEvent.occurred_at
+    filters = [MarketplaceOrderEvent.event_type == TRACKED, MarketplaceOrderEvent.source_event_key == TRACKED,
+               cancelled_at >= TRACKING_START]
     if view == "received":
         filters.append(event_exists(RECEIVED))
     elif view == "compensated":
@@ -43,10 +41,14 @@ def list_returns(view: Literal["pending", "overdue", "received", "compensated", 
         filters.append(MarketplaceOrder.external_code.ilike(pattern) | MarketplaceOrder.id.in_(
             select(MarketplaceOrderLine.marketplace_order_id).where(
                 MarketplaceOrderLine.title.ilike(pattern) | MarketplaceOrderLine.merchant_sku.ilike(pattern))))
+    base = select(MarketplaceOrder).join(
+        MarketplaceOrderEvent, MarketplaceOrderEvent.marketplace_order_id == MarketplaceOrder.id,
+    ).where(*filters)
     with SessionLocal() as session:
-        total = session.scalar(select(func.count(MarketplaceOrder.id)).where(*filters)) or 0
-        amount = session.scalar(select(func.sum(MarketplaceOrder.total_amount)).where(*filters)) or 0
-        orders = session.scalars(select(MarketplaceOrder).where(*filters).options(
+        total, amount = session.execute(base.with_only_columns(
+            func.count(MarketplaceOrder.id), func.coalesce(func.sum(MarketplaceOrder.total_amount), 0),
+        )).one()
+        orders = session.scalars(base.options(
             selectinload(MarketplaceOrder.events), selectinload(MarketplaceOrder.lines),
             selectinload(MarketplaceOrder.account),
         ).order_by(cancelled_at, MarketplaceOrder.id).offset(offset).limit(limit)).all()
@@ -101,7 +103,8 @@ def _close_return(order_id: int, outcome: str) -> tuple[datetime, bool]:
                 if resolved.event_type == outcome:
                     return resolved.occurred_at, True
                 raise HTTPException(409, "Заказ уже закрыт с другим исходом")
-            if order.status not in RETURN_STATUSES or not find_event(order, TRACKED):
+            tracked = find_event(order, TRACKED)
+            if order.status not in RETURN_STATUSES or tracked is None or utc(tracked.occurred_at) < TRACKING_START:
                 raise HTTPException(409, "Заказ не ожидает возврата после отмены в доставке")
             now = datetime.now(UTC)
             add_event(order, outcome, now, {"source": "operator_confirmation"})

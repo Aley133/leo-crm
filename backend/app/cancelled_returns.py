@@ -8,7 +8,7 @@ from datetime import UTC, datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
 
-from sqlalchemy import exists, select
+from sqlalchemy import String, cast, exists, select
 from sqlalchemy.orm import Session, selectinload
 
 from .db import SessionLocal
@@ -24,6 +24,7 @@ ALERT = "cancelled_return_overdue"
 CHECKED = "cancelled_return_evidence_checked_v2"
 RETURN_STATUSES = ("cancelling", "cancelled")
 WAIT = timedelta(days=10)
+TRACKING_START = datetime(2026, 11, 15, tzinfo=ZoneInfo("Asia/Qyzylorda")).astimezone(UTC)
 logger = logging.getLogger(__name__)
 
 
@@ -62,7 +63,7 @@ def event_exists(*kinds: str):
     return exists().where(
         MarketplaceOrderEvent.marketplace_order_id == MarketplaceOrder.id,
         MarketplaceOrderEvent.event_type.in_(kinds),
-    )
+    ).correlate(MarketplaceOrder)
 
 
 def find_event(order: MarketplaceOrder, *kinds: str):
@@ -115,7 +116,10 @@ def observe_return(session: Session, order: MarketplaceOrder, payload: dict | No
 
 def current_alert(session: Session, payload: dict) -> bool:
     order = session.get(MarketplaceOrder, int(payload["order_id"]))
-    return bool(order and order.status in RETURN_STATUSES and find_event(order, TRACKED)
+    if order is None or order.status not in RETURN_STATUSES:
+        return False
+    tracked = find_event(order, TRACKED)
+    return bool(tracked and utc(tracked.occurred_at) >= TRACKING_START
                 and not find_event(order, *RESOLVED_EVENTS))
 
 
@@ -130,28 +134,66 @@ def alert_message(payload: dict) -> str:
             "Когда товар или компенсация получены, отметьте исход во вкладке «Отменённые».")
 
 
+def _scan_candidates(after_id: int, limit: int, now: datetime, first_alert_cancellation: datetime):
+    order_id = MarketplaceOrderEvent.marketplace_order_id
+    processed = select(order_id).where(MarketplaceOrderEvent.event_type.in_((TRACKED, CHECKED)))
+    needs_evidence = select(order_id).where(
+        order_id > after_id,
+        MarketplaceOrderEvent.event_type.in_(("status_changed", "order_imported")),
+        MarketplaceOrderEvent.current_status.in_(RETURN_STATUSES),
+        MarketplaceOrderEvent.occurred_at >= TRACKING_START,
+        order_id.not_in(processed),
+    )
+    alert_exists = exists().where(
+        OutboxEvent.workspace_id == MarketplaceOrderEvent.workspace_id,
+        OutboxEvent.aggregate_id == cast(order_id, String),
+        OutboxEvent.event_type == ALERT,
+    )
+    needs_alert = select(order_id).where(
+        order_id > after_id,
+        MarketplaceOrderEvent.event_type == TRACKED,
+        MarketplaceOrderEvent.occurred_at.between(first_alert_cancellation, now - WAIT),
+        ~alert_exists,
+    )
+    return (
+        select(MarketplaceOrder)
+        .where(
+            MarketplaceOrder.status.in_(RETURN_STATUSES),
+            MarketplaceOrder.id.in_(needs_evidence.union_all(needs_alert)),
+            ~event_exists(*RESOLVED_EVENTS),
+        )
+        .options(selectinload(MarketplaceOrder.events), selectinload(MarketplaceOrder.lines),
+                 selectinload(MarketplaceOrder.account))
+        .order_by(MarketplaceOrder.id).limit(limit).with_for_update(skip_locked=True)
+    )
+
+
 def scan_returns(session: Session, *, after_id: int = 0, limit: int = 50,
                  now: datetime | None = None, alerts_start_at: datetime | None = None) -> int:
     now = utc(now or datetime.now(UTC))
-    orders = session.scalars(select(MarketplaceOrder).where(
-        MarketplaceOrder.status.in_(RETURN_STATUSES), MarketplaceOrder.id > after_id,
-        ~event_exists(*RESOLVED_EVENTS),
-        event_exists(TRACKED) | ~event_exists(CHECKED),
-    ).options(selectinload(MarketplaceOrder.events), selectinload(MarketplaceOrder.lines),
-              selectinload(MarketplaceOrder.account))
-      .order_by(MarketplaceOrder.id).limit(limit).with_for_update(skip_locked=True)).all()
+    first_alert_cancellation = TRACKING_START
+    if alerts_start_at is not None:
+        first_alert_cancellation = max(TRACKING_START, utc(alerts_start_at) - WAIT)
+    orders = session.scalars(_scan_candidates(after_id, limit, now, first_alert_cancellation)).all()
+    due_returns = []
     for order in orders:
-        observe_return(session, order, now=now, backfill=True)
-        if not find_event(order, CHECKED):
-            add_event(order, CHECKED, now)
         tracked = find_event(order, TRACKED)
         if tracked is None:
-            continue
-        due_at = utc(tracked.occurred_at) + WAIT
-        if due_at > now or (alerts_start_at is not None and due_at < alerts_start_at):
+            observe_return(session, order, now=now, backfill=True)
+            add_event(order, CHECKED, now)
+            tracked = find_event(order, TRACKED)
+        if tracked is None or not first_alert_cancellation <= utc(tracked.occurred_at) <= now - WAIT:
             continue
         key = f"cancelled-return:{order.workspace_id}:{order.id}:10d"
-        if session.scalar(select(OutboxEvent.id).where(OutboxEvent.idempotency_key == key)):
+        due_returns.append((order, tracked, key))
+
+    existing_keys = set()
+    if due_returns:
+        existing_keys = set(session.scalars(select(OutboxEvent.idempotency_key).where(
+            OutboxEvent.idempotency_key.in_([key for _, _, key in due_returns]),
+        )))
+    for order, tracked, key in due_returns:
+        if key in existing_keys:
             continue
         session.add(OutboxEvent(
             workspace_id=order.workspace_id, aggregate_type="marketplace_order",

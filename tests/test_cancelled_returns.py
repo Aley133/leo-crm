@@ -8,7 +8,7 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.cancelled_returns import (
-    HANDOFF, TRACKED, RECEIVED, COMPENSATED, ALERT, WAIT, add_event, current_alert,
+    HANDOFF, TRACKED, RECEIVED, COMPENSATED, ALERT, TRACKING_START, WAIT, add_event, current_alert,
     find_event, handoff_time, observe_return, scan_returns,
 )
 from backend.app.inventory_models import InventoryBatch
@@ -18,7 +18,7 @@ from backend.app.marketplace_import import import_kaspi_order
 from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderEvent, OutboxEvent, Product
 from backend.app.telegram_price_alerts import TelegramPriceAlertSettings, publish_pending_price_alerts
 
-NOW = datetime(2026, 11, 13, 10, tzinfo=UTC)
+NOW = datetime(2026, 11, 25, 10, tzinfo=UTC)
 CANCELLED = NOW - timedelta(days=10)
 HANDOVER = CANCELLED - timedelta(days=2)
 
@@ -102,6 +102,42 @@ def test_alert_cutoff_keeps_overdue_history_visible_without_sending(db_session):
 
     scan_returns(db_session, now=after_due, alerts_start_at=NOW)
     assert db_session.scalar(select(func.count(OutboxEvent.id))) == 1
+
+
+def test_november_cutoff_is_inclusive_and_scan_skips_old_and_already_queued(db_session, monkeypatch):
+    from fastapi import HTTPException
+    from backend.app import cancelled_returns_api as api
+
+    acc = account(db_session)
+    orders = []
+    assert TRACKING_START == datetime(2026, 11, 14, 19, tzinfo=UTC)
+    for code, when in (("old", TRACKING_START - timedelta(milliseconds=1)), ("new", TRACKING_START)):
+        raw = payload("CANCELLED", courier=HANDOVER)
+        raw["id"] = code
+        raw["attributes"].update(code=code, updatedAt=when.isoformat())
+        result = import_kaspi_order(db_session, marketplace_account_id=acc.id, payload=raw)
+        orders.append(db_session.get(MarketplaceOrder, result.order_id))
+
+    old, new = orders
+    assert find_event(old, TRACKED)
+    assert not current_alert(db_session, {"order_id": old.id})
+    due = TRACKING_START + WAIT
+    assert scan_returns(db_session, limit=1, now=due - timedelta(milliseconds=1)) == 0
+    assert scan_returns(db_session, limit=1, now=due) == new.id
+    assert scan_returns(db_session, limit=1, now=due) == 0
+    assert db_session.scalar(select(OutboxEvent.aggregate_id)) == str(new.id)
+    db_session.commit()
+
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    monkeypatch.setattr(api, "SessionLocal", factory)
+    for view in ("pending", "all"):
+        listing = api.list_returns(view=view, query=None, account_id=None, limit=50, offset=0)
+        assert listing["total"] == 1
+        assert listing["total_amount"] == "7000.00"
+        assert [item["id"] for item in listing["items"]] == [new.id]
+    with pytest.raises(HTTPException) as conflict:
+        api.receive_return(old.id)
+    assert conflict.value.status_code == 409
 
 
 @pytest.mark.parametrize("status", ["CANCELLING", "CANCELLED"])
