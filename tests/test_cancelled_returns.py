@@ -1,4 +1,5 @@
 from datetime import UTC, datetime, timedelta
+from decimal import Decimal
 import asyncio
 
 import httpx
@@ -7,12 +8,14 @@ from sqlalchemy import select, func
 from sqlalchemy.orm import sessionmaker
 
 from backend.app.cancelled_returns import (
-    HANDOFF, TRACKED, RECEIVED, ALERT, WAIT, add_event, find_event,
-    handoff_time, observe_return, scan_returns,
+    HANDOFF, TRACKED, RECEIVED, COMPENSATED, ALERT, WAIT, add_event, current_alert,
+    find_event, handoff_time, observe_return, scan_returns,
 )
+from backend.app.inventory_models import InventoryBatch
+from backend.app.inventory_service import allocate_order_line_fifo, create_inventory_batch, rebuild_product_fifo
 from backend.app.kaspi_order_payload import canonicalize_kaspi_order_payload
 from backend.app.marketplace_import import import_kaspi_order
-from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderEvent, OutboxEvent
+from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderEvent, OutboxEvent, Product
 from backend.app.telegram_price_alerts import TelegramPriceAlertSettings, publish_pending_price_alerts
 
 NOW = datetime(2026, 11, 13, 10, tzinfo=UTC)
@@ -178,6 +181,58 @@ def test_telegram_failure_retries_and_success_does_not_repeat(db_session):
             return first,second,third
     assert asyncio.run(publish()) == ((0,1),(1,0),(0,0))
     assert len(calls)==2
+
+
+@pytest.mark.parametrize("status", ["CANCELLING", "CANCELLED"])
+def test_compensation_closes_return_without_restocking(db_session, monkeypatch, status):
+    from fastapi import HTTPException
+    from backend.app import cancelled_returns_api as api
+
+    acc = account(db_session)
+    order = import_order(db_session, acc, status="SHIPPING")
+    product = Product(kaspi_product_id="105721344", merchant_sku="105721344", name="Товар", status="active")
+    db_session.add(product)
+    db_session.flush()
+    batch, _ = create_inventory_batch(
+        db_session, product=product, quantity=3, unit_cost=Decimal("500"),
+        received_at=HANDOVER - timedelta(days=1), reconcile_existing_orders=False,
+    )
+    order.lines[0].product_id = product.id
+    allocate_order_line_fifo(db_session, order_line=order.lines[0], order=order)
+    assert batch.quantity_remaining == 1
+    import_order(db_session, acc, status=status)
+    scan_returns(db_session, now=NOW)
+    db_session.commit()
+
+    factory = sessionmaker(bind=db_session.get_bind(), expire_on_commit=False)
+    monkeypatch.setattr(api, "SessionLocal", factory)
+    first = api.compensate_return(order.id)
+    assert not first["already_compensated"]
+    assert api.compensate_return(order.id) == {**first, "already_compensated": True}
+    with pytest.raises(HTTPException) as conflict:
+        api.receive_return(order.id)
+    assert conflict.value.status_code == 409
+
+    for view in ("pending", "overdue", "received", "compensated", "all"):
+        listing = api.list_returns(view=view, query=None, account_id=None, limit=50, offset=0)
+        if view in {"compensated", "all"}:
+            item, = listing["items"]
+            assert item["state"] == "compensated"
+            assert item["compensated_at"] == first["compensated_at"]
+            assert not item["can_receive"]
+        else:
+            assert listing["total"] == 0
+
+    with factory() as session:
+        alert = session.scalar(select(OutboxEvent).where(OutboxEvent.event_type == ALERT))
+        assert alert is not None
+        assert not current_alert(session, alert.payload_json)
+        assert session.get(InventoryBatch, batch.id).quantity_remaining == 1
+        rebuild_product_fifo(session, product_id=product.id)
+        assert session.get(InventoryBatch, batch.id).quantity_remaining == 1
+        assert session.scalar(select(func.count(MarketplaceOrderEvent.id)).where(
+            MarketplaceOrderEvent.event_type == COMPENSATED,
+        )) == 1
 
 
 def test_api_respects_workspace_for_read_and_receive(db_session, monkeypatch):
