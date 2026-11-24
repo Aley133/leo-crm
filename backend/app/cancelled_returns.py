@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 from datetime import UTC, datetime, timedelta
 from html import escape
 from zoneinfo import ZoneInfo
@@ -17,7 +18,9 @@ HANDOFF = "courier_handoff_confirmed"
 TRACKED = "cancelled_return_tracked"
 RECEIVED = "cancelled_return_received"
 ALERT = "cancelled_return_overdue"
-CHECKED = "cancelled_return_evidence_checked"
+# Revisit snapshots checked before the nested Kaspi Delivery fields were read.
+CHECKED = "cancelled_return_evidence_checked_v2"
+RETURN_STATUSES = ("cancelling", "cancelled")
 WAIT = timedelta(days=10)
 logger = logging.getLogger(__name__)
 
@@ -30,13 +33,18 @@ def handoff_time(payload: dict, observed_at: datetime) -> datetime | None:
     attrs = payload.get("attributes", payload)
     if not isinstance(attrs, dict):
         return None
-    value = attrs.get("courierTransmissionDate")
-    try:
-        transmitted = datetime.fromtimestamp(float(value) / 1000, UTC)
-        if 0 < float(value) and transmitted <= utc(observed_at):
+    delivery = attrs.get("kaspiDelivery")
+    nested_date = delivery.get("courierTransmissionDate") if isinstance(delivery, dict) else None
+    for value in (nested_date, attrs.get("courierTransmissionDate")):
+        if value is None or isinstance(value, bool):
+            continue
+        try:
+            milliseconds = float(value)
+            transmitted = datetime.fromtimestamp(milliseconds / 1000, UTC)
+        except (ValueError, TypeError, OverflowError, OSError):
+            continue
+        if milliseconds > 0 and transmitted <= utc(observed_at):
             return transmitted
-    except (ValueError, TypeError, OverflowError, OSError):
-        pass
     # Canonical payloads preserve the original marketplaceStatus. Synthesized
     # SHIPPING must not be treated as proof of physical courier handoff.
     status = str(attrs.get("marketplaceStatus", attrs.get("status", ""))).upper()
@@ -78,19 +86,20 @@ def observe_return(session: Session, order: MarketplaceOrder, payload: dict | No
             handoff = add_event(order, HANDOFF, transmitted)
     if handoff is None and backfill:
         snapshots = session.scalars(select(MarketplaceRawPayload).where(
+            MarketplaceRawPayload.workspace_id == order.workspace_id,
             MarketplaceRawPayload.marketplace_account_id == order.marketplace_account_id,
             MarketplaceRawPayload.external_object_id == order.external_order_id,
             MarketplaceRawPayload.payload_type == "order",
-        ).order_by(MarketplaceRawPayload.id).limit(20)).all()
+        ).order_by(MarketplaceRawPayload.received_at.desc(), MarketplaceRawPayload.id.desc()).limit(20)).all()
         for snapshot in snapshots:
             transmitted = handoff_time(snapshot.payload_json, utc(snapshot.received_at))
             if transmitted:
                 handoff = add_event(order, HANDOFF, transmitted)
                 break
-    if order.status != "cancelled" or handoff is None or find_event(order, TRACKED):
+    if order.status not in RETURN_STATUSES or handoff is None or find_event(order, TRACKED):
         return
     cancellations = [utc(event.occurred_at) for event in order.events
-                     if event.current_status == "cancelled"
+                     if event.current_status in RETURN_STATUSES
                      and event.event_type in {"status_changed", "order_imported"}
                      and utc(event.occurred_at) >= utc(handoff.occurred_at)]
     if not cancellations:
@@ -104,7 +113,7 @@ def observe_return(session: Session, order: MarketplaceOrder, payload: dict | No
 
 def current_alert(session: Session, payload: dict) -> bool:
     order = session.get(MarketplaceOrder, int(payload["order_id"]))
-    return bool(order and order.status == "cancelled" and find_event(order, TRACKED)
+    return bool(order and order.status in RETURN_STATUSES and find_event(order, TRACKED)
                 and not find_event(order, RECEIVED))
 
 
@@ -120,10 +129,10 @@ def alert_message(payload: dict) -> str:
 
 
 def scan_returns(session: Session, *, after_id: int = 0, limit: int = 50,
-                 now: datetime | None = None) -> int:
+                 now: datetime | None = None, alerts_start_at: datetime | None = None) -> int:
     now = utc(now or datetime.now(UTC))
     orders = session.scalars(select(MarketplaceOrder).where(
-        MarketplaceOrder.status == "cancelled", MarketplaceOrder.id > after_id,
+        MarketplaceOrder.status.in_(RETURN_STATUSES), MarketplaceOrder.id > after_id,
         ~event_exists(RECEIVED),
         event_exists(TRACKED) | ~event_exists(CHECKED),
     ).options(selectinload(MarketplaceOrder.events), selectinload(MarketplaceOrder.lines),
@@ -134,7 +143,10 @@ def scan_returns(session: Session, *, after_id: int = 0, limit: int = 50,
         if not find_event(order, CHECKED):
             add_event(order, CHECKED, now)
         tracked = find_event(order, TRACKED)
-        if tracked is None or now < utc(tracked.occurred_at) + WAIT:
+        if tracked is None:
+            continue
+        due_at = utc(tracked.occurred_at) + WAIT
+        if due_at > now or (alerts_start_at is not None and due_at < alerts_start_at):
             continue
         key = f"cancelled-return:{order.workspace_id}:{order.id}:10d"
         if session.scalar(select(OutboxEvent.id).where(OutboxEvent.idempotency_key == key)):
@@ -154,12 +166,19 @@ def scan_returns(session: Session, *, after_id: int = 0, limit: int = 50,
 
 
 async def returns_loop(stop_event: asyncio.Event) -> None:
+    raw_alert_start = os.getenv("CANCELLED_RETURN_ALERTS_START_AT", "").strip()
+    try:
+        alerts_start_at = utc(datetime.fromisoformat(raw_alert_start)) if raw_alert_start else None
+    except ValueError:
+        logger.error("Invalid CANCELLED_RETURN_ALERTS_START_AT; cancelled return notifications are paused")
+        alerts_start_at = datetime.max.replace(tzinfo=UTC)
+
     cursor = 0
     def cycle(after_id):
         with SessionLocal() as session:
             session.info["include_all_workspaces"] = True
             with session.begin():
-                return scan_returns(session, after_id=after_id)
+                return scan_returns(session, after_id=after_id, alerts_start_at=alerts_start_at)
     while not stop_event.is_set():
         try:
             cursor = await asyncio.to_thread(cycle, cursor)

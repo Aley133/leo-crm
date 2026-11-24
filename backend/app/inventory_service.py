@@ -540,13 +540,17 @@ def rebuild_product_fifo(
         .where(InventoryAllocation.inventory_batch_id.in_(purchase_ids))
         .options(selectinload(MarketplaceOrder.events))
     ).all()
+    from .cancelled_returns import HANDOFF, RECEIVED, RETURN_STATUSES, find_event
+
     for allocation, line, order in allocations:
         cancelled = (order.status == MarketplaceOrderStatus.CANCELLED.value
                      or order.manual_stage == "cancelled")
-        from .cancelled_returns import HANDOFF, RECEIVED, find_event
-
-        awaiting_physical_return = bool(find_event(order, HANDOFF) and not find_event(order, RECEIVED))
-        preserve = (cancelled and awaiting_physical_return) or (not cancelled and (
+        awaiting_physical_return = (
+            (cancelled or order.status in RETURN_STATUSES)
+            and find_event(order, HANDOFF) is not None
+            and find_event(order, RECEIVED) is None
+        )
+        preserve = awaiting_physical_return or (not cancelled and (
             (line.product_id not in group_ids
              and line.product_id not in (detached_product_ids or set()))
             or order.status == MarketplaceOrderStatus.RETURNED.value

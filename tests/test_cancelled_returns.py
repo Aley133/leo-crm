@@ -10,6 +10,7 @@ from backend.app.cancelled_returns import (
     HANDOFF, TRACKED, RECEIVED, ALERT, WAIT, add_event, find_event,
     handoff_time, observe_return, scan_returns,
 )
+from backend.app.kaspi_order_payload import canonicalize_kaspi_order_payload
 from backend.app.marketplace_import import import_kaspi_order
 from backend.app.models import MarketplaceAccount, MarketplaceOrder, MarketplaceOrderEvent, OutboxEvent
 from backend.app.telegram_price_alerts import TelegramPriceAlertSettings, publish_pending_price_alerts
@@ -46,6 +47,9 @@ def import_order(session, acc, status="CANCELLED", courier=HANDOVER):
     {"status":"SHIPPING", "marketplaceStatus":"ACCEPTED_BY_MERCHANT", "leoClassificationSource":"planned_transmission_date"},
     {"status":"SHIPPING", "leoClassificationSource":"first_import_old_order"},
     {"courierTransmissionPlanningDate":HANDOVER.timestamp()*1000, "deliveryCostForSeller":1000},
+    {"kaspiDelivery": {"courierTransmissionDate": None,
+                       "courierTransmissionPlanningDate": HANDOVER.timestamp() * 1000}},
+    {"kaspiDelivery": {"courierTransmissionDate": True}},
     {"courierTransmissionDate":(NOW+timedelta(days=1)).timestamp()*1000},
     {"courierTransmissionDate":"garbage"},
 ])
@@ -62,8 +66,9 @@ def test_cancelled_after_actual_dispatch_is_tracked_once(db_session):
     assert len([e for e in order.events if e.event_type == TRACKED]) == 1
 
 
-def test_cancellation_before_dispatch_excluded(db_session):
-    order = import_order(db_session,account(db_session),courier=None)
+@pytest.mark.parametrize("status", ["CANCELLING", "CANCELLED"])
+def test_cancellation_before_dispatch_excluded(db_session, status):
+    order = import_order(db_session, account(db_session), status, courier=None)
     scan_returns(db_session,now=NOW)
     assert find_event(order,TRACKED) is None
     assert db_session.scalar(select(func.count(OutboxEvent.id))) == 0
@@ -85,23 +90,56 @@ def test_ten_day_threshold_and_durable_deduplication(db_session):
     assert db_session.scalar(select(func.count(OutboxEvent.id))) == 1
 
 
-def test_backfill_recovers_raw_evidence(db_session):
-    order = import_order(db_session,account(db_session))
+def test_alert_cutoff_keeps_overdue_history_visible_without_sending(db_session):
+    order = import_order(db_session, account(db_session), status="CANCELLING")
+    after_due = NOW + timedelta(seconds=1)
+    scan_returns(db_session, now=after_due, alerts_start_at=after_due)
+    assert find_event(order, TRACKED)
+    assert db_session.scalar(select(func.count(OutboxEvent.id))) == 0
+
+    scan_returns(db_session, now=after_due, alerts_start_at=NOW)
+    assert db_session.scalar(select(func.count(OutboxEvent.id))) == 1
+
+
+@pytest.mark.parametrize("status", ["CANCELLING", "CANCELLED"])
+def test_backfill_rechecks_legacy_orders_for_nested_dispatch_evidence(db_session, status):
+    acc = account(db_session)
+    raw = payload(status)
+    raw["attributes"]["kaspiDelivery"] = {"courierTransmissionDate": int(HANDOVER.timestamp() * 1000)}
+    raw["attributes"]["cancellationReason"] = "TIMEOUT_BUYER_PICKUP"
+    canonical = canonicalize_kaspi_order_payload(raw, now=NOW)
+    result = import_kaspi_order(db_session, marketplace_account_id=acc.id, payload=canonical)
+    order = db_session.get(MarketplaceOrder, result.order_id)
+    assert find_event(order, HANDOFF).occurred_at == HANDOVER
+    assert find_event(order, TRACKED).occurred_at == CANCELLED
+
     for event in list(order.events):
         if event.event_type in {HANDOFF,TRACKED}:
             order.events.remove(event)
+    add_event(order, "cancelled_return_evidence_checked", NOW)
     db_session.flush()
     scan_returns(db_session,now=NOW)
-    assert find_event(order,TRACKED)
+    assert find_event(order, HANDOFF).occurred_at == HANDOVER
+    assert find_event(order, TRACKED).occurred_at == CANCELLED
+
+    final = payload("CANCELLED")
+    final["attributes"]["updatedAt"] = NOW.isoformat()
+    import_kaspi_order(db_session, marketplace_account_id=acc.id, payload=final)
+    assert len([event for event in order.events if event.event_type == TRACKED]) == 1
+    assert find_event(order, TRACKED).occurred_at == CANCELLED
 
 
-def test_receipt_is_idempotent_and_hides_pending_alert(db_session,monkeypatch):
+@pytest.mark.parametrize("status", ["CANCELLING", "CANCELLED"])
+def test_receipt_is_idempotent_and_hides_pending_alert(db_session,monkeypatch,status):
     from backend.app import cancelled_returns_api as api
-    order = import_order(db_session,account(db_session))
+    order = import_order(db_session,account(db_session),status)
     scan_returns(db_session,now=NOW)
     db_session.commit()
     factory=sessionmaker(bind=db_session.get_bind(),expire_on_commit=False)
     monkeypatch.setattr(api,"SessionLocal",factory)
+    listing = api.list_returns(view="pending", query=None, account_id=None, limit=50, offset=0)
+    assert listing["total"] == 1
+    assert listing["items"][0]["can_receive"]
     result=api.receive_return(order.id)
     assert result["already_received"] is False
     assert api.receive_return(order.id)["already_received"] is True
