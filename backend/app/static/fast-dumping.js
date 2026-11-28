@@ -23,11 +23,14 @@ const disabledSection = document.querySelector("#disabled-section");
 const empty = document.querySelector("#empty");
 const editDialog = document.querySelector("#edit-dialog");
 const editForm = document.querySelector("#edit-form");
+const editMessage = document.querySelector("#edit-message");
 const editRemove = document.querySelector("#edit-remove");
+const editSave = document.querySelector("#edit-save");
 let rows = [];
 let searchTimer = null;
 let searchController = null;
-let loading = false;
+let pageLoad = null;
+const removingProducts = new Set();
 const cardMarkup = new WeakMap();
 
 const attentionStatuses = new Set(["price_anomaly","market_context_mismatch","own_offer_missing","out_of_stock","apply_timeout","apply_unconfirmed","verification_retry","error","apply_failed","merchant_write_failed","automation_market_incomplete","automation_market_stale"]);
@@ -40,6 +43,7 @@ const isFloor = (row) => row.policy.enabled && !attentionStatuses.has(statusOf(r
 const productPhoto = (row, css = "fast-product-photo") => row.image_url
   ? `<img class="${css}" src="${escapeHtml(row.image_url)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`
   : `<span class="${css} placeholder" data-resolve-product-image data-product-id="${Number(row.product_id)}" data-image-class="${css}">Фото…</span>`;
+const removeButton = '<button class="button secondary remove-policy" type="button">Удалить из Fast</button>';
 
 const request = async (url, options = {}) => {
   const token = localStorage.getItem(storageKey) || "";
@@ -106,10 +110,10 @@ const offersTable = (offers) => {
 
 const diagnosticView = (payload) => `${offersTable(payload.offers || [])}${payload.diagnostic ? `<h4>Последнее задание и ответ Kaspi</h4><pre class="fast-job-diagnostic">${escapeHtml(JSON.stringify(payload.diagnostic, null, 2))}</pre>` : ""}`;
 
-const renderFloor = () => {
+const renderFloor = (force = false) => {
   const limited = rows.filter(isFloor);
   if (!floorSection.classList.contains("is-open")) return;
-  if (floorList.matches(":hover") || floorList.contains(document.activeElement)) return;
+  if (!force && (floorList.matches(":hover") || floorList.contains(document.activeElement))) return;
   document.querySelector("#floor-count").textContent = limited.length;
   floorList.innerHTML = limited.map((row) => `<article class="floor-item" data-product-id="${row.product_id}">
     <div><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")} · ${escapeHtml(row.state?.status_reason || "Конкурент ниже безопасного floor")}</small></div>
@@ -117,18 +121,18 @@ const renderFloor = () => {
     <div class="floor-value"><span>Конкурент</span><strong>${money(row.state?.competitor_price_kzt)}</strong></div>
     <div class="floor-value"><span>Текущий floor</span><strong>${money(row.current_safe_floor_kzt ?? row.state?.safe_floor_kzt)}</strong></div>
     <div class="floor-value"><span>Мин. прибыль</span><strong>${money(row.policy.minimum_profit_kzt)}</strong></div>
-    <div class="floor-action"><button class="button edit-policy" type="button">Изменить порог</button></div>
+    <div class="floor-action fast-card-actions"><button class="button edit-policy" type="button">Изменить порог</button>${removeButton}</div>
   </article>`).join("") || '<p class="fast-card-reason">Товаров на пороге нет.</p>';
 };
 
-const renderAttention = () => {
+const renderAttention = (force = false) => {
   if (!attentionSection.classList.contains("is-open")) return;
-  if (attentionList.matches(":hover") || attentionList.contains(document.activeElement)) return;
+  if (!force && (attentionList.matches(":hover") || attentionList.contains(document.activeElement))) return;
   const needingAttention = rows.filter((row) => attentionStatuses.has(statusOf(row)));
   document.querySelector("#attention-count").textContent = needingAttention.length;
   attentionList.innerHTML = needingAttention.map((row) => `<article class="attention-item" data-product-id="${row.product_id}">
     <div><span class="fast-status ${statusView(row).kind}">${escapeHtml(statusView(row).label)}</span><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")}</small><p>${escapeHtml(row.state?.last_error_message || row.state?.status_reason || "Проверьте настройки товара")}</p></div>
-    <div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button>${row.state?.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : ""}</div>
+    <div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button>${row.state?.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : ""}${removeButton}</div>
   </article>`).join("") || '<p class="fast-card-reason">Товаров, требующих внимания, нет.</p>';
 };
 
@@ -144,12 +148,12 @@ const rowMatches = (row) => {
   return true;
 };
 
-const renderDisabled = () => {
+const renderDisabled = (force = false) => {
   if (!disabledSection.classList.contains("is-open")) return;
-  if (disabledList.matches(":hover") || disabledList.contains(document.activeElement)) return;
+  if (!force && (disabledList.matches(":hover") || disabledList.contains(document.activeElement))) return;
   const disabled = rows.filter((row) => !row.policy.enabled);
   document.querySelector("#disabled-count").textContent = disabled.length;
-  disabledList.innerHTML = disabled.map((row) => `<article class="attention-item" data-product-id="${row.product_id}"><div><span class="fast-status off">Отключена</span><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")}</small><p>${escapeHtml(row.state?.status_reason || "Демпинг выключен")}</p></div><div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button></div></article>`).join("") || '<p class="fast-card-reason">Отключённых карточек нет.</p>';
+  disabledList.innerHTML = disabled.map((row) => `<article class="attention-item" data-product-id="${row.product_id}"><div><span class="fast-status off">Отключена</span><h3>${escapeHtml(row.name)}</h3><small>SKU ${escapeHtml(row.merchant_sku || "—")}</small><p>${escapeHtml(row.state?.status_reason || "Демпинг выключен")}</p></div><div class="floor-action"><button class="button secondary edit-policy" type="button">Настроить</button>${removeButton}</div></article>`).join("") || '<p class="fast-card-reason">Отключённых карточек нет.</p>';
 };
 
 const card = (row) => {
@@ -162,7 +166,7 @@ const card = (row) => {
   return `<article class="fast-card ${view.kind}" data-product-id="${row.product_id}">
     <div class="fast-card-head">
       <div class="fast-card-title"><span class="fast-status ${view.kind}">${escapeHtml(view.label)}</span>${productPhoto(row)}<div><h3>${escapeHtml(row.name)}</h3><p>Kaspi ${escapeHtml(row.kaspi_product_id)} · SKU ${escapeHtml(row.merchant_sku || "—")}${row.brand ? ` · ${escapeHtml(row.brand)}` : ""}</p></div></div>
-      <div class="fast-card-actions"><button class="button secondary edit-policy" type="button">Настроить</button>${state.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : `<button class="button run-now" type="button" ${canRun ? "" : "disabled"}>Проверить сейчас</button>`}</div>
+      <div class="fast-card-actions"><button class="button secondary edit-policy" type="button">Настроить</button>${state.automatic_writes_paused ? '<button class="button resume-product" type="button">Возобновить</button>' : `<button class="button run-now" type="button" ${canRun ? "" : "disabled"}>Проверить сейчас</button>`}${removeButton}</div>
     </div>
     <div class="fast-card-grid">
       <div><span>FIFO-остаток</span><strong>${Number(row.current_inventory_on_hand || 0).toLocaleString("ru-RU")} шт.</strong><small>повторно читается перед write</small></div>
@@ -186,7 +190,7 @@ const card = (row) => {
   </article>`;
 };
 
-const render = (payload) => {
+const render = (payload, forceLists = false) => {
   rows = payload.items || [];
   const summary = payload.summary || {};
   document.querySelector("#summary-total").textContent = summary.total || 0;
@@ -195,9 +199,9 @@ const render = (payload) => {
   document.querySelector("#summary-floor").textContent = summary.floor_limited || 0;
   document.querySelector("#summary-working").textContent = summary.working || 0;
   document.querySelector("#summary-attention").textContent = summary.attention || 0;
-  renderFloor();
-  renderAttention();
-  renderDisabled();
+  renderFloor(forceLists);
+  renderAttention(forceLists);
+  renderDisabled(forceLists);
   const visible = rows.filter(rowMatches);
   const existing = new Map(Array.from(list.children).map(el => [el.dataset.productId, el]));
   visible.forEach((row, index) => {
@@ -241,19 +245,19 @@ const renderAgent = (payload) => {
   meta.textContent = `версия ${agent.version || "—"} · потоков ${agent.concurrency || 1} · workspace ${agent.workspace_id} · Merchant ${agent.merchant_uid || "—"} · heartbeat ${dateTime(agent.last_seen_at)}`;
 };
 
-const loadPage = async ({silent=false}={}) => {
-  if (silent && editDialog.open) return;
+const loadPage = async ({silent=false, forceLists=false}={}) => {
+  if (silent && editDialog.open && !forceLists) return;
   if (!localStorage.getItem(storageKey)) {
     authPanel.classList.remove("hidden");
     page.classList.add("hidden");
     return;
   }
-  if (loading) return;
-  loading = true;
+  if (pageLoad) return;
   if (!silent) setBusy(refreshButton, true, "Обновляю…");
   try {
-    const [payload, agent] = await Promise.all([request("/api/fast-dumping"), request("/api/fast-dumping-agent/agents/status")]);
-    render(payload);
+    pageLoad = Promise.all([request("/api/fast-dumping"), request("/api/fast-dumping-agent/agents/status")]);
+    const [payload, agent] = await pageLoad;
+    render(payload, forceLists);
     renderAgent(agent);
     authPanel.classList.add("hidden");
     page.classList.remove("hidden");
@@ -262,7 +266,7 @@ const loadPage = async ({silent=false}={}) => {
     message.textContent = error instanceof Error ? error.message : "Не удалось загрузить быстрый демпинг";
     if (!localStorage.getItem(storageKey)) authPanel.classList.remove("hidden");
   } finally {
-    loading = false;
+    pageLoad = null;
     if (!silent) setBusy(refreshButton, false, "");
   }
 };
@@ -369,8 +373,8 @@ const saveSettings = async (productId, prefix = "") => {
 
 const openEdit = (row) => {
   editingRow = row;
-  document.querySelector("#edit-message").hidden = true;
-  document.querySelector("#edit-message").textContent = "";
+  editMessage.hidden = true;
+  editMessage.textContent = "";
   const policy = row.policy;
   document.querySelector("#edit-product-id").value = row.product_id;
   document.querySelector("#edit-title").textContent = row.name;
@@ -388,7 +392,6 @@ const openEdit = (row) => {
   document.querySelector("#edit-allow-raise").checked = policy.allow_price_raise;
   document.querySelector("#edit-enabled").checked = policy.enabled;
   setAutomation("edit-", policy.pricing_mode === "automation");
-  editRemove.classList.toggle("hidden", policy.pricing_mode === "automation");
   editDialog.showModal();
 };
 
@@ -410,8 +413,9 @@ policyForm.addEventListener("submit", async (event) => {
 editForm.addEventListener("submit", async (event) => {
   event.preventDefault();
   const productId = Number(document.querySelector("#edit-product-id").value);
-  const button = document.querySelector("#edit-save"); setBusy(button, true, "Сохраняю…");
-  const editMessage = document.querySelector("#edit-message");
+  if (editSave.disabled || removingProducts.has(productId)) return;
+  setBusy(editSave, true, "Сохраняю…");
+  editRemove.disabled = true;
   editMessage.hidden = true;
   try {
     await saveSettings(productId, "edit-");
@@ -423,26 +427,48 @@ editForm.addEventListener("submit", async (event) => {
     editMessage.hidden = false;
     message.textContent = editMessage.textContent;
   }
-  finally { setBusy(button, false, ""); }
-});
-
-editRemove.addEventListener("click", async () => {
-  const productId = Number(document.querySelector("#edit-product-id").value);
-  const row = rows.find((item) => Number(item.product_id) === productId);
-  if (!productId || !row) return;
-  if (!window.confirm(`Удалить «${row.name}» из Fast Dumping? Товар, остатки и карточка Kaspi останутся без изменений.`)) return;
-  setBusy(editRemove, true, "Удаляю…");
-  try {
-    await request(`/api/fast-dumping/products/${productId}`, {method:"DELETE"});
-    editDialog.close();
-    message.textContent = "Товар удалён из Fast Dumping. Карточка, остатки и текущий offer Kaspi не изменялись.";
-    await loadPage();
-  } catch (error) {
-    message.textContent = error.message || "Не удалось удалить товар из Fast Dumping";
-  } finally {
-    setBusy(editRemove, false, "");
+  finally {
+    setBusy(editSave, false, "");
+    editRemove.disabled = false;
   }
 });
+
+const showRemoveError = (row, text) => {
+  if (!editDialog.open) openEdit(row);
+  if (Number(editingRow?.product_id) === Number(row.product_id)) {
+    editMessage.textContent = text;
+    editMessage.hidden = false;
+    editMessage.scrollIntoView({block:"nearest"});
+  } else {
+    message.textContent = text;
+  }
+};
+
+const removeProduct = async (row, button) => {
+  const productId = Number(row.product_id);
+  if (removingProducts.has(productId)) return;
+  if (row.policy.pricing_mode === "automation") {
+    showRemoveError(row, "Перед удалением выключите «Полную автоматизацию» и сохраните настройки.");
+    return;
+  }
+  if (!window.confirm(`Удалить «${row.name}» из быстрого демпинга? CRM прекратит автоматическое управление ценой через Fast Dumping.`)) return;
+  removingProducts.add(productId);
+  setBusy(button, true, "Удаляю…");
+  try {
+    await request(`/api/fast-dumping/products/${productId}`, {method:"DELETE"});
+    if (editDialog.open && Number(editingRow?.product_id) === productId) editDialog.close();
+    message.textContent = "Товар удалён из быстрого демпинга.";
+    await pageLoad?.catch(() => {});
+    await loadPage({silent:true, forceLists:true});
+  } catch (error) {
+    showRemoveError(row, error.message || "Не удалось удалить товар из быстрого демпинга");
+  } finally {
+    removingProducts.delete(productId);
+    setBusy(button, false, "");
+  }
+};
+
+editRemove.addEventListener("click", () => removeProduct(editingRow, editRemove));
 
 const actionClick = async (event) => {
   const container = event.target.closest("[data-product-id]");
@@ -451,6 +477,8 @@ const actionClick = async (event) => {
   const row = rows.find((item) => Number(item.product_id) === productId);
   if (!row) return;
   if (event.target.closest(".edit-policy")) { openEdit(row); return; }
+  const remove = event.target.closest(".remove-policy");
+  if (remove) { await removeProduct(row, remove); return; }
   const resume = event.target.closest(".resume-product");
   const run = event.target.closest(".run-now");
   if (!resume && !run) return;
