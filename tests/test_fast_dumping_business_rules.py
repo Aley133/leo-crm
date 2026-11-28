@@ -247,11 +247,12 @@ def test_inventory_exhaustion_disables_unbound_product_and_cancels_apply(
 
 
 def test_fast_dumping_ui_connects_remove_button_to_delete_endpoint() -> None:
-    javascript = (
-        Path(__file__).resolve().parents[1]
-        / "backend/app/static/fast-dumping.js"
-    ).read_text(encoding="utf-8")
+    static = Path(__file__).resolve().parents[1] / "backend/app/static"
+    javascript = (static / "fast-dumping.js").read_text(encoding="utf-8")
+    html = (static / "fast-dumping.html").read_text(encoding="utf-8")
 
     assert 'document.querySelector("#edit-remove")' in javascript
+    assert 'event.target.closest(".remove-policy")' in javascript
     assert '`/api/fast-dumping/products/${productId}`' in javascript
-    assert 'method:"DELETE"' in javascript
+    assert javascript.count('method:"DELETE"') == 1
+    assert "fast-dumping-remove.js" not in html
